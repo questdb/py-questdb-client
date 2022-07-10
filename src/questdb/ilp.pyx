@@ -800,7 +800,7 @@ cdef class LineSender:
     def buffer(self):
         return self._buffer
 
-    cdef flush(self, LineSenderBuffer buffer=None, bint clear=True):
+    cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):
         cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
         if self._impl == NULL:
