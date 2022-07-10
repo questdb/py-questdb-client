@@ -1,22 +1,3 @@
-.. raw:: html
-
-    <div style="padding-bottom: 2em">
-        <a href="https://questdb.io/"><img
-            src="_images/logo.svg"
-            alt="QuestDB"
-            width="400"></a>
-    </div>
-
-.. raw:: html
-
-    <div style="display: none">
-
-.. image:: logo.svg
-
-.. raw:: html
-
-    </div>
-
 =================================
 QuestDB Client Library for Python
 =================================
@@ -50,3 +31,8 @@ Docs
 
     https://py-questdb-client.readthedocs.io/
 
+
+Code
+====
+
+    https://github.com/questdb/py-questdb-client

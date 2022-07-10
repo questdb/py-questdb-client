@@ -1,3 +1,8 @@
+.. image:: logo.svg
+    :target: https://questdb.io/
+    :alt: QuestDB
+    :width: 400px
+
 .. include:: ../README.rst
 
 Contents
