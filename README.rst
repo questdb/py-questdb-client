@@ -36,3 +36,10 @@ Code
 ====
 
     https://github.com/questdb/py-questdb-client
+
+
+Package on PyPI
+===============
+
+    https://pypi.org/project/questdb/
+

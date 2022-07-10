@@ -2,6 +2,8 @@
 
 import pathlib
 import sys
+import os
+import shutil
 
 from setuptools import setup, find_packages
 from setuptools.extension import Extension
@@ -51,13 +53,43 @@ def ilp_extension():
 
 def cargo_build():
     if not (PROJ_ROOT / 'c-questdb-client' / 'src').exists():
-        sys.stderr.write('Could not find `c-questdb-client` submodule.\n')
-        sys.stderr.write('You might need to run:\n')
-        sys.stderr.write('    git submodule update --init --recursive\n')
-        sys.exit(1)
+        if os.environ.get('SETUP_DO_GIT_SUBMODULE_INIT') == '1':
+            subprocess.check_call([
+                'git', 'submodule', 'update', '--init', '--recursive'])
+        else:
+            sys.stderr.write('Could not find `c-questdb-client` submodule.\n')
+            sys.stderr.write('You might need to run:\n')
+            sys.stderr.write('    git submodule update --init --recursive\n')
+            sys.stderr.write('\n')
+            sys.stderr.write('Alternatively specify the '
+                '`SETUP_DO_GIT_SUBMODULE_INIT=1` env variable\n')
+            sys.exit(1)
+
+    ran_rustup = False
+    if shutil.which('cargo') is None:
+        if os.environ.get('SETUP_DO_RUSTUP_INSTALL') == '1':
+            # curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+            subprocess.check_call([
+                'curl', '--proto', '=https', '--tlsv1.2', '-sSf',
+                'https://sh.rustup.rs', '-o', 'rustup-init.sh'])
+            subprocess.check_call(['bash', 'rustup-init.sh', '-y'])
+            ran_rustup = True
+        else:
+            sys.stderr.write('Could not find `cargo` executable.\n')
+            sys.stderr.write('You may install it via http://rustup.rs/.\n')
+            sys.stderr.write('\n')
+            sys.stderr.write('Alternatively specify the '
+                '`SETUP_DO_RUSTUP_INSTALL=1` env variable\n')
+            sys.exit(1)
+
+    env = dict(os.environ)
+    if ran_rustup:
+        env['PATH'] = os.path.join(
+            os.environ['HOME'], '.cargo', 'bin') + ':' + env['PATH']
     subprocess.check_call(
         ['cargo', 'build', '--release', '--features', 'ffi'],
-        cwd=str(PROJ_ROOT / 'c-questdb-client'))
+        cwd=str(PROJ_ROOT / 'c-questdb-client'),
+        env=env)
 
 
 class questdb_build_ext(build_ext):
@@ -82,7 +114,19 @@ setup(
     version='0.0.1',
     description='QuestDB client library for Python',
     long_description=readme(),
-    url='https://github.com/questdb/py-questdb-client/',
+    project_urls={
+        'Homepage':
+            'https://questdb.io/',
+        'Changelog':
+            'https://py-questdb-client.readthedocs.io/en/latest/changelog.html',
+        'Documentation':
+            'https://py-questdb-client.readthedocs.io/en/latest/index.html',
+        'Source':
+            'https://github.com/questdb/py-questdb-client/',
+        'Tracker':
+            'https://github.com/questdb/c-questdb-client/issues',
+        'Slack':
+            'http://slack.questdb.io'},
     license='Apache License 2.0',
     platforms=['any'],
     python_requires='>=3.7',
