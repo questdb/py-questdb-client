@@ -1,0 +1,8 @@
+include *.md
+include *.sh
+recursive-include src *.html
+recursive-include src *.pxd
+recursive-include src *.pyx
+graft c-questdb-client
+prune c-questdb-client/target
+prune c-questdb-client/src/tests/json_tests.rs
