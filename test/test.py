@@ -10,20 +10,20 @@ sys.path.append(str(PROJ_ROOT / 'src'))
 import questdb.ilp as ilp
 
 
-class TestLineSenderBuffer(unittest.TestCase):
+class TestBuffer(unittest.TestCase):
     def test_new(self):
-        buf = ilp.LineSenderBuffer()
+        buf = ilp.Buffer()
         self.assertEqual(len(buf), 0)
         self.assertEqual(buf.capacity(), 64 * 1024)
 
     def test_basic(self):
-        buf = ilp.LineSenderBuffer()
+        buf = ilp.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'})
         self.assertEqual(len(buf), 25)
         self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
 
     def test_bad_table(self):
-        buf = ilp.LineSenderBuffer()
+        buf = ilp.Buffer()
         with self.assertRaisesRegex(
                 ilp.IlpError,
                 'Table names must have a non-zero length'):
@@ -34,12 +34,12 @@ class TestLineSenderBuffer(unittest.TestCase):
             buf.row('x..y', symbols={'sym1': 'val1'})
 
     def test_symbol(self):
-        buf = ilp.LineSenderBuffer()
+        buf = ilp.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'})
         self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
 
     def test_bad_symbol_column_name(self):
-        buf = ilp.LineSenderBuffer()
+        buf = ilp.Buffer()
         with self.assertRaisesRegex(
                 ilp.IlpError,
                 'Column names must have a non-zero length.'):
@@ -54,7 +54,7 @@ class TestLineSenderBuffer(unittest.TestCase):
     def test_column(self):
         two_h_after_epoch = datetime.datetime(
             1970, 1, 1, 2, tzinfo=datetime.timezone.utc)
-        buf = ilp.LineSenderBuffer()
+        buf = ilp.Buffer()
         buf.row('tbl1', columns={
             'col1': True,
             'col2': False,

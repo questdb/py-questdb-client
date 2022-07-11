@@ -261,22 +261,22 @@ ctypedef bint (*row_complete_cb)(
     line_sender_error**)
 
 
-cdef class LineSenderBuffer:
+cdef class Buffer:
     """
     Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
 
     .. code-block:: python
 
-        from questdb.ilp import LineSenderBuffer
+        from questdb.ilp import Buffer
 
-        buf = LineSenderBuffer()
+        buf = Buffer()
         buf.row(
             'table_name',
             symbols={'s1', 'v1', 's2', 'v2'},
             columns={'c1': True, 'c2': 0.5})
 
         # Append any additional rows then, once ready,
-        # call `sender.flush(buffer)` on a `LineSender` instance.
+        # call `sender.flush(buffer)` on a `Sender` instance.
 
     Refer to the
     `QuestDB documentation <https://questdb.io/docs/concept/symbol/>`_ to
@@ -748,10 +748,10 @@ cdef class LineSenderBuffer:
     #     raise ValueError('nyi')
 
 
-cdef class LineSender:
+cdef class Sender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
-    cdef LineSenderBuffer _buffer
+    cdef Buffer _buffer
     cdef bint _auto_flush_enabled
     cdef size_t _auto_flush_watermark
 
@@ -855,7 +855,7 @@ cdef class LineSender:
         self._init_capacity = init_capacity
         self._max_name_len = max_name_len
 
-        self._buffer = LineSenderBuffer(
+        self._buffer = Buffer(
             init_capacity=init_capacity,
             max_name_len=max_name_len)
 
@@ -870,7 +870,7 @@ cdef class LineSender:
         The buffer is set up with the configured `init_capacity` and
         `max_name_len`.
         """
-        self._buffer = LineSenderBuffer(
+        self._buffer = Buffer(
             init_capacity=self._init_capacity,
             max_name_len=self._max_name_len)
 
@@ -896,7 +896,7 @@ cdef class LineSender:
     def buffer(self):
         return self._buffer
 
-    cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):
+    cpdef flush(self, Buffer buffer=None, bint clear=True):
         cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
         if self._impl == NULL:
