@@ -754,6 +754,8 @@ cdef class Sender:
     cdef Buffer _buffer
     cdef bint _auto_flush_enabled
     cdef size_t _auto_flush_watermark
+    cdef object _init_capacity
+    cdef object _max_name_len
 
     def __cinit__(
             self,
@@ -892,9 +894,8 @@ cdef class Sender:
         self.connect()
         return self
 
-    @property
-    def buffer(self):
-        return self._buffer
+    def row(self, *args, **kwargs):
+        self._buffer.row(*args, **kwargs)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
         cdef line_sender_error* err = NULL

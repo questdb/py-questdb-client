@@ -1,8 +1,10 @@
+from re import T
 import sys
 sys.dont_write_bytecode = True
 import unittest
 import pathlib
 import datetime
+from mock_server import Server
 
 PROJ_ROOT = pathlib.Path(__file__).parent.parent
 sys.path.append(str(PROJ_ROOT / 'src'))
@@ -67,6 +69,38 @@ class TestBuffer(unittest.TestCase):
             'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
             'col5="val",col6=12345t,col7=7200000000t\n')
         self.assertEqual(str(buf), exp)
+
+
+class TestSender(unittest.TestCase):
+    def test_basic(self):
+        with Server() as server, ilp.Sender('localhost', server.port) as sender:
+            server.accept()
+            self.assertEqual(server.recv(), [])
+            sender.row(
+                'tab1',
+                symbols={
+                    't1': 'val1',
+                    't2': 'val2'},
+                columns={
+                    'f1': True,
+                    'f2': 12345,
+                    'f3': 10.75,
+                    'f4': 'val3'},
+                at=ilp.TimestampNanos(111222233333))
+            sender.row(
+                'tab1',
+                symbols={
+                    'tag3': 'value 3',
+                    'tag4': 'value:4'},
+                columns={
+                    'field5': False})
+            sender.flush()
+            msgs = server.recv()
+            self.assertEqual(msgs, [
+                (b'tab1,t1=val1,t2=val2 '
+                 b'f1=t,f2=12345i,f3=10.75,f4="val3" '
+                 b'111222233333'),
+                b'tab1,tag3=value\\ 3,tag4=value:4 field5=f'])
 
 
 if __name__ == '__main__':
