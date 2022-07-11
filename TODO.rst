@@ -26,11 +26,7 @@ Build Tooling
 
 Docs
 ====
-* **[MEDIUM]** Wire-up triggers between github and read the docs.
-  This will keep https://py-questdb-client.readthedocs.io/en/latest/ up to date.
-  Until this is done, we need to trigger this manually.
-
-* **[MEDIUM]** Document on a per-version basis
+* **[MEDIUM]** Document on a per-version basis.
 
 * **[HIGH]** Author a few examples of how to use the client.
   This will help people get started. The examples should be presented in Sphinx
@@ -48,8 +44,6 @@ Development
 * **[HIGH]** Review API naming!
 
 * **[HIGH]** Implement ``tabular()`` API in the buffer.
-
-* **[HIGH]** Integrate system tests (borrowing fixture from the C client).
 
 * **[HIGH]** Test the flush API carefully with exceptions before / after flushing.
 
