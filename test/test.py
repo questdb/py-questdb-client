@@ -1,13 +1,17 @@
-from re import T
+#!/usr/bin/env python3
+
 import sys
 sys.dont_write_bytecode = True
+import os
 import unittest
 import pathlib
 import datetime
+
+import patch_path
 from mock_server import Server
 
-PROJ_ROOT = pathlib.Path(__file__).parent.parent
-sys.path.append(str(PROJ_ROOT / 'src'))
+if os.environ['TEST_QUESTDB_INTEGRATION'] == '1':
+    from system_test import TestWithDatabase
 
 import questdb.ilp as ilp
 
@@ -101,6 +105,31 @@ class TestSender(unittest.TestCase):
                  b'f1=t,f2=12345i,f3=10.75,f4="val3" '
                  b'111222233333'),
                 b'tab1,tag3=value\\ 3,tag4=value:4 field5=f'])
+
+    def test_connect_close(self):
+        with Server() as server:
+            sender = None
+            try:
+                sender = ilp.Sender('localhost', server.port)
+                sender.connect()
+                server.accept()
+                self.assertEqual(server.recv(), [])
+                sender.row('tbl1', symbols={'sym1': 'val1'})
+                sender.flush()
+                msgs = server.recv()
+                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+            finally:
+                sender.close()
+
+    def test_row_before_connect(self):
+        sender = None
+        try:
+            sender = ilp.Sender('localhost', 12345)
+            sender.row('tbl1', symbols={'sym1': 'val1'})
+            with self.assertRaisesRegex(ilp.IlpError, 'Not connected'):
+                sender.flush()
+        finally:
+            sender.close()
 
 
 if __name__ == '__main__':

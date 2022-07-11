@@ -67,6 +67,7 @@ cdef extern from "Python.h":
 
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
+import pathlib
 
 import sys
 
@@ -846,10 +847,14 @@ cdef class Sender:
                 else:
                     ca_owner = str_to_utf8(tls, &ca_utf8)
                     line_sender_opts_tls_ca(self._opts, ca_utf8)
+            elif isinstance(tls, pathlib.Path):
+                tls = str(tls)
+                ca_owner = str_to_utf8(tls, &ca_utf8)
+                line_sender_opts_tls_ca(self._opts, ca_utf8)
             else:
                 raise TypeError(
-                    'tls must be a bool, a str pointing to CA file or '
-                    f'"insecure_skip_verify", not {type(tls)}')
+                    'tls must be a bool, a path or string pointing to CA file '
+                    f'or "insecure_skip_verify", not {type(tls)}')
 
         if read_timeout is not None:
             line_sender_opts_read_timeout(self._opts, read_timeout)
@@ -894,6 +899,12 @@ cdef class Sender:
         self.connect()
         return self
 
+    def __str__(self):
+        return str(self._buffer)
+
+    def __len__(self):
+        return len(self._buffer)
+
     def row(self, *args, **kwargs):
         self._buffer.row(*args, **kwargs)
 
@@ -903,7 +914,7 @@ cdef class Sender:
         if self._impl == NULL:
             raise IlpError(
                 IlpErrorCode.InvalidApiCall,
-                'flush() can\'t be called after close().')
+                'flush() can\'t be called: Not connected.')
         if buffer is not None:
             c_buf = buffer._impl
         else:

@@ -45,11 +45,15 @@ Docs
 
 Development
 ===========
+* **[HIGH]** Review API naming!
+
 * **[HIGH]** Implement ``tabular()`` API in the buffer.
 
 * **[HIGH]** Integrate system tests (borrowing fixture from the C client).
 
-* **[HIGH]** Test
+* **[HIGH]** Test the flush API carefully with exceptions before / after flushing.
+
+* **[HIGH]** Implement the auto-commit logic based on a watermark.
 
 * **[MEDIUM]** Once we're done with them, merge in changes in the ``py_client_tweaks`` branch
   of the C client.

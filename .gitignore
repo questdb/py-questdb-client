@@ -1,3 +1,6 @@
+src/questdb/ilp.html
+src/questdb/ilp.c
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
