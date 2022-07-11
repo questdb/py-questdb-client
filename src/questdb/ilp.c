@@ -947,7 +947,7 @@ struct __pyx_opt_args_7questdb_3ilp_10LineSender_close;
  */
 typedef int (*__pyx_t_7questdb_3ilp_row_complete_cb)(struct line_sender_buffer *, void *, struct line_sender_error **);
 
-/* "questdb/ilp.pyx":502
+/* "questdb/ilp.pyx":510
  *                 'TimestampNanos, datetime, None')
  * 
  *     cdef int _row(             # <<<<<<<<<<<<<<
@@ -961,7 +961,7 @@ struct __pyx_opt_args_7questdb_3ilp_16LineSenderBuffer__row {
   PyObject *at;
 };
 
-/* "questdb/ilp.pyx":803
+/* "questdb/ilp.pyx":907
  *         return self._buffer
  * 
  *     cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):             # <<<<<<<<<<<<<<
@@ -974,7 +974,7 @@ struct __pyx_opt_args_7questdb_3ilp_10LineSender_flush {
   int clear;
 };
 
-/* "questdb/ilp.pyx":832
+/* "questdb/ilp.pyx":936
  *             raise
  * 
  *     cpdef close(self, bint flush=True):             # <<<<<<<<<<<<<<
@@ -1028,7 +1028,7 @@ struct __pyx_obj_7questdb_3ilp_LineSenderBuffer {
 };
 
 
-/* "questdb/ilp.pyx":751
+/* "questdb/ilp.pyx":759
  * 
  * 
  * cdef class LineSender:             # <<<<<<<<<<<<<<
@@ -1041,6 +1041,8 @@ struct __pyx_obj_7questdb_3ilp_LineSender {
   struct line_sender_opts *_opts;
   struct line_sender *_impl;
   struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *_buffer;
+  int _auto_flush_enabled;
+  size_t _auto_flush_watermark;
 };
 
 
@@ -1097,7 +1099,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(struct
 static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *, PyObject *);
 
 
-/* "questdb/ilp.pyx":751
+/* "questdb/ilp.pyx":759
  * 
  * 
  * cdef class LineSender:             # <<<<<<<<<<<<<<
@@ -1469,6 +1471,12 @@ static CYTHON_INLINE PyObject* __Pyx_dict_iterator(PyObject* dict, int is_dict, 
 static CYTHON_INLINE int __Pyx_dict_iter_next(PyObject* dict_or_iter, Py_ssize_t orig_length, Py_ssize_t* ppos,
                                               PyObject** pkey, PyObject** pvalue, PyObject** pitem, int is_dict);
 
+/* BytesEquals.proto */
+static CYTHON_INLINE int __Pyx_PyBytes_Equals(PyObject* s1, PyObject* s2, int equals);
+
+/* UnicodeEquals.proto */
+static CYTHON_INLINE int __Pyx_PyUnicode_Equals(PyObject* s1, PyObject* s2, int equals);
+
 /* PyObject_GenericGetAttrNoDict.proto */
 #if CYTHON_USE_TYPE_SLOTS && CYTHON_USE_PYTYPE_LOOKUP && PY_VERSION_HEX < 0x03070000
 static CYTHON_INLINE PyObject* __Pyx_PyObject_GenericGetAttrNoDict(PyObject* obj, PyObject* attr_name);
@@ -1611,6 +1619,35 @@ static CYTHON_UNUSED PyObject* __Pyx_Method_ClassMethod(PyObject *method);
 #define __Pyx_GetNameInClass(var, nmspace, name)  (var) = __Pyx__GetNameInClass(nmspace, name)
 static PyObject *__Pyx__GetNameInClass(PyObject *nmspace, PyObject *name);
 
+/* GetItemInt.proto */
+#define __Pyx_GetItemInt(o, i, type, is_signed, to_py_func, is_list, wraparound, boundscheck)\
+    (__Pyx_fits_Py_ssize_t(i, type, is_signed) ?\
+    __Pyx_GetItemInt_Fast(o, (Py_ssize_t)i, is_list, wraparound, boundscheck) :\
+    (is_list ? (PyErr_SetString(PyExc_IndexError, "list index out of range"), (PyObject*)NULL) :\
+               __Pyx_GetItemInt_Generic(o, to_py_func(i))))
+#define __Pyx_GetItemInt_List(o, i, type, is_signed, to_py_func, is_list, wraparound, boundscheck)\
+    (__Pyx_fits_Py_ssize_t(i, type, is_signed) ?\
+    __Pyx_GetItemInt_List_Fast(o, (Py_ssize_t)i, wraparound, boundscheck) :\
+    (PyErr_SetString(PyExc_IndexError, "list index out of range"), (PyObject*)NULL))
+static CYTHON_INLINE PyObject *__Pyx_GetItemInt_List_Fast(PyObject *o, Py_ssize_t i,
+                                                              int wraparound, int boundscheck);
+#define __Pyx_GetItemInt_Tuple(o, i, type, is_signed, to_py_func, is_list, wraparound, boundscheck)\
+    (__Pyx_fits_Py_ssize_t(i, type, is_signed) ?\
+    __Pyx_GetItemInt_Tuple_Fast(o, (Py_ssize_t)i, wraparound, boundscheck) :\
+    (PyErr_SetString(PyExc_IndexError, "tuple index out of range"), (PyObject*)NULL))
+static CYTHON_INLINE PyObject *__Pyx_GetItemInt_Tuple_Fast(PyObject *o, Py_ssize_t i,
+                                                              int wraparound, int boundscheck);
+static PyObject *__Pyx_GetItemInt_Generic(PyObject *o, PyObject* j);
+static CYTHON_INLINE PyObject *__Pyx_GetItemInt_Fast(PyObject *o, Py_ssize_t i,
+                                                     int is_list, int wraparound, int boundscheck);
+
+/* ObjectGetItem.proto */
+#if CYTHON_USE_TYPE_SLOTS
+static CYTHON_INLINE PyObject *__Pyx_PyObject_GetItem(PyObject *obj, PyObject* key);
+#else
+#define __Pyx_PyObject_GetItem(obj, key)  PyObject_GetItem(obj, key)
+#endif
+
 /* CLineInTraceback.proto */
 #ifdef CYTHON_CLINE_IN_TRACEBACK
 #define __Pyx_CLineForTraceback(tstate, c_line)  (((CYTHON_CLINE_IN_TRACEBACK)) ? c_line : 0)
@@ -1646,6 +1683,9 @@ static void __Pyx_AddTraceback(const char *funcname, int c_line,
 static CYTHON_INLINE PyObject* __Pyx_PyInt_From_enum__line_sender_error_code(enum line_sender_error_code value);
 
 /* CIntFromPy.proto */
+static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *);
+
+/* CIntFromPy.proto */
 static CYTHON_INLINE int64_t __Pyx_PyInt_As_int64_t(PyObject *);
 
 /* CIntToPy.proto */
@@ -1655,7 +1695,10 @@ static CYTHON_INLINE PyObject* __Pyx_PyInt_From_int64_t(int64_t value);
 static CYTHON_INLINE size_t __Pyx_PyInt_As_size_t(PyObject *);
 
 /* CIntFromPy.proto */
-static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *);
+static CYTHON_INLINE uint64_t __Pyx_PyInt_As_uint64_t(PyObject *);
+
+/* CIntToPy.proto */
+static CYTHON_INLINE PyObject* __Pyx_PyInt_From_int(int value);
 
 /* CIntToPy.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyInt_From_long(long value);
@@ -1759,21 +1802,28 @@ static PyObject *__pyx_builtin_ValueError;
 static PyObject *__pyx_builtin_TypeError;
 static const char __pyx_k__9[] = ", ";
 static const char __pyx_k_at[] = "at";
+static const char __pyx_k_dt[] = "dt";
 static const char __pyx_k_Any[] = "Any";
+static const char __pyx_k_cls[] = "cls";
 static const char __pyx_k_doc[] = "__doc__";
+static const char __pyx_k_err[] = "err";
 static const char __pyx_k_int[] = "int";
 static const char __pyx_k_msg[] = "msg";
 static const char __pyx_k_nyi[] = "nyi";
+static const char __pyx_k_row[] = "row";
 static const char __pyx_k_str[] = "str";
 static const char __pyx_k_sys[] = "sys";
+static const char __pyx_k_tls[] = "tls";
 static const char __pyx_k_Dict[] = "Dict";
 static const char __pyx_k_Enum[] = "Enum";
 static const char __pyx_k_List[] = "List";
 static const char __pyx_k_None[] = "None";
+static const char __pyx_k_auth[] = "auth";
 static const char __pyx_k_bool[] = "bool";
 static const char __pyx_k_code[] = "code";
 static const char __pyx_k_data[] = "data";
 static const char __pyx_k_enum[] = "enum";
+static const char __pyx_k_exit[] = "__exit__";
 static const char __pyx_k_host[] = "host";
 static const char __pyx_k_init[] = "__init__";
 static const char __pyx_k_main[] = "__main__";
@@ -1785,6 +1835,7 @@ static const char __pyx_k_Tuple[] = "Tuple";
 static const char __pyx_k_Union[] = "Union";
 static const char __pyx_k_clear[] = "clear";
 static const char __pyx_k_close[] = "close";
+static const char __pyx_k_enter[] = "__enter__";
 static const char __pyx_k_float[] = "float";
 static const char __pyx_k_flush[] = "flush";
 static const char __pyx_k_items[] = "items";
@@ -1805,12 +1856,17 @@ static const char __pyx_k_columns[] = "columns";
 static const char __pyx_k_connect[] = "connect";
 static const char __pyx_k_exc_val[] = "_exc_val";
 static const char __pyx_k_prepare[] = "__prepare__";
+static const char __pyx_k_reserve[] = "reserve";
 static const char __pyx_k_symbols[] = "symbols";
+static const char __pyx_k_tabular[] = "tabular";
+static const char __pyx_k_unicode[] = "unicode";
 static const char __pyx_k_Callable[] = "Callable";
 static const char __pyx_k_IlpError[] = "IlpError";
 static const char __pyx_k_Iterable[] = "Iterable";
 static const char __pyx_k_Optional[] = "Optional";
 static const char __pyx_k_TlsError[] = "TlsError";
+static const char __pyx_k_capacity[] = "capacity";
+static const char __pyx_k_datetime[] = "datetime";
 static const char __pyx_k_exc_type[] = "exc_type";
 static const char __pyx_k_getstate[] = "__getstate__";
 static const char __pyx_k_property[] = "property";
@@ -1818,11 +1874,16 @@ static const char __pyx_k_qualname[] = "__qualname__";
 static const char __pyx_k_setstate[] = "__setstate__";
 static const char __pyx_k_AuthError[] = "AuthError";
 static const char __pyx_k_TypeError[] = "TypeError";
+static const char __pyx_k_interface[] = "interface";
 static const char __pyx_k_metaclass[] = "__metaclass__";
+static const char __pyx_k_pyx_state[] = "__pyx_state";
 static const char __pyx_k_reduce_ex[] = "__reduce_ex__";
 static const char __pyx_k_timestamp[] = "timestamp";
 static const char __pyx_k_LineSender[] = "LineSender";
 static const char __pyx_k_ValueError[] = "ValueError";
+static const char __pyx_k_additional[] = "additional";
+static const char __pyx_k_auto_flush[] = "auto_flush";
+static const char __pyx_k_new_buffer[] = "new_buffer";
 static const char __pyx_k_pyx_vtable[] = "__pyx_vtable__";
 static const char __pyx_k_table_name[] = "table_name";
 static const char __pyx_k_InvalidName[] = "InvalidName";
@@ -1832,6 +1893,8 @@ static const char __pyx_k_microsecond[] = "microsecond";
 static const char __pyx_k_questdb_ilp[] = "questdb.ilp";
 static const char __pyx_k_IlpErrorCode[] = "IlpErrorCode";
 static const char __pyx_k_max_name_len[] = "max_name_len";
+static const char __pyx_k_read_timeout[] = "read_timeout";
+static const char __pyx_k_stringsource[] = "stringsource";
 static const char __pyx_k_IlpError_code[] = "IlpError.code";
 static const char __pyx_k_from_datetime[] = "from_datetime";
 static const char __pyx_k_init_capacity[] = "init_capacity";
@@ -1839,30 +1902,54 @@ static const char __pyx_k_reduce_cython[] = "__reduce_cython__";
 static const char __pyx_k_InvalidApiCall[] = "InvalidApiCall";
 static const char __pyx_k_Must_be_one_of[] = ". Must be one of: ";
 static const char __pyx_k_TimestampNanos[] = "TimestampNanos";
+static const char __pyx_k_max_name_len_2[] = "_max_name_len";
 static const char __pyx_k_IlpError___init[] = "IlpError.__init__";
 static const char __pyx_k_TimestampMicros[] = "TimestampMicros";
-static const char __pyx_k_collections_abc[] = "collections.abc";
+static const char __pyx_k_init_capacity_2[] = "_init_capacity";
 static const char __pyx_k_setstate_cython[] = "__setstate_cython__";
 static const char __pyx_k_InvalidTimestamp[] = "InvalidTimestamp";
 static const char __pyx_k_LineSenderBuffer[] = "LineSenderBuffer";
+static const char __pyx_k_LineSender_close[] = "LineSender.close";
+static const char __pyx_k_LineSender_flush[] = "LineSender.flush";
 static const char __pyx_k_Unsupported_type[] = "Unsupported type: ";
 static const char __pyx_k_Category_of_Error[] = "Category of Error.";
+static const char __pyx_k_LineSender___exit[] = "LineSender.__exit__";
 static const char __pyx_k_datetime_datetime[] = "datetime.datetime";
 static const char __pyx_k_IlpErrorCode___str[] = "IlpErrorCode.__str__";
+static const char __pyx_k_LineSender___enter[] = "LineSender.__enter__";
+static const char __pyx_k_LineSender_connect[] = "LineSender.connect";
 static const char __pyx_k_cline_in_traceback[] = "cline_in_traceback";
 static const char __pyx_k_CouldNotResolveAddr[] = "CouldNotResolveAddr";
 static const char __pyx_k_src_questdb_ilp_pyx[] = "src/questdb/ilp.pyx";
+static const char __pyx_k_LineSenderBuffer_row[] = "LineSenderBuffer.row";
+static const char __pyx_k_insecure_skip_verify[] = "insecure_skip_verify";
+static const char __pyx_k_LineSender_new_buffer[] = "LineSender.new_buffer";
+static const char __pyx_k_LineSenderBuffer_clear[] = "LineSenderBuffer.clear";
+static const char __pyx_k_LineSenderBuffer_reserve[] = "LineSenderBuffer.reserve";
+static const char __pyx_k_LineSenderBuffer_tabular[] = "LineSenderBuffer.tabular";
+static const char __pyx_k_LineSenderBuffer_capacity[] = "LineSenderBuffer.capacity";
+static const char __pyx_k_LineSender___reduce_cython[] = "LineSender.__reduce_cython__";
 static const char __pyx_k_value_must_positive_integer[] = "value must positive integer.";
+static const char __pyx_k_LineSender___setstate_cython[] = "LineSender.__setstate_cython__";
 static const char __pyx_k_TimestampNanos_datetime_None[] = "TimestampNanos, datetime, None";
+static const char __pyx_k_TimestampNanos_from_datetime[] = "TimestampNanos.from_datetime";
 static const char __pyx_k_dt_must_be_a_datetime_object[] = "dt must be a datetime object.";
+static const char __pyx_k_TimestampMicros_from_datetime[] = "TimestampMicros.from_datetime";
 static const char __pyx_k_An_error_whilst_using_the_line[] = "\n    An error whilst using the line sender or constructing its buffer.\n    ";
+static const char __pyx_k_TimestampNanos___reduce_cython[] = "TimestampNanos.__reduce_cython__";
 static const char __pyx_k_Internal_error_converting_error[] = "Internal error converting error code.";
+static const char __pyx_k_TimestampMicros___reduce_cython[] = "TimestampMicros.__reduce_cython__";
 static const char __pyx_k_additional_must_be_non_negative[] = "additional must be non-negative.";
+static const char __pyx_k_LineSenderBuffer___reduce_cython[] = "LineSenderBuffer.__reduce_cython__";
+static const char __pyx_k_LineSenderBuffer___setstate_cyth[] = "LineSenderBuffer.__setstate_cython__";
 static const char __pyx_k_Must_specify_at_least_one_symbol[] = "Must specify at least one symbol or column";
+static const char __pyx_k_TimestampMicros___setstate_cytho[] = "TimestampMicros.__setstate_cython__";
+static const char __pyx_k_TimestampNanos___setstate_cython[] = "TimestampNanos.__setstate_cython__";
 static const char __pyx_k_connect_can_t_be_called_after_cl[] = "connect() can't be called after close().";
 static const char __pyx_k_flush_can_t_be_called_after_clos[] = "flush() can't be called after close().";
 static const char __pyx_k_no_default___reduce___due_to_non[] = "no default __reduce__ due to non-trivial __cinit__";
 static const char __pyx_k_port_must_be_an_integer_or_a_str[] = "port must be an integer or a string, not ";
+static const char __pyx_k_tls_must_be_a_bool_a_str_pointin[] = "tls must be a bool, a str pointing to CA file or \"insecure_skip_verify\", not ";
 static PyObject *__pyx_kp_s_An_error_whilst_using_the_line;
 static PyObject *__pyx_n_s_Any;
 static PyObject *__pyx_n_s_AuthError;
@@ -1884,6 +1971,21 @@ static PyObject *__pyx_n_s_InvalidUtf8;
 static PyObject *__pyx_n_s_Iterable;
 static PyObject *__pyx_n_s_LineSender;
 static PyObject *__pyx_n_s_LineSenderBuffer;
+static PyObject *__pyx_n_s_LineSenderBuffer___reduce_cython;
+static PyObject *__pyx_n_s_LineSenderBuffer___setstate_cyth;
+static PyObject *__pyx_n_s_LineSenderBuffer_capacity;
+static PyObject *__pyx_n_s_LineSenderBuffer_clear;
+static PyObject *__pyx_n_s_LineSenderBuffer_reserve;
+static PyObject *__pyx_n_s_LineSenderBuffer_row;
+static PyObject *__pyx_n_s_LineSenderBuffer_tabular;
+static PyObject *__pyx_n_s_LineSender___enter;
+static PyObject *__pyx_n_s_LineSender___exit;
+static PyObject *__pyx_n_s_LineSender___reduce_cython;
+static PyObject *__pyx_n_s_LineSender___setstate_cython;
+static PyObject *__pyx_n_s_LineSender_close;
+static PyObject *__pyx_n_s_LineSender_connect;
+static PyObject *__pyx_n_s_LineSender_flush;
+static PyObject *__pyx_n_s_LineSender_new_buffer;
 static PyObject *__pyx_n_s_List;
 static PyObject *__pyx_kp_u_Must_be_one_of;
 static PyObject *__pyx_kp_u_Must_specify_at_least_one_symbol;
@@ -1892,8 +1994,14 @@ static PyObject *__pyx_n_s_Optional;
 static PyObject *__pyx_n_s_SocketError;
 static PyObject *__pyx_n_s_TimestampMicros;
 static PyObject *__pyx_n_u_TimestampMicros;
+static PyObject *__pyx_n_s_TimestampMicros___reduce_cython;
+static PyObject *__pyx_n_s_TimestampMicros___setstate_cytho;
+static PyObject *__pyx_n_s_TimestampMicros_from_datetime;
 static PyObject *__pyx_n_s_TimestampNanos;
+static PyObject *__pyx_n_s_TimestampNanos___reduce_cython;
+static PyObject *__pyx_n_s_TimestampNanos___setstate_cython;
 static PyObject *__pyx_kp_u_TimestampNanos_datetime_None;
+static PyObject *__pyx_n_s_TimestampNanos_from_datetime;
 static PyObject *__pyx_n_s_TlsError;
 static PyObject *__pyx_n_s_Tuple;
 static PyObject *__pyx_n_s_TypeError;
@@ -1901,27 +2009,36 @@ static PyObject *__pyx_n_s_Union;
 static PyObject *__pyx_kp_u_Unsupported_type;
 static PyObject *__pyx_n_s_ValueError;
 static PyObject *__pyx_kp_u__9;
+static PyObject *__pyx_n_s_additional;
 static PyObject *__pyx_kp_u_additional_must_be_non_negative;
 static PyObject *__pyx_n_s_at;
+static PyObject *__pyx_n_s_auth;
+static PyObject *__pyx_n_s_auto_flush;
 static PyObject *__pyx_n_u_bool;
 static PyObject *__pyx_n_s_buffer;
+static PyObject *__pyx_n_s_capacity;
 static PyObject *__pyx_n_s_clear;
 static PyObject *__pyx_n_s_cline_in_traceback;
 static PyObject *__pyx_n_s_close;
+static PyObject *__pyx_n_s_cls;
 static PyObject *__pyx_n_s_code;
 static PyObject *__pyx_n_s_code_2;
-static PyObject *__pyx_n_s_collections_abc;
 static PyObject *__pyx_n_s_columns;
 static PyObject *__pyx_n_s_connect;
 static PyObject *__pyx_kp_u_connect_can_t_be_called_after_cl;
 static PyObject *__pyx_n_s_data;
+static PyObject *__pyx_n_u_datetime;
 static PyObject *__pyx_kp_u_datetime_datetime;
 static PyObject *__pyx_n_s_doc;
+static PyObject *__pyx_n_s_dt;
 static PyObject *__pyx_kp_u_dt_must_be_a_datetime_object;
+static PyObject *__pyx_n_s_enter;
 static PyObject *__pyx_n_s_enum;
+static PyObject *__pyx_n_s_err;
 static PyObject *__pyx_n_s_exc_tb;
 static PyObject *__pyx_n_s_exc_type;
 static PyObject *__pyx_n_s_exc_val;
+static PyObject *__pyx_n_s_exit;
 static PyObject *__pyx_n_u_float;
 static PyObject *__pyx_n_s_flush;
 static PyObject *__pyx_kp_u_flush_can_t_be_called_after_clos;
@@ -1932,42 +2049,56 @@ static PyObject *__pyx_n_s_host;
 static PyObject *__pyx_n_s_import;
 static PyObject *__pyx_n_s_init;
 static PyObject *__pyx_n_s_init_capacity;
+static PyObject *__pyx_n_s_init_capacity_2;
+static PyObject *__pyx_n_u_insecure_skip_verify;
 static PyObject *__pyx_n_u_int;
+static PyObject *__pyx_n_s_interface;
 static PyObject *__pyx_n_s_items;
 static PyObject *__pyx_n_s_main;
 static PyObject *__pyx_n_s_max_name_len;
+static PyObject *__pyx_n_s_max_name_len_2;
 static PyObject *__pyx_n_s_metaclass;
 static PyObject *__pyx_n_s_microsecond;
 static PyObject *__pyx_n_s_module;
 static PyObject *__pyx_n_s_msg;
 static PyObject *__pyx_n_s_name;
 static PyObject *__pyx_n_s_name_2;
+static PyObject *__pyx_n_s_new_buffer;
 static PyObject *__pyx_kp_s_no_default___reduce___due_to_non;
 static PyObject *__pyx_n_u_nyi;
 static PyObject *__pyx_n_s_port;
 static PyObject *__pyx_kp_u_port_must_be_an_integer_or_a_str;
 static PyObject *__pyx_n_s_prepare;
 static PyObject *__pyx_n_s_property;
+static PyObject *__pyx_n_s_pyx_state;
 static PyObject *__pyx_n_s_pyx_vtable;
 static PyObject *__pyx_n_s_qualname;
 static PyObject *__pyx_n_s_questdb_ilp;
+static PyObject *__pyx_n_s_read_timeout;
 static PyObject *__pyx_n_s_reduce;
 static PyObject *__pyx_n_s_reduce_cython;
 static PyObject *__pyx_n_s_reduce_ex;
+static PyObject *__pyx_n_s_reserve;
 static PyObject *__pyx_n_s_return;
+static PyObject *__pyx_n_s_row;
 static PyObject *__pyx_n_s_self;
 static PyObject *__pyx_n_s_setstate;
 static PyObject *__pyx_n_s_setstate_cython;
 static PyObject *__pyx_kp_s_src_questdb_ilp_pyx;
 static PyObject *__pyx_n_u_str;
 static PyObject *__pyx_n_s_str_2;
+static PyObject *__pyx_kp_s_stringsource;
 static PyObject *__pyx_n_s_super;
 static PyObject *__pyx_n_s_symbols;
 static PyObject *__pyx_n_s_sys;
 static PyObject *__pyx_n_s_table_name;
+static PyObject *__pyx_n_s_tabular;
 static PyObject *__pyx_n_s_test;
 static PyObject *__pyx_n_s_timestamp;
+static PyObject *__pyx_n_s_tls;
+static PyObject *__pyx_kp_u_tls_must_be_a_bool_a_str_pointin;
 static PyObject *__pyx_n_s_typing;
+static PyObject *__pyx_n_u_unicode;
 static PyObject *__pyx_n_s_value;
 static PyObject *__pyx_kp_u_value_must_positive_integer;
 static PyObject *__pyx_pf_7questdb_3ilp_12IlpErrorCode___str__(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_self); /* proto */
@@ -1984,26 +2115,28 @@ static PyObject *__pyx_pf_7questdb_3ilp_14TimestampNanos_5value___get__(struct _
 static PyObject *__pyx_pf_7questdb_3ilp_14TimestampNanos_4__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_TimestampNanos *__pyx_v_self); /* proto */
 static PyObject *__pyx_pf_7questdb_3ilp_14TimestampNanos_6__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_TimestampNanos *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
 static int __pyx_pf_7questdb_3ilp_16LineSenderBuffer___cinit__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_init_capacity, PyObject *__pyx_v_max_name_len); /* proto */
-static void __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_4reserve(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_additional); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6capacity(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_8clear(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
-static Py_ssize_t __pyx_pf_7questdb_3ilp_16LineSenderBuffer_10__len__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__str__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14row(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_table_name, PyObject *__pyx_v_symbols, PyObject *__pyx_v_columns, PyObject *__pyx_v_at); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_16tabular(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v_table_name, CYTHON_UNUSED PyObject *__pyx_v_data, CYTHON_UNUSED PyObject *__pyx_v_header, CYTHON_UNUSED PyObject *__pyx_v_symbols, CYTHON_UNUSED PyObject *__pyx_v_at); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_18__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_20__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
-static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_host, PyObject *__pyx_v_port); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4__enter__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
+static int __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__init__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v_init_capacity, CYTHON_UNUSED PyObject *__pyx_v_max_name_len); /* proto */
+static void __pyx_pf_7questdb_3ilp_16LineSenderBuffer_4__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6reserve(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_additional); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_8capacity(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_10clear(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
+static Py_ssize_t __pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__len__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14__str__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_16row(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_table_name, PyObject *__pyx_v_symbols, PyObject *__pyx_v_columns, PyObject *__pyx_v_at); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_18tabular(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v_table_name, CYTHON_UNUSED PyObject *__pyx_v_data, CYTHON_UNUSED PyObject *__pyx_v_header, CYTHON_UNUSED PyObject *__pyx_v_symbols, CYTHON_UNUSED PyObject *__pyx_v_at); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_20__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_22__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
+static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_host, PyObject *__pyx_v_port, PyObject *__pyx_v_interface, PyObject *__pyx_v_auth, PyObject *__pyx_v_tls, PyObject *__pyx_v_read_timeout, int __pyx_v_init_capacity, int __pyx_v_max_name_len, PyObject *__pyx_v_auto_flush); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2new_buffer(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4connect(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6__enter__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
 static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6buffer___get__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6flush(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_buffer, int __pyx_v_clear); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_8close(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, int __pyx_v_flush); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_10__exit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_exc_type, CYTHON_UNUSED PyObject *__pyx_v__exc_val, CYTHON_UNUSED PyObject *__pyx_v__exc_tb); /* proto */
-static void __pyx_pf_7questdb_3ilp_10LineSender_12__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_14__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_16__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_8flush(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_buffer, int __pyx_v_clear); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_10close(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, int __pyx_v_flush); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_12__exit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_exc_type, CYTHON_UNUSED PyObject *__pyx_v__exc_val, CYTHON_UNUSED PyObject *__pyx_v__exc_tb); /* proto */
+static void __pyx_pf_7questdb_3ilp_10LineSender_14__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_16__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_18__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
 static PyObject *__pyx_tp_new_7questdb_3ilp_TimestampMicros(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
 static PyObject *__pyx_tp_new_7questdb_3ilp_TimestampNanos(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
 static PyObject *__pyx_tp_new_7questdb_3ilp_LineSenderBuffer(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
@@ -2011,6 +2144,7 @@ static PyObject *__pyx_tp_new_7questdb_3ilp_LineSender(PyTypeObject *t, PyObject
 static PyObject *__pyx_int_0;
 static PyObject *__pyx_int_127;
 static PyObject *__pyx_int_1000;
+static PyObject *__pyx_int_32768;
 static PyObject *__pyx_int_65536;
 static PyObject *__pyx_tuple_;
 static PyObject *__pyx_tuple__2;
@@ -2029,9 +2163,51 @@ static PyObject *__pyx_tuple__15;
 static PyObject *__pyx_tuple__16;
 static PyObject *__pyx_tuple__18;
 static PyObject *__pyx_tuple__20;
+static PyObject *__pyx_tuple__22;
+static PyObject *__pyx_tuple__24;
+static PyObject *__pyx_tuple__26;
+static PyObject *__pyx_tuple__28;
+static PyObject *__pyx_tuple__30;
+static PyObject *__pyx_tuple__32;
+static PyObject *__pyx_tuple__34;
+static PyObject *__pyx_tuple__36;
+static PyObject *__pyx_tuple__38;
+static PyObject *__pyx_tuple__40;
+static PyObject *__pyx_tuple__42;
+static PyObject *__pyx_tuple__44;
+static PyObject *__pyx_tuple__46;
+static PyObject *__pyx_tuple__48;
+static PyObject *__pyx_tuple__50;
+static PyObject *__pyx_tuple__52;
+static PyObject *__pyx_tuple__54;
+static PyObject *__pyx_tuple__56;
+static PyObject *__pyx_tuple__58;
+static PyObject *__pyx_tuple__60;
+static PyObject *__pyx_tuple__62;
 static PyObject *__pyx_codeobj__17;
 static PyObject *__pyx_codeobj__19;
 static PyObject *__pyx_codeobj__21;
+static PyObject *__pyx_codeobj__23;
+static PyObject *__pyx_codeobj__25;
+static PyObject *__pyx_codeobj__27;
+static PyObject *__pyx_codeobj__29;
+static PyObject *__pyx_codeobj__31;
+static PyObject *__pyx_codeobj__33;
+static PyObject *__pyx_codeobj__35;
+static PyObject *__pyx_codeobj__37;
+static PyObject *__pyx_codeobj__39;
+static PyObject *__pyx_codeobj__41;
+static PyObject *__pyx_codeobj__43;
+static PyObject *__pyx_codeobj__45;
+static PyObject *__pyx_codeobj__47;
+static PyObject *__pyx_codeobj__49;
+static PyObject *__pyx_codeobj__51;
+static PyObject *__pyx_codeobj__53;
+static PyObject *__pyx_codeobj__55;
+static PyObject *__pyx_codeobj__57;
+static PyObject *__pyx_codeobj__59;
+static PyObject *__pyx_codeobj__61;
+static PyObject *__pyx_codeobj__63;
 /* Late includes */
 
 /* "questdb/ilp.pyx":84
@@ -3538,6 +3714,7 @@ static int __pyx_pf_7questdb_3ilp_15TimestampMicros___cinit__(struct __pyx_obj_7
 /* Python wrapper */
 static PyObject *__pyx_pw_7questdb_3ilp_15TimestampMicros_3from_datetime(PyObject *__pyx_v_cls, PyObject *__pyx_v_dt); /*proto*/
 static char __pyx_doc_7questdb_3ilp_15TimestampMicros_2from_datetime[] = "\n        Construct a `TimestampMicros` from a `datetime` object.\n        ";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_15TimestampMicros_3from_datetime = {"from_datetime", (PyCFunction)__pyx_pw_7questdb_3ilp_15TimestampMicros_3from_datetime, METH_O, __pyx_doc_7questdb_3ilp_15TimestampMicros_2from_datetime};
 static PyObject *__pyx_pw_7questdb_3ilp_15TimestampMicros_3from_datetime(PyObject *__pyx_v_cls, PyObject *__pyx_v_dt) {
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
@@ -3710,6 +3887,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_15TimestampMicros_5value___get__(struct 
 
 /* Python wrapper */
 static PyObject *__pyx_pw_7questdb_3ilp_15TimestampMicros_5__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_15TimestampMicros_5__reduce_cython__ = {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_15TimestampMicros_5__reduce_cython__, METH_NOARGS, 0};
 static PyObject *__pyx_pw_7questdb_3ilp_15TimestampMicros_5__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
@@ -3767,6 +3945,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_15TimestampMicros_4__reduce_cython__(CYT
 
 /* Python wrapper */
 static PyObject *__pyx_pw_7questdb_3ilp_15TimestampMicros_7__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_15TimestampMicros_7__setstate_cython__ = {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_15TimestampMicros_7__setstate_cython__, METH_O, 0};
 static PyObject *__pyx_pw_7questdb_3ilp_15TimestampMicros_7__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
@@ -3962,6 +4141,7 @@ static int __pyx_pf_7questdb_3ilp_14TimestampNanos___cinit__(struct __pyx_obj_7q
 /* Python wrapper */
 static PyObject *__pyx_pw_7questdb_3ilp_14TimestampNanos_3from_datetime(PyObject *__pyx_v_cls, PyObject *__pyx_v_dt); /*proto*/
 static char __pyx_doc_7questdb_3ilp_14TimestampNanos_2from_datetime[] = "\n        Construct a `TimestampNanos` from a `datetime` object.\n        ";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_14TimestampNanos_3from_datetime = {"from_datetime", (PyCFunction)__pyx_pw_7questdb_3ilp_14TimestampNanos_3from_datetime, METH_O, __pyx_doc_7questdb_3ilp_14TimestampNanos_2from_datetime};
 static PyObject *__pyx_pw_7questdb_3ilp_14TimestampNanos_3from_datetime(PyObject *__pyx_v_cls, PyObject *__pyx_v_dt) {
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
@@ -4134,6 +4314,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_14TimestampNanos_5value___get__(struct _
 
 /* Python wrapper */
 static PyObject *__pyx_pw_7questdb_3ilp_14TimestampNanos_5__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_14TimestampNanos_5__reduce_cython__ = {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_14TimestampNanos_5__reduce_cython__, METH_NOARGS, 0};
 static PyObject *__pyx_pw_7questdb_3ilp_14TimestampNanos_5__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
@@ -4191,6 +4372,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_14TimestampNanos_4__reduce_cython__(CYTH
 
 /* Python wrapper */
 static PyObject *__pyx_pw_7questdb_3ilp_14TimestampNanos_7__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_14TimestampNanos_7__setstate_cython__ = {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_14TimestampNanos_7__setstate_cython__, METH_O, 0};
 static PyObject *__pyx_pw_7questdb_3ilp_14TimestampNanos_7__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
@@ -4242,7 +4424,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_14TimestampNanos_6__setstate_cython__(CY
 /* "questdb/ilp.pyx":298
  *     cdef void* _row_complete_ctx
  * 
- *     def __cinit__(self, init_capacity: int = 65536, max_name_len: int = 127):             # <<<<<<<<<<<<<<
+ *     def __cinit__(self, init_capacity: int=65536, max_name_len: int=127):             # <<<<<<<<<<<<<<
  *         """
  *         Create a new buffer with the an initial capacity and max name length.
  */
@@ -4346,7 +4528,7 @@ static int __pyx_pf_7questdb_3ilp_16LineSenderBuffer___cinit__(struct __pyx_obj_
   /* "questdb/ilp.pyx":298
  *     cdef void* _row_complete_ctx
  * 
- *     def __cinit__(self, init_capacity: int = 65536, max_name_len: int = 127):             # <<<<<<<<<<<<<<
+ *     def __cinit__(self, init_capacity: int=65536, max_name_len: int=127):             # <<<<<<<<<<<<<<
  *         """
  *         Create a new buffer with the an initial capacity and max name length.
  */
@@ -4408,7 +4590,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__cinit_i
  *         self._row_complete_cb = NULL
  *         self._row_complete_ctx = NULL             # <<<<<<<<<<<<<<
  * 
- *     def __dealloc__(self):
+ *     def __init__(self, init_capacity: int=65536, max_name_len: int=127):
  */
   __pyx_v_self->_row_complete_ctx = NULL;
 
@@ -4430,27 +4612,122 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__cinit_i
 /* "questdb/ilp.pyx":312
  *         self._row_complete_ctx = NULL
  * 
+ *     def __init__(self, init_capacity: int=65536, max_name_len: int=127):             # <<<<<<<<<<<<<<
+ *         """
+ *         Create a new buffer with the an initial capacity and max name length.
+ */
+
+/* Python wrapper */
+static int __pyx_pw_7questdb_3ilp_16LineSenderBuffer_3__init__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_2__init__[] = "\n        Create a new buffer with the an initial capacity and max name length.\n        :param int init_capacity: Initial capacity of the buffer in bytes.\n        :param int max_name_len: Maximum length of a table or column name.\n        ";
+#if CYTHON_COMPILING_IN_CPYTHON
+struct wrapperbase __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_2__init__;
+#endif
+static int __pyx_pw_7questdb_3ilp_16LineSenderBuffer_3__init__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
+  CYTHON_UNUSED PyObject *__pyx_v_init_capacity = 0;
+  CYTHON_UNUSED PyObject *__pyx_v_max_name_len = 0;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  int __pyx_r;
+  __Pyx_RefNannyDeclarations
+  __Pyx_RefNannySetupContext("__init__ (wrapper)", 0);
+  {
+    static PyObject **__pyx_pyargnames[] = {&__pyx_n_s_init_capacity,&__pyx_n_s_max_name_len,0};
+    PyObject* values[2] = {0,0};
+    values[0] = ((PyObject *)__pyx_int_65536);
+    values[1] = ((PyObject *)__pyx_int_127);
+    if (unlikely(__pyx_kwds)) {
+      Py_ssize_t kw_args;
+      const Py_ssize_t pos_args = PyTuple_GET_SIZE(__pyx_args);
+      switch (pos_args) {
+        case  2: values[1] = PyTuple_GET_ITEM(__pyx_args, 1);
+        CYTHON_FALLTHROUGH;
+        case  1: values[0] = PyTuple_GET_ITEM(__pyx_args, 0);
+        CYTHON_FALLTHROUGH;
+        case  0: break;
+        default: goto __pyx_L5_argtuple_error;
+      }
+      kw_args = PyDict_Size(__pyx_kwds);
+      switch (pos_args) {
+        case  0:
+        if (kw_args > 0) {
+          PyObject* value = __Pyx_PyDict_GetItemStr(__pyx_kwds, __pyx_n_s_init_capacity);
+          if (value) { values[0] = value; kw_args--; }
+        }
+        CYTHON_FALLTHROUGH;
+        case  1:
+        if (kw_args > 0) {
+          PyObject* value = __Pyx_PyDict_GetItemStr(__pyx_kwds, __pyx_n_s_max_name_len);
+          if (value) { values[1] = value; kw_args--; }
+        }
+      }
+      if (unlikely(kw_args > 0)) {
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "__init__") < 0)) __PYX_ERR(0, 312, __pyx_L3_error)
+      }
+    } else {
+      switch (PyTuple_GET_SIZE(__pyx_args)) {
+        case  2: values[1] = PyTuple_GET_ITEM(__pyx_args, 1);
+        CYTHON_FALLTHROUGH;
+        case  1: values[0] = PyTuple_GET_ITEM(__pyx_args, 0);
+        CYTHON_FALLTHROUGH;
+        case  0: break;
+        default: goto __pyx_L5_argtuple_error;
+      }
+    }
+    __pyx_v_init_capacity = values[0];
+    __pyx_v_max_name_len = values[1];
+  }
+  goto __pyx_L4_argument_unpacking_done;
+  __pyx_L5_argtuple_error:;
+  __Pyx_RaiseArgtupleInvalid("__init__", 0, 0, 2, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 312, __pyx_L3_error)
+  __pyx_L3_error:;
+  __Pyx_AddTraceback("questdb.ilp.LineSenderBuffer.__init__", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_RefNannyFinishContext();
+  return -1;
+  __pyx_L4_argument_unpacking_done:;
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__init__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), __pyx_v_init_capacity, __pyx_v_max_name_len);
+
+  /* function exit code */
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+static int __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__init__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v_init_capacity, CYTHON_UNUSED PyObject *__pyx_v_max_name_len) {
+  int __pyx_r;
+  __Pyx_RefNannyDeclarations
+  __Pyx_RefNannySetupContext("__init__", 0);
+
+  /* function exit code */
+  __pyx_r = 0;
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+/* "questdb/ilp.pyx":320
+ *         pass
+ * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
  *         line_sender_buffer_free(self._impl)
  * 
  */
 
 /* Python wrapper */
-static void __pyx_pw_7questdb_3ilp_16LineSenderBuffer_3__dealloc__(PyObject *__pyx_v_self); /*proto*/
-static void __pyx_pw_7questdb_3ilp_16LineSenderBuffer_3__dealloc__(PyObject *__pyx_v_self) {
+static void __pyx_pw_7questdb_3ilp_16LineSenderBuffer_5__dealloc__(PyObject *__pyx_v_self); /*proto*/
+static void __pyx_pw_7questdb_3ilp_16LineSenderBuffer_5__dealloc__(PyObject *__pyx_v_self) {
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__dealloc__ (wrapper)", 0);
-  __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__dealloc__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
+  __pyx_pf_7questdb_3ilp_16LineSenderBuffer_4__dealloc__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
 }
 
-static void __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
+static void __pyx_pf_7questdb_3ilp_16LineSenderBuffer_4__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__dealloc__", 0);
 
-  /* "questdb/ilp.pyx":313
+  /* "questdb/ilp.pyx":321
  * 
  *     def __dealloc__(self):
  *         line_sender_buffer_free(self._impl)             # <<<<<<<<<<<<<<
@@ -4459,8 +4736,8 @@ static void __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__dealloc__(struct __pyx_
  */
   line_sender_buffer_free(__pyx_v_self->_impl);
 
-  /* "questdb/ilp.pyx":312
- *         self._row_complete_ctx = NULL
+  /* "questdb/ilp.pyx":320
+ *         pass
  * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
  *         line_sender_buffer_free(self._impl)
@@ -4471,7 +4748,7 @@ static void __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__dealloc__(struct __pyx_
   __Pyx_RefNannyFinishContext();
 }
 
-/* "questdb/ilp.pyx":315
+/* "questdb/ilp.pyx":323
  *         line_sender_buffer_free(self._impl)
  * 
  *     def reserve(self, additional: int):             # <<<<<<<<<<<<<<
@@ -4480,20 +4757,21 @@ static void __pyx_pf_7questdb_3ilp_16LineSenderBuffer_2__dealloc__(struct __pyx_
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_5reserve(PyObject *__pyx_v_self, PyObject *__pyx_v_additional); /*proto*/
-static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_4reserve[] = "\n        Ensure the buffer has at least `additional` bytes of future capacity.\n\n        :param int additional: Additional bytes to reserve.\n        ";
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_5reserve(PyObject *__pyx_v_self, PyObject *__pyx_v_additional) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_7reserve(PyObject *__pyx_v_self, PyObject *__pyx_v_additional); /*proto*/
+static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_6reserve[] = "\n        Ensure the buffer has at least `additional` bytes of future capacity.\n\n        :param int additional: Additional bytes to reserve.\n        ";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_16LineSenderBuffer_7reserve = {"reserve", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_7reserve, METH_O, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_6reserve};
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_7reserve(PyObject *__pyx_v_self, PyObject *__pyx_v_additional) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("reserve (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_4reserve(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), ((PyObject *)__pyx_v_additional));
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_6reserve(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), ((PyObject *)__pyx_v_additional));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_4reserve(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_additional) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6reserve(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_additional) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -4504,32 +4782,32 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_4reserve(struct __pyx
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("reserve", 0);
 
-  /* "questdb/ilp.pyx":321
+  /* "questdb/ilp.pyx":329
  *         :param int additional: Additional bytes to reserve.
  *         """
  *         if additional < 0:             # <<<<<<<<<<<<<<
  *             raise ValueError('additional must be non-negative.')
  *         line_sender_buffer_reserve(self._impl, additional)
  */
-  __pyx_t_1 = PyObject_RichCompare(__pyx_v_additional, __pyx_int_0, Py_LT); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 321, __pyx_L1_error)
-  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely(__pyx_t_2 < 0)) __PYX_ERR(0, 321, __pyx_L1_error)
+  __pyx_t_1 = PyObject_RichCompare(__pyx_v_additional, __pyx_int_0, Py_LT); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 329, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely(__pyx_t_2 < 0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (unlikely(__pyx_t_2)) {
 
-    /* "questdb/ilp.pyx":322
+    /* "questdb/ilp.pyx":330
  *         """
  *         if additional < 0:
  *             raise ValueError('additional must be non-negative.')             # <<<<<<<<<<<<<<
  *         line_sender_buffer_reserve(self._impl, additional)
  * 
  */
-    __pyx_t_1 = __Pyx_PyObject_Call(__pyx_builtin_ValueError, __pyx_tuple__8, NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 322, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_Call(__pyx_builtin_ValueError, __pyx_tuple__8, NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 330, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 322, __pyx_L1_error)
+    __PYX_ERR(0, 330, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":321
+    /* "questdb/ilp.pyx":329
  *         :param int additional: Additional bytes to reserve.
  *         """
  *         if additional < 0:             # <<<<<<<<<<<<<<
@@ -4538,17 +4816,17 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_4reserve(struct __pyx
  */
   }
 
-  /* "questdb/ilp.pyx":323
+  /* "questdb/ilp.pyx":331
  *         if additional < 0:
  *             raise ValueError('additional must be non-negative.')
  *         line_sender_buffer_reserve(self._impl, additional)             # <<<<<<<<<<<<<<
  * 
  *     def capacity(self) -> int:
  */
-  __pyx_t_3 = __Pyx_PyInt_As_size_t(__pyx_v_additional); if (unlikely((__pyx_t_3 == (size_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 323, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyInt_As_size_t(__pyx_v_additional); if (unlikely((__pyx_t_3 == (size_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 331, __pyx_L1_error)
   line_sender_buffer_reserve(__pyx_v_self->_impl, __pyx_t_3);
 
-  /* "questdb/ilp.pyx":315
+  /* "questdb/ilp.pyx":323
  *         line_sender_buffer_free(self._impl)
  * 
  *     def reserve(self, additional: int):             # <<<<<<<<<<<<<<
@@ -4569,7 +4847,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_4reserve(struct __pyx
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":325
+/* "questdb/ilp.pyx":333
  *         line_sender_buffer_reserve(self._impl, additional)
  * 
  *     def capacity(self) -> int:             # <<<<<<<<<<<<<<
@@ -4578,20 +4856,21 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_4reserve(struct __pyx
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_7capacity(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_6capacity[] = "The current buffer capacity.";
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_7capacity(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_9capacity(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_8capacity[] = "The current buffer capacity.";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_16LineSenderBuffer_9capacity = {"capacity", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_9capacity, METH_NOARGS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_8capacity};
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_9capacity(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("capacity (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_6capacity(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_8capacity(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6capacity(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_8capacity(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -4600,7 +4879,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6capacity(struct __py
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("capacity", 0);
 
-  /* "questdb/ilp.pyx":327
+  /* "questdb/ilp.pyx":335
  *     def capacity(self) -> int:
  *         """The current buffer capacity."""
  *         return line_sender_buffer_capacity(self._impl)             # <<<<<<<<<<<<<<
@@ -4608,13 +4887,13 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6capacity(struct __py
  *     def clear(self):
  */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __Pyx_PyInt_FromSize_t(line_sender_buffer_capacity(__pyx_v_self->_impl)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 327, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyInt_FromSize_t(line_sender_buffer_capacity(__pyx_v_self->_impl)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 335, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":325
+  /* "questdb/ilp.pyx":333
  *         line_sender_buffer_reserve(self._impl, additional)
  * 
  *     def capacity(self) -> int:             # <<<<<<<<<<<<<<
@@ -4633,7 +4912,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6capacity(struct __py
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":329
+/* "questdb/ilp.pyx":337
  *         return line_sender_buffer_capacity(self._impl)
  * 
  *     def clear(self):             # <<<<<<<<<<<<<<
@@ -4642,25 +4921,26 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_6capacity(struct __py
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_9clear(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_8clear[] = "\n        Reset the buffer.\n\n        Note that flushing a buffer will (unless otherwise specified)\n        also automatically clear it.\n\n        This method is designed to be called only in conjunction with\n        ``sender.flush(buffer, clear=False)``.\n        ";
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_9clear(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_11clear(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_10clear[] = "\n        Reset the buffer.\n\n        Note that flushing a buffer will (unless otherwise specified)\n        also automatically clear it.\n\n        This method is designed to be called only in conjunction with\n        ``sender.flush(buffer, clear=False)``.\n        ";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_16LineSenderBuffer_11clear = {"clear", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_11clear, METH_NOARGS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_10clear};
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_11clear(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("clear (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_8clear(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_10clear(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_8clear(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_10clear(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("clear", 0);
 
-  /* "questdb/ilp.pyx":339
+  /* "questdb/ilp.pyx":347
  *         ``sender.flush(buffer, clear=False)``.
  *         """
  *         line_sender_buffer_clear(self._impl)             # <<<<<<<<<<<<<<
@@ -4669,7 +4949,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_8clear(struct __pyx_o
  */
   line_sender_buffer_clear(__pyx_v_self->_impl);
 
-  /* "questdb/ilp.pyx":329
+  /* "questdb/ilp.pyx":337
  *         return line_sender_buffer_capacity(self._impl)
  * 
  *     def clear(self):             # <<<<<<<<<<<<<<
@@ -4684,7 +4964,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_8clear(struct __pyx_o
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":341
+/* "questdb/ilp.pyx":349
  *         line_sender_buffer_clear(self._impl)
  * 
  *     def __len__(self):             # <<<<<<<<<<<<<<
@@ -4693,28 +4973,28 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_8clear(struct __pyx_o
  */
 
 /* Python wrapper */
-static Py_ssize_t __pyx_pw_7questdb_3ilp_16LineSenderBuffer_11__len__(PyObject *__pyx_v_self); /*proto*/
-static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_10__len__[] = "\n        The current number of bytes currently in the buffer.\n        ";
+static Py_ssize_t __pyx_pw_7questdb_3ilp_16LineSenderBuffer_13__len__(PyObject *__pyx_v_self); /*proto*/
+static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_12__len__[] = "\n        The current number of bytes currently in the buffer.\n        ";
 #if CYTHON_COMPILING_IN_CPYTHON
-struct wrapperbase __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_10__len__;
+struct wrapperbase __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_12__len__;
 #endif
-static Py_ssize_t __pyx_pw_7questdb_3ilp_16LineSenderBuffer_11__len__(PyObject *__pyx_v_self) {
+static Py_ssize_t __pyx_pw_7questdb_3ilp_16LineSenderBuffer_13__len__(PyObject *__pyx_v_self) {
   Py_ssize_t __pyx_r;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__len__ (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_10__len__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__len__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static Py_ssize_t __pyx_pf_7questdb_3ilp_16LineSenderBuffer_10__len__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
+static Py_ssize_t __pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__len__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
   Py_ssize_t __pyx_r;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__len__", 0);
 
-  /* "questdb/ilp.pyx":345
+  /* "questdb/ilp.pyx":353
  *         The current number of bytes currently in the buffer.
  *         """
  *         return line_sender_buffer_size(self._impl)             # <<<<<<<<<<<<<<
@@ -4724,7 +5004,7 @@ static Py_ssize_t __pyx_pf_7questdb_3ilp_16LineSenderBuffer_10__len__(struct __p
   __pyx_r = line_sender_buffer_size(__pyx_v_self->_impl);
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":341
+  /* "questdb/ilp.pyx":349
  *         line_sender_buffer_clear(self._impl)
  * 
  *     def __len__(self):             # <<<<<<<<<<<<<<
@@ -4738,7 +5018,7 @@ static Py_ssize_t __pyx_pf_7questdb_3ilp_16LineSenderBuffer_10__len__(struct __p
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":347
+/* "questdb/ilp.pyx":355
  *         return line_sender_buffer_size(self._impl)
  * 
  *     def __str__(self):             # <<<<<<<<<<<<<<
@@ -4747,19 +5027,19 @@ static Py_ssize_t __pyx_pf_7questdb_3ilp_16LineSenderBuffer_10__len__(struct __p
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_13__str__(PyObject *__pyx_v_self); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_13__str__(PyObject *__pyx_v_self) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15__str__(PyObject *__pyx_v_self); /*proto*/
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15__str__(PyObject *__pyx_v_self) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__str__ (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__str__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_14__str__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__str__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14__str__(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -4768,7 +5048,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__str__(struct __py
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__str__", 0);
 
-  /* "questdb/ilp.pyx":348
+  /* "questdb/ilp.pyx":356
  * 
  *     def __str__(self):
  *         return self._to_str()             # <<<<<<<<<<<<<<
@@ -4776,13 +5056,13 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__str__(struct __py
  *     cdef inline object _to_str(self):
  */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__to_str(__pyx_v_self); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 348, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__to_str(__pyx_v_self); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 356, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":347
+  /* "questdb/ilp.pyx":355
  *         return line_sender_buffer_size(self._impl)
  * 
  *     def __str__(self):             # <<<<<<<<<<<<<<
@@ -4801,7 +5081,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_12__str__(struct __py
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":350
+/* "questdb/ilp.pyx":358
  *         return self._to_str()
  * 
  *     cdef inline object _to_str(self):             # <<<<<<<<<<<<<<
@@ -4820,7 +5100,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__to_str(
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_to_str", 0);
 
-  /* "questdb/ilp.pyx":351
+  /* "questdb/ilp.pyx":359
  * 
  *     cdef inline object _to_str(self):
  *         cdef size_t size = 0             # <<<<<<<<<<<<<<
@@ -4829,7 +5109,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__to_str(
  */
   __pyx_v_size = 0;
 
-  /* "questdb/ilp.pyx":352
+  /* "questdb/ilp.pyx":360
  *     cdef inline object _to_str(self):
  *         cdef size_t size = 0
  *         cdef const char* utf8 = line_sender_buffer_peek(self._impl, &size)             # <<<<<<<<<<<<<<
@@ -4838,7 +5118,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__to_str(
  */
   __pyx_v_utf8 = line_sender_buffer_peek(__pyx_v_self->_impl, (&__pyx_v_size));
 
-  /* "questdb/ilp.pyx":353
+  /* "questdb/ilp.pyx":361
  *         cdef size_t size = 0
  *         cdef const char* utf8 = line_sender_buffer_peek(self._impl, &size)
  *         return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)             # <<<<<<<<<<<<<<
@@ -4846,13 +5126,13 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__to_str(
  *     cdef inline int _set_marker(self) except -1:
  */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = PyUnicode_FromStringAndSize(__pyx_v_utf8, ((Py_ssize_t)__pyx_v_size)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 353, __pyx_L1_error)
+  __pyx_t_1 = PyUnicode_FromStringAndSize(__pyx_v_utf8, ((Py_ssize_t)__pyx_v_size)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 361, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":350
+  /* "questdb/ilp.pyx":358
  *         return self._to_str()
  * 
  *     cdef inline object _to_str(self):             # <<<<<<<<<<<<<<
@@ -4871,7 +5151,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__to_str(
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":355
+/* "questdb/ilp.pyx":363
  *         return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)
  * 
  *     cdef inline int _set_marker(self) except -1:             # <<<<<<<<<<<<<<
@@ -4890,7 +5170,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__set_marker(st
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_set_marker", 0);
 
-  /* "questdb/ilp.pyx":356
+  /* "questdb/ilp.pyx":364
  * 
  *     cdef inline int _set_marker(self) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -4899,7 +5179,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__set_marker(st
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":357
+  /* "questdb/ilp.pyx":365
  *     cdef inline int _set_marker(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_set_marker(self._impl, &err):             # <<<<<<<<<<<<<<
@@ -4909,20 +5189,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__set_marker(st
   __pyx_t_1 = ((!(line_sender_buffer_set_marker(__pyx_v_self->_impl, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":358
+    /* "questdb/ilp.pyx":366
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_set_marker(self._impl, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  * 
  *     cdef inline int _rewind_to_marker(self) except -1:
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 358, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 366, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 358, __pyx_L1_error)
+    __PYX_ERR(0, 366, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":357
+    /* "questdb/ilp.pyx":365
  *     cdef inline int _set_marker(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_set_marker(self._impl, &err):             # <<<<<<<<<<<<<<
@@ -4931,7 +5211,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__set_marker(st
  */
   }
 
-  /* "questdb/ilp.pyx":355
+  /* "questdb/ilp.pyx":363
  *         return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)
  * 
  *     cdef inline int _set_marker(self) except -1:             # <<<<<<<<<<<<<<
@@ -4951,7 +5231,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__set_marker(st
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":360
+/* "questdb/ilp.pyx":368
  *             raise c_err_to_py(err)
  * 
  *     cdef inline int _rewind_to_marker(self) except -1:             # <<<<<<<<<<<<<<
@@ -4970,7 +5250,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__rewind_to_mar
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_rewind_to_marker", 0);
 
-  /* "questdb/ilp.pyx":361
+  /* "questdb/ilp.pyx":369
  * 
  *     cdef inline int _rewind_to_marker(self) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -4979,7 +5259,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__rewind_to_mar
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":362
+  /* "questdb/ilp.pyx":370
  *     cdef inline int _rewind_to_marker(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_rewind_to_marker(self._impl, &err):             # <<<<<<<<<<<<<<
@@ -4989,20 +5269,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__rewind_to_mar
   __pyx_t_1 = ((!(line_sender_buffer_rewind_to_marker(__pyx_v_self->_impl, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":363
+    /* "questdb/ilp.pyx":371
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_rewind_to_marker(self._impl, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  * 
  *     cdef inline _clear_marker(self):
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 363, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 371, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 363, __pyx_L1_error)
+    __PYX_ERR(0, 371, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":362
+    /* "questdb/ilp.pyx":370
  *     cdef inline int _rewind_to_marker(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_rewind_to_marker(self._impl, &err):             # <<<<<<<<<<<<<<
@@ -5011,7 +5291,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__rewind_to_mar
  */
   }
 
-  /* "questdb/ilp.pyx":360
+  /* "questdb/ilp.pyx":368
  *             raise c_err_to_py(err)
  * 
  *     cdef inline int _rewind_to_marker(self) except -1:             # <<<<<<<<<<<<<<
@@ -5031,7 +5311,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__rewind_to_mar
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":365
+/* "questdb/ilp.pyx":373
  *             raise c_err_to_py(err)
  * 
  *     cdef inline _clear_marker(self):             # <<<<<<<<<<<<<<
@@ -5044,7 +5324,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__clear_m
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("_clear_marker", 0);
 
-  /* "questdb/ilp.pyx":366
+  /* "questdb/ilp.pyx":374
  * 
  *     cdef inline _clear_marker(self):
  *         line_sender_buffer_clear_marker(self._impl)             # <<<<<<<<<<<<<<
@@ -5053,7 +5333,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__clear_m
  */
   line_sender_buffer_clear_marker(__pyx_v_self->_impl);
 
-  /* "questdb/ilp.pyx":365
+  /* "questdb/ilp.pyx":373
  *             raise c_err_to_py(err)
  * 
  *     cdef inline _clear_marker(self):             # <<<<<<<<<<<<<<
@@ -5068,7 +5348,7 @@ static CYTHON_INLINE PyObject *__pyx_f_7questdb_3ilp_16LineSenderBuffer__clear_m
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":368
+/* "questdb/ilp.pyx":376
  *         line_sender_buffer_clear_marker(self._impl)
  * 
  *     cdef inline int _table(self, str table_name) except -1:             # <<<<<<<<<<<<<<
@@ -5089,7 +5369,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(struct 
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_table", 0);
 
-  /* "questdb/ilp.pyx":369
+  /* "questdb/ilp.pyx":377
  * 
  *     cdef inline int _table(self, str table_name) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5098,19 +5378,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(struct 
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":371
+  /* "questdb/ilp.pyx":379
  *         cdef line_sender_error* err = NULL
  *         cdef line_sender_table_name c_table_name
  *         cdef bytes owner = str_to_table_name(table_name, &c_table_name)             # <<<<<<<<<<<<<<
  *         if not line_sender_buffer_table(self._impl, c_table_name, &err):
  *             raise c_err_to_py(err)
  */
-  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_table_name(__pyx_v_table_name, (&__pyx_v_c_table_name)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 371, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_table_name(__pyx_v_table_name, (&__pyx_v_c_table_name)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 379, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_owner = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "questdb/ilp.pyx":372
+  /* "questdb/ilp.pyx":380
  *         cdef line_sender_table_name c_table_name
  *         cdef bytes owner = str_to_table_name(table_name, &c_table_name)
  *         if not line_sender_buffer_table(self._impl, c_table_name, &err):             # <<<<<<<<<<<<<<
@@ -5120,20 +5400,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(struct 
   __pyx_t_2 = ((!(line_sender_buffer_table(__pyx_v_self->_impl, __pyx_v_c_table_name, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_2)) {
 
-    /* "questdb/ilp.pyx":373
+    /* "questdb/ilp.pyx":381
  *         cdef bytes owner = str_to_table_name(table_name, &c_table_name)
  *         if not line_sender_buffer_table(self._impl, c_table_name, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 373, __pyx_L1_error)
+    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 381, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 373, __pyx_L1_error)
+    __PYX_ERR(0, 381, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":372
+    /* "questdb/ilp.pyx":380
  *         cdef line_sender_table_name c_table_name
  *         cdef bytes owner = str_to_table_name(table_name, &c_table_name)
  *         if not line_sender_buffer_table(self._impl, c_table_name, &err):             # <<<<<<<<<<<<<<
@@ -5142,7 +5422,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(struct 
  */
   }
 
-  /* "questdb/ilp.pyx":374
+  /* "questdb/ilp.pyx":382
  *         if not line_sender_buffer_table(self._impl, c_table_name, &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5152,7 +5432,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(struct 
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":368
+  /* "questdb/ilp.pyx":376
  *         line_sender_buffer_clear_marker(self._impl)
  * 
  *     cdef inline int _table(self, str table_name) except -1:             # <<<<<<<<<<<<<<
@@ -5171,7 +5451,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(struct 
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":376
+/* "questdb/ilp.pyx":384
  *         return 0
  * 
  *     cdef inline int _symbol(self, str name, str value) except -1:             # <<<<<<<<<<<<<<
@@ -5194,7 +5474,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(struct
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_symbol", 0);
 
-  /* "questdb/ilp.pyx":377
+  /* "questdb/ilp.pyx":385
  * 
  *     cdef inline int _symbol(self, str name, str value) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5203,31 +5483,31 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(struct
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":380
+  /* "questdb/ilp.pyx":388
  *         cdef line_sender_column_name c_name
  *         cdef line_sender_utf8 c_value
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)             # <<<<<<<<<<<<<<
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)
  *         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
  */
-  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_column_name(__pyx_v_name, (&__pyx_v_c_name)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 380, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_column_name(__pyx_v_name, (&__pyx_v_c_name)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 388, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_owner_name = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "questdb/ilp.pyx":381
+  /* "questdb/ilp.pyx":389
  *         cdef line_sender_utf8 c_value
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)             # <<<<<<<<<<<<<<
  *         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
  *             raise c_err_to_py(err)
  */
-  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_value, (&__pyx_v_c_value)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 381, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_value, (&__pyx_v_c_value)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 389, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_owner_value = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "questdb/ilp.pyx":382
+  /* "questdb/ilp.pyx":390
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)
  *         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):             # <<<<<<<<<<<<<<
@@ -5237,20 +5517,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(struct
   __pyx_t_2 = ((!(line_sender_buffer_symbol(__pyx_v_self->_impl, __pyx_v_c_name, __pyx_v_c_value, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_2)) {
 
-    /* "questdb/ilp.pyx":383
+    /* "questdb/ilp.pyx":391
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)
  *         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 383, __pyx_L1_error)
+    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 391, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 383, __pyx_L1_error)
+    __PYX_ERR(0, 391, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":382
+    /* "questdb/ilp.pyx":390
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)
  *         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):             # <<<<<<<<<<<<<<
@@ -5259,7 +5539,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(struct
  */
   }
 
-  /* "questdb/ilp.pyx":384
+  /* "questdb/ilp.pyx":392
  *         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5269,7 +5549,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(struct
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":376
+  /* "questdb/ilp.pyx":384
  *         return 0
  * 
  *     cdef inline int _symbol(self, str name, str value) except -1:             # <<<<<<<<<<<<<<
@@ -5289,7 +5569,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(struct
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":386
+/* "questdb/ilp.pyx":394
  *         return 0
  * 
  *     cdef inline int _column_bool(             # <<<<<<<<<<<<<<
@@ -5308,7 +5588,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(s
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column_bool", 0);
 
-  /* "questdb/ilp.pyx":388
+  /* "questdb/ilp.pyx":396
  *     cdef inline int _column_bool(
  *             self, line_sender_column_name c_name, bint value) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5317,7 +5597,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(s
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":389
+  /* "questdb/ilp.pyx":397
  *             self, line_sender_column_name c_name, bint value) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):             # <<<<<<<<<<<<<<
@@ -5327,20 +5607,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(s
   __pyx_t_1 = ((!(line_sender_buffer_column_bool(__pyx_v_self->_impl, __pyx_v_c_name, __pyx_v_value, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":390
+    /* "questdb/ilp.pyx":398
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 390, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 398, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 390, __pyx_L1_error)
+    __PYX_ERR(0, 398, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":389
+    /* "questdb/ilp.pyx":397
  *             self, line_sender_column_name c_name, bint value) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):             # <<<<<<<<<<<<<<
@@ -5349,7 +5629,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(s
  */
   }
 
-  /* "questdb/ilp.pyx":391
+  /* "questdb/ilp.pyx":399
  *         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5359,7 +5639,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(s
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":386
+  /* "questdb/ilp.pyx":394
  *         return 0
  * 
  *     cdef inline int _column_bool(             # <<<<<<<<<<<<<<
@@ -5377,7 +5657,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(s
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":393
+/* "questdb/ilp.pyx":401
  *         return 0
  * 
  *     cdef inline int _column_i64(             # <<<<<<<<<<<<<<
@@ -5396,7 +5676,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(st
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column_i64", 0);
 
-  /* "questdb/ilp.pyx":397
+  /* "questdb/ilp.pyx":405
  *         # TODO: Generally audit for int overflows this in the whole codebase.
  *         # We pretty certainly have one here :-).
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5405,7 +5685,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(st
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":398
+  /* "questdb/ilp.pyx":406
  *         # We pretty certainly have one here :-).
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):             # <<<<<<<<<<<<<<
@@ -5415,20 +5695,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(st
   __pyx_t_1 = ((!(line_sender_buffer_column_i64(__pyx_v_self->_impl, __pyx_v_c_name, __pyx_v_value, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":399
+    /* "questdb/ilp.pyx":407
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 399, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 407, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 399, __pyx_L1_error)
+    __PYX_ERR(0, 407, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":398
+    /* "questdb/ilp.pyx":406
  *         # We pretty certainly have one here :-).
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):             # <<<<<<<<<<<<<<
@@ -5437,7 +5717,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(st
  */
   }
 
-  /* "questdb/ilp.pyx":400
+  /* "questdb/ilp.pyx":408
  *         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5447,7 +5727,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(st
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":393
+  /* "questdb/ilp.pyx":401
  *         return 0
  * 
  *     cdef inline int _column_i64(             # <<<<<<<<<<<<<<
@@ -5465,7 +5745,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(st
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":402
+/* "questdb/ilp.pyx":410
  *         return 0
  * 
  *     cdef inline int _column_f64(             # <<<<<<<<<<<<<<
@@ -5484,7 +5764,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(st
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column_f64", 0);
 
-  /* "questdb/ilp.pyx":404
+  /* "questdb/ilp.pyx":412
  *     cdef inline int _column_f64(
  *             self, line_sender_column_name c_name, float value) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5493,7 +5773,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(st
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":405
+  /* "questdb/ilp.pyx":413
  *             self, line_sender_column_name c_name, float value) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):             # <<<<<<<<<<<<<<
@@ -5503,20 +5783,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(st
   __pyx_t_1 = ((!(line_sender_buffer_column_f64(__pyx_v_self->_impl, __pyx_v_c_name, __pyx_v_value, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":406
+    /* "questdb/ilp.pyx":414
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 406, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 414, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 406, __pyx_L1_error)
+    __PYX_ERR(0, 414, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":405
+    /* "questdb/ilp.pyx":413
  *             self, line_sender_column_name c_name, float value) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):             # <<<<<<<<<<<<<<
@@ -5525,7 +5805,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(st
  */
   }
 
-  /* "questdb/ilp.pyx":407
+  /* "questdb/ilp.pyx":415
  *         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5535,7 +5815,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(st
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":402
+  /* "questdb/ilp.pyx":410
  *         return 0
  * 
  *     cdef inline int _column_f64(             # <<<<<<<<<<<<<<
@@ -5553,7 +5833,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(st
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":409
+/* "questdb/ilp.pyx":417
  *         return 0
  * 
  *     cdef inline int _column_str(             # <<<<<<<<<<<<<<
@@ -5574,7 +5854,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(st
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column_str", 0);
 
-  /* "questdb/ilp.pyx":411
+  /* "questdb/ilp.pyx":419
  *     cdef inline int _column_str(
  *             self, line_sender_column_name c_name, str value) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5583,19 +5863,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(st
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":413
+  /* "questdb/ilp.pyx":421
  *         cdef line_sender_error* err = NULL
  *         cdef line_sender_utf8 c_value
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)             # <<<<<<<<<<<<<<
  *         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
  *             raise c_err_to_py(err)
  */
-  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_value, (&__pyx_v_c_value)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 413, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_value, (&__pyx_v_c_value)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 421, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_owner_value = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "questdb/ilp.pyx":414
+  /* "questdb/ilp.pyx":422
  *         cdef line_sender_utf8 c_value
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)
  *         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):             # <<<<<<<<<<<<<<
@@ -5605,20 +5885,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(st
   __pyx_t_2 = ((!(line_sender_buffer_column_str(__pyx_v_self->_impl, __pyx_v_c_name, __pyx_v_c_value, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_2)) {
 
-    /* "questdb/ilp.pyx":415
+    /* "questdb/ilp.pyx":423
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)
  *         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 415, __pyx_L1_error)
+    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 423, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 415, __pyx_L1_error)
+    __PYX_ERR(0, 423, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":414
+    /* "questdb/ilp.pyx":422
  *         cdef line_sender_utf8 c_value
  *         cdef bytes owner_value = str_to_utf8(value, &c_value)
  *         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):             # <<<<<<<<<<<<<<
@@ -5627,7 +5907,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(st
  */
   }
 
-  /* "questdb/ilp.pyx":416
+  /* "questdb/ilp.pyx":424
  *         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5637,7 +5917,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(st
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":409
+  /* "questdb/ilp.pyx":417
  *         return 0
  * 
  *     cdef inline int _column_str(             # <<<<<<<<<<<<<<
@@ -5656,7 +5936,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(st
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":418
+/* "questdb/ilp.pyx":426
  *         return 0
  * 
  *     cdef inline int _column_ts(             # <<<<<<<<<<<<<<
@@ -5676,7 +5956,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_ts(str
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column_ts", 0);
 
-  /* "questdb/ilp.pyx":420
+  /* "questdb/ilp.pyx":428
  *     cdef inline int _column_ts(
  *             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5685,34 +5965,34 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_ts(str
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":421
+  /* "questdb/ilp.pyx":429
  *             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_ts(self._impl, c_name, ts.value, &err):             # <<<<<<<<<<<<<<
  *             raise c_err_to_py(err)
  *         return 0
  */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_ts), __pyx_n_s_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 421, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_ts), __pyx_n_s_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 429, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyInt_As_int64_t(__pyx_t_1); if (unlikely((__pyx_t_2 == ((int64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 421, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyInt_As_int64_t(__pyx_t_1); if (unlikely((__pyx_t_2 == ((int64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 429, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_3 = ((!(line_sender_buffer_column_ts(__pyx_v_self->_impl, __pyx_v_c_name, __pyx_t_2, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_3)) {
 
-    /* "questdb/ilp.pyx":422
+    /* "questdb/ilp.pyx":430
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_ts(self._impl, c_name, ts.value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 422, __pyx_L1_error)
+    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 430, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 422, __pyx_L1_error)
+    __PYX_ERR(0, 430, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":421
+    /* "questdb/ilp.pyx":429
  *             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_ts(self._impl, c_name, ts.value, &err):             # <<<<<<<<<<<<<<
@@ -5721,7 +6001,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_ts(str
  */
   }
 
-  /* "questdb/ilp.pyx":423
+  /* "questdb/ilp.pyx":431
  *         if not line_sender_buffer_column_ts(self._impl, c_name, ts.value, &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5731,7 +6011,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_ts(str
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":418
+  /* "questdb/ilp.pyx":426
  *         return 0
  * 
  *     cdef inline int _column_ts(             # <<<<<<<<<<<<<<
@@ -5749,7 +6029,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_ts(str
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":425
+/* "questdb/ilp.pyx":433
  *         return 0
  * 
  *     cdef inline int _column_dt(             # <<<<<<<<<<<<<<
@@ -5768,7 +6048,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(str
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column_dt", 0);
 
-  /* "questdb/ilp.pyx":427
+  /* "questdb/ilp.pyx":435
  *     cdef inline int _column_dt(
  *             self, line_sender_column_name c_name, datetime dt) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -5777,7 +6057,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(str
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":428
+  /* "questdb/ilp.pyx":436
  *             self, line_sender_column_name c_name, datetime dt) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_ts(             # <<<<<<<<<<<<<<
@@ -5787,20 +6067,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(str
   __pyx_t_1 = ((!(line_sender_buffer_column_ts(__pyx_v_self->_impl, __pyx_v_c_name, __pyx_f_7questdb_3ilp_datetime_to_micros(__pyx_v_dt), (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":430
+    /* "questdb/ilp.pyx":438
  *         if not line_sender_buffer_column_ts(
  *                 self._impl, c_name, datetime_to_micros(dt), &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 430, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 438, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 430, __pyx_L1_error)
+    __PYX_ERR(0, 438, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":428
+    /* "questdb/ilp.pyx":436
  *             self, line_sender_column_name c_name, datetime dt) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_column_ts(             # <<<<<<<<<<<<<<
@@ -5809,7 +6089,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(str
  */
   }
 
-  /* "questdb/ilp.pyx":431
+  /* "questdb/ilp.pyx":439
  *                 self._impl, c_name, datetime_to_micros(dt), &err):
  *             raise c_err_to_py(err)
  *         return 0             # <<<<<<<<<<<<<<
@@ -5819,7 +6099,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(str
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":425
+  /* "questdb/ilp.pyx":433
  *         return 0
  * 
  *     cdef inline int _column_dt(             # <<<<<<<<<<<<<<
@@ -5837,7 +6117,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(str
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":433
+/* "questdb/ilp.pyx":441
  *         return 0
  * 
  *     cdef inline int _column(self, str name, object value) except -1:             # <<<<<<<<<<<<<<
@@ -5865,19 +6145,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column", 0);
 
-  /* "questdb/ilp.pyx":435
+  /* "questdb/ilp.pyx":443
  *     cdef inline int _column(self, str name, object value) except -1:
  *         cdef line_sender_column_name c_name
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)             # <<<<<<<<<<<<<<
  *         if PyBool_Check(value):
  *             return self._column_bool(c_name, value)
  */
-  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_column_name(__pyx_v_name, (&__pyx_v_c_name)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 435, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7questdb_3ilp_str_to_column_name(__pyx_v_name, (&__pyx_v_c_name)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 443, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_owner_name = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "questdb/ilp.pyx":436
+  /* "questdb/ilp.pyx":444
  *         cdef line_sender_column_name c_name
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)
  *         if PyBool_Check(value):             # <<<<<<<<<<<<<<
@@ -5887,19 +6167,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   __pyx_t_2 = (PyBool_Check(__pyx_v_value) != 0);
   if (__pyx_t_2) {
 
-    /* "questdb/ilp.pyx":437
+    /* "questdb/ilp.pyx":445
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)
  *         if PyBool_Check(value):
  *             return self._column_bool(c_name, value)             # <<<<<<<<<<<<<<
  *         elif isinstance(value, int):
  *             return self._column_i64(c_name, value)
  */
-    __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_v_value); if (unlikely((__pyx_t_2 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 437, __pyx_L1_error)
-    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(__pyx_v_self, __pyx_v_c_name, __pyx_t_2); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 437, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_v_value); if (unlikely((__pyx_t_2 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 445, __pyx_L1_error)
+    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_bool(__pyx_v_self, __pyx_v_c_name, __pyx_t_2); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 445, __pyx_L1_error)
     __pyx_r = __pyx_t_3;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":436
+    /* "questdb/ilp.pyx":444
  *         cdef line_sender_column_name c_name
  *         cdef bytes owner_name = str_to_column_name(name, &c_name)
  *         if PyBool_Check(value):             # <<<<<<<<<<<<<<
@@ -5908,7 +6188,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
  */
   }
 
-  /* "questdb/ilp.pyx":438
+  /* "questdb/ilp.pyx":446
  *         if PyBool_Check(value):
  *             return self._column_bool(c_name, value)
  *         elif isinstance(value, int):             # <<<<<<<<<<<<<<
@@ -5919,19 +6199,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   __pyx_t_4 = (__pyx_t_2 != 0);
   if (__pyx_t_4) {
 
-    /* "questdb/ilp.pyx":439
+    /* "questdb/ilp.pyx":447
  *             return self._column_bool(c_name, value)
  *         elif isinstance(value, int):
  *             return self._column_i64(c_name, value)             # <<<<<<<<<<<<<<
  *         elif isinstance(value, float):
  *             return self._column_f64(c_name, value)
  */
-    __pyx_t_3 = __Pyx_PyInt_As_int(__pyx_v_value); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 439, __pyx_L1_error)
-    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(__pyx_v_self, __pyx_v_c_name, __pyx_t_3); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 439, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyInt_As_int(__pyx_v_value); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 447, __pyx_L1_error)
+    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_i64(__pyx_v_self, __pyx_v_c_name, __pyx_t_3); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 447, __pyx_L1_error)
     __pyx_r = __pyx_t_5;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":438
+    /* "questdb/ilp.pyx":446
  *         if PyBool_Check(value):
  *             return self._column_bool(c_name, value)
  *         elif isinstance(value, int):             # <<<<<<<<<<<<<<
@@ -5940,7 +6220,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
  */
   }
 
-  /* "questdb/ilp.pyx":440
+  /* "questdb/ilp.pyx":448
  *         elif isinstance(value, int):
  *             return self._column_i64(c_name, value)
  *         elif isinstance(value, float):             # <<<<<<<<<<<<<<
@@ -5951,19 +6231,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   __pyx_t_2 = (__pyx_t_4 != 0);
   if (__pyx_t_2) {
 
-    /* "questdb/ilp.pyx":441
+    /* "questdb/ilp.pyx":449
  *             return self._column_i64(c_name, value)
  *         elif isinstance(value, float):
  *             return self._column_f64(c_name, value)             # <<<<<<<<<<<<<<
  *         elif isinstance(value, str):
  *             return self._column_str(c_name, value)
  */
-    __pyx_t_6 = __pyx_PyFloat_AsFloat(__pyx_v_value); if (unlikely((__pyx_t_6 == (float)-1) && PyErr_Occurred())) __PYX_ERR(0, 441, __pyx_L1_error)
-    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(__pyx_v_self, __pyx_v_c_name, __pyx_t_6); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 441, __pyx_L1_error)
+    __pyx_t_6 = __pyx_PyFloat_AsFloat(__pyx_v_value); if (unlikely((__pyx_t_6 == (float)-1) && PyErr_Occurred())) __PYX_ERR(0, 449, __pyx_L1_error)
+    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_f64(__pyx_v_self, __pyx_v_c_name, __pyx_t_6); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 449, __pyx_L1_error)
     __pyx_r = __pyx_t_5;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":440
+    /* "questdb/ilp.pyx":448
  *         elif isinstance(value, int):
  *             return self._column_i64(c_name, value)
  *         elif isinstance(value, float):             # <<<<<<<<<<<<<<
@@ -5972,7 +6252,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
  */
   }
 
-  /* "questdb/ilp.pyx":442
+  /* "questdb/ilp.pyx":450
  *         elif isinstance(value, float):
  *             return self._column_f64(c_name, value)
  *         elif isinstance(value, str):             # <<<<<<<<<<<<<<
@@ -5983,19 +6263,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   __pyx_t_4 = (__pyx_t_2 != 0);
   if (__pyx_t_4) {
 
-    /* "questdb/ilp.pyx":443
+    /* "questdb/ilp.pyx":451
  *             return self._column_f64(c_name, value)
  *         elif isinstance(value, str):
  *             return self._column_str(c_name, value)             # <<<<<<<<<<<<<<
  *         elif isinstance(value, TimestampMicros):
  *             return self._column_ts(c_name, value)
  */
-    if (!(likely(PyUnicode_CheckExact(__pyx_v_value))||((__pyx_v_value) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_value)->tp_name), 0))) __PYX_ERR(0, 443, __pyx_L1_error)
-    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(__pyx_v_self, __pyx_v_c_name, ((PyObject*)__pyx_v_value)); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 443, __pyx_L1_error)
+    if (!(likely(PyUnicode_CheckExact(__pyx_v_value))||((__pyx_v_value) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_value)->tp_name), 0))) __PYX_ERR(0, 451, __pyx_L1_error)
+    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_str(__pyx_v_self, __pyx_v_c_name, ((PyObject*)__pyx_v_value)); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 451, __pyx_L1_error)
     __pyx_r = __pyx_t_5;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":442
+    /* "questdb/ilp.pyx":450
  *         elif isinstance(value, float):
  *             return self._column_f64(c_name, value)
  *         elif isinstance(value, str):             # <<<<<<<<<<<<<<
@@ -6004,7 +6284,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
  */
   }
 
-  /* "questdb/ilp.pyx":444
+  /* "questdb/ilp.pyx":452
  *         elif isinstance(value, str):
  *             return self._column_str(c_name, value)
  *         elif isinstance(value, TimestampMicros):             # <<<<<<<<<<<<<<
@@ -6015,19 +6295,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   __pyx_t_2 = (__pyx_t_4 != 0);
   if (__pyx_t_2) {
 
-    /* "questdb/ilp.pyx":445
+    /* "questdb/ilp.pyx":453
  *             return self._column_str(c_name, value)
  *         elif isinstance(value, TimestampMicros):
  *             return self._column_ts(c_name, value)             # <<<<<<<<<<<<<<
  *         elif isinstance(value, datetime):
  *             return self._column_dt(c_name, value)
  */
-    if (!(likely(((__pyx_v_value) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_value, __pyx_ptype_7questdb_3ilp_TimestampMicros))))) __PYX_ERR(0, 445, __pyx_L1_error)
-    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_ts(__pyx_v_self, __pyx_v_c_name, ((struct __pyx_obj_7questdb_3ilp_TimestampMicros *)__pyx_v_value)); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 445, __pyx_L1_error)
+    if (!(likely(((__pyx_v_value) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_value, __pyx_ptype_7questdb_3ilp_TimestampMicros))))) __PYX_ERR(0, 453, __pyx_L1_error)
+    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_ts(__pyx_v_self, __pyx_v_c_name, ((struct __pyx_obj_7questdb_3ilp_TimestampMicros *)__pyx_v_value)); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 453, __pyx_L1_error)
     __pyx_r = __pyx_t_5;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":444
+    /* "questdb/ilp.pyx":452
  *         elif isinstance(value, str):
  *             return self._column_str(c_name, value)
  *         elif isinstance(value, TimestampMicros):             # <<<<<<<<<<<<<<
@@ -6036,7 +6316,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
  */
   }
 
-  /* "questdb/ilp.pyx":446
+  /* "questdb/ilp.pyx":454
  *         elif isinstance(value, TimestampMicros):
  *             return self._column_ts(c_name, value)
  *         elif isinstance(value, datetime):             # <<<<<<<<<<<<<<
@@ -6047,19 +6327,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   __pyx_t_4 = (__pyx_t_2 != 0);
   if (likely(__pyx_t_4)) {
 
-    /* "questdb/ilp.pyx":447
+    /* "questdb/ilp.pyx":455
  *             return self._column_ts(c_name, value)
  *         elif isinstance(value, datetime):
  *             return self._column_dt(c_name, value)             # <<<<<<<<<<<<<<
  *         else:
  *             valid = ', '.join((
  */
-    if (!(likely(((__pyx_v_value) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_value, __pyx_ptype_7cpython_8datetime_datetime))))) __PYX_ERR(0, 447, __pyx_L1_error)
-    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(__pyx_v_self, __pyx_v_c_name, ((PyDateTime_DateTime *)__pyx_v_value)); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 447, __pyx_L1_error)
+    if (!(likely(((__pyx_v_value) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_value, __pyx_ptype_7cpython_8datetime_datetime))))) __PYX_ERR(0, 455, __pyx_L1_error)
+    __pyx_t_5 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column_dt(__pyx_v_self, __pyx_v_c_name, ((PyDateTime_DateTime *)__pyx_v_value)); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 455, __pyx_L1_error)
     __pyx_r = __pyx_t_5;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":446
+    /* "questdb/ilp.pyx":454
  *         elif isinstance(value, TimestampMicros):
  *             return self._column_ts(c_name, value)
  *         elif isinstance(value, datetime):             # <<<<<<<<<<<<<<
@@ -6068,7 +6348,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
  */
   }
 
-  /* "questdb/ilp.pyx":449
+  /* "questdb/ilp.pyx":457
  *             return self._column_dt(c_name, value)
  *         else:
  *             valid = ', '.join((             # <<<<<<<<<<<<<<
@@ -6077,26 +6357,26 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
  */
   /*else*/ {
 
-    /* "questdb/ilp.pyx":450
+    /* "questdb/ilp.pyx":458
  *         else:
  *             valid = ', '.join((
  *                 'bool',             # <<<<<<<<<<<<<<
  *                 'int',
  *                 'float',
  */
-    __pyx_t_1 = PyUnicode_Join(__pyx_kp_u__9, __pyx_tuple__10); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 449, __pyx_L1_error)
+    __pyx_t_1 = PyUnicode_Join(__pyx_kp_u__9, __pyx_tuple__10); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 457, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_v_valid = ((PyObject*)__pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "questdb/ilp.pyx":457
+    /* "questdb/ilp.pyx":465
  *                 'datetime.datetime'))
  *             raise TypeError(
  *                 f'Unsupported type: {type(value)}. Must be one of: {valid}')             # <<<<<<<<<<<<<<
  * 
  *     cdef inline int _may_trigger_row_complete(self) except -1:
  */
-    __pyx_t_1 = PyTuple_New(4); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 457, __pyx_L1_error)
+    __pyx_t_1 = PyTuple_New(4); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 465, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_t_7 = 0;
     __pyx_t_8 = 127;
@@ -6104,7 +6384,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
     __pyx_t_7 += 18;
     __Pyx_GIVEREF(__pyx_kp_u_Unsupported_type);
     PyTuple_SET_ITEM(__pyx_t_1, 0, __pyx_kp_u_Unsupported_type);
-    __pyx_t_9 = __Pyx_PyObject_FormatSimple(((PyObject *)Py_TYPE(__pyx_v_value)), __pyx_empty_unicode); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 457, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyObject_FormatSimple(((PyObject *)Py_TYPE(__pyx_v_value)), __pyx_empty_unicode); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 465, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __pyx_t_8 = (__Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_9) > __pyx_t_8) ? __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_9) : __pyx_t_8;
     __pyx_t_7 += __Pyx_PyUnicode_GET_LENGTH(__pyx_t_9);
@@ -6115,33 +6395,33 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
     __pyx_t_7 += 18;
     __Pyx_GIVEREF(__pyx_kp_u_Must_be_one_of);
     PyTuple_SET_ITEM(__pyx_t_1, 2, __pyx_kp_u_Must_be_one_of);
-    __pyx_t_9 = __Pyx_PyUnicode_Unicode(__pyx_v_valid); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 457, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyUnicode_Unicode(__pyx_v_valid); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 465, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __pyx_t_8 = (__Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_9) > __pyx_t_8) ? __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_9) : __pyx_t_8;
     __pyx_t_7 += __Pyx_PyUnicode_GET_LENGTH(__pyx_t_9);
     __Pyx_GIVEREF(__pyx_t_9);
     PyTuple_SET_ITEM(__pyx_t_1, 3, __pyx_t_9);
     __pyx_t_9 = 0;
-    __pyx_t_9 = __Pyx_PyUnicode_Join(__pyx_t_1, 4, __pyx_t_7, __pyx_t_8); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 457, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyUnicode_Join(__pyx_t_1, 4, __pyx_t_7, __pyx_t_8); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 465, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "questdb/ilp.pyx":456
+    /* "questdb/ilp.pyx":464
  *                 'TimestampMicros',
  *                 'datetime.datetime'))
  *             raise TypeError(             # <<<<<<<<<<<<<<
  *                 f'Unsupported type: {type(value)}. Must be one of: {valid}')
  * 
  */
-    __pyx_t_1 = __Pyx_PyObject_CallOneArg(__pyx_builtin_TypeError, __pyx_t_9); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 456, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_CallOneArg(__pyx_builtin_TypeError, __pyx_t_9); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 464, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 456, __pyx_L1_error)
+    __PYX_ERR(0, 464, __pyx_L1_error)
   }
 
-  /* "questdb/ilp.pyx":433
+  /* "questdb/ilp.pyx":441
  *         return 0
  * 
  *     cdef inline int _column(self, str name, object value) except -1:             # <<<<<<<<<<<<<<
@@ -6162,7 +6442,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(struct
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":459
+/* "questdb/ilp.pyx":467
  *                 f'Unsupported type: {type(value)}. Must be one of: {valid}')
  * 
  *     cdef inline int _may_trigger_row_complete(self) except -1:             # <<<<<<<<<<<<<<
@@ -6181,7 +6461,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_r
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_may_trigger_row_complete", 0);
 
-  /* "questdb/ilp.pyx":460
+  /* "questdb/ilp.pyx":468
  * 
  *     cdef inline int _may_trigger_row_complete(self) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -6190,7 +6470,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_r
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":461
+  /* "questdb/ilp.pyx":469
  *     cdef inline int _may_trigger_row_complete(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if self._row_complete_cb != NULL:             # <<<<<<<<<<<<<<
@@ -6200,7 +6480,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_r
   __pyx_t_1 = ((__pyx_v_self->_row_complete_cb != NULL) != 0);
   if (__pyx_t_1) {
 
-    /* "questdb/ilp.pyx":462
+    /* "questdb/ilp.pyx":470
  *         cdef line_sender_error* err = NULL
  *         if self._row_complete_cb != NULL:
  *             if not self._row_complete_cb(             # <<<<<<<<<<<<<<
@@ -6210,20 +6490,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_r
     __pyx_t_1 = ((!(__pyx_v_self->_row_complete_cb(__pyx_v_self->_impl, __pyx_v_self->_row_complete_ctx, (&__pyx_v_err)) != 0)) != 0);
     if (unlikely(__pyx_t_1)) {
 
-      /* "questdb/ilp.pyx":466
+      /* "questdb/ilp.pyx":474
  *                     self._row_complete_ctx,
  *                     &err):
  *                 raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  * 
  *     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
  */
-      __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 466, __pyx_L1_error)
+      __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 474, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
       __Pyx_Raise(__pyx_t_2, 0, 0, 0);
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-      __PYX_ERR(0, 466, __pyx_L1_error)
+      __PYX_ERR(0, 474, __pyx_L1_error)
 
-      /* "questdb/ilp.pyx":462
+      /* "questdb/ilp.pyx":470
  *         cdef line_sender_error* err = NULL
  *         if self._row_complete_cb != NULL:
  *             if not self._row_complete_cb(             # <<<<<<<<<<<<<<
@@ -6232,7 +6512,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_r
  */
     }
 
-    /* "questdb/ilp.pyx":461
+    /* "questdb/ilp.pyx":469
  *     cdef inline int _may_trigger_row_complete(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if self._row_complete_cb != NULL:             # <<<<<<<<<<<<<<
@@ -6241,7 +6521,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_r
  */
   }
 
-  /* "questdb/ilp.pyx":459
+  /* "questdb/ilp.pyx":467
  *                 f'Unsupported type: {type(value)}. Must be one of: {valid}')
  * 
  *     cdef inline int _may_trigger_row_complete(self) except -1:             # <<<<<<<<<<<<<<
@@ -6261,7 +6541,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_r
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":468
+/* "questdb/ilp.pyx":476
  *                 raise c_err_to_py(err)
  * 
  *     cdef inline int _at_ts(self, TimestampNanos ts) except -1:             # <<<<<<<<<<<<<<
@@ -6282,7 +6562,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_ts(struct 
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_at_ts", 0);
 
-  /* "questdb/ilp.pyx":469
+  /* "questdb/ilp.pyx":477
  * 
  *     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -6291,34 +6571,34 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_ts(struct 
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":470
+  /* "questdb/ilp.pyx":478
  *     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at(self._impl, ts.value, &err):             # <<<<<<<<<<<<<<
  *             raise c_err_to_py(err)
  *         self._may_trigger_row_complete()
  */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_ts), __pyx_n_s_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 470, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_ts), __pyx_n_s_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 478, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyInt_As_int64_t(__pyx_t_1); if (unlikely((__pyx_t_2 == ((int64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 470, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyInt_As_int64_t(__pyx_t_1); if (unlikely((__pyx_t_2 == ((int64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 478, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_3 = ((!(line_sender_buffer_at(__pyx_v_self->_impl, __pyx_t_2, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_3)) {
 
-    /* "questdb/ilp.pyx":471
+    /* "questdb/ilp.pyx":479
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at(self._impl, ts.value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         self._may_trigger_row_complete()
  *         return 0
  */
-    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 471, __pyx_L1_error)
+    __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 479, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 471, __pyx_L1_error)
+    __PYX_ERR(0, 479, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":470
+    /* "questdb/ilp.pyx":478
  *     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at(self._impl, ts.value, &err):             # <<<<<<<<<<<<<<
@@ -6327,16 +6607,16 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_ts(struct 
  */
   }
 
-  /* "questdb/ilp.pyx":472
+  /* "questdb/ilp.pyx":480
  *         if not line_sender_buffer_at(self._impl, ts.value, &err):
  *             raise c_err_to_py(err)
  *         self._may_trigger_row_complete()             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-  __pyx_t_4 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_row_complete(__pyx_v_self); if (unlikely(__pyx_t_4 == ((int)-1))) __PYX_ERR(0, 472, __pyx_L1_error)
+  __pyx_t_4 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_row_complete(__pyx_v_self); if (unlikely(__pyx_t_4 == ((int)-1))) __PYX_ERR(0, 480, __pyx_L1_error)
 
-  /* "questdb/ilp.pyx":473
+  /* "questdb/ilp.pyx":481
  *             raise c_err_to_py(err)
  *         self._may_trigger_row_complete()
  *         return 0             # <<<<<<<<<<<<<<
@@ -6346,7 +6626,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_ts(struct 
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":468
+  /* "questdb/ilp.pyx":476
  *                 raise c_err_to_py(err)
  * 
  *     cdef inline int _at_ts(self, TimestampNanos ts) except -1:             # <<<<<<<<<<<<<<
@@ -6364,7 +6644,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_ts(struct 
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":475
+/* "questdb/ilp.pyx":483
  *         return 0
  * 
  *     cdef inline int _at_dt(self, datetime dt) except -1:             # <<<<<<<<<<<<<<
@@ -6385,7 +6665,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(struct 
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_at_dt", 0);
 
-  /* "questdb/ilp.pyx":476
+  /* "questdb/ilp.pyx":484
  * 
  *     cdef inline int _at_dt(self, datetime dt) except -1:
  *         cdef int64_t value = datetime_to_nanos(dt)             # <<<<<<<<<<<<<<
@@ -6394,7 +6674,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(struct 
  */
   __pyx_v_value = __pyx_f_7questdb_3ilp_datetime_to_nanos(__pyx_v_dt);
 
-  /* "questdb/ilp.pyx":477
+  /* "questdb/ilp.pyx":485
  *     cdef inline int _at_dt(self, datetime dt) except -1:
  *         cdef int64_t value = datetime_to_nanos(dt)
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -6403,7 +6683,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(struct 
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":478
+  /* "questdb/ilp.pyx":486
  *         cdef int64_t value = datetime_to_nanos(dt)
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at(self._impl, value, &err):             # <<<<<<<<<<<<<<
@@ -6413,20 +6693,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(struct 
   __pyx_t_1 = ((!(line_sender_buffer_at(__pyx_v_self->_impl, __pyx_v_value, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":479
+    /* "questdb/ilp.pyx":487
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at(self._impl, value, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         self._may_trigger_row_complete()
  *         return 0
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 479, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 487, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 479, __pyx_L1_error)
+    __PYX_ERR(0, 487, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":478
+    /* "questdb/ilp.pyx":486
  *         cdef int64_t value = datetime_to_nanos(dt)
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at(self._impl, value, &err):             # <<<<<<<<<<<<<<
@@ -6435,16 +6715,16 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(struct 
  */
   }
 
-  /* "questdb/ilp.pyx":480
+  /* "questdb/ilp.pyx":488
  *         if not line_sender_buffer_at(self._impl, value, &err):
  *             raise c_err_to_py(err)
  *         self._may_trigger_row_complete()             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-  __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_row_complete(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 480, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_row_complete(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 488, __pyx_L1_error)
 
-  /* "questdb/ilp.pyx":481
+  /* "questdb/ilp.pyx":489
  *             raise c_err_to_py(err)
  *         self._may_trigger_row_complete()
  *         return 0             # <<<<<<<<<<<<<<
@@ -6454,7 +6734,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(struct 
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":475
+  /* "questdb/ilp.pyx":483
  *         return 0
  * 
  *     cdef inline int _at_dt(self, datetime dt) except -1:             # <<<<<<<<<<<<<<
@@ -6472,7 +6752,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(struct 
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":483
+/* "questdb/ilp.pyx":491
  *         return 0
  * 
  *     cdef inline int _at_now(self) except -1:             # <<<<<<<<<<<<<<
@@ -6492,7 +6772,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(struct
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_at_now", 0);
 
-  /* "questdb/ilp.pyx":484
+  /* "questdb/ilp.pyx":492
  * 
  *     cdef inline int _at_now(self) except -1:
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -6501,7 +6781,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(struct
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":485
+  /* "questdb/ilp.pyx":493
  *     cdef inline int _at_now(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at_now(self._impl, &err):             # <<<<<<<<<<<<<<
@@ -6511,20 +6791,20 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(struct
   __pyx_t_1 = ((!(line_sender_buffer_at_now(__pyx_v_self->_impl, (&__pyx_v_err)) != 0)) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":486
+    /* "questdb/ilp.pyx":494
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at_now(self._impl, &err):
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         self._may_trigger_row_complete()
  *         return 0
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 486, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 494, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 486, __pyx_L1_error)
+    __PYX_ERR(0, 494, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":485
+    /* "questdb/ilp.pyx":493
  *     cdef inline int _at_now(self) except -1:
  *         cdef line_sender_error* err = NULL
  *         if not line_sender_buffer_at_now(self._impl, &err):             # <<<<<<<<<<<<<<
@@ -6533,16 +6813,16 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(struct
  */
   }
 
-  /* "questdb/ilp.pyx":487
+  /* "questdb/ilp.pyx":495
  *         if not line_sender_buffer_at_now(self._impl, &err):
  *             raise c_err_to_py(err)
  *         self._may_trigger_row_complete()             # <<<<<<<<<<<<<<
  *         return 0
  * 
  */
-  __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_row_complete(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 487, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__may_trigger_row_complete(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 495, __pyx_L1_error)
 
-  /* "questdb/ilp.pyx":488
+  /* "questdb/ilp.pyx":496
  *             raise c_err_to_py(err)
  *         self._may_trigger_row_complete()
  *         return 0             # <<<<<<<<<<<<<<
@@ -6552,7 +6832,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(struct
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":483
+  /* "questdb/ilp.pyx":491
  *         return 0
  * 
  *     cdef inline int _at_now(self) except -1:             # <<<<<<<<<<<<<<
@@ -6570,7 +6850,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(struct
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":490
+/* "questdb/ilp.pyx":498
  *         return 0
  * 
  *     cdef inline int _at(self, object ts) except -1:             # <<<<<<<<<<<<<<
@@ -6593,7 +6873,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_at", 0);
 
-  /* "questdb/ilp.pyx":491
+  /* "questdb/ilp.pyx":499
  * 
  *     cdef inline int _at(self, object ts) except -1:
  *         if ts is None:             # <<<<<<<<<<<<<<
@@ -6604,18 +6884,18 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
   __pyx_t_2 = (__pyx_t_1 != 0);
   if (__pyx_t_2) {
 
-    /* "questdb/ilp.pyx":492
+    /* "questdb/ilp.pyx":500
  *     cdef inline int _at(self, object ts) except -1:
  *         if ts is None:
  *             return self._at_now()             # <<<<<<<<<<<<<<
  *         elif isinstance(ts, TimestampNanos):
  *             return self._at_ts(ts)
  */
-    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 492, __pyx_L1_error)
+    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_now(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 500, __pyx_L1_error)
     __pyx_r = __pyx_t_3;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":491
+    /* "questdb/ilp.pyx":499
  * 
  *     cdef inline int _at(self, object ts) except -1:
  *         if ts is None:             # <<<<<<<<<<<<<<
@@ -6624,7 +6904,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
  */
   }
 
-  /* "questdb/ilp.pyx":493
+  /* "questdb/ilp.pyx":501
  *         if ts is None:
  *             return self._at_now()
  *         elif isinstance(ts, TimestampNanos):             # <<<<<<<<<<<<<<
@@ -6635,19 +6915,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
   __pyx_t_1 = (__pyx_t_2 != 0);
   if (__pyx_t_1) {
 
-    /* "questdb/ilp.pyx":494
+    /* "questdb/ilp.pyx":502
  *             return self._at_now()
  *         elif isinstance(ts, TimestampNanos):
  *             return self._at_ts(ts)             # <<<<<<<<<<<<<<
  *         elif isinstance(ts, datetime):
  *             return self._at_dt(ts)
  */
-    if (!(likely(((__pyx_v_ts) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_ts, __pyx_ptype_7questdb_3ilp_TimestampNanos))))) __PYX_ERR(0, 494, __pyx_L1_error)
-    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_ts(__pyx_v_self, ((struct __pyx_obj_7questdb_3ilp_TimestampNanos *)__pyx_v_ts)); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 494, __pyx_L1_error)
+    if (!(likely(((__pyx_v_ts) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_ts, __pyx_ptype_7questdb_3ilp_TimestampNanos))))) __PYX_ERR(0, 502, __pyx_L1_error)
+    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_ts(__pyx_v_self, ((struct __pyx_obj_7questdb_3ilp_TimestampNanos *)__pyx_v_ts)); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 502, __pyx_L1_error)
     __pyx_r = __pyx_t_3;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":493
+    /* "questdb/ilp.pyx":501
  *         if ts is None:
  *             return self._at_now()
  *         elif isinstance(ts, TimestampNanos):             # <<<<<<<<<<<<<<
@@ -6656,7 +6936,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
  */
   }
 
-  /* "questdb/ilp.pyx":495
+  /* "questdb/ilp.pyx":503
  *         elif isinstance(ts, TimestampNanos):
  *             return self._at_ts(ts)
  *         elif isinstance(ts, datetime):             # <<<<<<<<<<<<<<
@@ -6667,19 +6947,19 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
   __pyx_t_2 = (__pyx_t_1 != 0);
   if (likely(__pyx_t_2)) {
 
-    /* "questdb/ilp.pyx":496
+    /* "questdb/ilp.pyx":504
  *             return self._at_ts(ts)
  *         elif isinstance(ts, datetime):
  *             return self._at_dt(ts)             # <<<<<<<<<<<<<<
  *         else:
  *             raise TypeError(
  */
-    if (!(likely(((__pyx_v_ts) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_ts, __pyx_ptype_7cpython_8datetime_datetime))))) __PYX_ERR(0, 496, __pyx_L1_error)
-    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(__pyx_v_self, ((PyDateTime_DateTime *)__pyx_v_ts)); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 496, __pyx_L1_error)
+    if (!(likely(((__pyx_v_ts) == Py_None) || likely(__Pyx_TypeTest(__pyx_v_ts, __pyx_ptype_7cpython_8datetime_datetime))))) __PYX_ERR(0, 504, __pyx_L1_error)
+    __pyx_t_3 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at_dt(__pyx_v_self, ((PyDateTime_DateTime *)__pyx_v_ts)); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 504, __pyx_L1_error)
     __pyx_r = __pyx_t_3;
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":495
+    /* "questdb/ilp.pyx":503
  *         elif isinstance(ts, TimestampNanos):
  *             return self._at_ts(ts)
  *         elif isinstance(ts, datetime):             # <<<<<<<<<<<<<<
@@ -6688,7 +6968,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
  */
   }
 
-  /* "questdb/ilp.pyx":498
+  /* "questdb/ilp.pyx":506
  *             return self._at_dt(ts)
  *         else:
  *             raise TypeError(             # <<<<<<<<<<<<<<
@@ -6697,14 +6977,14 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
  */
   /*else*/ {
 
-    /* "questdb/ilp.pyx":499
+    /* "questdb/ilp.pyx":507
  *         else:
  *             raise TypeError(
  *                 f'Unsupported type: {type(ts)}. Must be one of: ' +             # <<<<<<<<<<<<<<
  *                 'TimestampNanos, datetime, None')
  * 
  */
-    __pyx_t_4 = PyTuple_New(3); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 499, __pyx_L1_error)
+    __pyx_t_4 = PyTuple_New(3); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 507, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_5 = 0;
     __pyx_t_6 = 127;
@@ -6712,7 +6992,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
     __pyx_t_5 += 18;
     __Pyx_GIVEREF(__pyx_kp_u_Unsupported_type);
     PyTuple_SET_ITEM(__pyx_t_4, 0, __pyx_kp_u_Unsupported_type);
-    __pyx_t_7 = __Pyx_PyObject_FormatSimple(((PyObject *)Py_TYPE(__pyx_v_ts)), __pyx_empty_unicode); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 499, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyObject_FormatSimple(((PyObject *)Py_TYPE(__pyx_v_ts)), __pyx_empty_unicode); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 507, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
     __pyx_t_6 = (__Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_7) > __pyx_t_6) ? __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_7) : __pyx_t_6;
     __pyx_t_5 += __Pyx_PyUnicode_GET_LENGTH(__pyx_t_7);
@@ -6723,29 +7003,29 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
     __pyx_t_5 += 18;
     __Pyx_GIVEREF(__pyx_kp_u_Must_be_one_of);
     PyTuple_SET_ITEM(__pyx_t_4, 2, __pyx_kp_u_Must_be_one_of);
-    __pyx_t_7 = __Pyx_PyUnicode_Join(__pyx_t_4, 3, __pyx_t_5, __pyx_t_6); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 499, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyUnicode_Join(__pyx_t_4, 3, __pyx_t_5, __pyx_t_6); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 507, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    __pyx_t_4 = __Pyx_PyUnicode_Concat(__pyx_t_7, __pyx_kp_u_TimestampNanos_datetime_None); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 499, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyUnicode_Concat(__pyx_t_7, __pyx_kp_u_TimestampNanos_datetime_None); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 507, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-    /* "questdb/ilp.pyx":498
+    /* "questdb/ilp.pyx":506
  *             return self._at_dt(ts)
  *         else:
  *             raise TypeError(             # <<<<<<<<<<<<<<
  *                 f'Unsupported type: {type(ts)}. Must be one of: ' +
  *                 'TimestampNanos, datetime, None')
  */
-    __pyx_t_7 = __Pyx_PyObject_CallOneArg(__pyx_builtin_TypeError, __pyx_t_4); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 498, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyObject_CallOneArg(__pyx_builtin_TypeError, __pyx_t_4); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 506, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_Raise(__pyx_t_7, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-    __PYX_ERR(0, 498, __pyx_L1_error)
+    __PYX_ERR(0, 506, __pyx_L1_error)
   }
 
-  /* "questdb/ilp.pyx":490
+  /* "questdb/ilp.pyx":498
  *         return 0
  * 
  *     cdef inline int _at(self, object ts) except -1:             # <<<<<<<<<<<<<<
@@ -6764,7 +7044,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":502
+/* "questdb/ilp.pyx":510
  *                 'TimestampNanos, datetime, None')
  * 
  *     cdef int _row(             # <<<<<<<<<<<<<<
@@ -6774,7 +7054,7 @@ static CYTHON_INLINE int __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(struct __p
 
 static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_table_name, struct __pyx_opt_args_7questdb_3ilp_16LineSenderBuffer__row *__pyx_optional_args) {
 
-  /* "questdb/ilp.pyx":505
+  /* "questdb/ilp.pyx":513
  *             self,
  *             str table_name,
  *             dict symbols=None,             # <<<<<<<<<<<<<<
@@ -6783,7 +7063,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
  */
   PyObject *__pyx_v_symbols = ((PyObject*)Py_None);
 
-  /* "questdb/ilp.pyx":506
+  /* "questdb/ilp.pyx":514
  *             str table_name,
  *             dict symbols=None,
  *             dict columns=None,             # <<<<<<<<<<<<<<
@@ -6792,7 +7072,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
  */
   PyObject *__pyx_v_columns = ((PyObject*)Py_None);
 
-  /* "questdb/ilp.pyx":507
+  /* "questdb/ilp.pyx":515
  *             dict symbols=None,
  *             dict columns=None,
  *             object at=None) except -1:             # <<<<<<<<<<<<<<
@@ -6834,16 +7114,16 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
     }
   }
 
-  /* "questdb/ilp.pyx":511
+  /* "questdb/ilp.pyx":519
  *         Add a row to the buffer.
  *         """
  *         self._set_marker()             # <<<<<<<<<<<<<<
  *         try:
  *             self._table(table_name)
  */
-  __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__set_marker(__pyx_v_self); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 511, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__set_marker(__pyx_v_self); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 519, __pyx_L1_error)
 
-  /* "questdb/ilp.pyx":512
+  /* "questdb/ilp.pyx":520
  *         """
  *         self._set_marker()
  *         try:             # <<<<<<<<<<<<<<
@@ -6859,54 +7139,54 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
     __Pyx_XGOTREF(__pyx_t_4);
     /*try:*/ {
 
-      /* "questdb/ilp.pyx":513
+      /* "questdb/ilp.pyx":521
  *         self._set_marker()
  *         try:
  *             self._table(table_name)             # <<<<<<<<<<<<<<
  *             if not (symbols or columns):
  *                 raise IlpError(
  */
-      __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(__pyx_v_self, __pyx_v_table_name); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 513, __pyx_L3_error)
+      __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__table(__pyx_v_self, __pyx_v_table_name); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 521, __pyx_L3_error)
 
-      /* "questdb/ilp.pyx":514
+      /* "questdb/ilp.pyx":522
  *         try:
  *             self._table(table_name)
  *             if not (symbols or columns):             # <<<<<<<<<<<<<<
  *                 raise IlpError(
  *                     IlpErrorCode.InvalidApiCall,
  */
-      __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_v_symbols); if (unlikely(__pyx_t_6 < 0)) __PYX_ERR(0, 514, __pyx_L3_error)
+      __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_v_symbols); if (unlikely(__pyx_t_6 < 0)) __PYX_ERR(0, 522, __pyx_L3_error)
       if (!__pyx_t_6) {
       } else {
         __pyx_t_5 = __pyx_t_6;
         goto __pyx_L10_bool_binop_done;
       }
-      __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_v_columns); if (unlikely(__pyx_t_6 < 0)) __PYX_ERR(0, 514, __pyx_L3_error)
+      __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_v_columns); if (unlikely(__pyx_t_6 < 0)) __PYX_ERR(0, 522, __pyx_L3_error)
       __pyx_t_5 = __pyx_t_6;
       __pyx_L10_bool_binop_done:;
       __pyx_t_6 = ((!__pyx_t_5) != 0);
       if (unlikely(__pyx_t_6)) {
 
-        /* "questdb/ilp.pyx":515
+        /* "questdb/ilp.pyx":523
  *             self._table(table_name)
  *             if not (symbols or columns):
  *                 raise IlpError(             # <<<<<<<<<<<<<<
  *                     IlpErrorCode.InvalidApiCall,
  *                     'Must specify at least one symbol or column')
  */
-        __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_IlpError); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 515, __pyx_L3_error)
+        __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_IlpError); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 523, __pyx_L3_error)
         __Pyx_GOTREF(__pyx_t_8);
 
-        /* "questdb/ilp.pyx":516
+        /* "questdb/ilp.pyx":524
  *             if not (symbols or columns):
  *                 raise IlpError(
  *                     IlpErrorCode.InvalidApiCall,             # <<<<<<<<<<<<<<
  *                     'Must specify at least one symbol or column')
  *             if symbols is not None:
  */
-        __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_n_s_IlpErrorCode); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 516, __pyx_L3_error)
+        __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_n_s_IlpErrorCode); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 524, __pyx_L3_error)
         __Pyx_GOTREF(__pyx_t_9);
-        __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_t_9, __pyx_n_s_InvalidApiCall); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 516, __pyx_L3_error)
+        __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_t_9, __pyx_n_s_InvalidApiCall); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 524, __pyx_L3_error)
         __Pyx_GOTREF(__pyx_t_10);
         __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
         __pyx_t_9 = NULL;
@@ -6924,7 +7204,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
         #if CYTHON_FAST_PYCALL
         if (PyFunction_Check(__pyx_t_8)) {
           PyObject *__pyx_temp[3] = {__pyx_t_9, __pyx_t_10, __pyx_kp_u_Must_specify_at_least_one_symbol};
-          __pyx_t_7 = __Pyx_PyFunction_FastCall(__pyx_t_8, __pyx_temp+1-__pyx_t_1, 2+__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 515, __pyx_L3_error)
+          __pyx_t_7 = __Pyx_PyFunction_FastCall(__pyx_t_8, __pyx_temp+1-__pyx_t_1, 2+__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 523, __pyx_L3_error)
           __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
           __Pyx_GOTREF(__pyx_t_7);
           __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
@@ -6933,14 +7213,14 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
         #if CYTHON_FAST_PYCCALL
         if (__Pyx_PyFastCFunction_Check(__pyx_t_8)) {
           PyObject *__pyx_temp[3] = {__pyx_t_9, __pyx_t_10, __pyx_kp_u_Must_specify_at_least_one_symbol};
-          __pyx_t_7 = __Pyx_PyCFunction_FastCall(__pyx_t_8, __pyx_temp+1-__pyx_t_1, 2+__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 515, __pyx_L3_error)
+          __pyx_t_7 = __Pyx_PyCFunction_FastCall(__pyx_t_8, __pyx_temp+1-__pyx_t_1, 2+__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 523, __pyx_L3_error)
           __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
           __Pyx_GOTREF(__pyx_t_7);
           __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
         } else
         #endif
         {
-          __pyx_t_11 = PyTuple_New(2+__pyx_t_1); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 515, __pyx_L3_error)
+          __pyx_t_11 = PyTuple_New(2+__pyx_t_1); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 523, __pyx_L3_error)
           __Pyx_GOTREF(__pyx_t_11);
           if (__pyx_t_9) {
             __Pyx_GIVEREF(__pyx_t_9); PyTuple_SET_ITEM(__pyx_t_11, 0, __pyx_t_9); __pyx_t_9 = NULL;
@@ -6951,16 +7231,16 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
           __Pyx_GIVEREF(__pyx_kp_u_Must_specify_at_least_one_symbol);
           PyTuple_SET_ITEM(__pyx_t_11, 1+__pyx_t_1, __pyx_kp_u_Must_specify_at_least_one_symbol);
           __pyx_t_10 = 0;
-          __pyx_t_7 = __Pyx_PyObject_Call(__pyx_t_8, __pyx_t_11, NULL); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 515, __pyx_L3_error)
+          __pyx_t_7 = __Pyx_PyObject_Call(__pyx_t_8, __pyx_t_11, NULL); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 523, __pyx_L3_error)
           __Pyx_GOTREF(__pyx_t_7);
           __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
         }
         __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
         __Pyx_Raise(__pyx_t_7, 0, 0, 0);
         __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-        __PYX_ERR(0, 515, __pyx_L3_error)
+        __PYX_ERR(0, 523, __pyx_L3_error)
 
-        /* "questdb/ilp.pyx":514
+        /* "questdb/ilp.pyx":522
  *         try:
  *             self._table(table_name)
  *             if not (symbols or columns):             # <<<<<<<<<<<<<<
@@ -6969,7 +7249,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
  */
       }
 
-      /* "questdb/ilp.pyx":518
+      /* "questdb/ilp.pyx":526
  *                     IlpErrorCode.InvalidApiCall,
  *                     'Must specify at least one symbol or column')
  *             if symbols is not None:             # <<<<<<<<<<<<<<
@@ -6980,7 +7260,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
       __pyx_t_5 = (__pyx_t_6 != 0);
       if (__pyx_t_5) {
 
-        /* "questdb/ilp.pyx":519
+        /* "questdb/ilp.pyx":527
  *                     'Must specify at least one symbol or column')
  *             if symbols is not None:
  *                 for name, value in symbols.items():             # <<<<<<<<<<<<<<
@@ -6990,9 +7270,9 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
         __pyx_t_12 = 0;
         if (unlikely(__pyx_v_symbols == Py_None)) {
           PyErr_Format(PyExc_AttributeError, "'NoneType' object has no attribute '%.30s'", "items");
-          __PYX_ERR(0, 519, __pyx_L3_error)
+          __PYX_ERR(0, 527, __pyx_L3_error)
         }
-        __pyx_t_8 = __Pyx_dict_iterator(__pyx_v_symbols, 1, __pyx_n_s_items, (&__pyx_t_13), (&__pyx_t_1)); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 519, __pyx_L3_error)
+        __pyx_t_8 = __Pyx_dict_iterator(__pyx_v_symbols, 1, __pyx_n_s_items, (&__pyx_t_13), (&__pyx_t_1)); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 527, __pyx_L3_error)
         __Pyx_GOTREF(__pyx_t_8);
         __Pyx_XDECREF(__pyx_t_7);
         __pyx_t_7 = __pyx_t_8;
@@ -7000,7 +7280,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
         while (1) {
           __pyx_t_14 = __Pyx_dict_iter_next(__pyx_t_7, __pyx_t_13, &__pyx_t_12, &__pyx_t_8, &__pyx_t_11, NULL, __pyx_t_1);
           if (unlikely(__pyx_t_14 == 0)) break;
-          if (unlikely(__pyx_t_14 == -1)) __PYX_ERR(0, 519, __pyx_L3_error)
+          if (unlikely(__pyx_t_14 == -1)) __PYX_ERR(0, 527, __pyx_L3_error)
           __Pyx_GOTREF(__pyx_t_8);
           __Pyx_GOTREF(__pyx_t_11);
           __Pyx_XDECREF_SET(__pyx_v_name, __pyx_t_8);
@@ -7008,20 +7288,20 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
           __Pyx_XDECREF_SET(__pyx_v_value, __pyx_t_11);
           __pyx_t_11 = 0;
 
-          /* "questdb/ilp.pyx":520
+          /* "questdb/ilp.pyx":528
  *             if symbols is not None:
  *                 for name, value in symbols.items():
  *                     self._symbol(name, value)             # <<<<<<<<<<<<<<
  *             if columns is not None:
  *                 for name, value in columns.items():
  */
-          if (!(likely(PyUnicode_CheckExact(__pyx_v_name))||((__pyx_v_name) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_name)->tp_name), 0))) __PYX_ERR(0, 520, __pyx_L3_error)
-          if (!(likely(PyUnicode_CheckExact(__pyx_v_value))||((__pyx_v_value) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_value)->tp_name), 0))) __PYX_ERR(0, 520, __pyx_L3_error)
-          __pyx_t_14 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(__pyx_v_self, ((PyObject*)__pyx_v_name), ((PyObject*)__pyx_v_value)); if (unlikely(__pyx_t_14 == ((int)-1))) __PYX_ERR(0, 520, __pyx_L3_error)
+          if (!(likely(PyUnicode_CheckExact(__pyx_v_name))||((__pyx_v_name) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_name)->tp_name), 0))) __PYX_ERR(0, 528, __pyx_L3_error)
+          if (!(likely(PyUnicode_CheckExact(__pyx_v_value))||((__pyx_v_value) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_value)->tp_name), 0))) __PYX_ERR(0, 528, __pyx_L3_error)
+          __pyx_t_14 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__symbol(__pyx_v_self, ((PyObject*)__pyx_v_name), ((PyObject*)__pyx_v_value)); if (unlikely(__pyx_t_14 == ((int)-1))) __PYX_ERR(0, 528, __pyx_L3_error)
         }
         __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-        /* "questdb/ilp.pyx":518
+        /* "questdb/ilp.pyx":526
  *                     IlpErrorCode.InvalidApiCall,
  *                     'Must specify at least one symbol or column')
  *             if symbols is not None:             # <<<<<<<<<<<<<<
@@ -7030,7 +7310,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
  */
       }
 
-      /* "questdb/ilp.pyx":521
+      /* "questdb/ilp.pyx":529
  *                 for name, value in symbols.items():
  *                     self._symbol(name, value)
  *             if columns is not None:             # <<<<<<<<<<<<<<
@@ -7041,7 +7321,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
       __pyx_t_6 = (__pyx_t_5 != 0);
       if (__pyx_t_6) {
 
-        /* "questdb/ilp.pyx":522
+        /* "questdb/ilp.pyx":530
  *                     self._symbol(name, value)
  *             if columns is not None:
  *                 for name, value in columns.items():             # <<<<<<<<<<<<<<
@@ -7051,9 +7331,9 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
         __pyx_t_13 = 0;
         if (unlikely(__pyx_v_columns == Py_None)) {
           PyErr_Format(PyExc_AttributeError, "'NoneType' object has no attribute '%.30s'", "items");
-          __PYX_ERR(0, 522, __pyx_L3_error)
+          __PYX_ERR(0, 530, __pyx_L3_error)
         }
-        __pyx_t_11 = __Pyx_dict_iterator(__pyx_v_columns, 1, __pyx_n_s_items, (&__pyx_t_12), (&__pyx_t_1)); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 522, __pyx_L3_error)
+        __pyx_t_11 = __Pyx_dict_iterator(__pyx_v_columns, 1, __pyx_n_s_items, (&__pyx_t_12), (&__pyx_t_1)); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 530, __pyx_L3_error)
         __Pyx_GOTREF(__pyx_t_11);
         __Pyx_XDECREF(__pyx_t_7);
         __pyx_t_7 = __pyx_t_11;
@@ -7061,7 +7341,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
         while (1) {
           __pyx_t_14 = __Pyx_dict_iter_next(__pyx_t_7, __pyx_t_12, &__pyx_t_13, &__pyx_t_11, &__pyx_t_8, NULL, __pyx_t_1);
           if (unlikely(__pyx_t_14 == 0)) break;
-          if (unlikely(__pyx_t_14 == -1)) __PYX_ERR(0, 522, __pyx_L3_error)
+          if (unlikely(__pyx_t_14 == -1)) __PYX_ERR(0, 530, __pyx_L3_error)
           __Pyx_GOTREF(__pyx_t_11);
           __Pyx_GOTREF(__pyx_t_8);
           __Pyx_XDECREF_SET(__pyx_v_name, __pyx_t_11);
@@ -7069,19 +7349,19 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
           __Pyx_XDECREF_SET(__pyx_v_value, __pyx_t_8);
           __pyx_t_8 = 0;
 
-          /* "questdb/ilp.pyx":523
+          /* "questdb/ilp.pyx":531
  *             if columns is not None:
  *                 for name, value in columns.items():
  *                     self._column(name, value)             # <<<<<<<<<<<<<<
  *             self._at(at)
  *             self._clear_marker()
  */
-          if (!(likely(PyUnicode_CheckExact(__pyx_v_name))||((__pyx_v_name) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_name)->tp_name), 0))) __PYX_ERR(0, 523, __pyx_L3_error)
-          __pyx_t_14 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(__pyx_v_self, ((PyObject*)__pyx_v_name), __pyx_v_value); if (unlikely(__pyx_t_14 == ((int)-1))) __PYX_ERR(0, 523, __pyx_L3_error)
+          if (!(likely(PyUnicode_CheckExact(__pyx_v_name))||((__pyx_v_name) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_name)->tp_name), 0))) __PYX_ERR(0, 531, __pyx_L3_error)
+          __pyx_t_14 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__column(__pyx_v_self, ((PyObject*)__pyx_v_name), __pyx_v_value); if (unlikely(__pyx_t_14 == ((int)-1))) __PYX_ERR(0, 531, __pyx_L3_error)
         }
         __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-        /* "questdb/ilp.pyx":521
+        /* "questdb/ilp.pyx":529
  *                 for name, value in symbols.items():
  *                     self._symbol(name, value)
  *             if columns is not None:             # <<<<<<<<<<<<<<
@@ -7090,27 +7370,27 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
  */
       }
 
-      /* "questdb/ilp.pyx":524
+      /* "questdb/ilp.pyx":532
  *                 for name, value in columns.items():
  *                     self._column(name, value)
  *             self._at(at)             # <<<<<<<<<<<<<<
  *             self._clear_marker()
  *         except:
  */
-      __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(__pyx_v_self, __pyx_v_at); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 524, __pyx_L3_error)
+      __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__at(__pyx_v_self, __pyx_v_at); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 532, __pyx_L3_error)
 
-      /* "questdb/ilp.pyx":525
+      /* "questdb/ilp.pyx":533
  *                     self._column(name, value)
  *             self._at(at)
  *             self._clear_marker()             # <<<<<<<<<<<<<<
  *         except:
  *             self._rewind_to_marker()
  */
-      __pyx_t_7 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__clear_marker(__pyx_v_self); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 525, __pyx_L3_error)
+      __pyx_t_7 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__clear_marker(__pyx_v_self); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 533, __pyx_L3_error)
       __Pyx_GOTREF(__pyx_t_7);
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-      /* "questdb/ilp.pyx":512
+      /* "questdb/ilp.pyx":520
  *         """
  *         self._set_marker()
  *         try:             # <<<<<<<<<<<<<<
@@ -7129,7 +7409,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
     __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
     __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-    /* "questdb/ilp.pyx":526
+    /* "questdb/ilp.pyx":534
  *             self._at(at)
  *             self._clear_marker()
  *         except:             # <<<<<<<<<<<<<<
@@ -7138,21 +7418,21 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
  */
     /*except:*/ {
       __Pyx_AddTraceback("questdb.ilp.LineSenderBuffer._row", __pyx_clineno, __pyx_lineno, __pyx_filename);
-      if (__Pyx_GetException(&__pyx_t_7, &__pyx_t_8, &__pyx_t_11) < 0) __PYX_ERR(0, 526, __pyx_L5_except_error)
+      if (__Pyx_GetException(&__pyx_t_7, &__pyx_t_8, &__pyx_t_11) < 0) __PYX_ERR(0, 534, __pyx_L5_except_error)
       __Pyx_GOTREF(__pyx_t_7);
       __Pyx_GOTREF(__pyx_t_8);
       __Pyx_GOTREF(__pyx_t_11);
 
-      /* "questdb/ilp.pyx":527
+      /* "questdb/ilp.pyx":535
  *             self._clear_marker()
  *         except:
  *             self._rewind_to_marker()             # <<<<<<<<<<<<<<
  *             raise
  * 
  */
-      __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__rewind_to_marker(__pyx_v_self); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 527, __pyx_L5_except_error)
+      __pyx_t_1 = __pyx_f_7questdb_3ilp_16LineSenderBuffer__rewind_to_marker(__pyx_v_self); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 535, __pyx_L5_except_error)
 
-      /* "questdb/ilp.pyx":528
+      /* "questdb/ilp.pyx":536
  *         except:
  *             self._rewind_to_marker()
  *             raise             # <<<<<<<<<<<<<<
@@ -7164,11 +7444,11 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
       __Pyx_XGIVEREF(__pyx_t_11);
       __Pyx_ErrRestoreWithState(__pyx_t_7, __pyx_t_8, __pyx_t_11);
       __pyx_t_7 = 0; __pyx_t_8 = 0; __pyx_t_11 = 0; 
-      __PYX_ERR(0, 528, __pyx_L5_except_error)
+      __PYX_ERR(0, 536, __pyx_L5_except_error)
     }
     __pyx_L5_except_error:;
 
-    /* "questdb/ilp.pyx":512
+    /* "questdb/ilp.pyx":520
  *         """
  *         self._set_marker()
  *         try:             # <<<<<<<<<<<<<<
@@ -7183,7 +7463,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
     __pyx_L8_try_end:;
   }
 
-  /* "questdb/ilp.pyx":502
+  /* "questdb/ilp.pyx":510
  *                 'TimestampNanos, datetime, None')
  * 
  *     cdef int _row(             # <<<<<<<<<<<<<<
@@ -7209,7 +7489,7 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":530
+/* "questdb/ilp.pyx":538
  *             raise
  * 
  *     def row(             # <<<<<<<<<<<<<<
@@ -7218,9 +7498,10 @@ static int __pyx_f_7questdb_3ilp_16LineSenderBuffer__row(struct __pyx_obj_7quest
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
-static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_14row[] = "\n        Add a single row (line) to the buffer.\n\n        At least one ``symbols`` or ``columns`` must be specified.\n\n        .. code-block:: python\n\n            # All fields specified.\n            buffer.row(\n                'table_name',\n                symbols={'sym1': 'abc', 'sym2': 'def'},\n                columns={\n                    'col1': True,\n                    'col2': 123,\n                    'col3': 3.14,\n                    'col4': 'xyz',\n                    'col5': TimestampMicros(123456789),\n                    'col6': datetime(2019, 1, 1, 12, 0, 0)},\n                at=TimestampNanos(123456789))\n\n            # Only symbols specified. Designated timestamp assigned by the db.\n            buffer.row(\n                'table_name',\n                symbols={'sym1': 'abc', 'sym2': 'def'})\n\n            # Float columns and timestamp specified as `datetime.datetime`.\n            # Pay special attention to the timezone, which if unspecified is\n            # assumed to be the local timezone (and not UTC).\n            buffer.row(\n                'sensor data',\n                columns={\n                    'temperature': 24.5,\n                    'humidity': 0.5},\n                at=datetime.datetime.utcnow())\n\n        :param table_name: The name of the table to which the row belongs.\n        :param symbols: A dictionary of symbol column names to ``str`` values.\n        :param columns: A dictionary of column names to ``bool``, ``int``,\n            ``float``, ``str``, ``TimestampMicros`` or ``datetime`` values.\n        :param at: The timestamp of the row. If ``None``, timestamp is assigned\n            by the server. If ``datetime``, the timestamp is converted to\n            nanoseconds. A nanosecond unix epoch timestamp can be passed\n            explicitly as a ``TimestampNanos`` object.\n        ";
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17row(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_16row[] = "\n        Add a single row (line) to the buffer.\n\n        At least one ``symbols`` or ``columns`` must be specified.\n\n        .. code-block:: python\n\n            # All fields specified.\n            buffer.row(\n                'table_name',\n                symbols={'sym1': 'abc', 'sym2': 'def'},\n                columns={\n                    'col1': True,\n                    'col2': 123,\n                    'col3': 3.14,\n                    'col4': 'xyz',\n                    'col5': TimestampMicros(123456789),\n                    'col6': datetime(2019, 1, 1, 12, 0, 0)},\n                at=TimestampNanos(123456789))\n\n            # Only symbols specified. Designated timestamp assigned by the db.\n            buffer.row(\n                'table_name',\n                symbols={'sym1': 'abc', 'sym2': 'def'})\n\n            # Float columns and timestamp specified as `datetime.datetime`.\n            # Pay special attention to the timezone, which if unspecified is\n            # assumed to be the local timezone (and not UTC).\n            buffer.row(\n                'sensor data',\n                columns={\n                    'temperature': 24.5,\n                    'humidity': 0.5},\n                at=datetime.datetime.utcnow())\n\n        :param table_name: The name of the table to which the row belongs.\n        :param symbols: A dictionary of symbol column names to ``str`` values.\n        :param columns: A dictionary of column names to ``bool``, ``int``,\n            ``float``, ``str``, ``TimestampMicros`` or ``datetime`` values.\n        :param at: The timestamp of the row. If ``None``, timestamp is assigned\n            by the server. If ``datetime``, the timestamp is converted to\n            nanoseconds. A nanosecond unix epoch timestamp can be passed\n            explicitly as a ``TimestampNanos`` object.\n        ";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_16LineSenderBuffer_17row = {"row", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17row, METH_VARARGS|METH_KEYWORDS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_16row};
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17row(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
   PyObject *__pyx_v_table_name = 0;
   PyObject *__pyx_v_symbols = 0;
   PyObject *__pyx_v_columns = 0;
@@ -7235,17 +7516,17 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row(PyObject *__pyx
     static PyObject **__pyx_pyargnames[] = {&__pyx_n_s_table_name,&__pyx_n_s_symbols,&__pyx_n_s_columns,&__pyx_n_s_at,0};
     PyObject* values[4] = {0,0,0,0};
 
-    /* "questdb/ilp.pyx":534
+    /* "questdb/ilp.pyx":542
  *             table_name: str,
  *             *,
- *             symbols: Optional[dict[str, str]]=None,             # <<<<<<<<<<<<<<
- *             columns: Optional[dict[
+ *             symbols: Optional[Dict[str, str]]=None,             # <<<<<<<<<<<<<<
+ *             columns: Optional[Dict[
  *                 str,
  */
     values[1] = ((PyObject *)Py_None);
 
-    /* "questdb/ilp.pyx":537
- *             columns: Optional[dict[
+    /* "questdb/ilp.pyx":545
+ *             columns: Optional[Dict[
  *                 str,
  *                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,             # <<<<<<<<<<<<<<
  *             at: Union[None, TimestampNanos, datetime]=None):
@@ -7253,7 +7534,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row(PyObject *__pyx
  */
     values[2] = ((PyObject *)Py_None);
 
-    /* "questdb/ilp.pyx":538
+    /* "questdb/ilp.pyx":546
  *                 str,
  *                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
  *             at: Union[None, TimestampNanos, datetime]=None):             # <<<<<<<<<<<<<<
@@ -7284,7 +7565,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row(PyObject *__pyx
         }
       }
       if (unlikely(kw_args > 0)) {
-        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "row") < 0)) __PYX_ERR(0, 530, __pyx_L3_error)
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "row") < 0)) __PYX_ERR(0, 538, __pyx_L3_error)
       }
     } else if (PyTuple_GET_SIZE(__pyx_args) != 1) {
       goto __pyx_L5_argtuple_error;
@@ -7298,16 +7579,16 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row(PyObject *__pyx
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("row", 1, 1, 1, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 530, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("row", 1, 1, 1, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 538, __pyx_L3_error)
   __pyx_L3_error:;
   __Pyx_AddTraceback("questdb.ilp.LineSenderBuffer.row", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_table_name), (&PyUnicode_Type), 1, "table_name", 1))) __PYX_ERR(0, 532, __pyx_L1_error)
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_14row(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), __pyx_v_table_name, __pyx_v_symbols, __pyx_v_columns, __pyx_v_at);
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_table_name), (&PyUnicode_Type), 1, "table_name", 1))) __PYX_ERR(0, 540, __pyx_L1_error)
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_16row(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), __pyx_v_table_name, __pyx_v_symbols, __pyx_v_columns, __pyx_v_at);
 
-  /* "questdb/ilp.pyx":530
+  /* "questdb/ilp.pyx":538
  *             raise
  * 
  *     def row(             # <<<<<<<<<<<<<<
@@ -7324,7 +7605,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row(PyObject *__pyx
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14row(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_table_name, PyObject *__pyx_v_symbols, PyObject *__pyx_v_columns, PyObject *__pyx_v_at) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_16row(struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, PyObject *__pyx_v_table_name, PyObject *__pyx_v_symbols, PyObject *__pyx_v_columns, PyObject *__pyx_v_at) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   int __pyx_t_1;
@@ -7334,22 +7615,22 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14row(struct __pyx_ob
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("row", 0);
 
-  /* "questdb/ilp.pyx":583
+  /* "questdb/ilp.pyx":591
  *             explicitly as a ``TimestampNanos`` object.
  *         """
  *         self._row(table_name, symbols, columns, at)             # <<<<<<<<<<<<<<
  *         return self
  * 
  */
-  if (!(likely(PyDict_CheckExact(__pyx_v_symbols))||((__pyx_v_symbols) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "dict", Py_TYPE(__pyx_v_symbols)->tp_name), 0))) __PYX_ERR(0, 583, __pyx_L1_error)
-  if (!(likely(PyDict_CheckExact(__pyx_v_columns))||((__pyx_v_columns) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "dict", Py_TYPE(__pyx_v_columns)->tp_name), 0))) __PYX_ERR(0, 583, __pyx_L1_error)
+  if (!(likely(PyDict_CheckExact(__pyx_v_symbols))||((__pyx_v_symbols) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "dict", Py_TYPE(__pyx_v_symbols)->tp_name), 0))) __PYX_ERR(0, 591, __pyx_L1_error)
+  if (!(likely(PyDict_CheckExact(__pyx_v_columns))||((__pyx_v_columns) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "dict", Py_TYPE(__pyx_v_columns)->tp_name), 0))) __PYX_ERR(0, 591, __pyx_L1_error)
   __pyx_t_2.__pyx_n = 3;
   __pyx_t_2.symbols = ((PyObject*)__pyx_v_symbols);
   __pyx_t_2.columns = ((PyObject*)__pyx_v_columns);
   __pyx_t_2.at = __pyx_v_at;
-  __pyx_t_1 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self->__pyx_vtab)->_row(__pyx_v_self, __pyx_v_table_name, &__pyx_t_2); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 583, __pyx_L1_error)
+  __pyx_t_1 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self->__pyx_vtab)->_row(__pyx_v_self, __pyx_v_table_name, &__pyx_t_2); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 591, __pyx_L1_error)
 
-  /* "questdb/ilp.pyx":584
+  /* "questdb/ilp.pyx":592
  *         """
  *         self._row(table_name, symbols, columns, at)
  *         return self             # <<<<<<<<<<<<<<
@@ -7361,7 +7642,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14row(struct __pyx_ob
   __pyx_r = ((PyObject *)__pyx_v_self);
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":530
+  /* "questdb/ilp.pyx":538
  *             raise
  * 
  *     def row(             # <<<<<<<<<<<<<<
@@ -7379,7 +7660,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14row(struct __pyx_ob
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":586
+/* "questdb/ilp.pyx":594
  *         return self
  * 
  *     def tabular(             # <<<<<<<<<<<<<<
@@ -7388,9 +7669,10 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_14row(struct __pyx_ob
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
-static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_16tabular[] = "\n        Add multiple rows as an iterable of iterables (e.g. list of lists) to\n        the buffer.\n\n        **Data and header**\n\n        The ``data`` argument specifies rows which must all be for the same\n        table. Column names are provided as the ``header``.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [[True, 123, 3.14, 'xyz'],\n                 [False, 456, 6.28, 'abc'],\n                 [True, 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'])\n\n        **Designated Timestamp Column**\n\n        QuestDB supports a special `designated timestamp\n        <https://questdb.io/docs/concept/designated-timestamp/>`_ column that it\n        uses to sort the rows by timestamp.\n\n        If the data section contains the same number of columns as the header,\n        then the designated is going to be\n        assigned by the server, unless specified for all columns the `at`\n        argument as either an integer wrapped in a ``TimestampNanos`` object\n        representing nanoseconds since unix epoch (1970-01-01 00:00:00 UTC) or\n        as a ``datetime.datetime`` object.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [[True, 123, 3.14, 'xyz'],\n                 [False, 456, 6.28, 'abc'],\n                 [True, 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'],\n                at=datetime.datetime.utcnow())\n\n                # or ...\n                # at=TimestampNanos(1657386397157631000))\n\n        If the rows need different `designated timestamp\n        <https://questdb.io/docs/concept/designated-timestamp/>`_ values across\n        different rows, you can provide them as an additional unlabeled column.\n        An unlabled column is one that has its name set to ``None``.\n\n        .. code-block:: python\n\n            ts1 = datetime.datetime.utcnow()\n         ""   ts2 = (\n                datetime.datetime.utcnow() +\n                datetime.timedelta(microseconds=1))\n            buffer.tabular(\n                'table_name',\n                [[True, 123, ts1],\n                 [False, 456, ts2]],\n                header=['col1', 'col2', None])\n\n        Like the ``at`` argument, the designated timestamp column may also be\n        specified as ``TimestampNanos`` objects.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [[True, 123, TimestampNanos(1657386397157630000)],\n                 [False, 456, TimestampNanos(1657386397157631000)]],\n                header=['col1', 'col2', None])\n\n        The designated timestamp column may appear anywhere positionally.\n\n        .. code-block:: python\n\n            ts1 = datetime.datetime.utcnow()\n            ts2 = (\n                datetime.datetime.utcnow() +\n                datetime.timedelta(microseconds=1))\n            buffer.tabular(\n                'table_name',\n                [[1000, ts1, 123],\n                 [2000, ts2, 456]],\n                header=['col1', None, 'col2'])\n\n        **Other timestamp columns**\n\n        Other columns may also contain timestamps. These columns can take\n        ``datetime.datetime`` objects or ``TimestampMicros`` (*not nanos*)\n        objects.\n\n        .. code-block:: python\n\n            ts1 = datetime.datetime.utcnow()\n            ts2 = (\n                datetime.datetime.utcnow() +\n                datetime.timedelta(microseconds=1))\n            buffer.tabular(\n                'table_name',\n                [[1000, ts1, 123],\n                 [2000, ts2, 456]],\n                header=['col1', 'col2', 'col3'],\n                at=datetime.datetime.utcnow())\n\n        **Symbol Columns**\n\n        QuestDB can represent strings via the ``STRING`` or ``SYMBOL`` types.\n\n        If all the columns of type ``str`` are to be treated as ``STRING``, th""en\n        specify ``symbols=False`` (default - see exaples above).\n\n        If all need to be treated as ``SYMBOL`` specify ``symbols=True``.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [['abc', 123, 3.14, 'xyz'],\n                 ['def', 456, 6.28, 'abc'],\n                 ['ghi', 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'],\n                symbols=True)  # `col1` and `col4` are SYMBOL columns.\n\n        Whilst if only a select few are to be treated as ``SYMBOL``, specify a\n        list of column indices to the ``symbols`` arg.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [['abc', 123, 3.14, 'xyz'],\n                 ['def', 456, 6.28, 'abc'],\n                 ['ghi', 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'],\n                symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.\n\n        Note that column indices are 0-based and negative indices are counted\n        from the end.\n        ";
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_19tabular(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static char __pyx_doc_7questdb_3ilp_16LineSenderBuffer_18tabular[] = "\n        Add multiple rows as an iterable of iterables (e.g. list of lists) to\n        the buffer.\n\n        **Data and header**\n\n        The ``data`` argument specifies rows which must all be for the same\n        table. Column names are provided as the ``header``.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [[True, 123, 3.14, 'xyz'],\n                 [False, 456, 6.28, 'abc'],\n                 [True, 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'])\n\n        **Designated Timestamp Column**\n\n        QuestDB supports a special `designated timestamp\n        <https://questdb.io/docs/concept/designated-timestamp/>`_ column that it\n        uses to sort the rows by timestamp.\n\n        If the data section contains the same number of columns as the header,\n        then the designated is going to be\n        assigned by the server, unless specified for all columns the `at`\n        argument as either an integer wrapped in a ``TimestampNanos`` object\n        representing nanoseconds since unix epoch (1970-01-01 00:00:00 UTC) or\n        as a ``datetime.datetime`` object.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [[True, 123, 3.14, 'xyz'],\n                 [False, 456, 6.28, 'abc'],\n                 [True, 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'],\n                at=datetime.datetime.utcnow())\n\n                # or ...\n                # at=TimestampNanos(1657386397157631000))\n\n        If the rows need different `designated timestamp\n        <https://questdb.io/docs/concept/designated-timestamp/>`_ values across\n        different rows, you can provide them as an additional unlabeled column.\n        An unlabled column is one that has its name set to ``None``.\n\n        .. code-block:: python\n\n            ts1 = datetime.datetime.utcnow()\n         ""   ts2 = (\n                datetime.datetime.utcnow() +\n                datetime.timedelta(microseconds=1))\n            buffer.tabular(\n                'table_name',\n                [[True, 123, ts1],\n                 [False, 456, ts2]],\n                header=['col1', 'col2', None])\n\n        Like the ``at`` argument, the designated timestamp column may also be\n        specified as ``TimestampNanos`` objects.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [[True, 123, TimestampNanos(1657386397157630000)],\n                 [False, 456, TimestampNanos(1657386397157631000)]],\n                header=['col1', 'col2', None])\n\n        The designated timestamp column may appear anywhere positionally.\n\n        .. code-block:: python\n\n            ts1 = datetime.datetime.utcnow()\n            ts2 = (\n                datetime.datetime.utcnow() +\n                datetime.timedelta(microseconds=1))\n            buffer.tabular(\n                'table_name',\n                [[1000, ts1, 123],\n                 [2000, ts2, 456]],\n                header=['col1', None, 'col2'])\n\n        **Other timestamp columns**\n\n        Other columns may also contain timestamps. These columns can take\n        ``datetime.datetime`` objects or ``TimestampMicros`` (*not nanos*)\n        objects.\n\n        .. code-block:: python\n\n            ts1 = datetime.datetime.utcnow()\n            ts2 = (\n                datetime.datetime.utcnow() +\n                datetime.timedelta(microseconds=1))\n            buffer.tabular(\n                'table_name',\n                [[1000, ts1, 123],\n                 [2000, ts2, 456]],\n                header=['col1', 'col2', 'col3'],\n                at=datetime.datetime.utcnow())\n\n        **Symbol Columns**\n\n        QuestDB can represent strings via the ``STRING`` or ``SYMBOL`` types.\n\n        If all the columns of type ``str`` are to be treated as ``STRING``, th""en\n        specify ``symbols=False`` (default - see exaples above).\n\n        If all need to be treated as ``SYMBOL`` specify ``symbols=True``.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [['abc', 123, 3.14, 'xyz'],\n                 ['def', 456, 6.28, 'abc'],\n                 ['ghi', 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'],\n                symbols=True)  # `col1` and `col4` are SYMBOL columns.\n\n        Whilst if only a select few are to be treated as ``SYMBOL``, specify a\n        list of column indices to the ``symbols`` arg.\n\n        .. code-block:: python\n\n            buffer.tabular(\n                'table_name',\n                [['abc', 123, 3.14, 'xyz'],\n                 ['def', 456, 6.28, 'abc'],\n                 ['ghi', 789, 9.87, 'def']],\n                header=['col1', 'col2', 'col3', 'col4'],\n                symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.\n\n        Note that column indices are 0-based and negative indices are counted\n        from the end.\n        ";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_16LineSenderBuffer_19tabular = {"tabular", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_19tabular, METH_VARARGS|METH_KEYWORDS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_18tabular};
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_19tabular(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
   CYTHON_UNUSED PyObject *__pyx_v_table_name = 0;
   CYTHON_UNUSED PyObject *__pyx_v_data = 0;
   CYTHON_UNUSED PyObject *__pyx_v_header = 0;
@@ -7406,7 +7688,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *_
     static PyObject **__pyx_pyargnames[] = {&__pyx_n_s_table_name,&__pyx_n_s_data,&__pyx_n_s_header,&__pyx_n_s_symbols,&__pyx_n_s_at,0};
     PyObject* values[5] = {0,0,0,0,0};
 
-    /* "questdb/ilp.pyx":593
+    /* "questdb/ilp.pyx":601
  *                 TimestampMicros, TimestampNanos, datetime]]],
  *             *,
  *             header: Optional[List[Optional[str]]]=None,             # <<<<<<<<<<<<<<
@@ -7415,7 +7697,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *_
  */
     values[2] = ((PyObject *)Py_None);
 
-    /* "questdb/ilp.pyx":594
+    /* "questdb/ilp.pyx":602
  *             *,
  *             header: Optional[List[Optional[str]]]=None,
  *             symbols: Union[bool, List[int]]=False,             # <<<<<<<<<<<<<<
@@ -7424,7 +7706,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *_
  */
     values[3] = ((PyObject *)Py_False);
 
-    /* "questdb/ilp.pyx":595
+    /* "questdb/ilp.pyx":603
  *             header: Optional[List[Optional[str]]]=None,
  *             symbols: Union[bool, List[int]]=False,
  *             at: Union[None, TimestampNanos, datetime]=None):             # <<<<<<<<<<<<<<
@@ -7452,7 +7734,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *_
         case  1:
         if (likely((values[1] = __Pyx_PyDict_GetItemStr(__pyx_kwds, __pyx_n_s_data)) != 0)) kw_args--;
         else {
-          __Pyx_RaiseArgtupleInvalid("tabular", 1, 2, 2, 1); __PYX_ERR(0, 586, __pyx_L3_error)
+          __Pyx_RaiseArgtupleInvalid("tabular", 1, 2, 2, 1); __PYX_ERR(0, 594, __pyx_L3_error)
         }
       }
       if (kw_args > 0 && likely(kw_args <= 3)) {
@@ -7463,7 +7745,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *_
         }
       }
       if (unlikely(kw_args > 0)) {
-        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "tabular") < 0)) __PYX_ERR(0, 586, __pyx_L3_error)
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "tabular") < 0)) __PYX_ERR(0, 594, __pyx_L3_error)
       }
     } else if (PyTuple_GET_SIZE(__pyx_args) != 2) {
       goto __pyx_L5_argtuple_error;
@@ -7479,16 +7761,16 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *_
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("tabular", 1, 2, 2, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 586, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("tabular", 1, 2, 2, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 594, __pyx_L3_error)
   __pyx_L3_error:;
   __Pyx_AddTraceback("questdb.ilp.LineSenderBuffer.tabular", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_table_name), (&PyUnicode_Type), 1, "table_name", 1))) __PYX_ERR(0, 588, __pyx_L1_error)
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_16tabular(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), __pyx_v_table_name, __pyx_v_data, __pyx_v_header, __pyx_v_symbols, __pyx_v_at);
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_table_name), (&PyUnicode_Type), 1, "table_name", 1))) __PYX_ERR(0, 596, __pyx_L1_error)
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_18tabular(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), __pyx_v_table_name, __pyx_v_data, __pyx_v_header, __pyx_v_symbols, __pyx_v_at);
 
-  /* "questdb/ilp.pyx":586
+  /* "questdb/ilp.pyx":594
  *         return self
  * 
  *     def tabular(             # <<<<<<<<<<<<<<
@@ -7505,7 +7787,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular(PyObject *_
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_16tabular(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v_table_name, CYTHON_UNUSED PyObject *__pyx_v_data, CYTHON_UNUSED PyObject *__pyx_v_header, CYTHON_UNUSED PyObject *__pyx_v_symbols, CYTHON_UNUSED PyObject *__pyx_v_at) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_18tabular(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v_table_name, CYTHON_UNUSED PyObject *__pyx_v_data, CYTHON_UNUSED PyObject *__pyx_v_header, CYTHON_UNUSED PyObject *__pyx_v_symbols, CYTHON_UNUSED PyObject *__pyx_v_at) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -7514,20 +7796,20 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_16tabular(CYTHON_UNUS
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("tabular", 0);
 
-  /* "questdb/ilp.pyx":736
+  /* "questdb/ilp.pyx":744
  *         from the end.
  *         """
  *         raise ValueError('nyi')             # <<<<<<<<<<<<<<
  * 
  *     # def pandas(
  */
-  __pyx_t_1 = __Pyx_PyObject_Call(__pyx_builtin_ValueError, __pyx_tuple__11, NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 736, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_Call(__pyx_builtin_ValueError, __pyx_tuple__11, NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 744, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_Raise(__pyx_t_1, 0, 0, 0);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __PYX_ERR(0, 736, __pyx_L1_error)
+  __PYX_ERR(0, 744, __pyx_L1_error)
 
-  /* "questdb/ilp.pyx":586
+  /* "questdb/ilp.pyx":594
  *         return self
  * 
  *     def tabular(             # <<<<<<<<<<<<<<
@@ -7552,19 +7834,20 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_16tabular(CYTHON_UNUS
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_19__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_19__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_21__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_16LineSenderBuffer_21__reduce_cython__ = {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_21__reduce_cython__, METH_NOARGS, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_21__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__reduce_cython__ (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_18__reduce_cython__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_20__reduce_cython__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_18__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_20__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -7609,19 +7892,20 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_18__reduce_cython__(C
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_21__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_21__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_23__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_16LineSenderBuffer_23__setstate_cython__ = {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_23__setstate_cython__, METH_O, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_16LineSenderBuffer_23__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__setstate_cython__ (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_20__setstate_cython__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), ((PyObject *)__pyx_v___pyx_state));
+  __pyx_r = __pyx_pf_7questdb_3ilp_16LineSenderBuffer_22__setstate_cython__(((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_v_self), ((PyObject *)__pyx_v___pyx_state));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_20__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state) {
+static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_22__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -7658,12 +7942,12 @@ static PyObject *__pyx_pf_7questdb_3ilp_16LineSenderBuffer_20__setstate_cython__
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":756
- *     cdef LineSenderBuffer _buffer
+/* "questdb/ilp.pyx":766
+ *     cdef size_t _auto_flush_watermark
  * 
- *     def __cinit__(self, str host, object port):             # <<<<<<<<<<<<<<
- *         cdef line_sender_error* err = NULL
- *         cdef str port_str
+ *     def __cinit__(             # <<<<<<<<<<<<<<
+ *             self,
+ *             str host,
  */
 
 /* Python wrapper */
@@ -7671,6 +7955,13 @@ static int __pyx_pw_7questdb_3ilp_10LineSender_1__cinit__(PyObject *__pyx_v_self
 static int __pyx_pw_7questdb_3ilp_10LineSender_1__cinit__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
   PyObject *__pyx_v_host = 0;
   PyObject *__pyx_v_port = 0;
+  PyObject *__pyx_v_interface = 0;
+  PyObject *__pyx_v_auth = 0;
+  PyObject *__pyx_v_tls = 0;
+  PyObject *__pyx_v_read_timeout = 0;
+  int __pyx_v_init_capacity;
+  int __pyx_v_max_name_len;
+  PyObject *__pyx_v_auto_flush = 0;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
@@ -7678,8 +7969,45 @@ static int __pyx_pw_7questdb_3ilp_10LineSender_1__cinit__(PyObject *__pyx_v_self
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__cinit__ (wrapper)", 0);
   {
-    static PyObject **__pyx_pyargnames[] = {&__pyx_n_s_host,&__pyx_n_s_port,0};
-    PyObject* values[2] = {0,0};
+    static PyObject **__pyx_pyargnames[] = {&__pyx_n_s_host,&__pyx_n_s_port,&__pyx_n_s_interface,&__pyx_n_s_auth,&__pyx_n_s_tls,&__pyx_n_s_read_timeout,&__pyx_n_s_init_capacity,&__pyx_n_s_max_name_len,&__pyx_n_s_auto_flush,0};
+    PyObject* values[9] = {0,0,0,0,0,0,0,0,0};
+
+    /* "questdb/ilp.pyx":771
+ *             object port,
+ *             *,
+ *             str interface=None,             # <<<<<<<<<<<<<<
+ *             tuple auth=None,
+ *             object tls=False,
+ */
+    values[2] = ((PyObject*)Py_None);
+
+    /* "questdb/ilp.pyx":772
+ *             *,
+ *             str interface=None,
+ *             tuple auth=None,             # <<<<<<<<<<<<<<
+ *             object tls=False,
+ *             object read_timeout=None,
+ */
+    values[3] = ((PyObject*)Py_None);
+
+    /* "questdb/ilp.pyx":773
+ *             str interface=None,
+ *             tuple auth=None,
+ *             object tls=False,             # <<<<<<<<<<<<<<
+ *             object read_timeout=None,
+ *             int init_capacity=65536,
+ */
+    values[4] = ((PyObject *)Py_False);
+
+    /* "questdb/ilp.pyx":774
+ *             tuple auth=None,
+ *             object tls=False,
+ *             object read_timeout=None,             # <<<<<<<<<<<<<<
+ *             int init_capacity=65536,
+ *             int max_name_len=127,
+ */
+    values[5] = ((PyObject *)Py_None);
+    values[8] = ((PyObject *)__pyx_int_32768);
     if (unlikely(__pyx_kwds)) {
       Py_ssize_t kw_args;
       const Py_ssize_t pos_args = PyTuple_GET_SIZE(__pyx_args);
@@ -7700,11 +8028,18 @@ static int __pyx_pw_7questdb_3ilp_10LineSender_1__cinit__(PyObject *__pyx_v_self
         case  1:
         if (likely((values[1] = __Pyx_PyDict_GetItemStr(__pyx_kwds, __pyx_n_s_port)) != 0)) kw_args--;
         else {
-          __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 2, 2, 1); __PYX_ERR(0, 756, __pyx_L3_error)
+          __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 2, 2, 1); __PYX_ERR(0, 766, __pyx_L3_error)
+        }
+      }
+      if (kw_args > 0 && likely(kw_args <= 7)) {
+        Py_ssize_t index;
+        for (index = 2; index < 9 && kw_args > 0; index++) {
+          PyObject* value = __Pyx_PyDict_GetItemStr(__pyx_kwds, *__pyx_pyargnames[index]);
+          if (value) { values[index] = value; kw_args--; }
         }
       }
       if (unlikely(kw_args > 0)) {
-        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "__cinit__") < 0)) __PYX_ERR(0, 756, __pyx_L3_error)
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "__cinit__") < 0)) __PYX_ERR(0, 766, __pyx_L3_error)
       }
     } else if (PyTuple_GET_SIZE(__pyx_args) != 2) {
       goto __pyx_L5_argtuple_error;
@@ -7714,17 +8049,42 @@ static int __pyx_pw_7questdb_3ilp_10LineSender_1__cinit__(PyObject *__pyx_v_self
     }
     __pyx_v_host = ((PyObject*)values[0]);
     __pyx_v_port = values[1];
+    __pyx_v_interface = ((PyObject*)values[2]);
+    __pyx_v_auth = ((PyObject*)values[3]);
+    __pyx_v_tls = values[4];
+    __pyx_v_read_timeout = values[5];
+    if (values[6]) {
+      __pyx_v_init_capacity = __Pyx_PyInt_As_int(values[6]); if (unlikely((__pyx_v_init_capacity == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 775, __pyx_L3_error)
+    } else {
+      __pyx_v_init_capacity = ((int)0x10000);
+    }
+    if (values[7]) {
+      __pyx_v_max_name_len = __Pyx_PyInt_As_int(values[7]); if (unlikely((__pyx_v_max_name_len == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 776, __pyx_L3_error)
+    } else {
+      __pyx_v_max_name_len = ((int)0x7F);
+    }
+    __pyx_v_auto_flush = values[8];
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 2, 2, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 756, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 2, 2, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 766, __pyx_L3_error)
   __pyx_L3_error:;
   __Pyx_AddTraceback("questdb.ilp.LineSender.__cinit__", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return -1;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_host), (&PyUnicode_Type), 1, "host", 1))) __PYX_ERR(0, 756, __pyx_L1_error)
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender___cinit__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_host, __pyx_v_port);
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_host), (&PyUnicode_Type), 1, "host", 1))) __PYX_ERR(0, 768, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_interface), (&PyUnicode_Type), 1, "interface", 1))) __PYX_ERR(0, 771, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_auth), (&PyTuple_Type), 1, "auth", 1))) __PYX_ERR(0, 772, __pyx_L1_error)
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender___cinit__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_host, __pyx_v_port, __pyx_v_interface, __pyx_v_auth, __pyx_v_tls, __pyx_v_read_timeout, __pyx_v_init_capacity, __pyx_v_max_name_len, __pyx_v_auto_flush);
+
+  /* "questdb/ilp.pyx":766
+ *     cdef size_t _auto_flush_watermark
+ * 
+ *     def __cinit__(             # <<<<<<<<<<<<<<
+ *             self,
+ *             str host,
+ */
 
   /* function exit code */
   goto __pyx_L0;
@@ -7735,35 +8095,56 @@ static int __pyx_pw_7questdb_3ilp_10LineSender_1__cinit__(PyObject *__pyx_v_self
   return __pyx_r;
 }
 
-static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_host, PyObject *__pyx_v_port) {
+static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_host, PyObject *__pyx_v_port, PyObject *__pyx_v_interface, PyObject *__pyx_v_auth, PyObject *__pyx_v_tls, PyObject *__pyx_v_read_timeout, int __pyx_v_init_capacity, int __pyx_v_max_name_len, PyObject *__pyx_v_auto_flush) {
   CYTHON_UNUSED struct line_sender_error *__pyx_v_err;
-  PyObject *__pyx_v_port_str = 0;
   struct line_sender_utf8 __pyx_v_host_utf8;
   CYTHON_UNUSED PyObject *__pyx_v_host_owner = 0;
+  PyObject *__pyx_v_port_str = 0;
   struct line_sender_utf8 __pyx_v_port_utf8;
   CYTHON_UNUSED PyObject *__pyx_v_port_owner = 0;
+  struct line_sender_utf8 __pyx_v_interface_utf8;
+  CYTHON_UNUSED PyObject *__pyx_v_interface_owner = 0;
+  PyObject *__pyx_v_a_key_id = 0;
+  CYTHON_UNUSED PyObject *__pyx_v_a_key_id_owner = 0;
+  struct line_sender_utf8 __pyx_v_a_key_id_utf8;
+  PyObject *__pyx_v_a_priv_key = 0;
+  CYTHON_UNUSED PyObject *__pyx_v_a_priv_key_owner = 0;
+  struct line_sender_utf8 __pyx_v_a_priv_key_utf8;
+  PyObject *__pyx_v_a_pub_key_x = 0;
+  CYTHON_UNUSED PyObject *__pyx_v_a_pub_key_x_owner = 0;
+  struct line_sender_utf8 __pyx_v_a_pub_key_x_utf8;
+  PyObject *__pyx_v_a_pub_key_y = 0;
+  CYTHON_UNUSED PyObject *__pyx_v_a_pub_key_y_owner = 0;
+  struct line_sender_utf8 __pyx_v_a_pub_key_y_utf8;
+  CYTHON_UNUSED PyObject *__pyx_v_ca_owner = 0;
+  struct line_sender_utf8 __pyx_v_ca_utf8;
   int __pyx_r;
   __Pyx_RefNannyDeclarations
   int __pyx_t_1;
   int __pyx_t_2;
   PyObject *__pyx_t_3 = NULL;
   PyObject *__pyx_t_4 = NULL;
+  PyObject *__pyx_t_5 = NULL;
+  PyObject *__pyx_t_6 = NULL;
+  uint64_t __pyx_t_7;
+  size_t __pyx_t_8;
+  size_t __pyx_t_9;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__cinit__", 0);
 
-  /* "questdb/ilp.pyx":757
- * 
- *     def __cinit__(self, str host, object port):
+  /* "questdb/ilp.pyx":778
+ *             int max_name_len=127,
+ *             object auto_flush=32768):
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
- *         cdef str port_str
+ * 
  *         cdef line_sender_utf8 host_utf8
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":764
- *         cdef bytes port_owner
+  /* "questdb/ilp.pyx":810
+ *         cdef line_sender_utf8 ca_utf8
  * 
  *         self._opts = NULL             # <<<<<<<<<<<<<<
  *         self._impl = NULL
@@ -7771,7 +8152,7 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
  */
   __pyx_v_self->_opts = NULL;
 
-  /* "questdb/ilp.pyx":765
+  /* "questdb/ilp.pyx":811
  * 
  *         self._opts = NULL
  *         self._impl = NULL             # <<<<<<<<<<<<<<
@@ -7780,7 +8161,7 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
  */
   __pyx_v_self->_impl = NULL;
 
-  /* "questdb/ilp.pyx":766
+  /* "questdb/ilp.pyx":812
  *         self._opts = NULL
  *         self._impl = NULL
  *         self._buffer = None             # <<<<<<<<<<<<<<
@@ -7793,7 +8174,7 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
   __Pyx_DECREF(((PyObject *)__pyx_v_self->_buffer));
   __pyx_v_self->_buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)Py_None);
 
-  /* "questdb/ilp.pyx":768
+  /* "questdb/ilp.pyx":814
  *         self._buffer = None
  * 
  *         if isinstance(port, int):             # <<<<<<<<<<<<<<
@@ -7804,19 +8185,19 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
   __pyx_t_2 = (__pyx_t_1 != 0);
   if (__pyx_t_2) {
 
-    /* "questdb/ilp.pyx":769
+    /* "questdb/ilp.pyx":815
  * 
  *         if isinstance(port, int):
  *             port_str = str(port)             # <<<<<<<<<<<<<<
  *         elif isinstance(port, str):
  *             port_str = port
  */
-    __pyx_t_3 = __Pyx_PyObject_CallOneArg(((PyObject *)(&PyUnicode_Type)), __pyx_v_port); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 769, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_CallOneArg(((PyObject *)(&PyUnicode_Type)), __pyx_v_port); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 815, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_v_port_str = ((PyObject*)__pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "questdb/ilp.pyx":768
+    /* "questdb/ilp.pyx":814
  *         self._buffer = None
  * 
  *         if isinstance(port, int):             # <<<<<<<<<<<<<<
@@ -7826,7 +8207,7 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
     goto __pyx_L3;
   }
 
-  /* "questdb/ilp.pyx":770
+  /* "questdb/ilp.pyx":816
  *         if isinstance(port, int):
  *             port_str = str(port)
  *         elif isinstance(port, str):             # <<<<<<<<<<<<<<
@@ -7837,20 +8218,20 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
   __pyx_t_1 = (__pyx_t_2 != 0);
   if (likely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":771
+    /* "questdb/ilp.pyx":817
  *             port_str = str(port)
  *         elif isinstance(port, str):
  *             port_str = port             # <<<<<<<<<<<<<<
  *         else:
  *             raise TypeError(
  */
-    if (!(likely(PyUnicode_CheckExact(__pyx_v_port))||((__pyx_v_port) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_port)->tp_name), 0))) __PYX_ERR(0, 771, __pyx_L1_error)
+    if (!(likely(PyUnicode_CheckExact(__pyx_v_port))||((__pyx_v_port) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_port)->tp_name), 0))) __PYX_ERR(0, 817, __pyx_L1_error)
     __pyx_t_3 = __pyx_v_port;
     __Pyx_INCREF(__pyx_t_3);
     __pyx_v_port_str = ((PyObject*)__pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "questdb/ilp.pyx":770
+    /* "questdb/ilp.pyx":816
  *         if isinstance(port, int):
  *             port_str = str(port)
  *         elif isinstance(port, str):             # <<<<<<<<<<<<<<
@@ -7860,7 +8241,7 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
     goto __pyx_L3;
   }
 
-  /* "questdb/ilp.pyx":773
+  /* "questdb/ilp.pyx":819
  *             port_str = port
  *         else:
  *             raise TypeError(             # <<<<<<<<<<<<<<
@@ -7869,89 +8250,553 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
  */
   /*else*/ {
 
-    /* "questdb/ilp.pyx":774
+    /* "questdb/ilp.pyx":820
  *         else:
  *             raise TypeError(
  *                 f'port must be an integer or a string, not {type(port)}')             # <<<<<<<<<<<<<<
  * 
  *         host_owner = str_to_utf8(host, &host_utf8)
  */
-    __pyx_t_3 = __Pyx_PyObject_FormatSimple(((PyObject *)Py_TYPE(__pyx_v_port)), __pyx_empty_unicode); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 774, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_FormatSimple(((PyObject *)Py_TYPE(__pyx_v_port)), __pyx_empty_unicode); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 820, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_4 = __Pyx_PyUnicode_Concat(__pyx_kp_u_port_must_be_an_integer_or_a_str, __pyx_t_3); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 774, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyUnicode_Concat(__pyx_kp_u_port_must_be_an_integer_or_a_str, __pyx_t_3); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 820, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-    /* "questdb/ilp.pyx":773
+    /* "questdb/ilp.pyx":819
  *             port_str = port
  *         else:
  *             raise TypeError(             # <<<<<<<<<<<<<<
  *                 f'port must be an integer or a string, not {type(port)}')
  * 
  */
-    __pyx_t_3 = __Pyx_PyObject_CallOneArg(__pyx_builtin_TypeError, __pyx_t_4); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 773, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_CallOneArg(__pyx_builtin_TypeError, __pyx_t_4); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 819, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_Raise(__pyx_t_3, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __PYX_ERR(0, 773, __pyx_L1_error)
+    __PYX_ERR(0, 819, __pyx_L1_error)
   }
   __pyx_L3:;
 
-  /* "questdb/ilp.pyx":776
+  /* "questdb/ilp.pyx":822
  *                 f'port must be an integer or a string, not {type(port)}')
  * 
  *         host_owner = str_to_utf8(host, &host_utf8)             # <<<<<<<<<<<<<<
  *         port_owner = str_to_utf8(port_str, &port_utf8)
  *         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
  */
-  __pyx_t_3 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_host, (&__pyx_v_host_utf8)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 776, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_host, (&__pyx_v_host_utf8)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 822, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_v_host_owner = ((PyObject*)__pyx_t_3);
   __pyx_t_3 = 0;
 
-  /* "questdb/ilp.pyx":777
+  /* "questdb/ilp.pyx":823
  * 
  *         host_owner = str_to_utf8(host, &host_utf8)
  *         port_owner = str_to_utf8(port_str, &port_utf8)             # <<<<<<<<<<<<<<
  *         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
- *         self._buffer = LineSenderBuffer()
+ * 
  */
-  __pyx_t_3 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_port_str, (&__pyx_v_port_utf8)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 777, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_port_str, (&__pyx_v_port_utf8)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 823, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_v_port_owner = ((PyObject*)__pyx_t_3);
   __pyx_t_3 = 0;
 
-  /* "questdb/ilp.pyx":778
+  /* "questdb/ilp.pyx":824
  *         host_owner = str_to_utf8(host, &host_utf8)
  *         port_owner = str_to_utf8(port_str, &port_utf8)
  *         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)             # <<<<<<<<<<<<<<
- *         self._buffer = LineSenderBuffer()
  * 
+ *         if interface is not None:
  */
   __pyx_v_self->_opts = line_sender_opts_new_service(__pyx_v_host_utf8, __pyx_v_port_utf8);
 
-  /* "questdb/ilp.pyx":779
- *         port_owner = str_to_utf8(port_str, &port_utf8)
+  /* "questdb/ilp.pyx":826
  *         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
- *         self._buffer = LineSenderBuffer()             # <<<<<<<<<<<<<<
  * 
- *     def connect(self):
+ *         if interface is not None:             # <<<<<<<<<<<<<<
+ *             interface_owner = str_to_utf8(interface, &interface_utf8)
+ *             line_sender_opts_net_interface(self._opts, interface_utf8)
  */
-  __pyx_t_3 = __Pyx_PyObject_CallNoArg(((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 779, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __Pyx_GIVEREF(__pyx_t_3);
+  __pyx_t_1 = (__pyx_v_interface != ((PyObject*)Py_None));
+  __pyx_t_2 = (__pyx_t_1 != 0);
+  if (__pyx_t_2) {
+
+    /* "questdb/ilp.pyx":827
+ * 
+ *         if interface is not None:
+ *             interface_owner = str_to_utf8(interface, &interface_utf8)             # <<<<<<<<<<<<<<
+ *             line_sender_opts_net_interface(self._opts, interface_utf8)
+ * 
+ */
+    __pyx_t_3 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_interface, (&__pyx_v_interface_utf8)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 827, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+    __pyx_v_interface_owner = ((PyObject*)__pyx_t_3);
+    __pyx_t_3 = 0;
+
+    /* "questdb/ilp.pyx":828
+ *         if interface is not None:
+ *             interface_owner = str_to_utf8(interface, &interface_utf8)
+ *             line_sender_opts_net_interface(self._opts, interface_utf8)             # <<<<<<<<<<<<<<
+ * 
+ *         if auth is not None:
+ */
+    line_sender_opts_net_interface(__pyx_v_self->_opts, __pyx_v_interface_utf8);
+
+    /* "questdb/ilp.pyx":826
+ *         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
+ * 
+ *         if interface is not None:             # <<<<<<<<<<<<<<
+ *             interface_owner = str_to_utf8(interface, &interface_utf8)
+ *             line_sender_opts_net_interface(self._opts, interface_utf8)
+ */
+  }
+
+  /* "questdb/ilp.pyx":830
+ *             line_sender_opts_net_interface(self._opts, interface_utf8)
+ * 
+ *         if auth is not None:             # <<<<<<<<<<<<<<
+ *             (a_key_id,
+ *              a_priv_key,
+ */
+  __pyx_t_2 = (__pyx_v_auth != ((PyObject*)Py_None));
+  __pyx_t_1 = (__pyx_t_2 != 0);
+  if (__pyx_t_1) {
+
+    /* "questdb/ilp.pyx":834
+ *              a_priv_key,
+ *              a_pub_key_x,
+ *              a_pub_key_y) = auth             # <<<<<<<<<<<<<<
+ *             a_key_id_owner = str_to_utf8(a_key_id, &a_key_id_utf8)
+ *             a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)
+ */
+    if (likely(__pyx_v_auth != Py_None)) {
+      PyObject* sequence = __pyx_v_auth;
+      Py_ssize_t size = __Pyx_PySequence_SIZE(sequence);
+      if (unlikely(size != 4)) {
+        if (size > 4) __Pyx_RaiseTooManyValuesError(4);
+        else if (size >= 0) __Pyx_RaiseNeedMoreValuesError(size);
+        __PYX_ERR(0, 831, __pyx_L1_error)
+      }
+      #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+      __pyx_t_3 = PyTuple_GET_ITEM(sequence, 0); 
+      __pyx_t_4 = PyTuple_GET_ITEM(sequence, 1); 
+      __pyx_t_5 = PyTuple_GET_ITEM(sequence, 2); 
+      __pyx_t_6 = PyTuple_GET_ITEM(sequence, 3); 
+      __Pyx_INCREF(__pyx_t_3);
+      __Pyx_INCREF(__pyx_t_4);
+      __Pyx_INCREF(__pyx_t_5);
+      __Pyx_INCREF(__pyx_t_6);
+      #else
+      {
+        Py_ssize_t i;
+        PyObject** temps[4] = {&__pyx_t_3,&__pyx_t_4,&__pyx_t_5,&__pyx_t_6};
+        for (i=0; i < 4; i++) {
+          PyObject* item = PySequence_ITEM(sequence, i); if (unlikely(!item)) __PYX_ERR(0, 831, __pyx_L1_error)
+          __Pyx_GOTREF(item);
+          *(temps[i]) = item;
+        }
+      }
+      #endif
+    } else {
+      __Pyx_RaiseNoneNotIterableError(); __PYX_ERR(0, 831, __pyx_L1_error)
+    }
+
+    /* "questdb/ilp.pyx":831
+ * 
+ *         if auth is not None:
+ *             (a_key_id,             # <<<<<<<<<<<<<<
+ *              a_priv_key,
+ *              a_pub_key_x,
+ */
+    if (!(likely(PyUnicode_CheckExact(__pyx_t_3))||((__pyx_t_3) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_t_3)->tp_name), 0))) __PYX_ERR(0, 831, __pyx_L1_error)
+    if (!(likely(PyUnicode_CheckExact(__pyx_t_4))||((__pyx_t_4) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_t_4)->tp_name), 0))) __PYX_ERR(0, 831, __pyx_L1_error)
+    if (!(likely(PyUnicode_CheckExact(__pyx_t_5))||((__pyx_t_5) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_t_5)->tp_name), 0))) __PYX_ERR(0, 831, __pyx_L1_error)
+    if (!(likely(PyUnicode_CheckExact(__pyx_t_6))||((__pyx_t_6) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_t_6)->tp_name), 0))) __PYX_ERR(0, 831, __pyx_L1_error)
+    __pyx_v_a_key_id = ((PyObject*)__pyx_t_3);
+    __pyx_t_3 = 0;
+    __pyx_v_a_priv_key = ((PyObject*)__pyx_t_4);
+    __pyx_t_4 = 0;
+    __pyx_v_a_pub_key_x = ((PyObject*)__pyx_t_5);
+    __pyx_t_5 = 0;
+    __pyx_v_a_pub_key_y = ((PyObject*)__pyx_t_6);
+    __pyx_t_6 = 0;
+
+    /* "questdb/ilp.pyx":835
+ *              a_pub_key_x,
+ *              a_pub_key_y) = auth
+ *             a_key_id_owner = str_to_utf8(a_key_id, &a_key_id_utf8)             # <<<<<<<<<<<<<<
+ *             a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)
+ *             a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)
+ */
+    __pyx_t_6 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_a_key_id, (&__pyx_v_a_key_id_utf8)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 835, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_6);
+    __pyx_v_a_key_id_owner = ((PyObject*)__pyx_t_6);
+    __pyx_t_6 = 0;
+
+    /* "questdb/ilp.pyx":836
+ *              a_pub_key_y) = auth
+ *             a_key_id_owner = str_to_utf8(a_key_id, &a_key_id_utf8)
+ *             a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)             # <<<<<<<<<<<<<<
+ *             a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)
+ *             a_pub_key_y_owner = str_to_utf8(a_pub_key_y, &a_pub_key_y_utf8)
+ */
+    __pyx_t_6 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_a_priv_key, (&__pyx_v_a_priv_key_utf8)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 836, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_6);
+    __pyx_v_a_priv_key_owner = ((PyObject*)__pyx_t_6);
+    __pyx_t_6 = 0;
+
+    /* "questdb/ilp.pyx":837
+ *             a_key_id_owner = str_to_utf8(a_key_id, &a_key_id_utf8)
+ *             a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)
+ *             a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)             # <<<<<<<<<<<<<<
+ *             a_pub_key_y_owner = str_to_utf8(a_pub_key_y, &a_pub_key_y_utf8)
+ *             line_sender_opts_auth(
+ */
+    __pyx_t_6 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_a_pub_key_x, (&__pyx_v_a_pub_key_x_utf8)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 837, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_6);
+    __pyx_v_a_pub_key_x_owner = ((PyObject*)__pyx_t_6);
+    __pyx_t_6 = 0;
+
+    /* "questdb/ilp.pyx":838
+ *             a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)
+ *             a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)
+ *             a_pub_key_y_owner = str_to_utf8(a_pub_key_y, &a_pub_key_y_utf8)             # <<<<<<<<<<<<<<
+ *             line_sender_opts_auth(
+ *                 self._opts,
+ */
+    __pyx_t_6 = __pyx_f_7questdb_3ilp_str_to_utf8(__pyx_v_a_pub_key_y, (&__pyx_v_a_pub_key_y_utf8)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 838, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_6);
+    __pyx_v_a_pub_key_y_owner = ((PyObject*)__pyx_t_6);
+    __pyx_t_6 = 0;
+
+    /* "questdb/ilp.pyx":839
+ *             a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)
+ *             a_pub_key_y_owner = str_to_utf8(a_pub_key_y, &a_pub_key_y_utf8)
+ *             line_sender_opts_auth(             # <<<<<<<<<<<<<<
+ *                 self._opts,
+ *                 a_key_id_utf8,
+ */
+    line_sender_opts_auth(__pyx_v_self->_opts, __pyx_v_a_key_id_utf8, __pyx_v_a_priv_key_utf8, __pyx_v_a_pub_key_x_utf8, __pyx_v_a_pub_key_y_utf8);
+
+    /* "questdb/ilp.pyx":830
+ *             line_sender_opts_net_interface(self._opts, interface_utf8)
+ * 
+ *         if auth is not None:             # <<<<<<<<<<<<<<
+ *             (a_key_id,
+ *              a_priv_key,
+ */
+  }
+
+  /* "questdb/ilp.pyx":846
+ *                 a_pub_key_y_utf8)
+ * 
+ *         if tls:             # <<<<<<<<<<<<<<
+ *             if tls is True:
+ *                 line_sender_opts_tls(self._opts)
+ */
+  __pyx_t_1 = __Pyx_PyObject_IsTrue(__pyx_v_tls); if (unlikely(__pyx_t_1 < 0)) __PYX_ERR(0, 846, __pyx_L1_error)
+  if (__pyx_t_1) {
+
+    /* "questdb/ilp.pyx":847
+ * 
+ *         if tls:
+ *             if tls is True:             # <<<<<<<<<<<<<<
+ *                 line_sender_opts_tls(self._opts)
+ *             elif isinstance(tls, str):
+ */
+    __pyx_t_1 = (__pyx_v_tls == Py_True);
+    __pyx_t_2 = (__pyx_t_1 != 0);
+    if (__pyx_t_2) {
+
+      /* "questdb/ilp.pyx":848
+ *         if tls:
+ *             if tls is True:
+ *                 line_sender_opts_tls(self._opts)             # <<<<<<<<<<<<<<
+ *             elif isinstance(tls, str):
+ *                 if tls == 'insecure_skip_verify':
+ */
+      line_sender_opts_tls(__pyx_v_self->_opts);
+
+      /* "questdb/ilp.pyx":847
+ * 
+ *         if tls:
+ *             if tls is True:             # <<<<<<<<<<<<<<
+ *                 line_sender_opts_tls(self._opts)
+ *             elif isinstance(tls, str):
+ */
+      goto __pyx_L7;
+    }
+
+    /* "questdb/ilp.pyx":849
+ *             if tls is True:
+ *                 line_sender_opts_tls(self._opts)
+ *             elif isinstance(tls, str):             # <<<<<<<<<<<<<<
+ *                 if tls == 'insecure_skip_verify':
+ *                     line_sender_opts_tls_insecure_skip_verify(self._opts)
+ */
+    __pyx_t_2 = PyUnicode_Check(__pyx_v_tls); 
+    __pyx_t_1 = (__pyx_t_2 != 0);
+    if (likely(__pyx_t_1)) {
+
+      /* "questdb/ilp.pyx":850
+ *                 line_sender_opts_tls(self._opts)
+ *             elif isinstance(tls, str):
+ *                 if tls == 'insecure_skip_verify':             # <<<<<<<<<<<<<<
+ *                     line_sender_opts_tls_insecure_skip_verify(self._opts)
+ *                 else:
+ */
+      __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_v_tls, __pyx_n_u_insecure_skip_verify, Py_EQ)); if (unlikely(__pyx_t_1 < 0)) __PYX_ERR(0, 850, __pyx_L1_error)
+      if (__pyx_t_1) {
+
+        /* "questdb/ilp.pyx":851
+ *             elif isinstance(tls, str):
+ *                 if tls == 'insecure_skip_verify':
+ *                     line_sender_opts_tls_insecure_skip_verify(self._opts)             # <<<<<<<<<<<<<<
+ *                 else:
+ *                     ca_owner = str_to_utf8(tls, &ca_utf8)
+ */
+        line_sender_opts_tls_insecure_skip_verify(__pyx_v_self->_opts);
+
+        /* "questdb/ilp.pyx":850
+ *                 line_sender_opts_tls(self._opts)
+ *             elif isinstance(tls, str):
+ *                 if tls == 'insecure_skip_verify':             # <<<<<<<<<<<<<<
+ *                     line_sender_opts_tls_insecure_skip_verify(self._opts)
+ *                 else:
+ */
+        goto __pyx_L8;
+      }
+
+      /* "questdb/ilp.pyx":853
+ *                     line_sender_opts_tls_insecure_skip_verify(self._opts)
+ *                 else:
+ *                     ca_owner = str_to_utf8(tls, &ca_utf8)             # <<<<<<<<<<<<<<
+ *                     line_sender_opts_tls_ca(self._opts, ca_utf8)
+ *             else:
+ */
+      /*else*/ {
+        if (!(likely(PyUnicode_CheckExact(__pyx_v_tls))||((__pyx_v_tls) == Py_None)||(PyErr_Format(PyExc_TypeError, "Expected %.16s, got %.200s", "unicode", Py_TYPE(__pyx_v_tls)->tp_name), 0))) __PYX_ERR(0, 853, __pyx_L1_error)
+        __pyx_t_6 = __pyx_f_7questdb_3ilp_str_to_utf8(((PyObject*)__pyx_v_tls), (&__pyx_v_ca_utf8)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 853, __pyx_L1_error)
+        __Pyx_GOTREF(__pyx_t_6);
+        __pyx_v_ca_owner = ((PyObject*)__pyx_t_6);
+        __pyx_t_6 = 0;
+
+        /* "questdb/ilp.pyx":854
+ *                 else:
+ *                     ca_owner = str_to_utf8(tls, &ca_utf8)
+ *                     line_sender_opts_tls_ca(self._opts, ca_utf8)             # <<<<<<<<<<<<<<
+ *             else:
+ *                 raise TypeError(
+ */
+        line_sender_opts_tls_ca(__pyx_v_self->_opts, __pyx_v_ca_utf8);
+      }
+      __pyx_L8:;
+
+      /* "questdb/ilp.pyx":849
+ *             if tls is True:
+ *                 line_sender_opts_tls(self._opts)
+ *             elif isinstance(tls, str):             # <<<<<<<<<<<<<<
+ *                 if tls == 'insecure_skip_verify':
+ *                     line_sender_opts_tls_insecure_skip_verify(self._opts)
+ */
+      goto __pyx_L7;
+    }
+
+    /* "questdb/ilp.pyx":856
+ *                     line_sender_opts_tls_ca(self._opts, ca_utf8)
+ *             else:
+ *                 raise TypeError(             # <<<<<<<<<<<<<<
+ *                     'tls must be a bool, a str pointing to CA file or '
+ *                     f'"insecure_skip_verify", not {type(tls)}')
+ */
+    /*else*/ {
+
+      /* "questdb/ilp.pyx":858
+ *                 raise TypeError(
+ *                     'tls must be a bool, a str pointing to CA file or '
+ *                     f'"insecure_skip_verify", not {type(tls)}')             # <<<<<<<<<<<<<<
+ * 
+ *         if read_timeout is not None:
+ */
+      __pyx_t_6 = __Pyx_PyObject_FormatSimple(((PyObject *)Py_TYPE(__pyx_v_tls)), __pyx_empty_unicode); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 858, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_6);
+
+      /* "questdb/ilp.pyx":857
+ *             else:
+ *                 raise TypeError(
+ *                     'tls must be a bool, a str pointing to CA file or '             # <<<<<<<<<<<<<<
+ *                     f'"insecure_skip_verify", not {type(tls)}')
+ * 
+ */
+      __pyx_t_5 = __Pyx_PyUnicode_Concat(__pyx_kp_u_tls_must_be_a_bool_a_str_pointin, __pyx_t_6); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 857, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_5);
+      __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+      /* "questdb/ilp.pyx":856
+ *                     line_sender_opts_tls_ca(self._opts, ca_utf8)
+ *             else:
+ *                 raise TypeError(             # <<<<<<<<<<<<<<
+ *                     'tls must be a bool, a str pointing to CA file or '
+ *                     f'"insecure_skip_verify", not {type(tls)}')
+ */
+      __pyx_t_6 = __Pyx_PyObject_CallOneArg(__pyx_builtin_TypeError, __pyx_t_5); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 856, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_6);
+      __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+      __Pyx_Raise(__pyx_t_6, 0, 0, 0);
+      __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+      __PYX_ERR(0, 856, __pyx_L1_error)
+    }
+    __pyx_L7:;
+
+    /* "questdb/ilp.pyx":846
+ *                 a_pub_key_y_utf8)
+ * 
+ *         if tls:             # <<<<<<<<<<<<<<
+ *             if tls is True:
+ *                 line_sender_opts_tls(self._opts)
+ */
+  }
+
+  /* "questdb/ilp.pyx":860
+ *                     f'"insecure_skip_verify", not {type(tls)}')
+ * 
+ *         if read_timeout is not None:             # <<<<<<<<<<<<<<
+ *             line_sender_opts_read_timeout(self._opts, read_timeout)
+ * 
+ */
+  __pyx_t_1 = (__pyx_v_read_timeout != Py_None);
+  __pyx_t_2 = (__pyx_t_1 != 0);
+  if (__pyx_t_2) {
+
+    /* "questdb/ilp.pyx":861
+ * 
+ *         if read_timeout is not None:
+ *             line_sender_opts_read_timeout(self._opts, read_timeout)             # <<<<<<<<<<<<<<
+ * 
+ *         self._init_capacity = init_capacity
+ */
+    __pyx_t_7 = __Pyx_PyInt_As_uint64_t(__pyx_v_read_timeout); if (unlikely((__pyx_t_7 == ((uint64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 861, __pyx_L1_error)
+    line_sender_opts_read_timeout(__pyx_v_self->_opts, __pyx_t_7);
+
+    /* "questdb/ilp.pyx":860
+ *                     f'"insecure_skip_verify", not {type(tls)}')
+ * 
+ *         if read_timeout is not None:             # <<<<<<<<<<<<<<
+ *             line_sender_opts_read_timeout(self._opts, read_timeout)
+ * 
+ */
+  }
+
+  /* "questdb/ilp.pyx":863
+ *             line_sender_opts_read_timeout(self._opts, read_timeout)
+ * 
+ *         self._init_capacity = init_capacity             # <<<<<<<<<<<<<<
+ *         self._max_name_len = max_name_len
+ * 
+ */
+  __pyx_t_6 = __Pyx_PyInt_From_int(__pyx_v_init_capacity); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 863, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (__Pyx_PyObject_SetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_init_capacity_2, __pyx_t_6) < 0) __PYX_ERR(0, 863, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+  /* "questdb/ilp.pyx":864
+ * 
+ *         self._init_capacity = init_capacity
+ *         self._max_name_len = max_name_len             # <<<<<<<<<<<<<<
+ * 
+ *         self._buffer = LineSenderBuffer(
+ */
+  __pyx_t_6 = __Pyx_PyInt_From_int(__pyx_v_max_name_len); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 864, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (__Pyx_PyObject_SetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_max_name_len_2, __pyx_t_6) < 0) __PYX_ERR(0, 864, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+  /* "questdb/ilp.pyx":867
+ * 
+ *         self._buffer = LineSenderBuffer(
+ *             init_capacity=init_capacity,             # <<<<<<<<<<<<<<
+ *             max_name_len=max_name_len)
+ * 
+ */
+  __pyx_t_6 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 867, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __pyx_t_5 = __Pyx_PyInt_From_int(__pyx_v_init_capacity); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 867, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  if (PyDict_SetItem(__pyx_t_6, __pyx_n_s_init_capacity, __pyx_t_5) < 0) __PYX_ERR(0, 867, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+
+  /* "questdb/ilp.pyx":868
+ *         self._buffer = LineSenderBuffer(
+ *             init_capacity=init_capacity,
+ *             max_name_len=max_name_len)             # <<<<<<<<<<<<<<
+ * 
+ *         self._auto_flush_enabled = auto_flush is not None
+ */
+  __pyx_t_5 = __Pyx_PyInt_From_int(__pyx_v_max_name_len); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 868, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  if (PyDict_SetItem(__pyx_t_6, __pyx_n_s_max_name_len, __pyx_t_5) < 0) __PYX_ERR(0, 867, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+
+  /* "questdb/ilp.pyx":866
+ *         self._max_name_len = max_name_len
+ * 
+ *         self._buffer = LineSenderBuffer(             # <<<<<<<<<<<<<<
+ *             init_capacity=init_capacity,
+ *             max_name_len=max_name_len)
+ */
+  __pyx_t_5 = __Pyx_PyObject_Call(((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer), __pyx_empty_tuple, __pyx_t_6); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 866, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  __Pyx_GIVEREF(__pyx_t_5);
   __Pyx_GOTREF(__pyx_v_self->_buffer);
   __Pyx_DECREF(((PyObject *)__pyx_v_self->_buffer));
-  __pyx_v_self->_buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_t_3);
-  __pyx_t_3 = 0;
+  __pyx_v_self->_buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_t_5);
+  __pyx_t_5 = 0;
 
-  /* "questdb/ilp.pyx":756
- *     cdef LineSenderBuffer _buffer
+  /* "questdb/ilp.pyx":870
+ *             max_name_len=max_name_len)
  * 
- *     def __cinit__(self, str host, object port):             # <<<<<<<<<<<<<<
- *         cdef line_sender_error* err = NULL
- *         cdef str port_str
+ *         self._auto_flush_enabled = auto_flush is not None             # <<<<<<<<<<<<<<
+ *         self._auto_flush_watermark = int(auto_flush) \
+ *             if self._auto_flush_enabled else 0
+ */
+  __pyx_t_2 = (__pyx_v_auto_flush != Py_None);
+  __pyx_v_self->_auto_flush_enabled = __pyx_t_2;
+
+  /* "questdb/ilp.pyx":872
+ *         self._auto_flush_enabled = auto_flush is not None
+ *         self._auto_flush_watermark = int(auto_flush) \
+ *             if self._auto_flush_enabled else 0             # <<<<<<<<<<<<<<
+ * 
+ *     def new_buffer(self):
+ */
+  if ((__pyx_v_self->_auto_flush_enabled != 0)) {
+
+    /* "questdb/ilp.pyx":871
+ * 
+ *         self._auto_flush_enabled = auto_flush is not None
+ *         self._auto_flush_watermark = int(auto_flush) \             # <<<<<<<<<<<<<<
+ *             if self._auto_flush_enabled else 0
+ * 
+ */
+    __pyx_t_5 = __Pyx_PyNumber_Int(__pyx_v_auto_flush); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 871, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_5);
+    __pyx_t_9 = __Pyx_PyInt_As_size_t(__pyx_t_5); if (unlikely((__pyx_t_9 == (size_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 871, __pyx_L1_error)
+    __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+    __pyx_t_8 = __pyx_t_9;
+  } else {
+    __pyx_t_8 = 0;
+  }
+  __pyx_v_self->_auto_flush_watermark = __pyx_t_8;
+
+  /* "questdb/ilp.pyx":766
+ *     cdef size_t _auto_flush_watermark
+ * 
+ *     def __cinit__(             # <<<<<<<<<<<<<<
+ *             self,
+ *             str host,
  */
 
   /* function exit code */
@@ -7960,18 +8805,127 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
   __pyx_L1_error:;
   __Pyx_XDECREF(__pyx_t_3);
   __Pyx_XDECREF(__pyx_t_4);
+  __Pyx_XDECREF(__pyx_t_5);
+  __Pyx_XDECREF(__pyx_t_6);
   __Pyx_AddTraceback("questdb.ilp.LineSender.__cinit__", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = -1;
   __pyx_L0:;
-  __Pyx_XDECREF(__pyx_v_port_str);
   __Pyx_XDECREF(__pyx_v_host_owner);
+  __Pyx_XDECREF(__pyx_v_port_str);
   __Pyx_XDECREF(__pyx_v_port_owner);
+  __Pyx_XDECREF(__pyx_v_interface_owner);
+  __Pyx_XDECREF(__pyx_v_a_key_id);
+  __Pyx_XDECREF(__pyx_v_a_key_id_owner);
+  __Pyx_XDECREF(__pyx_v_a_priv_key);
+  __Pyx_XDECREF(__pyx_v_a_priv_key_owner);
+  __Pyx_XDECREF(__pyx_v_a_pub_key_x);
+  __Pyx_XDECREF(__pyx_v_a_pub_key_x_owner);
+  __Pyx_XDECREF(__pyx_v_a_pub_key_y);
+  __Pyx_XDECREF(__pyx_v_a_pub_key_y_owner);
+  __Pyx_XDECREF(__pyx_v_ca_owner);
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":781
- *         self._buffer = LineSenderBuffer()
+/* "questdb/ilp.pyx":874
+ *             if self._auto_flush_enabled else 0
+ * 
+ *     def new_buffer(self):             # <<<<<<<<<<<<<<
+ *         """
+ *         Make a new configured buffer.
+ */
+
+/* Python wrapper */
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_3new_buffer(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static char __pyx_doc_7questdb_3ilp_10LineSender_2new_buffer[] = "\n        Make a new configured buffer.\n\n        The buffer is set up with the configured `init_capacity` and\n        `max_name_len`.\n        ";
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_3new_buffer = {"new_buffer", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_3new_buffer, METH_NOARGS, __pyx_doc_7questdb_3ilp_10LineSender_2new_buffer};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_3new_buffer(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
+  PyObject *__pyx_r = 0;
+  __Pyx_RefNannyDeclarations
+  __Pyx_RefNannySetupContext("new_buffer (wrapper)", 0);
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_2new_buffer(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
+
+  /* function exit code */
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2new_buffer(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
+  PyObject *__pyx_r = NULL;
+  __Pyx_RefNannyDeclarations
+  PyObject *__pyx_t_1 = NULL;
+  PyObject *__pyx_t_2 = NULL;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  __Pyx_RefNannySetupContext("new_buffer", 0);
+
+  /* "questdb/ilp.pyx":882
+ *         """
+ *         self._buffer = LineSenderBuffer(
+ *             init_capacity=self._init_capacity,             # <<<<<<<<<<<<<<
+ *             max_name_len=self._max_name_len)
+ * 
+ */
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 882, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_init_capacity_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 882, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_1, __pyx_n_s_init_capacity, __pyx_t_2) < 0) __PYX_ERR(0, 882, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "questdb/ilp.pyx":883
+ *         self._buffer = LineSenderBuffer(
+ *             init_capacity=self._init_capacity,
+ *             max_name_len=self._max_name_len)             # <<<<<<<<<<<<<<
+ * 
+ *     def connect(self):
+ */
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_max_name_len_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 883, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_1, __pyx_n_s_max_name_len, __pyx_t_2) < 0) __PYX_ERR(0, 882, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "questdb/ilp.pyx":881
+ *         `max_name_len`.
+ *         """
+ *         self._buffer = LineSenderBuffer(             # <<<<<<<<<<<<<<
+ *             init_capacity=self._init_capacity,
+ *             max_name_len=self._max_name_len)
+ */
+  __pyx_t_2 = __Pyx_PyObject_Call(((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer), __pyx_empty_tuple, __pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 881, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_GIVEREF(__pyx_t_2);
+  __Pyx_GOTREF(__pyx_v_self->_buffer);
+  __Pyx_DECREF(((PyObject *)__pyx_v_self->_buffer));
+  __pyx_v_self->_buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)__pyx_t_2);
+  __pyx_t_2 = 0;
+
+  /* "questdb/ilp.pyx":874
+ *             if self._auto_flush_enabled else 0
+ * 
+ *     def new_buffer(self):             # <<<<<<<<<<<<<<
+ *         """
+ *         Make a new configured buffer.
+ */
+
+  /* function exit code */
+  __pyx_r = Py_None; __Pyx_INCREF(Py_None);
+  goto __pyx_L0;
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_1);
+  __Pyx_XDECREF(__pyx_t_2);
+  __Pyx_AddTraceback("questdb.ilp.LineSender.new_buffer", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_r = NULL;
+  __pyx_L0:;
+  __Pyx_XGIVEREF(__pyx_r);
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+/* "questdb/ilp.pyx":885
+ *             max_name_len=self._max_name_len)
  * 
  *     def connect(self):             # <<<<<<<<<<<<<<
  *         cdef line_sender_error* err = NULL
@@ -7979,19 +8933,20 @@ static int __pyx_pf_7questdb_3ilp_10LineSender___cinit__(struct __pyx_obj_7quest
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_3connect(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_3connect(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_5connect(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_5connect = {"connect", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_5connect, METH_NOARGS, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_5connect(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("connect (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_2connect(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_4connect(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4connect(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
   struct line_sender_error *__pyx_v_err;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
@@ -8007,7 +8962,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("connect", 0);
 
-  /* "questdb/ilp.pyx":782
+  /* "questdb/ilp.pyx":886
  * 
  *     def connect(self):
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -8016,7 +8971,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":783
+  /* "questdb/ilp.pyx":887
  *     def connect(self):
  *         cdef line_sender_error* err = NULL
  *         if self._opts == NULL:             # <<<<<<<<<<<<<<
@@ -8026,26 +8981,26 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
   __pyx_t_1 = ((__pyx_v_self->_opts == NULL) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":784
+    /* "questdb/ilp.pyx":888
  *         cdef line_sender_error* err = NULL
  *         if self._opts == NULL:
  *             raise IlpError(             # <<<<<<<<<<<<<<
  *                 IlpErrorCode.InvalidApiCall,
  *                 'connect() can\'t be called after close().')
  */
-    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_n_s_IlpError); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 784, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_n_s_IlpError); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 888, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
 
-    /* "questdb/ilp.pyx":785
+    /* "questdb/ilp.pyx":889
  *         if self._opts == NULL:
  *             raise IlpError(
  *                 IlpErrorCode.InvalidApiCall,             # <<<<<<<<<<<<<<
  *                 'connect() can\'t be called after close().')
  *         self._impl = line_sender_connect(self._opts, &err)
  */
-    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_n_s_IlpErrorCode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 785, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_n_s_IlpErrorCode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 889, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_n_s_InvalidApiCall); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 785, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_n_s_InvalidApiCall); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 889, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
     __pyx_t_4 = NULL;
@@ -8063,7 +9018,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
     #if CYTHON_FAST_PYCALL
     if (PyFunction_Check(__pyx_t_3)) {
       PyObject *__pyx_temp[3] = {__pyx_t_4, __pyx_t_5, __pyx_kp_u_connect_can_t_be_called_after_cl};
-      __pyx_t_2 = __Pyx_PyFunction_FastCall(__pyx_t_3, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 784, __pyx_L1_error)
+      __pyx_t_2 = __Pyx_PyFunction_FastCall(__pyx_t_3, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 888, __pyx_L1_error)
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_GOTREF(__pyx_t_2);
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
@@ -8072,14 +9027,14 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
     #if CYTHON_FAST_PYCCALL
     if (__Pyx_PyFastCFunction_Check(__pyx_t_3)) {
       PyObject *__pyx_temp[3] = {__pyx_t_4, __pyx_t_5, __pyx_kp_u_connect_can_t_be_called_after_cl};
-      __pyx_t_2 = __Pyx_PyCFunction_FastCall(__pyx_t_3, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 784, __pyx_L1_error)
+      __pyx_t_2 = __Pyx_PyCFunction_FastCall(__pyx_t_3, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 888, __pyx_L1_error)
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_GOTREF(__pyx_t_2);
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
     } else
     #endif
     {
-      __pyx_t_7 = PyTuple_New(2+__pyx_t_6); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 784, __pyx_L1_error)
+      __pyx_t_7 = PyTuple_New(2+__pyx_t_6); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 888, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_7);
       if (__pyx_t_4) {
         __Pyx_GIVEREF(__pyx_t_4); PyTuple_SET_ITEM(__pyx_t_7, 0, __pyx_t_4); __pyx_t_4 = NULL;
@@ -8090,16 +9045,16 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
       __Pyx_GIVEREF(__pyx_kp_u_connect_can_t_be_called_after_cl);
       PyTuple_SET_ITEM(__pyx_t_7, 1+__pyx_t_6, __pyx_kp_u_connect_can_t_be_called_after_cl);
       __pyx_t_5 = 0;
-      __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_3, __pyx_t_7, NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 784, __pyx_L1_error)
+      __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_3, __pyx_t_7, NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 888, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
     }
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 784, __pyx_L1_error)
+    __PYX_ERR(0, 888, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":783
+    /* "questdb/ilp.pyx":887
  *     def connect(self):
  *         cdef line_sender_error* err = NULL
  *         if self._opts == NULL:             # <<<<<<<<<<<<<<
@@ -8108,7 +9063,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
  */
   }
 
-  /* "questdb/ilp.pyx":787
+  /* "questdb/ilp.pyx":891
  *                 IlpErrorCode.InvalidApiCall,
  *                 'connect() can\'t be called after close().')
  *         self._impl = line_sender_connect(self._opts, &err)             # <<<<<<<<<<<<<<
@@ -8117,7 +9072,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
  */
   __pyx_v_self->_impl = line_sender_connect(__pyx_v_self->_opts, (&__pyx_v_err));
 
-  /* "questdb/ilp.pyx":788
+  /* "questdb/ilp.pyx":892
  *                 'connect() can\'t be called after close().')
  *         self._impl = line_sender_connect(self._opts, &err)
  *         if self._impl == NULL:             # <<<<<<<<<<<<<<
@@ -8127,20 +9082,20 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
   __pyx_t_1 = ((__pyx_v_self->_impl == NULL) != 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "questdb/ilp.pyx":789
+    /* "questdb/ilp.pyx":893
  *         self._impl = line_sender_connect(self._opts, &err)
  *         if self._impl == NULL:
  *             raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         line_sender_opts_free(self._opts)
  *         self._opts = NULL
  */
-    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 789, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 893, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 789, __pyx_L1_error)
+    __PYX_ERR(0, 893, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":788
+    /* "questdb/ilp.pyx":892
  *                 'connect() can\'t be called after close().')
  *         self._impl = line_sender_connect(self._opts, &err)
  *         if self._impl == NULL:             # <<<<<<<<<<<<<<
@@ -8149,7 +9104,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
  */
   }
 
-  /* "questdb/ilp.pyx":790
+  /* "questdb/ilp.pyx":894
  *         if self._impl == NULL:
  *             raise c_err_to_py(err)
  *         line_sender_opts_free(self._opts)             # <<<<<<<<<<<<<<
@@ -8158,7 +9113,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
  */
   line_sender_opts_free(__pyx_v_self->_opts);
 
-  /* "questdb/ilp.pyx":791
+  /* "questdb/ilp.pyx":895
  *             raise c_err_to_py(err)
  *         line_sender_opts_free(self._opts)
  *         self._opts = NULL             # <<<<<<<<<<<<<<
@@ -8167,8 +9122,8 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
  */
   __pyx_v_self->_opts = NULL;
 
-  /* "questdb/ilp.pyx":781
- *         self._buffer = LineSenderBuffer()
+  /* "questdb/ilp.pyx":885
+ *             max_name_len=self._max_name_len)
  * 
  *     def connect(self):             # <<<<<<<<<<<<<<
  *         cdef line_sender_error* err = NULL
@@ -8192,7 +9147,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":795
+/* "questdb/ilp.pyx":899
  *         # self._buffer._row_complete_ctx = self
  * 
  *     def __enter__(self):             # <<<<<<<<<<<<<<
@@ -8201,19 +9156,20 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_2connect(struct __pyx_obj_7
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_5__enter__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_5__enter__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7__enter__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_7__enter__ = {"__enter__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_7__enter__, METH_NOARGS, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7__enter__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__enter__ (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_4__enter__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_6__enter__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4__enter__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6__enter__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -8224,14 +9180,14 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4__enter__(struct __pyx_obj
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__enter__", 0);
 
-  /* "questdb/ilp.pyx":796
+  /* "questdb/ilp.pyx":900
  * 
  *     def __enter__(self):
  *         self.connect()             # <<<<<<<<<<<<<<
  *         return self
  * 
  */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_connect); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 796, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_connect); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 900, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_t_3 = NULL;
   if (CYTHON_UNPACK_METHODS && likely(PyMethod_Check(__pyx_t_2))) {
@@ -8245,12 +9201,12 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4__enter__(struct __pyx_obj
   }
   __pyx_t_1 = (__pyx_t_3) ? __Pyx_PyObject_CallOneArg(__pyx_t_2, __pyx_t_3) : __Pyx_PyObject_CallNoArg(__pyx_t_2);
   __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-  if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 796, __pyx_L1_error)
+  if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 900, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "questdb/ilp.pyx":797
+  /* "questdb/ilp.pyx":901
  *     def __enter__(self):
  *         self.connect()
  *         return self             # <<<<<<<<<<<<<<
@@ -8262,7 +9218,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4__enter__(struct __pyx_obj
   __pyx_r = ((PyObject *)__pyx_v_self);
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":795
+  /* "questdb/ilp.pyx":899
  *         # self._buffer._row_complete_ctx = self
  * 
  *     def __enter__(self):             # <<<<<<<<<<<<<<
@@ -8283,7 +9239,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_4__enter__(struct __pyx_obj
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":800
+/* "questdb/ilp.pyx":904
  * 
  *     @property
  *     def buffer(self):             # <<<<<<<<<<<<<<
@@ -8309,7 +9265,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6buffer___get__(struct __py
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "questdb/ilp.pyx":801
+  /* "questdb/ilp.pyx":905
  *     @property
  *     def buffer(self):
  *         return self._buffer             # <<<<<<<<<<<<<<
@@ -8321,7 +9277,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6buffer___get__(struct __py
   __pyx_r = ((PyObject *)__pyx_v_self->_buffer);
   goto __pyx_L0;
 
-  /* "questdb/ilp.pyx":800
+  /* "questdb/ilp.pyx":904
  * 
  *     @property
  *     def buffer(self):             # <<<<<<<<<<<<<<
@@ -8336,7 +9292,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6buffer___get__(struct __py
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":803
+/* "questdb/ilp.pyx":907
  *         return self._buffer
  * 
  *     cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):             # <<<<<<<<<<<<<<
@@ -8344,7 +9300,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6buffer___get__(struct __py
  *         cdef line_sender_buffer* c_buf = NULL
  */
 
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7flush(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9flush(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
 static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, int __pyx_skip_dispatch, struct __pyx_opt_args_7questdb_3ilp_10LineSender_flush *__pyx_optional_args) {
   struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)Py_None);
   int __pyx_v_clear = ((int)1);
@@ -8386,11 +9342,11 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_type_dict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_flush); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 803, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_flush); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 907, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
-      if (!PyCFunction_Check(__pyx_t_1) || (PyCFunction_GET_FUNCTION(__pyx_t_1) != (PyCFunction)(void*)__pyx_pw_7questdb_3ilp_10LineSender_7flush)) {
+      if (!PyCFunction_Check(__pyx_t_1) || (PyCFunction_GET_FUNCTION(__pyx_t_1) != (PyCFunction)(void*)__pyx_pw_7questdb_3ilp_10LineSender_9flush)) {
         __Pyx_XDECREF(__pyx_r);
-        __pyx_t_3 = __Pyx_PyBool_FromLong(__pyx_v_clear); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 803, __pyx_L1_error)
+        __pyx_t_3 = __Pyx_PyBool_FromLong(__pyx_v_clear); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 907, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_3);
         __Pyx_INCREF(__pyx_t_1);
         __pyx_t_4 = __pyx_t_1; __pyx_t_5 = NULL;
@@ -8408,7 +9364,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
         #if CYTHON_FAST_PYCALL
         if (PyFunction_Check(__pyx_t_4)) {
           PyObject *__pyx_temp[3] = {__pyx_t_5, ((PyObject *)__pyx_v_buffer), __pyx_t_3};
-          __pyx_t_2 = __Pyx_PyFunction_FastCall(__pyx_t_4, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 803, __pyx_L1_error)
+          __pyx_t_2 = __Pyx_PyFunction_FastCall(__pyx_t_4, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 907, __pyx_L1_error)
           __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
           __Pyx_GOTREF(__pyx_t_2);
           __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
@@ -8417,14 +9373,14 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
         #if CYTHON_FAST_PYCCALL
         if (__Pyx_PyFastCFunction_Check(__pyx_t_4)) {
           PyObject *__pyx_temp[3] = {__pyx_t_5, ((PyObject *)__pyx_v_buffer), __pyx_t_3};
-          __pyx_t_2 = __Pyx_PyCFunction_FastCall(__pyx_t_4, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 803, __pyx_L1_error)
+          __pyx_t_2 = __Pyx_PyCFunction_FastCall(__pyx_t_4, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 907, __pyx_L1_error)
           __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
           __Pyx_GOTREF(__pyx_t_2);
           __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
         } else
         #endif
         {
-          __pyx_t_7 = PyTuple_New(2+__pyx_t_6); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 803, __pyx_L1_error)
+          __pyx_t_7 = PyTuple_New(2+__pyx_t_6); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 907, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_7);
           if (__pyx_t_5) {
             __Pyx_GIVEREF(__pyx_t_5); PyTuple_SET_ITEM(__pyx_t_7, 0, __pyx_t_5); __pyx_t_5 = NULL;
@@ -8435,7 +9391,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
           __Pyx_GIVEREF(__pyx_t_3);
           PyTuple_SET_ITEM(__pyx_t_7, 1+__pyx_t_6, __pyx_t_3);
           __pyx_t_3 = 0;
-          __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_4, __pyx_t_7, NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 803, __pyx_L1_error)
+          __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_4, __pyx_t_7, NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 907, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
           __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
         }
@@ -8458,7 +9414,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     #endif
   }
 
-  /* "questdb/ilp.pyx":804
+  /* "questdb/ilp.pyx":908
  * 
  *     cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):
  *         cdef line_sender_error* err = NULL             # <<<<<<<<<<<<<<
@@ -8467,7 +9423,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
   __pyx_v_err = NULL;
 
-  /* "questdb/ilp.pyx":805
+  /* "questdb/ilp.pyx":909
  *     cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):
  *         cdef line_sender_error* err = NULL
  *         cdef line_sender_buffer* c_buf = NULL             # <<<<<<<<<<<<<<
@@ -8476,7 +9432,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
   __pyx_v_c_buf = NULL;
 
-  /* "questdb/ilp.pyx":806
+  /* "questdb/ilp.pyx":910
  *         cdef line_sender_error* err = NULL
  *         cdef line_sender_buffer* c_buf = NULL
  *         if self._impl == NULL:             # <<<<<<<<<<<<<<
@@ -8486,26 +9442,26 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
   __pyx_t_8 = ((__pyx_v_self->_impl == NULL) != 0);
   if (unlikely(__pyx_t_8)) {
 
-    /* "questdb/ilp.pyx":807
+    /* "questdb/ilp.pyx":911
  *         cdef line_sender_buffer* c_buf = NULL
  *         if self._impl == NULL:
  *             raise IlpError(             # <<<<<<<<<<<<<<
  *                 IlpErrorCode.InvalidApiCall,
  *                 'flush() can\'t be called after close().')
  */
-    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_n_s_IlpError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 807, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_n_s_IlpError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 911, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
 
-    /* "questdb/ilp.pyx":808
+    /* "questdb/ilp.pyx":912
  *         if self._impl == NULL:
  *             raise IlpError(
  *                 IlpErrorCode.InvalidApiCall,             # <<<<<<<<<<<<<<
  *                 'flush() can\'t be called after close().')
  *         if buffer is not None:
  */
-    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_n_s_IlpErrorCode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 808, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_n_s_IlpErrorCode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 912, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_n_s_InvalidApiCall); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 808, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_n_s_InvalidApiCall); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 912, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
     __pyx_t_4 = NULL;
@@ -8523,7 +9479,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     #if CYTHON_FAST_PYCALL
     if (PyFunction_Check(__pyx_t_2)) {
       PyObject *__pyx_temp[3] = {__pyx_t_4, __pyx_t_7, __pyx_kp_u_flush_can_t_be_called_after_clos};
-      __pyx_t_1 = __Pyx_PyFunction_FastCall(__pyx_t_2, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 807, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyFunction_FastCall(__pyx_t_2, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 911, __pyx_L1_error)
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_GOTREF(__pyx_t_1);
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
@@ -8532,14 +9488,14 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     #if CYTHON_FAST_PYCCALL
     if (__Pyx_PyFastCFunction_Check(__pyx_t_2)) {
       PyObject *__pyx_temp[3] = {__pyx_t_4, __pyx_t_7, __pyx_kp_u_flush_can_t_be_called_after_clos};
-      __pyx_t_1 = __Pyx_PyCFunction_FastCall(__pyx_t_2, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 807, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyCFunction_FastCall(__pyx_t_2, __pyx_temp+1-__pyx_t_6, 2+__pyx_t_6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 911, __pyx_L1_error)
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_GOTREF(__pyx_t_1);
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
     } else
     #endif
     {
-      __pyx_t_3 = PyTuple_New(2+__pyx_t_6); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 807, __pyx_L1_error)
+      __pyx_t_3 = PyTuple_New(2+__pyx_t_6); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 911, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
       if (__pyx_t_4) {
         __Pyx_GIVEREF(__pyx_t_4); PyTuple_SET_ITEM(__pyx_t_3, 0, __pyx_t_4); __pyx_t_4 = NULL;
@@ -8550,16 +9506,16 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
       __Pyx_GIVEREF(__pyx_kp_u_flush_can_t_be_called_after_clos);
       PyTuple_SET_ITEM(__pyx_t_3, 1+__pyx_t_6, __pyx_kp_u_flush_can_t_be_called_after_clos);
       __pyx_t_7 = 0;
-      __pyx_t_1 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_t_3, NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 807, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_t_3, NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 911, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
     }
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(0, 807, __pyx_L1_error)
+    __PYX_ERR(0, 911, __pyx_L1_error)
 
-    /* "questdb/ilp.pyx":806
+    /* "questdb/ilp.pyx":910
  *         cdef line_sender_error* err = NULL
  *         cdef line_sender_buffer* c_buf = NULL
  *         if self._impl == NULL:             # <<<<<<<<<<<<<<
@@ -8568,7 +9524,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
   }
 
-  /* "questdb/ilp.pyx":810
+  /* "questdb/ilp.pyx":914
  *                 IlpErrorCode.InvalidApiCall,
  *                 'flush() can\'t be called after close().')
  *         if buffer is not None:             # <<<<<<<<<<<<<<
@@ -8579,7 +9535,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
   __pyx_t_9 = (__pyx_t_8 != 0);
   if (__pyx_t_9) {
 
-    /* "questdb/ilp.pyx":811
+    /* "questdb/ilp.pyx":915
  *                 'flush() can\'t be called after close().')
  *         if buffer is not None:
  *             c_buf = buffer._impl             # <<<<<<<<<<<<<<
@@ -8589,7 +9545,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     __pyx_t_10 = __pyx_v_buffer->_impl;
     __pyx_v_c_buf = __pyx_t_10;
 
-    /* "questdb/ilp.pyx":810
+    /* "questdb/ilp.pyx":914
  *                 IlpErrorCode.InvalidApiCall,
  *                 'flush() can\'t be called after close().')
  *         if buffer is not None:             # <<<<<<<<<<<<<<
@@ -8599,7 +9555,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     goto __pyx_L4;
   }
 
-  /* "questdb/ilp.pyx":813
+  /* "questdb/ilp.pyx":917
  *             c_buf = buffer._impl
  *         else:
  *             c_buf = self._buffer._impl             # <<<<<<<<<<<<<<
@@ -8612,7 +9568,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
   }
   __pyx_L4:;
 
-  /* "questdb/ilp.pyx":814
+  /* "questdb/ilp.pyx":918
  *         else:
  *             c_buf = self._buffer._impl
  *         if line_sender_buffer_size(c_buf) == 0:             # <<<<<<<<<<<<<<
@@ -8622,7 +9578,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
   __pyx_t_9 = ((line_sender_buffer_size(__pyx_v_c_buf) == 0) != 0);
   if (__pyx_t_9) {
 
-    /* "questdb/ilp.pyx":815
+    /* "questdb/ilp.pyx":919
  *             c_buf = self._buffer._impl
  *         if line_sender_buffer_size(c_buf) == 0:
  *             return             # <<<<<<<<<<<<<<
@@ -8633,7 +9589,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "questdb/ilp.pyx":814
+    /* "questdb/ilp.pyx":918
  *         else:
  *             c_buf = self._buffer._impl
  *         if line_sender_buffer_size(c_buf) == 0:             # <<<<<<<<<<<<<<
@@ -8642,7 +9598,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
   }
 
-  /* "questdb/ilp.pyx":817
+  /* "questdb/ilp.pyx":921
  *             return
  * 
  *         try:             # <<<<<<<<<<<<<<
@@ -8658,7 +9614,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     __Pyx_XGOTREF(__pyx_t_13);
     /*try:*/ {
 
-      /* "questdb/ilp.pyx":818
+      /* "questdb/ilp.pyx":922
  * 
  *         try:
  *             if clear:             # <<<<<<<<<<<<<<
@@ -8668,7 +9624,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
       __pyx_t_9 = (__pyx_v_clear != 0);
       if (__pyx_t_9) {
 
-        /* "questdb/ilp.pyx":819
+        /* "questdb/ilp.pyx":923
  *         try:
  *             if clear:
  *                 if not line_sender_flush(self._impl, c_buf, &err):             # <<<<<<<<<<<<<<
@@ -8678,20 +9634,20 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
         __pyx_t_9 = ((!(line_sender_flush(__pyx_v_self->_impl, __pyx_v_c_buf, (&__pyx_v_err)) != 0)) != 0);
         if (unlikely(__pyx_t_9)) {
 
-          /* "questdb/ilp.pyx":820
+          /* "questdb/ilp.pyx":924
  *             if clear:
  *                 if not line_sender_flush(self._impl, c_buf, &err):
  *                     raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *             else:
  *                 if not line_sender_flush_and_keep(self._impl, c_buf, &err):
  */
-          __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 820, __pyx_L6_error)
+          __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 924, __pyx_L6_error)
           __Pyx_GOTREF(__pyx_t_1);
           __Pyx_Raise(__pyx_t_1, 0, 0, 0);
           __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-          __PYX_ERR(0, 820, __pyx_L6_error)
+          __PYX_ERR(0, 924, __pyx_L6_error)
 
-          /* "questdb/ilp.pyx":819
+          /* "questdb/ilp.pyx":923
  *         try:
  *             if clear:
  *                 if not line_sender_flush(self._impl, c_buf, &err):             # <<<<<<<<<<<<<<
@@ -8700,7 +9656,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
         }
 
-        /* "questdb/ilp.pyx":818
+        /* "questdb/ilp.pyx":922
  * 
  *         try:
  *             if clear:             # <<<<<<<<<<<<<<
@@ -8710,7 +9666,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
         goto __pyx_L12;
       }
 
-      /* "questdb/ilp.pyx":822
+      /* "questdb/ilp.pyx":926
  *                     raise c_err_to_py(err)
  *             else:
  *                 if not line_sender_flush_and_keep(self._impl, c_buf, &err):             # <<<<<<<<<<<<<<
@@ -8721,20 +9677,20 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
         __pyx_t_9 = ((!(line_sender_flush_and_keep(__pyx_v_self->_impl, __pyx_v_c_buf, (&__pyx_v_err)) != 0)) != 0);
         if (unlikely(__pyx_t_9)) {
 
-          /* "questdb/ilp.pyx":823
+          /* "questdb/ilp.pyx":927
  *             else:
  *                 if not line_sender_flush_and_keep(self._impl, c_buf, &err):
  *                     raise c_err_to_py(err)             # <<<<<<<<<<<<<<
  *         except:
  *             # Prevent a follow-up call to `.close(flush=True)` (as is usually
  */
-          __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 823, __pyx_L6_error)
+          __pyx_t_1 = __pyx_f_7questdb_3ilp_c_err_to_py(__pyx_v_err); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 927, __pyx_L6_error)
           __Pyx_GOTREF(__pyx_t_1);
           __Pyx_Raise(__pyx_t_1, 0, 0, 0);
           __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-          __PYX_ERR(0, 823, __pyx_L6_error)
+          __PYX_ERR(0, 927, __pyx_L6_error)
 
-          /* "questdb/ilp.pyx":822
+          /* "questdb/ilp.pyx":926
  *                     raise c_err_to_py(err)
  *             else:
  *                 if not line_sender_flush_and_keep(self._impl, c_buf, &err):             # <<<<<<<<<<<<<<
@@ -8745,7 +9701,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
       }
       __pyx_L12:;
 
-      /* "questdb/ilp.pyx":817
+      /* "questdb/ilp.pyx":921
  *             return
  * 
  *         try:             # <<<<<<<<<<<<<<
@@ -8765,7 +9721,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
     __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-    /* "questdb/ilp.pyx":824
+    /* "questdb/ilp.pyx":928
  *                 if not line_sender_flush_and_keep(self._impl, c_buf, &err):
  *                     raise c_err_to_py(err)
  *         except:             # <<<<<<<<<<<<<<
@@ -8774,12 +9730,12 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
     /*except:*/ {
       __Pyx_AddTraceback("questdb.ilp.LineSender.flush", __pyx_clineno, __pyx_lineno, __pyx_filename);
-      if (__Pyx_GetException(&__pyx_t_1, &__pyx_t_2, &__pyx_t_3) < 0) __PYX_ERR(0, 824, __pyx_L8_except_error)
+      if (__Pyx_GetException(&__pyx_t_1, &__pyx_t_2, &__pyx_t_3) < 0) __PYX_ERR(0, 928, __pyx_L8_except_error)
       __Pyx_GOTREF(__pyx_t_1);
       __Pyx_GOTREF(__pyx_t_2);
       __Pyx_GOTREF(__pyx_t_3);
 
-      /* "questdb/ilp.pyx":828
+      /* "questdb/ilp.pyx":932
  *             # called from `__exit__`) to raise after the sender entered an error
  *             # state following a failed call to `.flush()`.
  *             if c_buf == self._buffer._impl:             # <<<<<<<<<<<<<<
@@ -8789,7 +9745,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
       __pyx_t_9 = ((__pyx_v_c_buf == __pyx_v_self->_buffer->_impl) != 0);
       if (__pyx_t_9) {
 
-        /* "questdb/ilp.pyx":829
+        /* "questdb/ilp.pyx":933
  *             # state following a failed call to `.flush()`.
  *             if c_buf == self._buffer._impl:
  *                 line_sender_buffer_clear(c_buf)             # <<<<<<<<<<<<<<
@@ -8798,7 +9754,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
         line_sender_buffer_clear(__pyx_v_c_buf);
 
-        /* "questdb/ilp.pyx":828
+        /* "questdb/ilp.pyx":932
  *             # called from `__exit__`) to raise after the sender entered an error
  *             # state following a failed call to `.flush()`.
  *             if c_buf == self._buffer._impl:             # <<<<<<<<<<<<<<
@@ -8807,7 +9763,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
  */
       }
 
-      /* "questdb/ilp.pyx":830
+      /* "questdb/ilp.pyx":934
  *             if c_buf == self._buffer._impl:
  *                 line_sender_buffer_clear(c_buf)
  *             raise             # <<<<<<<<<<<<<<
@@ -8819,11 +9775,11 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
       __Pyx_XGIVEREF(__pyx_t_3);
       __Pyx_ErrRestoreWithState(__pyx_t_1, __pyx_t_2, __pyx_t_3);
       __pyx_t_1 = 0; __pyx_t_2 = 0; __pyx_t_3 = 0; 
-      __PYX_ERR(0, 830, __pyx_L8_except_error)
+      __PYX_ERR(0, 934, __pyx_L8_except_error)
     }
     __pyx_L8_except_error:;
 
-    /* "questdb/ilp.pyx":817
+    /* "questdb/ilp.pyx":921
  *             return
  * 
  *         try:             # <<<<<<<<<<<<<<
@@ -8838,7 +9794,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
     __pyx_L11_try_end:;
   }
 
-  /* "questdb/ilp.pyx":803
+  /* "questdb/ilp.pyx":907
  *         return self._buffer
  * 
  *     cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):             # <<<<<<<<<<<<<<
@@ -8865,8 +9821,9 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_flush(struct __pyx_obj_7ques
 }
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7flush(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7flush(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9flush(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_9flush = {"flush", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_10LineSender_9flush, METH_VARARGS|METH_KEYWORDS, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9flush(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
   struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_buffer = 0;
   int __pyx_v_clear;
   int __pyx_lineno = 0;
@@ -8905,7 +9862,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7flush(PyObject *__pyx_v_se
         }
       }
       if (unlikely(kw_args > 0)) {
-        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "flush") < 0)) __PYX_ERR(0, 803, __pyx_L3_error)
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "flush") < 0)) __PYX_ERR(0, 907, __pyx_L3_error)
       }
     } else {
       switch (PyTuple_GET_SIZE(__pyx_args)) {
@@ -8919,21 +9876,21 @@ static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7flush(PyObject *__pyx_v_se
     }
     __pyx_v_buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)values[0]);
     if (values[1]) {
-      __pyx_v_clear = __Pyx_PyObject_IsTrue(values[1]); if (unlikely((__pyx_v_clear == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 803, __pyx_L3_error)
+      __pyx_v_clear = __Pyx_PyObject_IsTrue(values[1]); if (unlikely((__pyx_v_clear == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 907, __pyx_L3_error)
     } else {
       __pyx_v_clear = ((int)1);
     }
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("flush", 0, 0, 2, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 803, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("flush", 0, 0, 2, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 907, __pyx_L3_error)
   __pyx_L3_error:;
   __Pyx_AddTraceback("questdb.ilp.LineSender.flush", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_buffer), __pyx_ptype_7questdb_3ilp_LineSenderBuffer, 1, "buffer", 0))) __PYX_ERR(0, 803, __pyx_L1_error)
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_6flush(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_buffer, __pyx_v_clear);
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_buffer), __pyx_ptype_7questdb_3ilp_LineSenderBuffer, 1, "buffer", 0))) __PYX_ERR(0, 907, __pyx_L1_error)
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_8flush(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_buffer, __pyx_v_clear);
 
   /* function exit code */
   goto __pyx_L0;
@@ -8944,7 +9901,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_7flush(PyObject *__pyx_v_se
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6flush(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_buffer, int __pyx_v_clear) {
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_8flush(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *__pyx_v_buffer, int __pyx_v_clear) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -8957,7 +9914,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6flush(struct __pyx_obj_7qu
   __pyx_t_2.__pyx_n = 2;
   __pyx_t_2.buffer = __pyx_v_buffer;
   __pyx_t_2.clear = __pyx_v_clear;
-  __pyx_t_1 = __pyx_vtabptr_7questdb_3ilp_LineSender->flush(__pyx_v_self, 1, &__pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 803, __pyx_L1_error)
+  __pyx_t_1 = __pyx_vtabptr_7questdb_3ilp_LineSender->flush(__pyx_v_self, 1, &__pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 907, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -8974,7 +9931,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6flush(struct __pyx_obj_7qu
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":832
+/* "questdb/ilp.pyx":936
  *             raise
  * 
  *     cpdef close(self, bint flush=True):             # <<<<<<<<<<<<<<
@@ -8982,7 +9939,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_6flush(struct __pyx_obj_7qu
  *         self._buffer._row_complete_ctx = NULL
  */
 
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9close(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_11close(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
 static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, int __pyx_skip_dispatch, struct __pyx_opt_args_7questdb_3ilp_10LineSender_close *__pyx_optional_args) {
   int __pyx_v_flush = ((int)1);
   PyObject *__pyx_r = NULL;
@@ -9022,11 +9979,11 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_type_dict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_close); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 832, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_n_s_close); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 936, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
-      if (!PyCFunction_Check(__pyx_t_1) || (PyCFunction_GET_FUNCTION(__pyx_t_1) != (PyCFunction)(void*)__pyx_pw_7questdb_3ilp_10LineSender_9close)) {
+      if (!PyCFunction_Check(__pyx_t_1) || (PyCFunction_GET_FUNCTION(__pyx_t_1) != (PyCFunction)(void*)__pyx_pw_7questdb_3ilp_10LineSender_11close)) {
         __Pyx_XDECREF(__pyx_r);
-        __pyx_t_3 = __Pyx_PyBool_FromLong(__pyx_v_flush); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 832, __pyx_L1_error)
+        __pyx_t_3 = __Pyx_PyBool_FromLong(__pyx_v_flush); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 936, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_3);
         __Pyx_INCREF(__pyx_t_1);
         __pyx_t_4 = __pyx_t_1; __pyx_t_5 = NULL;
@@ -9042,7 +9999,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
         __pyx_t_2 = (__pyx_t_5) ? __Pyx_PyObject_Call2Args(__pyx_t_4, __pyx_t_5, __pyx_t_3) : __Pyx_PyObject_CallOneArg(__pyx_t_4, __pyx_t_3);
         __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
         __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 832, __pyx_L1_error)
+        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 936, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_2);
         __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
         __pyx_r = __pyx_t_2;
@@ -9063,7 +10020,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
     #endif
   }
 
-  /* "questdb/ilp.pyx":833
+  /* "questdb/ilp.pyx":937
  * 
  *     cpdef close(self, bint flush=True):
  *         self._buffer._row_complete_cb = NULL             # <<<<<<<<<<<<<<
@@ -9072,7 +10029,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
  */
   __pyx_v_self->_buffer->_row_complete_cb = NULL;
 
-  /* "questdb/ilp.pyx":834
+  /* "questdb/ilp.pyx":938
  *     cpdef close(self, bint flush=True):
  *         self._buffer._row_complete_cb = NULL
  *         self._buffer._row_complete_ctx = NULL             # <<<<<<<<<<<<<<
@@ -9081,7 +10038,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
  */
   __pyx_v_self->_buffer->_row_complete_ctx = NULL;
 
-  /* "questdb/ilp.pyx":835
+  /* "questdb/ilp.pyx":939
  *         self._buffer._row_complete_cb = NULL
  *         self._buffer._row_complete_ctx = NULL
  *         line_sender_opts_free(self._opts)             # <<<<<<<<<<<<<<
@@ -9090,7 +10047,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
  */
   line_sender_opts_free(__pyx_v_self->_opts);
 
-  /* "questdb/ilp.pyx":836
+  /* "questdb/ilp.pyx":940
  *         self._buffer._row_complete_ctx = NULL
  *         line_sender_opts_free(self._opts)
  *         self._opts = NULL             # <<<<<<<<<<<<<<
@@ -9099,7 +10056,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
  */
   __pyx_v_self->_opts = NULL;
 
-  /* "questdb/ilp.pyx":837
+  /* "questdb/ilp.pyx":941
  *         line_sender_opts_free(self._opts)
  *         self._opts = NULL
  *         try:             # <<<<<<<<<<<<<<
@@ -9108,7 +10065,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
  */
   /*try:*/ {
 
-    /* "questdb/ilp.pyx":838
+    /* "questdb/ilp.pyx":942
  *         self._opts = NULL
  *         try:
  *             if (flush and (self._impl != NULL) and             # <<<<<<<<<<<<<<
@@ -9128,7 +10085,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
       goto __pyx_L7_bool_binop_done;
     }
 
-    /* "questdb/ilp.pyx":839
+    /* "questdb/ilp.pyx":943
  *         try:
  *             if (flush and (self._impl != NULL) and
  *                     (not line_sender_must_close(self._impl))):             # <<<<<<<<<<<<<<
@@ -9139,7 +10096,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
     __pyx_t_6 = __pyx_t_7;
     __pyx_L7_bool_binop_done:;
 
-    /* "questdb/ilp.pyx":838
+    /* "questdb/ilp.pyx":942
  *         self._opts = NULL
  *         try:
  *             if (flush and (self._impl != NULL) and             # <<<<<<<<<<<<<<
@@ -9148,7 +10105,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
  */
     if (__pyx_t_6) {
 
-      /* "questdb/ilp.pyx":840
+      /* "questdb/ilp.pyx":944
  *             if (flush and (self._impl != NULL) and
  *                     (not line_sender_must_close(self._impl))):
  *                 self.flush(None, True)             # <<<<<<<<<<<<<<
@@ -9158,11 +10115,11 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
       __pyx_t_8.__pyx_n = 2;
       __pyx_t_8.buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)Py_None);
       __pyx_t_8.clear = 1;
-      __pyx_t_1 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSender *)__pyx_v_self->__pyx_vtab)->flush(__pyx_v_self, 0, &__pyx_t_8); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 840, __pyx_L4_error)
+      __pyx_t_1 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSender *)__pyx_v_self->__pyx_vtab)->flush(__pyx_v_self, 0, &__pyx_t_8); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 944, __pyx_L4_error)
       __Pyx_GOTREF(__pyx_t_1);
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "questdb/ilp.pyx":838
+      /* "questdb/ilp.pyx":942
  *         self._opts = NULL
  *         try:
  *             if (flush and (self._impl != NULL) and             # <<<<<<<<<<<<<<
@@ -9172,7 +10129,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
     }
   }
 
-  /* "questdb/ilp.pyx":842
+  /* "questdb/ilp.pyx":946
  *                 self.flush(None, True)
  *         finally:
  *             line_sender_close(self._impl)             # <<<<<<<<<<<<<<
@@ -9223,7 +10180,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
     __pyx_L5:;
   }
 
-  /* "questdb/ilp.pyx":843
+  /* "questdb/ilp.pyx":947
  *         finally:
  *             line_sender_close(self._impl)
  *         self._impl = NULL             # <<<<<<<<<<<<<<
@@ -9232,7 +10189,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
  */
   __pyx_v_self->_impl = NULL;
 
-  /* "questdb/ilp.pyx":844
+  /* "questdb/ilp.pyx":948
  *             line_sender_close(self._impl)
  *         self._impl = NULL
  *         self._buffer = None             # <<<<<<<<<<<<<<
@@ -9245,7 +10202,7 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
   __Pyx_DECREF(((PyObject *)__pyx_v_self->_buffer));
   __pyx_v_self->_buffer = ((struct __pyx_obj_7questdb_3ilp_LineSenderBuffer *)Py_None);
 
-  /* "questdb/ilp.pyx":832
+  /* "questdb/ilp.pyx":936
  *             raise
  * 
  *     cpdef close(self, bint flush=True):             # <<<<<<<<<<<<<<
@@ -9271,8 +10228,9 @@ static PyObject *__pyx_f_7questdb_3ilp_10LineSender_close(struct __pyx_obj_7ques
 }
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9close(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9close(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_11close(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_11close = {"close", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_10LineSender_11close, METH_VARARGS|METH_KEYWORDS, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_11close(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
   int __pyx_v_flush;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
@@ -9301,7 +10259,7 @@ static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9close(PyObject *__pyx_v_se
         }
       }
       if (unlikely(kw_args > 0)) {
-        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "close") < 0)) __PYX_ERR(0, 832, __pyx_L3_error)
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "close") < 0)) __PYX_ERR(0, 936, __pyx_L3_error)
       }
     } else {
       switch (PyTuple_GET_SIZE(__pyx_args)) {
@@ -9312,27 +10270,27 @@ static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_9close(PyObject *__pyx_v_se
       }
     }
     if (values[0]) {
-      __pyx_v_flush = __Pyx_PyObject_IsTrue(values[0]); if (unlikely((__pyx_v_flush == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 832, __pyx_L3_error)
+      __pyx_v_flush = __Pyx_PyObject_IsTrue(values[0]); if (unlikely((__pyx_v_flush == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 936, __pyx_L3_error)
     } else {
       __pyx_v_flush = ((int)1);
     }
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("close", 0, 0, 1, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 832, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("close", 0, 0, 1, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 936, __pyx_L3_error)
   __pyx_L3_error:;
   __Pyx_AddTraceback("questdb.ilp.LineSender.close", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_8close(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_flush);
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_10close(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_flush);
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_8close(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, int __pyx_v_flush) {
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_10close(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, int __pyx_v_flush) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -9344,7 +10302,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_8close(struct __pyx_obj_7qu
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_2.__pyx_n = 1;
   __pyx_t_2.flush = __pyx_v_flush;
-  __pyx_t_1 = __pyx_vtabptr_7questdb_3ilp_LineSender->close(__pyx_v_self, 1, &__pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 832, __pyx_L1_error)
+  __pyx_t_1 = __pyx_vtabptr_7questdb_3ilp_LineSender->close(__pyx_v_self, 1, &__pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 936, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -9361,7 +10319,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_8close(struct __pyx_obj_7qu
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":846
+/* "questdb/ilp.pyx":950
  *         self._buffer = None
  * 
  *     def __exit__(self, exc_type, _exc_val, _exc_tb):             # <<<<<<<<<<<<<<
@@ -9370,8 +10328,9 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_8close(struct __pyx_obj_7qu
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_11__exit__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_11__exit__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_13__exit__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_13__exit__ = {"__exit__", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_10LineSender_13__exit__, METH_VARARGS|METH_KEYWORDS, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_13__exit__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
   PyObject *__pyx_v_exc_type = 0;
   CYTHON_UNUSED PyObject *__pyx_v__exc_val = 0;
   CYTHON_UNUSED PyObject *__pyx_v__exc_tb = 0;
@@ -9406,17 +10365,17 @@ static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_11__exit__(PyObject *__pyx_
         case  1:
         if (likely((values[1] = __Pyx_PyDict_GetItemStr(__pyx_kwds, __pyx_n_s_exc_val)) != 0)) kw_args--;
         else {
-          __Pyx_RaiseArgtupleInvalid("__exit__", 1, 3, 3, 1); __PYX_ERR(0, 846, __pyx_L3_error)
+          __Pyx_RaiseArgtupleInvalid("__exit__", 1, 3, 3, 1); __PYX_ERR(0, 950, __pyx_L3_error)
         }
         CYTHON_FALLTHROUGH;
         case  2:
         if (likely((values[2] = __Pyx_PyDict_GetItemStr(__pyx_kwds, __pyx_n_s_exc_tb)) != 0)) kw_args--;
         else {
-          __Pyx_RaiseArgtupleInvalid("__exit__", 1, 3, 3, 2); __PYX_ERR(0, 846, __pyx_L3_error)
+          __Pyx_RaiseArgtupleInvalid("__exit__", 1, 3, 3, 2); __PYX_ERR(0, 950, __pyx_L3_error)
         }
       }
       if (unlikely(kw_args > 0)) {
-        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "__exit__") < 0)) __PYX_ERR(0, 846, __pyx_L3_error)
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, "__exit__") < 0)) __PYX_ERR(0, 950, __pyx_L3_error)
       }
     } else if (PyTuple_GET_SIZE(__pyx_args) != 3) {
       goto __pyx_L5_argtuple_error;
@@ -9431,20 +10390,20 @@ static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_11__exit__(PyObject *__pyx_
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__exit__", 1, 3, 3, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 846, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__exit__", 1, 3, 3, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 950, __pyx_L3_error)
   __pyx_L3_error:;
   __Pyx_AddTraceback("questdb.ilp.LineSender.__exit__", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_10__exit__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_exc_type, __pyx_v__exc_val, __pyx_v__exc_tb);
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_12__exit__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), __pyx_v_exc_type, __pyx_v__exc_val, __pyx_v__exc_tb);
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_10__exit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_exc_type, CYTHON_UNUSED PyObject *__pyx_v__exc_val, CYTHON_UNUSED PyObject *__pyx_v__exc_tb) {
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_12__exit__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, PyObject *__pyx_v_exc_type, CYTHON_UNUSED PyObject *__pyx_v__exc_val, CYTHON_UNUSED PyObject *__pyx_v__exc_tb) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   int __pyx_t_1;
@@ -9455,21 +10414,21 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_10__exit__(struct __pyx_obj
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__exit__", 0);
 
-  /* "questdb/ilp.pyx":847
+  /* "questdb/ilp.pyx":951
  * 
  *     def __exit__(self, exc_type, _exc_val, _exc_tb):
  *         self.close(not exc_type)             # <<<<<<<<<<<<<<
  * 
  *     def __dealloc__(self):
  */
-  __pyx_t_1 = __Pyx_PyObject_IsTrue(__pyx_v_exc_type); if (unlikely(__pyx_t_1 < 0)) __PYX_ERR(0, 847, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_IsTrue(__pyx_v_exc_type); if (unlikely(__pyx_t_1 < 0)) __PYX_ERR(0, 951, __pyx_L1_error)
   __pyx_t_3.__pyx_n = 1;
   __pyx_t_3.flush = (!__pyx_t_1);
-  __pyx_t_2 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSender *)__pyx_v_self->__pyx_vtab)->close(__pyx_v_self, 0, &__pyx_t_3); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 847, __pyx_L1_error)
+  __pyx_t_2 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSender *)__pyx_v_self->__pyx_vtab)->close(__pyx_v_self, 0, &__pyx_t_3); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 951, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "questdb/ilp.pyx":846
+  /* "questdb/ilp.pyx":950
  *         self._buffer = None
  * 
  *     def __exit__(self, exc_type, _exc_val, _exc_tb):             # <<<<<<<<<<<<<<
@@ -9490,7 +10449,7 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_10__exit__(struct __pyx_obj
   return __pyx_r;
 }
 
-/* "questdb/ilp.pyx":849
+/* "questdb/ilp.pyx":953
  *         self.close(not exc_type)
  * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
@@ -9499,17 +10458,17 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_10__exit__(struct __pyx_obj
  */
 
 /* Python wrapper */
-static void __pyx_pw_7questdb_3ilp_10LineSender_13__dealloc__(PyObject *__pyx_v_self); /*proto*/
-static void __pyx_pw_7questdb_3ilp_10LineSender_13__dealloc__(PyObject *__pyx_v_self) {
+static void __pyx_pw_7questdb_3ilp_10LineSender_15__dealloc__(PyObject *__pyx_v_self); /*proto*/
+static void __pyx_pw_7questdb_3ilp_10LineSender_15__dealloc__(PyObject *__pyx_v_self) {
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__dealloc__ (wrapper)", 0);
-  __pyx_pf_7questdb_3ilp_10LineSender_12__dealloc__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
+  __pyx_pf_7questdb_3ilp_10LineSender_14__dealloc__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
 }
 
-static void __pyx_pf_7questdb_3ilp_10LineSender_12__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
+static void __pyx_pf_7questdb_3ilp_10LineSender_14__dealloc__(struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
   struct __pyx_opt_args_7questdb_3ilp_10LineSender_close __pyx_t_2;
@@ -9518,7 +10477,7 @@ static void __pyx_pf_7questdb_3ilp_10LineSender_12__dealloc__(struct __pyx_obj_7
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__dealloc__", 0);
 
-  /* "questdb/ilp.pyx":850
+  /* "questdb/ilp.pyx":954
  * 
  *     def __dealloc__(self):
  *         self.close(False)             # <<<<<<<<<<<<<<
@@ -9527,11 +10486,11 @@ static void __pyx_pf_7questdb_3ilp_10LineSender_12__dealloc__(struct __pyx_obj_7
  */
   __pyx_t_2.__pyx_n = 1;
   __pyx_t_2.flush = 0;
-  __pyx_t_1 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSender *)__pyx_v_self->__pyx_vtab)->close(__pyx_v_self, 0, &__pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 850, __pyx_L1_error)
+  __pyx_t_1 = ((struct __pyx_vtabstruct_7questdb_3ilp_LineSender *)__pyx_v_self->__pyx_vtab)->close(__pyx_v_self, 0, &__pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 954, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "questdb/ilp.pyx":849
+  /* "questdb/ilp.pyx":953
  *         self.close(not exc_type)
  * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
@@ -9555,19 +10514,20 @@ static void __pyx_pf_7questdb_3ilp_10LineSender_12__dealloc__(struct __pyx_obj_7
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_15__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_15__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_17__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_17__reduce_cython__ = {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_17__reduce_cython__, METH_NOARGS, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_17__reduce_cython__(PyObject *__pyx_v_self, CYTHON_UNUSED PyObject *unused) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__reduce_cython__ (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_14__reduce_cython__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_16__reduce_cython__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_14__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_16__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -9612,19 +10572,20 @@ static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_14__reduce_cython__(CYTHON_
  */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_17__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state); /*proto*/
-static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_17__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_19__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state); /*proto*/
+static PyMethodDef __pyx_mdef_7questdb_3ilp_10LineSender_19__setstate_cython__ = {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_19__setstate_cython__, METH_O, 0};
+static PyObject *__pyx_pw_7questdb_3ilp_10LineSender_19__setstate_cython__(PyObject *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
   PyObject *__pyx_r = 0;
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("__setstate_cython__ (wrapper)", 0);
-  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_16__setstate_cython__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), ((PyObject *)__pyx_v___pyx_state));
+  __pyx_r = __pyx_pf_7questdb_3ilp_10LineSender_18__setstate_cython__(((struct __pyx_obj_7questdb_3ilp_LineSender *)__pyx_v_self), ((PyObject *)__pyx_v___pyx_state));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_16__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state) {
+static PyObject *__pyx_pf_7questdb_3ilp_10LineSender_18__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7questdb_3ilp_LineSender *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -10918,7 +11879,7 @@ static void __pyx_tp_dealloc_7questdb_3ilp_LineSenderBuffer(PyObject *o) {
     PyObject *etype, *eval, *etb;
     PyErr_Fetch(&etype, &eval, &etb);
     __Pyx_SET_REFCNT(o, Py_REFCNT(o) + 1);
-    __pyx_pw_7questdb_3ilp_16LineSenderBuffer_3__dealloc__(o);
+    __pyx_pw_7questdb_3ilp_16LineSenderBuffer_5__dealloc__(o);
     __Pyx_SET_REFCNT(o, Py_REFCNT(o) - 1);
     PyErr_Restore(etype, eval, etb);
   }
@@ -10926,18 +11887,18 @@ static void __pyx_tp_dealloc_7questdb_3ilp_LineSenderBuffer(PyObject *o) {
 }
 
 static PyMethodDef __pyx_methods_7questdb_3ilp_LineSenderBuffer[] = {
-  {"reserve", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_5reserve, METH_O, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_4reserve},
-  {"capacity", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_7capacity, METH_NOARGS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_6capacity},
-  {"clear", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_9clear, METH_NOARGS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_8clear},
-  {"row", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_15row, METH_VARARGS|METH_KEYWORDS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_14row},
-  {"tabular", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17tabular, METH_VARARGS|METH_KEYWORDS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_16tabular},
-  {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_19__reduce_cython__, METH_NOARGS, 0},
-  {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_21__setstate_cython__, METH_O, 0},
+  {"reserve", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_7reserve, METH_O, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_6reserve},
+  {"capacity", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_9capacity, METH_NOARGS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_8capacity},
+  {"clear", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_11clear, METH_NOARGS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_10clear},
+  {"row", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_17row, METH_VARARGS|METH_KEYWORDS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_16row},
+  {"tabular", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_19tabular, METH_VARARGS|METH_KEYWORDS, __pyx_doc_7questdb_3ilp_16LineSenderBuffer_18tabular},
+  {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_21__reduce_cython__, METH_NOARGS, 0},
+  {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_16LineSenderBuffer_23__setstate_cython__, METH_O, 0},
   {0, 0, 0, 0}
 };
 
 static PySequenceMethods __pyx_tp_as_sequence_LineSenderBuffer = {
-  __pyx_pw_7questdb_3ilp_16LineSenderBuffer_11__len__, /*sq_length*/
+  __pyx_pw_7questdb_3ilp_16LineSenderBuffer_13__len__, /*sq_length*/
   0, /*sq_concat*/
   0, /*sq_repeat*/
   0, /*sq_item*/
@@ -10950,7 +11911,7 @@ static PySequenceMethods __pyx_tp_as_sequence_LineSenderBuffer = {
 };
 
 static PyMappingMethods __pyx_tp_as_mapping_LineSenderBuffer = {
-  __pyx_pw_7questdb_3ilp_16LineSenderBuffer_11__len__, /*mp_length*/
+  __pyx_pw_7questdb_3ilp_16LineSenderBuffer_13__len__, /*mp_length*/
   0, /*mp_subscript*/
   0, /*mp_ass_subscript*/
 };
@@ -10981,7 +11942,7 @@ static PyTypeObject __pyx_type_7questdb_3ilp_LineSenderBuffer = {
   &__pyx_tp_as_mapping_LineSenderBuffer, /*tp_as_mapping*/
   0, /*tp_hash*/
   0, /*tp_call*/
-  __pyx_pw_7questdb_3ilp_16LineSenderBuffer_13__str__, /*tp_str*/
+  __pyx_pw_7questdb_3ilp_16LineSenderBuffer_15__str__, /*tp_str*/
   0, /*tp_getattro*/
   0, /*tp_setattro*/
   0, /*tp_as_buffer*/
@@ -11001,7 +11962,7 @@ static PyTypeObject __pyx_type_7questdb_3ilp_LineSenderBuffer = {
   0, /*tp_descr_get*/
   0, /*tp_descr_set*/
   0, /*tp_dictoffset*/
-  0, /*tp_init*/
+  __pyx_pw_7questdb_3ilp_16LineSenderBuffer_3__init__, /*tp_init*/
   0, /*tp_alloc*/
   __pyx_tp_new_7questdb_3ilp_LineSenderBuffer, /*tp_new*/
   0, /*tp_free*/
@@ -11059,7 +12020,7 @@ static void __pyx_tp_dealloc_7questdb_3ilp_LineSender(PyObject *o) {
     PyObject *etype, *eval, *etb;
     PyErr_Fetch(&etype, &eval, &etb);
     __Pyx_SET_REFCNT(o, Py_REFCNT(o) + 1);
-    __pyx_pw_7questdb_3ilp_10LineSender_13__dealloc__(o);
+    __pyx_pw_7questdb_3ilp_10LineSender_15__dealloc__(o);
     __Pyx_SET_REFCNT(o, Py_REFCNT(o) - 1);
     PyErr_Restore(etype, eval, etb);
   }
@@ -11090,13 +12051,12 @@ static PyObject *__pyx_getprop_7questdb_3ilp_10LineSender_buffer(PyObject *o, CY
 }
 
 static PyMethodDef __pyx_methods_7questdb_3ilp_LineSender[] = {
-  {"connect", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_3connect, METH_NOARGS, 0},
-  {"__enter__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_5__enter__, METH_NOARGS, 0},
-  {"flush", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_10LineSender_7flush, METH_VARARGS|METH_KEYWORDS, 0},
-  {"close", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_10LineSender_9close, METH_VARARGS|METH_KEYWORDS, 0},
-  {"__exit__", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_10LineSender_11__exit__, METH_VARARGS|METH_KEYWORDS, 0},
-  {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_15__reduce_cython__, METH_NOARGS, 0},
-  {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_17__setstate_cython__, METH_O, 0},
+  {"new_buffer", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_3new_buffer, METH_NOARGS, __pyx_doc_7questdb_3ilp_10LineSender_2new_buffer},
+  {"connect", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_5connect, METH_NOARGS, 0},
+  {"__enter__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_7__enter__, METH_NOARGS, 0},
+  {"__exit__", (PyCFunction)(void*)(PyCFunctionWithKeywords)__pyx_pw_7questdb_3ilp_10LineSender_13__exit__, METH_VARARGS|METH_KEYWORDS, 0},
+  {"__reduce_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_17__reduce_cython__, METH_NOARGS, 0},
+  {"__setstate_cython__", (PyCFunction)__pyx_pw_7questdb_3ilp_10LineSender_19__setstate_cython__, METH_O, 0},
   {0, 0, 0, 0}
 };
 
@@ -11244,6 +12204,21 @@ static __Pyx_StringTabEntry __pyx_string_tab[] = {
   {&__pyx_n_s_Iterable, __pyx_k_Iterable, sizeof(__pyx_k_Iterable), 0, 0, 1, 1},
   {&__pyx_n_s_LineSender, __pyx_k_LineSender, sizeof(__pyx_k_LineSender), 0, 0, 1, 1},
   {&__pyx_n_s_LineSenderBuffer, __pyx_k_LineSenderBuffer, sizeof(__pyx_k_LineSenderBuffer), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSenderBuffer___reduce_cython, __pyx_k_LineSenderBuffer___reduce_cython, sizeof(__pyx_k_LineSenderBuffer___reduce_cython), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSenderBuffer___setstate_cyth, __pyx_k_LineSenderBuffer___setstate_cyth, sizeof(__pyx_k_LineSenderBuffer___setstate_cyth), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSenderBuffer_capacity, __pyx_k_LineSenderBuffer_capacity, sizeof(__pyx_k_LineSenderBuffer_capacity), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSenderBuffer_clear, __pyx_k_LineSenderBuffer_clear, sizeof(__pyx_k_LineSenderBuffer_clear), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSenderBuffer_reserve, __pyx_k_LineSenderBuffer_reserve, sizeof(__pyx_k_LineSenderBuffer_reserve), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSenderBuffer_row, __pyx_k_LineSenderBuffer_row, sizeof(__pyx_k_LineSenderBuffer_row), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSenderBuffer_tabular, __pyx_k_LineSenderBuffer_tabular, sizeof(__pyx_k_LineSenderBuffer_tabular), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender___enter, __pyx_k_LineSender___enter, sizeof(__pyx_k_LineSender___enter), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender___exit, __pyx_k_LineSender___exit, sizeof(__pyx_k_LineSender___exit), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender___reduce_cython, __pyx_k_LineSender___reduce_cython, sizeof(__pyx_k_LineSender___reduce_cython), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender___setstate_cython, __pyx_k_LineSender___setstate_cython, sizeof(__pyx_k_LineSender___setstate_cython), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender_close, __pyx_k_LineSender_close, sizeof(__pyx_k_LineSender_close), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender_connect, __pyx_k_LineSender_connect, sizeof(__pyx_k_LineSender_connect), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender_flush, __pyx_k_LineSender_flush, sizeof(__pyx_k_LineSender_flush), 0, 0, 1, 1},
+  {&__pyx_n_s_LineSender_new_buffer, __pyx_k_LineSender_new_buffer, sizeof(__pyx_k_LineSender_new_buffer), 0, 0, 1, 1},
   {&__pyx_n_s_List, __pyx_k_List, sizeof(__pyx_k_List), 0, 0, 1, 1},
   {&__pyx_kp_u_Must_be_one_of, __pyx_k_Must_be_one_of, sizeof(__pyx_k_Must_be_one_of), 0, 1, 0, 0},
   {&__pyx_kp_u_Must_specify_at_least_one_symbol, __pyx_k_Must_specify_at_least_one_symbol, sizeof(__pyx_k_Must_specify_at_least_one_symbol), 0, 1, 0, 0},
@@ -11252,8 +12227,14 @@ static __Pyx_StringTabEntry __pyx_string_tab[] = {
   {&__pyx_n_s_SocketError, __pyx_k_SocketError, sizeof(__pyx_k_SocketError), 0, 0, 1, 1},
   {&__pyx_n_s_TimestampMicros, __pyx_k_TimestampMicros, sizeof(__pyx_k_TimestampMicros), 0, 0, 1, 1},
   {&__pyx_n_u_TimestampMicros, __pyx_k_TimestampMicros, sizeof(__pyx_k_TimestampMicros), 0, 1, 0, 1},
+  {&__pyx_n_s_TimestampMicros___reduce_cython, __pyx_k_TimestampMicros___reduce_cython, sizeof(__pyx_k_TimestampMicros___reduce_cython), 0, 0, 1, 1},
+  {&__pyx_n_s_TimestampMicros___setstate_cytho, __pyx_k_TimestampMicros___setstate_cytho, sizeof(__pyx_k_TimestampMicros___setstate_cytho), 0, 0, 1, 1},
+  {&__pyx_n_s_TimestampMicros_from_datetime, __pyx_k_TimestampMicros_from_datetime, sizeof(__pyx_k_TimestampMicros_from_datetime), 0, 0, 1, 1},
   {&__pyx_n_s_TimestampNanos, __pyx_k_TimestampNanos, sizeof(__pyx_k_TimestampNanos), 0, 0, 1, 1},
+  {&__pyx_n_s_TimestampNanos___reduce_cython, __pyx_k_TimestampNanos___reduce_cython, sizeof(__pyx_k_TimestampNanos___reduce_cython), 0, 0, 1, 1},
+  {&__pyx_n_s_TimestampNanos___setstate_cython, __pyx_k_TimestampNanos___setstate_cython, sizeof(__pyx_k_TimestampNanos___setstate_cython), 0, 0, 1, 1},
   {&__pyx_kp_u_TimestampNanos_datetime_None, __pyx_k_TimestampNanos_datetime_None, sizeof(__pyx_k_TimestampNanos_datetime_None), 0, 1, 0, 0},
+  {&__pyx_n_s_TimestampNanos_from_datetime, __pyx_k_TimestampNanos_from_datetime, sizeof(__pyx_k_TimestampNanos_from_datetime), 0, 0, 1, 1},
   {&__pyx_n_s_TlsError, __pyx_k_TlsError, sizeof(__pyx_k_TlsError), 0, 0, 1, 1},
   {&__pyx_n_s_Tuple, __pyx_k_Tuple, sizeof(__pyx_k_Tuple), 0, 0, 1, 1},
   {&__pyx_n_s_TypeError, __pyx_k_TypeError, sizeof(__pyx_k_TypeError), 0, 0, 1, 1},
@@ -11261,27 +12242,36 @@ static __Pyx_StringTabEntry __pyx_string_tab[] = {
   {&__pyx_kp_u_Unsupported_type, __pyx_k_Unsupported_type, sizeof(__pyx_k_Unsupported_type), 0, 1, 0, 0},
   {&__pyx_n_s_ValueError, __pyx_k_ValueError, sizeof(__pyx_k_ValueError), 0, 0, 1, 1},
   {&__pyx_kp_u__9, __pyx_k__9, sizeof(__pyx_k__9), 0, 1, 0, 0},
+  {&__pyx_n_s_additional, __pyx_k_additional, sizeof(__pyx_k_additional), 0, 0, 1, 1},
   {&__pyx_kp_u_additional_must_be_non_negative, __pyx_k_additional_must_be_non_negative, sizeof(__pyx_k_additional_must_be_non_negative), 0, 1, 0, 0},
   {&__pyx_n_s_at, __pyx_k_at, sizeof(__pyx_k_at), 0, 0, 1, 1},
+  {&__pyx_n_s_auth, __pyx_k_auth, sizeof(__pyx_k_auth), 0, 0, 1, 1},
+  {&__pyx_n_s_auto_flush, __pyx_k_auto_flush, sizeof(__pyx_k_auto_flush), 0, 0, 1, 1},
   {&__pyx_n_u_bool, __pyx_k_bool, sizeof(__pyx_k_bool), 0, 1, 0, 1},
   {&__pyx_n_s_buffer, __pyx_k_buffer, sizeof(__pyx_k_buffer), 0, 0, 1, 1},
+  {&__pyx_n_s_capacity, __pyx_k_capacity, sizeof(__pyx_k_capacity), 0, 0, 1, 1},
   {&__pyx_n_s_clear, __pyx_k_clear, sizeof(__pyx_k_clear), 0, 0, 1, 1},
   {&__pyx_n_s_cline_in_traceback, __pyx_k_cline_in_traceback, sizeof(__pyx_k_cline_in_traceback), 0, 0, 1, 1},
   {&__pyx_n_s_close, __pyx_k_close, sizeof(__pyx_k_close), 0, 0, 1, 1},
+  {&__pyx_n_s_cls, __pyx_k_cls, sizeof(__pyx_k_cls), 0, 0, 1, 1},
   {&__pyx_n_s_code, __pyx_k_code, sizeof(__pyx_k_code), 0, 0, 1, 1},
   {&__pyx_n_s_code_2, __pyx_k_code_2, sizeof(__pyx_k_code_2), 0, 0, 1, 1},
-  {&__pyx_n_s_collections_abc, __pyx_k_collections_abc, sizeof(__pyx_k_collections_abc), 0, 0, 1, 1},
   {&__pyx_n_s_columns, __pyx_k_columns, sizeof(__pyx_k_columns), 0, 0, 1, 1},
   {&__pyx_n_s_connect, __pyx_k_connect, sizeof(__pyx_k_connect), 0, 0, 1, 1},
   {&__pyx_kp_u_connect_can_t_be_called_after_cl, __pyx_k_connect_can_t_be_called_after_cl, sizeof(__pyx_k_connect_can_t_be_called_after_cl), 0, 1, 0, 0},
   {&__pyx_n_s_data, __pyx_k_data, sizeof(__pyx_k_data), 0, 0, 1, 1},
+  {&__pyx_n_u_datetime, __pyx_k_datetime, sizeof(__pyx_k_datetime), 0, 1, 0, 1},
   {&__pyx_kp_u_datetime_datetime, __pyx_k_datetime_datetime, sizeof(__pyx_k_datetime_datetime), 0, 1, 0, 0},
   {&__pyx_n_s_doc, __pyx_k_doc, sizeof(__pyx_k_doc), 0, 0, 1, 1},
+  {&__pyx_n_s_dt, __pyx_k_dt, sizeof(__pyx_k_dt), 0, 0, 1, 1},
   {&__pyx_kp_u_dt_must_be_a_datetime_object, __pyx_k_dt_must_be_a_datetime_object, sizeof(__pyx_k_dt_must_be_a_datetime_object), 0, 1, 0, 0},
+  {&__pyx_n_s_enter, __pyx_k_enter, sizeof(__pyx_k_enter), 0, 0, 1, 1},
   {&__pyx_n_s_enum, __pyx_k_enum, sizeof(__pyx_k_enum), 0, 0, 1, 1},
+  {&__pyx_n_s_err, __pyx_k_err, sizeof(__pyx_k_err), 0, 0, 1, 1},
   {&__pyx_n_s_exc_tb, __pyx_k_exc_tb, sizeof(__pyx_k_exc_tb), 0, 0, 1, 1},
   {&__pyx_n_s_exc_type, __pyx_k_exc_type, sizeof(__pyx_k_exc_type), 0, 0, 1, 1},
   {&__pyx_n_s_exc_val, __pyx_k_exc_val, sizeof(__pyx_k_exc_val), 0, 0, 1, 1},
+  {&__pyx_n_s_exit, __pyx_k_exit, sizeof(__pyx_k_exit), 0, 0, 1, 1},
   {&__pyx_n_u_float, __pyx_k_float, sizeof(__pyx_k_float), 0, 1, 0, 1},
   {&__pyx_n_s_flush, __pyx_k_flush, sizeof(__pyx_k_flush), 0, 0, 1, 1},
   {&__pyx_kp_u_flush_can_t_be_called_after_clos, __pyx_k_flush_can_t_be_called_after_clos, sizeof(__pyx_k_flush_can_t_be_called_after_clos), 0, 1, 0, 0},
@@ -11292,42 +12282,56 @@ static __Pyx_StringTabEntry __pyx_string_tab[] = {
   {&__pyx_n_s_import, __pyx_k_import, sizeof(__pyx_k_import), 0, 0, 1, 1},
   {&__pyx_n_s_init, __pyx_k_init, sizeof(__pyx_k_init), 0, 0, 1, 1},
   {&__pyx_n_s_init_capacity, __pyx_k_init_capacity, sizeof(__pyx_k_init_capacity), 0, 0, 1, 1},
+  {&__pyx_n_s_init_capacity_2, __pyx_k_init_capacity_2, sizeof(__pyx_k_init_capacity_2), 0, 0, 1, 1},
+  {&__pyx_n_u_insecure_skip_verify, __pyx_k_insecure_skip_verify, sizeof(__pyx_k_insecure_skip_verify), 0, 1, 0, 1},
   {&__pyx_n_u_int, __pyx_k_int, sizeof(__pyx_k_int), 0, 1, 0, 1},
+  {&__pyx_n_s_interface, __pyx_k_interface, sizeof(__pyx_k_interface), 0, 0, 1, 1},
   {&__pyx_n_s_items, __pyx_k_items, sizeof(__pyx_k_items), 0, 0, 1, 1},
   {&__pyx_n_s_main, __pyx_k_main, sizeof(__pyx_k_main), 0, 0, 1, 1},
   {&__pyx_n_s_max_name_len, __pyx_k_max_name_len, sizeof(__pyx_k_max_name_len), 0, 0, 1, 1},
+  {&__pyx_n_s_max_name_len_2, __pyx_k_max_name_len_2, sizeof(__pyx_k_max_name_len_2), 0, 0, 1, 1},
   {&__pyx_n_s_metaclass, __pyx_k_metaclass, sizeof(__pyx_k_metaclass), 0, 0, 1, 1},
   {&__pyx_n_s_microsecond, __pyx_k_microsecond, sizeof(__pyx_k_microsecond), 0, 0, 1, 1},
   {&__pyx_n_s_module, __pyx_k_module, sizeof(__pyx_k_module), 0, 0, 1, 1},
   {&__pyx_n_s_msg, __pyx_k_msg, sizeof(__pyx_k_msg), 0, 0, 1, 1},
   {&__pyx_n_s_name, __pyx_k_name, sizeof(__pyx_k_name), 0, 0, 1, 1},
   {&__pyx_n_s_name_2, __pyx_k_name_2, sizeof(__pyx_k_name_2), 0, 0, 1, 1},
+  {&__pyx_n_s_new_buffer, __pyx_k_new_buffer, sizeof(__pyx_k_new_buffer), 0, 0, 1, 1},
   {&__pyx_kp_s_no_default___reduce___due_to_non, __pyx_k_no_default___reduce___due_to_non, sizeof(__pyx_k_no_default___reduce___due_to_non), 0, 0, 1, 0},
   {&__pyx_n_u_nyi, __pyx_k_nyi, sizeof(__pyx_k_nyi), 0, 1, 0, 1},
   {&__pyx_n_s_port, __pyx_k_port, sizeof(__pyx_k_port), 0, 0, 1, 1},
   {&__pyx_kp_u_port_must_be_an_integer_or_a_str, __pyx_k_port_must_be_an_integer_or_a_str, sizeof(__pyx_k_port_must_be_an_integer_or_a_str), 0, 1, 0, 0},
   {&__pyx_n_s_prepare, __pyx_k_prepare, sizeof(__pyx_k_prepare), 0, 0, 1, 1},
   {&__pyx_n_s_property, __pyx_k_property, sizeof(__pyx_k_property), 0, 0, 1, 1},
+  {&__pyx_n_s_pyx_state, __pyx_k_pyx_state, sizeof(__pyx_k_pyx_state), 0, 0, 1, 1},
   {&__pyx_n_s_pyx_vtable, __pyx_k_pyx_vtable, sizeof(__pyx_k_pyx_vtable), 0, 0, 1, 1},
   {&__pyx_n_s_qualname, __pyx_k_qualname, sizeof(__pyx_k_qualname), 0, 0, 1, 1},
   {&__pyx_n_s_questdb_ilp, __pyx_k_questdb_ilp, sizeof(__pyx_k_questdb_ilp), 0, 0, 1, 1},
+  {&__pyx_n_s_read_timeout, __pyx_k_read_timeout, sizeof(__pyx_k_read_timeout), 0, 0, 1, 1},
   {&__pyx_n_s_reduce, __pyx_k_reduce, sizeof(__pyx_k_reduce), 0, 0, 1, 1},
   {&__pyx_n_s_reduce_cython, __pyx_k_reduce_cython, sizeof(__pyx_k_reduce_cython), 0, 0, 1, 1},
   {&__pyx_n_s_reduce_ex, __pyx_k_reduce_ex, sizeof(__pyx_k_reduce_ex), 0, 0, 1, 1},
+  {&__pyx_n_s_reserve, __pyx_k_reserve, sizeof(__pyx_k_reserve), 0, 0, 1, 1},
   {&__pyx_n_s_return, __pyx_k_return, sizeof(__pyx_k_return), 0, 0, 1, 1},
+  {&__pyx_n_s_row, __pyx_k_row, sizeof(__pyx_k_row), 0, 0, 1, 1},
   {&__pyx_n_s_self, __pyx_k_self, sizeof(__pyx_k_self), 0, 0, 1, 1},
   {&__pyx_n_s_setstate, __pyx_k_setstate, sizeof(__pyx_k_setstate), 0, 0, 1, 1},
   {&__pyx_n_s_setstate_cython, __pyx_k_setstate_cython, sizeof(__pyx_k_setstate_cython), 0, 0, 1, 1},
   {&__pyx_kp_s_src_questdb_ilp_pyx, __pyx_k_src_questdb_ilp_pyx, sizeof(__pyx_k_src_questdb_ilp_pyx), 0, 0, 1, 0},
   {&__pyx_n_u_str, __pyx_k_str, sizeof(__pyx_k_str), 0, 1, 0, 1},
   {&__pyx_n_s_str_2, __pyx_k_str_2, sizeof(__pyx_k_str_2), 0, 0, 1, 1},
+  {&__pyx_kp_s_stringsource, __pyx_k_stringsource, sizeof(__pyx_k_stringsource), 0, 0, 1, 0},
   {&__pyx_n_s_super, __pyx_k_super, sizeof(__pyx_k_super), 0, 0, 1, 1},
   {&__pyx_n_s_symbols, __pyx_k_symbols, sizeof(__pyx_k_symbols), 0, 0, 1, 1},
   {&__pyx_n_s_sys, __pyx_k_sys, sizeof(__pyx_k_sys), 0, 0, 1, 1},
   {&__pyx_n_s_table_name, __pyx_k_table_name, sizeof(__pyx_k_table_name), 0, 0, 1, 1},
+  {&__pyx_n_s_tabular, __pyx_k_tabular, sizeof(__pyx_k_tabular), 0, 0, 1, 1},
   {&__pyx_n_s_test, __pyx_k_test, sizeof(__pyx_k_test), 0, 0, 1, 1},
   {&__pyx_n_s_timestamp, __pyx_k_timestamp, sizeof(__pyx_k_timestamp), 0, 0, 1, 1},
+  {&__pyx_n_s_tls, __pyx_k_tls, sizeof(__pyx_k_tls), 0, 0, 1, 1},
+  {&__pyx_kp_u_tls_must_be_a_bool_a_str_pointin, __pyx_k_tls_must_be_a_bool_a_str_pointin, sizeof(__pyx_k_tls_must_be_a_bool_a_str_pointin), 0, 1, 0, 0},
   {&__pyx_n_s_typing, __pyx_k_typing, sizeof(__pyx_k_typing), 0, 0, 1, 1},
+  {&__pyx_n_u_unicode, __pyx_k_unicode, sizeof(__pyx_k_unicode), 0, 1, 0, 1},
   {&__pyx_n_s_value, __pyx_k_value, sizeof(__pyx_k_value), 0, 0, 1, 1},
   {&__pyx_kp_u_value_must_positive_integer, __pyx_k_value_must_positive_integer, sizeof(__pyx_k_value_must_positive_integer), 0, 1, 0, 0},
   {0, 0, 0, 0, 0, 0, 0}
@@ -11417,36 +12421,36 @@ static CYTHON_SMALL_CODE int __Pyx_InitCachedConstants(void) {
   __Pyx_GOTREF(__pyx_tuple__7);
   __Pyx_GIVEREF(__pyx_tuple__7);
 
-  /* "questdb/ilp.pyx":322
+  /* "questdb/ilp.pyx":330
  *         """
  *         if additional < 0:
  *             raise ValueError('additional must be non-negative.')             # <<<<<<<<<<<<<<
  *         line_sender_buffer_reserve(self._impl, additional)
  * 
  */
-  __pyx_tuple__8 = PyTuple_Pack(1, __pyx_kp_u_additional_must_be_non_negative); if (unlikely(!__pyx_tuple__8)) __PYX_ERR(0, 322, __pyx_L1_error)
+  __pyx_tuple__8 = PyTuple_Pack(1, __pyx_kp_u_additional_must_be_non_negative); if (unlikely(!__pyx_tuple__8)) __PYX_ERR(0, 330, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_tuple__8);
   __Pyx_GIVEREF(__pyx_tuple__8);
 
-  /* "questdb/ilp.pyx":450
+  /* "questdb/ilp.pyx":458
  *         else:
  *             valid = ', '.join((
  *                 'bool',             # <<<<<<<<<<<<<<
  *                 'int',
  *                 'float',
  */
-  __pyx_tuple__10 = PyTuple_Pack(6, __pyx_n_u_bool, __pyx_n_u_int, __pyx_n_u_float, __pyx_n_u_str, __pyx_n_u_TimestampMicros, __pyx_kp_u_datetime_datetime); if (unlikely(!__pyx_tuple__10)) __PYX_ERR(0, 450, __pyx_L1_error)
+  __pyx_tuple__10 = PyTuple_Pack(6, __pyx_n_u_bool, __pyx_n_u_int, __pyx_n_u_float, __pyx_n_u_str, __pyx_n_u_TimestampMicros, __pyx_kp_u_datetime_datetime); if (unlikely(!__pyx_tuple__10)) __PYX_ERR(0, 458, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_tuple__10);
   __Pyx_GIVEREF(__pyx_tuple__10);
 
-  /* "questdb/ilp.pyx":736
+  /* "questdb/ilp.pyx":744
  *         from the end.
  *         """
  *         raise ValueError('nyi')             # <<<<<<<<<<<<<<
  * 
  *     # def pandas(
  */
-  __pyx_tuple__11 = PyTuple_Pack(1, __pyx_n_u_nyi); if (unlikely(!__pyx_tuple__11)) __PYX_ERR(0, 736, __pyx_L1_error)
+  __pyx_tuple__11 = PyTuple_Pack(1, __pyx_n_u_nyi); if (unlikely(!__pyx_tuple__11)) __PYX_ERR(0, 744, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_tuple__11);
   __Pyx_GIVEREF(__pyx_tuple__11);
 
@@ -11523,6 +12527,246 @@ static CYTHON_SMALL_CODE int __Pyx_InitCachedConstants(void) {
   __Pyx_GOTREF(__pyx_tuple__20);
   __Pyx_GIVEREF(__pyx_tuple__20);
   __pyx_codeobj__21 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__20, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_code, 97, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__21)) __PYX_ERR(0, 97, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":220
+ * 
+ *     @classmethod
+ *     def from_datetime(cls, dt: datetime):             # <<<<<<<<<<<<<<
+ *         """
+ *         Construct a `TimestampMicros` from a `datetime` object.
+ */
+  __pyx_tuple__22 = PyTuple_Pack(2, __pyx_n_s_cls, __pyx_n_s_dt); if (unlikely(!__pyx_tuple__22)) __PYX_ERR(0, 220, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__22);
+  __Pyx_GIVEREF(__pyx_tuple__22);
+  __pyx_codeobj__23 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__22, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_from_datetime, 220, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__23)) __PYX_ERR(0, 220, __pyx_L1_error)
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_tuple__24 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__24)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__24);
+  __Pyx_GIVEREF(__pyx_tuple__24);
+  __pyx_codeobj__25 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__24, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_reduce_cython, 1, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__25)) __PYX_ERR(1, 1, __pyx_L1_error)
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_tuple__26 = PyTuple_Pack(2, __pyx_n_s_self, __pyx_n_s_pyx_state); if (unlikely(!__pyx_tuple__26)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__26);
+  __Pyx_GIVEREF(__pyx_tuple__26);
+  __pyx_codeobj__27 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__26, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_setstate_cython, 3, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__27)) __PYX_ERR(1, 3, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":244
+ * 
+ *     @classmethod
+ *     def from_datetime(cls, dt: datetime):             # <<<<<<<<<<<<<<
+ *         """
+ *         Construct a `TimestampNanos` from a `datetime` object.
+ */
+  __pyx_tuple__28 = PyTuple_Pack(2, __pyx_n_s_cls, __pyx_n_s_dt); if (unlikely(!__pyx_tuple__28)) __PYX_ERR(0, 244, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__28);
+  __Pyx_GIVEREF(__pyx_tuple__28);
+  __pyx_codeobj__29 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__28, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_from_datetime, 244, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__29)) __PYX_ERR(0, 244, __pyx_L1_error)
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_tuple__30 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__30)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__30);
+  __Pyx_GIVEREF(__pyx_tuple__30);
+  __pyx_codeobj__31 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__30, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_reduce_cython, 1, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__31)) __PYX_ERR(1, 1, __pyx_L1_error)
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_tuple__32 = PyTuple_Pack(2, __pyx_n_s_self, __pyx_n_s_pyx_state); if (unlikely(!__pyx_tuple__32)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__32);
+  __Pyx_GIVEREF(__pyx_tuple__32);
+  __pyx_codeobj__33 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__32, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_setstate_cython, 3, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__33)) __PYX_ERR(1, 3, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":323
+ *         line_sender_buffer_free(self._impl)
+ * 
+ *     def reserve(self, additional: int):             # <<<<<<<<<<<<<<
+ *         """
+ *         Ensure the buffer has at least `additional` bytes of future capacity.
+ */
+  __pyx_tuple__34 = PyTuple_Pack(2, __pyx_n_s_self, __pyx_n_s_additional); if (unlikely(!__pyx_tuple__34)) __PYX_ERR(0, 323, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__34);
+  __Pyx_GIVEREF(__pyx_tuple__34);
+  __pyx_codeobj__35 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__34, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_reserve, 323, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__35)) __PYX_ERR(0, 323, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":333
+ *         line_sender_buffer_reserve(self._impl, additional)
+ * 
+ *     def capacity(self) -> int:             # <<<<<<<<<<<<<<
+ *         """The current buffer capacity."""
+ *         return line_sender_buffer_capacity(self._impl)
+ */
+  __pyx_tuple__36 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__36)) __PYX_ERR(0, 333, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__36);
+  __Pyx_GIVEREF(__pyx_tuple__36);
+  __pyx_codeobj__37 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__36, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_capacity, 333, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__37)) __PYX_ERR(0, 333, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":337
+ *         return line_sender_buffer_capacity(self._impl)
+ * 
+ *     def clear(self):             # <<<<<<<<<<<<<<
+ *         """
+ *         Reset the buffer.
+ */
+  __pyx_tuple__38 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__38)) __PYX_ERR(0, 337, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__38);
+  __Pyx_GIVEREF(__pyx_tuple__38);
+  __pyx_codeobj__39 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__38, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_clear, 337, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__39)) __PYX_ERR(0, 337, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":538
+ *             raise
+ * 
+ *     def row(             # <<<<<<<<<<<<<<
+ *             self,
+ *             table_name: str,
+ */
+  __pyx_tuple__40 = PyTuple_Pack(5, __pyx_n_s_self, __pyx_n_s_table_name, __pyx_n_s_symbols, __pyx_n_s_columns, __pyx_n_s_at); if (unlikely(!__pyx_tuple__40)) __PYX_ERR(0, 538, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__40);
+  __Pyx_GIVEREF(__pyx_tuple__40);
+  __pyx_codeobj__41 = (PyObject*)__Pyx_PyCode_New(2, 3, 5, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__40, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_row, 538, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__41)) __PYX_ERR(0, 538, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":594
+ *         return self
+ * 
+ *     def tabular(             # <<<<<<<<<<<<<<
+ *             self,
+ *             table_name: str,
+ */
+  __pyx_tuple__42 = PyTuple_Pack(6, __pyx_n_s_self, __pyx_n_s_table_name, __pyx_n_s_data, __pyx_n_s_header, __pyx_n_s_symbols, __pyx_n_s_at); if (unlikely(!__pyx_tuple__42)) __PYX_ERR(0, 594, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__42);
+  __Pyx_GIVEREF(__pyx_tuple__42);
+  __pyx_codeobj__43 = (PyObject*)__Pyx_PyCode_New(3, 3, 6, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__42, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_tabular, 594, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__43)) __PYX_ERR(0, 594, __pyx_L1_error)
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_tuple__44 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__44)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__44);
+  __Pyx_GIVEREF(__pyx_tuple__44);
+  __pyx_codeobj__45 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__44, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_reduce_cython, 1, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__45)) __PYX_ERR(1, 1, __pyx_L1_error)
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_tuple__46 = PyTuple_Pack(2, __pyx_n_s_self, __pyx_n_s_pyx_state); if (unlikely(!__pyx_tuple__46)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__46);
+  __Pyx_GIVEREF(__pyx_tuple__46);
+  __pyx_codeobj__47 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__46, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_setstate_cython, 3, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__47)) __PYX_ERR(1, 3, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":874
+ *             if self._auto_flush_enabled else 0
+ * 
+ *     def new_buffer(self):             # <<<<<<<<<<<<<<
+ *         """
+ *         Make a new configured buffer.
+ */
+  __pyx_tuple__48 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__48)) __PYX_ERR(0, 874, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__48);
+  __Pyx_GIVEREF(__pyx_tuple__48);
+  __pyx_codeobj__49 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__48, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_new_buffer, 874, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__49)) __PYX_ERR(0, 874, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":885
+ *             max_name_len=self._max_name_len)
+ * 
+ *     def connect(self):             # <<<<<<<<<<<<<<
+ *         cdef line_sender_error* err = NULL
+ *         if self._opts == NULL:
+ */
+  __pyx_tuple__50 = PyTuple_Pack(2, __pyx_n_s_self, __pyx_n_s_err); if (unlikely(!__pyx_tuple__50)) __PYX_ERR(0, 885, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__50);
+  __Pyx_GIVEREF(__pyx_tuple__50);
+  __pyx_codeobj__51 = (PyObject*)__Pyx_PyCode_New(1, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__50, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_connect, 885, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__51)) __PYX_ERR(0, 885, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":899
+ *         # self._buffer._row_complete_ctx = self
+ * 
+ *     def __enter__(self):             # <<<<<<<<<<<<<<
+ *         self.connect()
+ *         return self
+ */
+  __pyx_tuple__52 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__52)) __PYX_ERR(0, 899, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__52);
+  __Pyx_GIVEREF(__pyx_tuple__52);
+  __pyx_codeobj__53 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__52, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_enter, 899, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__53)) __PYX_ERR(0, 899, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":907
+ *         return self._buffer
+ * 
+ *     cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):             # <<<<<<<<<<<<<<
+ *         cdef line_sender_error* err = NULL
+ *         cdef line_sender_buffer* c_buf = NULL
+ */
+  __pyx_tuple__54 = PyTuple_Pack(3, __pyx_n_s_self, __pyx_n_s_buffer, __pyx_n_s_clear); if (unlikely(!__pyx_tuple__54)) __PYX_ERR(0, 907, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__54);
+  __Pyx_GIVEREF(__pyx_tuple__54);
+  __pyx_codeobj__55 = (PyObject*)__Pyx_PyCode_New(3, 0, 3, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__54, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_flush, 907, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__55)) __PYX_ERR(0, 907, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":936
+ *             raise
+ * 
+ *     cpdef close(self, bint flush=True):             # <<<<<<<<<<<<<<
+ *         self._buffer._row_complete_cb = NULL
+ *         self._buffer._row_complete_ctx = NULL
+ */
+  __pyx_tuple__56 = PyTuple_Pack(2, __pyx_n_s_self, __pyx_n_s_flush); if (unlikely(!__pyx_tuple__56)) __PYX_ERR(0, 936, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__56);
+  __Pyx_GIVEREF(__pyx_tuple__56);
+  __pyx_codeobj__57 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__56, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_close, 936, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__57)) __PYX_ERR(0, 936, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":950
+ *         self._buffer = None
+ * 
+ *     def __exit__(self, exc_type, _exc_val, _exc_tb):             # <<<<<<<<<<<<<<
+ *         self.close(not exc_type)
+ * 
+ */
+  __pyx_tuple__58 = PyTuple_Pack(4, __pyx_n_s_self, __pyx_n_s_exc_type, __pyx_n_s_exc_val, __pyx_n_s_exc_tb); if (unlikely(!__pyx_tuple__58)) __PYX_ERR(0, 950, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__58);
+  __Pyx_GIVEREF(__pyx_tuple__58);
+  __pyx_codeobj__59 = (PyObject*)__Pyx_PyCode_New(4, 0, 4, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__58, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_src_questdb_ilp_pyx, __pyx_n_s_exit, 950, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__59)) __PYX_ERR(0, 950, __pyx_L1_error)
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_tuple__60 = PyTuple_Pack(1, __pyx_n_s_self); if (unlikely(!__pyx_tuple__60)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__60);
+  __Pyx_GIVEREF(__pyx_tuple__60);
+  __pyx_codeobj__61 = (PyObject*)__Pyx_PyCode_New(1, 0, 1, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__60, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_reduce_cython, 1, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__61)) __PYX_ERR(1, 1, __pyx_L1_error)
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_tuple__62 = PyTuple_Pack(2, __pyx_n_s_self, __pyx_n_s_pyx_state); if (unlikely(!__pyx_tuple__62)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_tuple__62);
+  __Pyx_GIVEREF(__pyx_tuple__62);
+  __pyx_codeobj__63 = (PyObject*)__Pyx_PyCode_New(2, 0, 2, 0, CO_OPTIMIZED|CO_NEWLOCALS, __pyx_empty_bytes, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_tuple__62, __pyx_empty_tuple, __pyx_empty_tuple, __pyx_kp_s_stringsource, __pyx_n_s_setstate_cython, 3, __pyx_empty_bytes); if (unlikely(!__pyx_codeobj__63)) __PYX_ERR(1, 3, __pyx_L1_error)
   __Pyx_RefNannyFinishContext();
   return 0;
   __pyx_L1_error:;
@@ -11535,6 +12779,7 @@ static CYTHON_SMALL_CODE int __Pyx_InitGlobals(void) {
   __pyx_int_0 = PyInt_FromLong(0); if (unlikely(!__pyx_int_0)) __PYX_ERR(0, 1, __pyx_L1_error)
   __pyx_int_127 = PyInt_FromLong(127); if (unlikely(!__pyx_int_127)) __PYX_ERR(0, 1, __pyx_L1_error)
   __pyx_int_1000 = PyInt_FromLong(1000); if (unlikely(!__pyx_int_1000)) __PYX_ERR(0, 1, __pyx_L1_error)
+  __pyx_int_32768 = PyInt_FromLong(32768L); if (unlikely(!__pyx_int_32768)) __PYX_ERR(0, 1, __pyx_L1_error)
   __pyx_int_65536 = PyInt_FromLong(65536L); if (unlikely(!__pyx_int_65536)) __PYX_ERR(0, 1, __pyx_L1_error)
   return 0;
   __pyx_L1_error:;
@@ -11630,11 +12875,21 @@ static int __Pyx_modinit_type_init_code(void) {
   }
   #if CYTHON_COMPILING_IN_CPYTHON
   {
+    PyObject *wrapper = PyObject_GetAttrString((PyObject *)&__pyx_type_7questdb_3ilp_LineSenderBuffer, "__init__"); if (unlikely(!wrapper)) __PYX_ERR(0, 264, __pyx_L1_error)
+    if (Py_TYPE(wrapper) == &PyWrapperDescr_Type) {
+      __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_2__init__ = *((PyWrapperDescrObject *)wrapper)->d_base;
+      __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_2__init__.doc = __pyx_doc_7questdb_3ilp_16LineSenderBuffer_2__init__;
+      ((PyWrapperDescrObject *)wrapper)->d_base = &__pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_2__init__;
+    }
+  }
+  #endif
+  #if CYTHON_COMPILING_IN_CPYTHON
+  {
     PyObject *wrapper = PyObject_GetAttrString((PyObject *)&__pyx_type_7questdb_3ilp_LineSenderBuffer, "__len__"); if (unlikely(!wrapper)) __PYX_ERR(0, 264, __pyx_L1_error)
     if (Py_TYPE(wrapper) == &PyWrapperDescr_Type) {
-      __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_10__len__ = *((PyWrapperDescrObject *)wrapper)->d_base;
-      __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_10__len__.doc = __pyx_doc_7questdb_3ilp_16LineSenderBuffer_10__len__;
-      ((PyWrapperDescrObject *)wrapper)->d_base = &__pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_10__len__;
+      __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_12__len__ = *((PyWrapperDescrObject *)wrapper)->d_base;
+      __pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_12__len__.doc = __pyx_doc_7questdb_3ilp_16LineSenderBuffer_12__len__;
+      ((PyWrapperDescrObject *)wrapper)->d_base = &__pyx_wrapperbase_7questdb_3ilp_16LineSenderBuffer_12__len__;
     }
   }
   #endif
@@ -11645,16 +12900,16 @@ static int __Pyx_modinit_type_init_code(void) {
   __pyx_vtabptr_7questdb_3ilp_LineSender = &__pyx_vtable_7questdb_3ilp_LineSender;
   __pyx_vtable_7questdb_3ilp_LineSender.flush = (PyObject *(*)(struct __pyx_obj_7questdb_3ilp_LineSender *, int __pyx_skip_dispatch, struct __pyx_opt_args_7questdb_3ilp_10LineSender_flush *__pyx_optional_args))__pyx_f_7questdb_3ilp_10LineSender_flush;
   __pyx_vtable_7questdb_3ilp_LineSender.close = (PyObject *(*)(struct __pyx_obj_7questdb_3ilp_LineSender *, int __pyx_skip_dispatch, struct __pyx_opt_args_7questdb_3ilp_10LineSender_close *__pyx_optional_args))__pyx_f_7questdb_3ilp_10LineSender_close;
-  if (PyType_Ready(&__pyx_type_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 751, __pyx_L1_error)
+  if (PyType_Ready(&__pyx_type_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 759, __pyx_L1_error)
   #if PY_VERSION_HEX < 0x030800B1
   __pyx_type_7questdb_3ilp_LineSender.tp_print = 0;
   #endif
   if ((CYTHON_USE_TYPE_SLOTS && CYTHON_USE_PYTYPE_LOOKUP) && likely(!__pyx_type_7questdb_3ilp_LineSender.tp_dictoffset && __pyx_type_7questdb_3ilp_LineSender.tp_getattro == PyObject_GenericGetAttr)) {
     __pyx_type_7questdb_3ilp_LineSender.tp_getattro = __Pyx_PyObject_GenericGetAttr;
   }
-  if (__Pyx_SetVtable(__pyx_type_7questdb_3ilp_LineSender.tp_dict, __pyx_vtabptr_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 751, __pyx_L1_error)
-  if (PyObject_SetAttr(__pyx_m, __pyx_n_s_LineSender, (PyObject *)&__pyx_type_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 751, __pyx_L1_error)
-  if (__Pyx_setup_reduce((PyObject*)&__pyx_type_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 751, __pyx_L1_error)
+  if (__Pyx_SetVtable(__pyx_type_7questdb_3ilp_LineSender.tp_dict, __pyx_vtabptr_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 759, __pyx_L1_error)
+  if (PyObject_SetAttr(__pyx_m, __pyx_n_s_LineSender, (PyObject *)&__pyx_type_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 759, __pyx_L1_error)
+  if (__Pyx_setup_reduce((PyObject*)&__pyx_type_7questdb_3ilp_LineSender) < 0) __PYX_ERR(0, 759, __pyx_L1_error)
   __pyx_ptype_7questdb_3ilp_LineSender = &__pyx_type_7questdb_3ilp_LineSender;
   __Pyx_RefNannyFinishContext();
   return 0;
@@ -11929,35 +13184,35 @@ if (!__Pyx_RefNanny) {
   if (__Pyx_patch_abc() < 0) __PYX_ERR(0, 1, __pyx_L1_error)
   #endif
 
-  /* "questdb/ilp.pyx":67
+  /* "questdb/ilp.pyx":68
  * 
  * 
  * from enum import Enum             # <<<<<<<<<<<<<<
- * from typing import List, Tuple, Dict, Union, Any, Optional, Callable
- * from collections.abc import Iterable
+ * from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
+ * 
  */
-  __pyx_t_1 = PyList_New(1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 67, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 68, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_INCREF(__pyx_n_s_Enum);
   __Pyx_GIVEREF(__pyx_n_s_Enum);
   PyList_SET_ITEM(__pyx_t_1, 0, __pyx_n_s_Enum);
-  __pyx_t_2 = __Pyx_Import(__pyx_n_s_enum, __pyx_t_1, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 67, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_Import(__pyx_n_s_enum, __pyx_t_1, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_ImportFrom(__pyx_t_2, __pyx_n_s_Enum); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 67, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_ImportFrom(__pyx_t_2, __pyx_n_s_Enum); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 68, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Enum, __pyx_t_1) < 0) __PYX_ERR(0, 67, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Enum, __pyx_t_1) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "questdb/ilp.pyx":68
+  /* "questdb/ilp.pyx":69
  * 
  * from enum import Enum
- * from typing import List, Tuple, Dict, Union, Any, Optional, Callable             # <<<<<<<<<<<<<<
- * from collections.abc import Iterable
+ * from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable             # <<<<<<<<<<<<<<
  * 
+ * import sys
  */
-  __pyx_t_2 = PyList_New(7); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
+  __pyx_t_2 = PyList_New(8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_INCREF(__pyx_n_s_List);
   __Pyx_GIVEREF(__pyx_n_s_List);
@@ -11980,71 +13235,57 @@ if (!__Pyx_RefNanny) {
   __Pyx_INCREF(__pyx_n_s_Callable);
   __Pyx_GIVEREF(__pyx_n_s_Callable);
   PyList_SET_ITEM(__pyx_t_2, 6, __pyx_n_s_Callable);
-  __pyx_t_1 = __Pyx_Import(__pyx_n_s_typing, __pyx_t_2, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_List); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_List, __pyx_t_2) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Tuple); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Tuple, __pyx_t_2) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Dict); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Dict, __pyx_t_2) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Union); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Union, __pyx_t_2) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Any); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Any, __pyx_t_2) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Optional); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Optional, __pyx_t_2) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Callable); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Callable, __pyx_t_2) < 0) __PYX_ERR(0, 68, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-  /* "questdb/ilp.pyx":69
- * from enum import Enum
- * from typing import List, Tuple, Dict, Union, Any, Optional, Callable
- * from collections.abc import Iterable             # <<<<<<<<<<<<<<
- * 
- * import sys
- */
-  __pyx_t_1 = PyList_New(1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 69, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
   __Pyx_INCREF(__pyx_n_s_Iterable);
   __Pyx_GIVEREF(__pyx_n_s_Iterable);
-  PyList_SET_ITEM(__pyx_t_1, 0, __pyx_n_s_Iterable);
-  __pyx_t_2 = __Pyx_Import(__pyx_n_s_collections_abc, __pyx_t_1, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_ImportFrom(__pyx_t_2, __pyx_n_s_Iterable); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 69, __pyx_L1_error)
+  PyList_SET_ITEM(__pyx_t_2, 7, __pyx_n_s_Iterable);
+  __pyx_t_1 = __Pyx_Import(__pyx_n_s_typing, __pyx_t_2, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 69, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Iterable, __pyx_t_1) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_List); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_List, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Tuple); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Tuple, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Dict); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Dict, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Union); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Union, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Any); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Any, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Optional); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Optional, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Callable); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Callable, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_ImportFrom(__pyx_t_1, __pyx_n_s_Iterable); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_Iterable, __pyx_t_2) < 0) __PYX_ERR(0, 69, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
   /* "questdb/ilp.pyx":71
- * from collections.abc import Iterable
+ * from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
  * 
  * import sys             # <<<<<<<<<<<<<<
  * 
  * class IlpErrorCode(Enum):
  */
-  __pyx_t_2 = __Pyx_Import(__pyx_n_s_sys, 0, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 71, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_sys, __pyx_t_2) < 0) __PYX_ERR(0, 71, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_1 = __Pyx_Import(__pyx_n_s_sys, 0, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 71, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_sys, __pyx_t_1) < 0) __PYX_ERR(0, 71, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
   /* "questdb/ilp.pyx":73
  * import sys
@@ -12053,16 +13294,16 @@ if (!__Pyx_RefNanny) {
  *     """Category of Error."""
  *     CouldNotResolveAddr = line_sender_error_could_not_resolve_addr
  */
-  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_n_s_Enum); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 73, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_1 = PyTuple_New(1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 73, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_n_s_Enum); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 73, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __Pyx_GIVEREF(__pyx_t_2);
-  PyTuple_SET_ITEM(__pyx_t_1, 0, __pyx_t_2);
-  __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_CalculateMetaclass(NULL, __pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 73, __pyx_L1_error)
+  __pyx_t_2 = PyTuple_New(1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 73, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_3 = __Pyx_Py3MetaclassPrepare(__pyx_t_2, __pyx_t_1, __pyx_n_s_IlpErrorCode, __pyx_n_s_IlpErrorCode, (PyObject *) NULL, __pyx_n_s_questdb_ilp, __pyx_kp_s_Category_of_Error); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 73, __pyx_L1_error)
+  __Pyx_GIVEREF(__pyx_t_1);
+  PyTuple_SET_ITEM(__pyx_t_2, 0, __pyx_t_1);
+  __pyx_t_1 = 0;
+  __pyx_t_1 = __Pyx_CalculateMetaclass(NULL, __pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 73, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_3 = __Pyx_Py3MetaclassPrepare(__pyx_t_1, __pyx_t_2, __pyx_n_s_IlpErrorCode, __pyx_n_s_IlpErrorCode, (PyObject *) NULL, __pyx_n_s_questdb_ilp, __pyx_kp_s_Category_of_Error); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 73, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
 
   /* "questdb/ilp.pyx":75
@@ -12180,13 +13421,13 @@ if (!__Pyx_RefNanny) {
  *     """Category of Error."""
  *     CouldNotResolveAddr = line_sender_error_could_not_resolve_addr
  */
-  __pyx_t_4 = __Pyx_Py3ClassCreate(__pyx_t_2, __pyx_n_s_IlpErrorCode, __pyx_t_1, __pyx_t_3, NULL, 0, 0); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 73, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_Py3ClassCreate(__pyx_t_1, __pyx_n_s_IlpErrorCode, __pyx_t_2, __pyx_t_3, NULL, 0, 0); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 73, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   if (PyDict_SetItem(__pyx_d, __pyx_n_s_IlpErrorCode, __pyx_t_4) < 0) __PYX_ERR(0, 73, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "questdb/ilp.pyx":88
  * 
@@ -12195,14 +13436,14 @@ if (!__Pyx_RefNanny) {
  *     """
  *     An error whilst using the line sender or constructing its buffer.
  */
-  __pyx_t_1 = PyTuple_New(1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 88, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_2 = PyTuple_New(1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 88, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
   __Pyx_INCREF(((PyObject *)(&((PyTypeObject*)PyExc_Exception)[0])));
   __Pyx_GIVEREF(((PyObject *)(&((PyTypeObject*)PyExc_Exception)[0])));
-  PyTuple_SET_ITEM(__pyx_t_1, 0, ((PyObject *)(&((PyTypeObject*)PyExc_Exception)[0])));
-  __pyx_t_2 = __Pyx_CalculateMetaclass(NULL, __pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 88, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_3 = __Pyx_Py3MetaclassPrepare(__pyx_t_2, __pyx_t_1, __pyx_n_s_IlpError, __pyx_n_s_IlpError, (PyObject *) NULL, __pyx_n_s_questdb_ilp, __pyx_kp_s_An_error_whilst_using_the_line); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 88, __pyx_L1_error)
+  PyTuple_SET_ITEM(__pyx_t_2, 0, ((PyObject *)(&((PyTypeObject*)PyExc_Exception)[0])));
+  __pyx_t_1 = __Pyx_CalculateMetaclass(NULL, __pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 88, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_3 = __Pyx_Py3MetaclassPrepare(__pyx_t_1, __pyx_t_2, __pyx_n_s_IlpError, __pyx_n_s_IlpError, (PyObject *) NULL, __pyx_n_s_questdb_ilp, __pyx_kp_s_An_error_whilst_using_the_line); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 88, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_t_4 = PyList_New(0); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 88, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
@@ -12260,15 +13501,15 @@ if (!__Pyx_RefNanny) {
  *     """
  *     An error whilst using the line sender or constructing its buffer.
  */
-  __pyx_t_5 = __Pyx_Py3ClassCreate(__pyx_t_2, __pyx_n_s_IlpError, __pyx_t_1, __pyx_t_3, NULL, 0, 0); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 88, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_Py3ClassCreate(__pyx_t_1, __pyx_n_s_IlpError, __pyx_t_2, __pyx_t_3, NULL, 0, 0); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 88, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   if (__Pyx_CyFunction_InitClassCell(__pyx_t_4, __pyx_t_5) < 0) __PYX_ERR(0, 88, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (PyDict_SetItem(__pyx_d, __pyx_n_s_IlpError, __pyx_t_5) < 0) __PYX_ERR(0, 88, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "questdb/ilp.pyx":220
  * 
@@ -12277,8 +13518,16 @@ if (!__Pyx_RefNanny) {
  *         """
  *         Construct a `TimestampMicros` from a `datetime` object.
  */
-  __Pyx_GetNameInClass(__pyx_t_1, (PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros, __pyx_n_s_from_datetime); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 220, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 220, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_n_s_dt, __pyx_n_u_datetime) < 0) __PYX_ERR(0, 220, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_15TimestampMicros_3from_datetime, __Pyx_CYFUNCTION_CLASSMETHOD | __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_TimestampMicros_from_datetime, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__23)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 220, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_1, __pyx_t_2);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros->tp_dict, __pyx_n_s_from_datetime, __pyx_t_1) < 0) __PYX_ERR(0, 220, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_TimestampMicros);
 
   /* "questdb/ilp.pyx":219
  *         self._value = value
@@ -12287,12 +13536,35 @@ if (!__Pyx_RefNanny) {
  *     def from_datetime(cls, dt: datetime):
  *         """
  */
+  __Pyx_GetNameInClass(__pyx_t_1, (PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros, __pyx_n_s_from_datetime); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 220, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
   __pyx_t_2 = __Pyx_Method_ClassMethod(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 219, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros->tp_dict, __pyx_n_s_from_datetime, __pyx_t_2) < 0) __PYX_ERR(0, 220, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   PyType_Modified(__pyx_ptype_7questdb_3ilp_TimestampMicros);
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_15TimestampMicros_5__reduce_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_TimestampMicros___reduce_cython, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__25)); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_reduce_cython, __pyx_t_2) < 0) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_15TimestampMicros_7__setstate_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_TimestampMicros___setstate_cytho, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__27)); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_setstate_cython, __pyx_t_2) < 0) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "questdb/ilp.pyx":244
  * 
@@ -12301,8 +13573,16 @@ if (!__Pyx_RefNanny) {
  *         """
  *         Construct a `TimestampNanos` from a `datetime` object.
  */
-  __Pyx_GetNameInClass(__pyx_t_2, (PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos, __pyx_n_s_from_datetime); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 244, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 244, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_n_s_dt, __pyx_n_u_datetime) < 0) __PYX_ERR(0, 244, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_14TimestampNanos_3from_datetime, __Pyx_CYFUNCTION_CLASSMETHOD | __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_TimestampNanos_from_datetime, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__29)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 244, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_1, __pyx_t_2);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos->tp_dict, __pyx_n_s_from_datetime, __pyx_t_1) < 0) __PYX_ERR(0, 244, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_TimestampNanos);
 
   /* "questdb/ilp.pyx":243
  *         self._value = value
@@ -12311,22 +13591,545 @@ if (!__Pyx_RefNanny) {
  *     def from_datetime(cls, dt: datetime):
  *         """
  */
-  __pyx_t_1 = __Pyx_Method_ClassMethod(__pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 243, __pyx_L1_error)
+  __Pyx_GetNameInClass(__pyx_t_1, (PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos, __pyx_n_s_from_datetime); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 244, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_2 = __Pyx_Method_ClassMethod(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 243, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos->tp_dict, __pyx_n_s_from_datetime, __pyx_t_2) < 0) __PYX_ERR(0, 244, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_TimestampNanos);
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_14TimestampNanos_5__reduce_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_TimestampNanos___reduce_cython, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__31)); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_reduce_cython, __pyx_t_2) < 0) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_14TimestampNanos_7__setstate_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_TimestampNanos___setstate_cython, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__33)); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_setstate_cython, __pyx_t_2) < 0) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "questdb/ilp.pyx":323
+ *         line_sender_buffer_free(self._impl)
+ * 
+ *     def reserve(self, additional: int):             # <<<<<<<<<<<<<<
+ *         """
+ *         Ensure the buffer has at least `additional` bytes of future capacity.
+ */
+  __pyx_t_2 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 323, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_n_s_additional, __pyx_n_u_int) < 0) __PYX_ERR(0, 323, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_16LineSenderBuffer_7reserve, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSenderBuffer_reserve, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__35)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 323, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_1, __pyx_t_2);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer->tp_dict, __pyx_n_s_reserve, __pyx_t_1) < 0) __PYX_ERR(0, 323, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSenderBuffer);
+
+  /* "questdb/ilp.pyx":333
+ *         line_sender_buffer_reserve(self._impl, additional)
+ * 
+ *     def capacity(self) -> int:             # <<<<<<<<<<<<<<
+ *         """The current buffer capacity."""
+ *         return line_sender_buffer_capacity(self._impl)
+ */
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 333, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  if (PyDict_SetItem(__pyx_t_1, __pyx_n_s_return, __pyx_n_u_int) < 0) __PYX_ERR(0, 333, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_16LineSenderBuffer_9capacity, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSenderBuffer_capacity, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__37)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 333, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_2, __pyx_t_1);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer->tp_dict, __pyx_n_s_capacity, __pyx_t_2) < 0) __PYX_ERR(0, 333, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSenderBuffer);
+
+  /* "questdb/ilp.pyx":337
+ *         return line_sender_buffer_capacity(self._impl)
+ * 
+ *     def clear(self):             # <<<<<<<<<<<<<<
+ *         """
+ *         Reset the buffer.
+ */
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_16LineSenderBuffer_11clear, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSenderBuffer_clear, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__39)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 337, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer->tp_dict, __pyx_n_s_clear, __pyx_t_2) < 0) __PYX_ERR(0, 337, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSenderBuffer);
+
+  /* "questdb/ilp.pyx":538
+ *             raise
+ * 
+ *     def row(             # <<<<<<<<<<<<<<
+ *             self,
+ *             table_name: str,
+ */
+  __pyx_t_2 = __Pyx_PyDict_NewPresized(4); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 538, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_n_s_table_name, __pyx_n_u_unicode) < 0) __PYX_ERR(0, 538, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":542
+ *             table_name: str,
+ *             *,
+ *             symbols: Optional[Dict[str, str]]=None,             # <<<<<<<<<<<<<<
+ *             columns: Optional[Dict[
+ *                 str,
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_n_s_Optional); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 542, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_n_s_Dict); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 542, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __pyx_t_5 = PyTuple_New(2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 542, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_INCREF(((PyObject *)(&PyUnicode_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyUnicode_Type)));
+  PyTuple_SET_ITEM(__pyx_t_5, 0, ((PyObject *)(&PyUnicode_Type)));
+  __Pyx_INCREF(((PyObject *)(&PyUnicode_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyUnicode_Type)));
+  PyTuple_SET_ITEM(__pyx_t_5, 1, ((PyObject *)(&PyUnicode_Type)));
+  __pyx_t_4 = __Pyx_PyObject_GetItem(__pyx_t_3, __pyx_t_5); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 542, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  __pyx_t_5 = __Pyx_PyObject_GetItem(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 542, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  if (PyDict_SetItem(__pyx_t_2, __pyx_n_s_symbols, __pyx_t_5) < 0) __PYX_ERR(0, 538, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+
+  /* "questdb/ilp.pyx":543
+ *             *,
+ *             symbols: Optional[Dict[str, str]]=None,
+ *             columns: Optional[Dict[             # <<<<<<<<<<<<<<
+ *                 str,
+ *                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_n_s_Optional); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 543, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_n_s_Dict); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 543, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+
+  /* "questdb/ilp.pyx":545
+ *             columns: Optional[Dict[
+ *                 str,
+ *                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,             # <<<<<<<<<<<<<<
+ *             at: Union[None, TimestampNanos, datetime]=None):
+ *         """
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_n_s_Union); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 545, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_3 = PyTuple_New(6); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 545, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  PyTuple_SET_ITEM(__pyx_t_3, 0, ((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  __Pyx_INCREF(((PyObject *)(&PyInt_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyInt_Type)));
+  PyTuple_SET_ITEM(__pyx_t_3, 1, ((PyObject *)(&PyInt_Type)));
+  __Pyx_INCREF(((PyObject *)(&PyFloat_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyFloat_Type)));
+  PyTuple_SET_ITEM(__pyx_t_3, 2, ((PyObject *)(&PyFloat_Type)));
+  __Pyx_INCREF(((PyObject *)(&PyUnicode_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyUnicode_Type)));
+  PyTuple_SET_ITEM(__pyx_t_3, 3, ((PyObject *)(&PyUnicode_Type)));
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros));
+  PyTuple_SET_ITEM(__pyx_t_3, 4, ((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros));
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  PyTuple_SET_ITEM(__pyx_t_3, 5, ((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  __pyx_t_6 = __Pyx_PyObject_GetItem(__pyx_t_1, __pyx_t_3); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 545, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+
+  /* "questdb/ilp.pyx":543
+ *             *,
+ *             symbols: Optional[Dict[str, str]]=None,
+ *             columns: Optional[Dict[             # <<<<<<<<<<<<<<
+ *                 str,
+ *                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
+ */
+  __pyx_t_3 = PyTuple_New(2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 543, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __Pyx_INCREF(((PyObject *)(&PyUnicode_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyUnicode_Type)));
+  PyTuple_SET_ITEM(__pyx_t_3, 0, ((PyObject *)(&PyUnicode_Type)));
+  __Pyx_GIVEREF(__pyx_t_6);
+  PyTuple_SET_ITEM(__pyx_t_3, 1, __pyx_t_6);
+  __pyx_t_6 = 0;
+  __pyx_t_6 = __Pyx_PyObject_GetItem(__pyx_t_4, __pyx_t_3); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 543, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __pyx_t_3 = __Pyx_PyObject_GetItem(__pyx_t_5, __pyx_t_6); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 543, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  if (PyDict_SetItem(__pyx_t_2, __pyx_n_s_columns, __pyx_t_3) < 0) __PYX_ERR(0, 538, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+
+  /* "questdb/ilp.pyx":546
+ *                 str,
+ *                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
+ *             at: Union[None, TimestampNanos, datetime]=None):             # <<<<<<<<<<<<<<
+ *         """
+ *         Add a single row (line) to the buffer.
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_n_s_Union); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 546, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __pyx_t_6 = PyTuple_New(3); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 546, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_INCREF(Py_None);
+  __Pyx_GIVEREF(Py_None);
+  PyTuple_SET_ITEM(__pyx_t_6, 0, Py_None);
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  PyTuple_SET_ITEM(__pyx_t_6, 1, ((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  PyTuple_SET_ITEM(__pyx_t_6, 2, ((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  __pyx_t_5 = __Pyx_PyObject_GetItem(__pyx_t_3, __pyx_t_6); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 546, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  if (PyDict_SetItem(__pyx_t_2, __pyx_n_s_at, __pyx_t_5) < 0) __PYX_ERR(0, 538, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+
+  /* "questdb/ilp.pyx":538
+ *             raise
+ * 
+ *     def row(             # <<<<<<<<<<<<<<
+ *             self,
+ *             table_name: str,
+ */
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_16LineSenderBuffer_17row, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSenderBuffer_row, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__41)); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 538, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_5, __pyx_t_2);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer->tp_dict, __pyx_n_s_row, __pyx_t_5) < 0) __PYX_ERR(0, 538, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSenderBuffer);
+
+  /* "questdb/ilp.pyx":594
+ *         return self
+ * 
+ *     def tabular(             # <<<<<<<<<<<<<<
+ *             self,
+ *             table_name: str,
+ */
+  __pyx_t_5 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 594, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  if (PyDict_SetItem(__pyx_t_5, __pyx_n_s_table_name, __pyx_n_u_unicode) < 0) __PYX_ERR(0, 594, __pyx_L1_error)
+
+  /* "questdb/ilp.pyx":597
+ *             self,
+ *             table_name: str,
+ *             data: Iterable[Iterable[Union[             # <<<<<<<<<<<<<<
+ *                 bool, int, float, str,
+ *                 TimestampMicros, TimestampNanos, datetime]]],
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_n_s_Iterable); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 597, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_n_s_Iterable); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 597, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_n_s_Union); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 597, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+
+  /* "questdb/ilp.pyx":599
+ *             data: Iterable[Iterable[Union[
+ *                 bool, int, float, str,
+ *                 TimestampMicros, TimestampNanos, datetime]]],             # <<<<<<<<<<<<<<
+ *             *,
+ *             header: Optional[List[Optional[str]]]=None,
+ */
+  __pyx_t_4 = PyTuple_New(7); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 597, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  PyTuple_SET_ITEM(__pyx_t_4, 0, ((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  __Pyx_INCREF(((PyObject *)(&PyInt_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyInt_Type)));
+  PyTuple_SET_ITEM(__pyx_t_4, 1, ((PyObject *)(&PyInt_Type)));
+  __Pyx_INCREF(((PyObject *)(&PyFloat_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyFloat_Type)));
+  PyTuple_SET_ITEM(__pyx_t_4, 2, ((PyObject *)(&PyFloat_Type)));
+  __Pyx_INCREF(((PyObject *)(&PyUnicode_Type)));
+  __Pyx_GIVEREF(((PyObject *)(&PyUnicode_Type)));
+  PyTuple_SET_ITEM(__pyx_t_4, 3, ((PyObject *)(&PyUnicode_Type)));
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros));
+  PyTuple_SET_ITEM(__pyx_t_4, 4, ((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampMicros));
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  PyTuple_SET_ITEM(__pyx_t_4, 5, ((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  PyTuple_SET_ITEM(__pyx_t_4, 6, ((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+
+  /* "questdb/ilp.pyx":597
+ *             self,
+ *             table_name: str,
+ *             data: Iterable[Iterable[Union[             # <<<<<<<<<<<<<<
+ *                 bool, int, float, str,
+ *                 TimestampMicros, TimestampNanos, datetime]]],
+ */
+  __pyx_t_1 = __Pyx_PyObject_GetItem(__pyx_t_3, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 597, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  __pyx_t_4 = __Pyx_PyObject_GetItem(__pyx_t_6, __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 597, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __pyx_t_1 = __Pyx_PyObject_GetItem(__pyx_t_2, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 597, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos->tp_dict, __pyx_n_s_from_datetime, __pyx_t_1) < 0) __PYX_ERR(0, 244, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  if (PyDict_SetItem(__pyx_t_5, __pyx_n_s_data, __pyx_t_1) < 0) __PYX_ERR(0, 594, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  PyType_Modified(__pyx_ptype_7questdb_3ilp_TimestampNanos);
+
+  /* "questdb/ilp.pyx":601
+ *                 TimestampMicros, TimestampNanos, datetime]]],
+ *             *,
+ *             header: Optional[List[Optional[str]]]=None,             # <<<<<<<<<<<<<<
+ *             symbols: Union[bool, List[int]]=False,
+ *             at: Union[None, TimestampNanos, datetime]=None):
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_n_s_Optional); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 601, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_n_s_List); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 601, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_n_s_Optional); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 601, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_6 = __Pyx_PyObject_GetItem(__pyx_t_2, ((PyObject *)(&PyUnicode_Type))); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 601, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = __Pyx_PyObject_GetItem(__pyx_t_4, __pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 601, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  __pyx_t_6 = __Pyx_PyObject_GetItem(__pyx_t_1, __pyx_t_2); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 601, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  if (PyDict_SetItem(__pyx_t_5, __pyx_n_s_header, __pyx_t_6) < 0) __PYX_ERR(0, 594, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+  /* "questdb/ilp.pyx":602
+ *             *,
+ *             header: Optional[List[Optional[str]]]=None,
+ *             symbols: Union[bool, List[int]]=False,             # <<<<<<<<<<<<<<
+ *             at: Union[None, TimestampNanos, datetime]=None):
+ *         """
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_n_s_Union); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 602, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_n_s_List); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 602, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_1 = __Pyx_PyObject_GetItem(__pyx_t_2, ((PyObject *)(&PyInt_Type))); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 602, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_2 = PyTuple_New(2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 602, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  PyTuple_SET_ITEM(__pyx_t_2, 0, ((PyObject *)__pyx_ptype_7cpython_4bool_bool));
+  __Pyx_GIVEREF(__pyx_t_1);
+  PyTuple_SET_ITEM(__pyx_t_2, 1, __pyx_t_1);
+  __pyx_t_1 = 0;
+  __pyx_t_1 = __Pyx_PyObject_GetItem(__pyx_t_6, __pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 602, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  if (PyDict_SetItem(__pyx_t_5, __pyx_n_s_symbols, __pyx_t_1) < 0) __PYX_ERR(0, 594, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+
+  /* "questdb/ilp.pyx":603
+ *             header: Optional[List[Optional[str]]]=None,
+ *             symbols: Union[bool, List[int]]=False,
+ *             at: Union[None, TimestampNanos, datetime]=None):             # <<<<<<<<<<<<<<
+ *         """
+ *         Add multiple rows as an iterable of iterables (e.g. list of lists) to
+ */
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_n_s_Union); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 603, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_2 = PyTuple_New(3); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 603, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_INCREF(Py_None);
+  __Pyx_GIVEREF(Py_None);
+  PyTuple_SET_ITEM(__pyx_t_2, 0, Py_None);
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  PyTuple_SET_ITEM(__pyx_t_2, 1, ((PyObject *)__pyx_ptype_7questdb_3ilp_TimestampNanos));
+  __Pyx_INCREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  __Pyx_GIVEREF(((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  PyTuple_SET_ITEM(__pyx_t_2, 2, ((PyObject *)__pyx_ptype_7cpython_8datetime_datetime));
+  __pyx_t_6 = __Pyx_PyObject_GetItem(__pyx_t_1, __pyx_t_2); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 603, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  if (PyDict_SetItem(__pyx_t_5, __pyx_n_s_at, __pyx_t_6) < 0) __PYX_ERR(0, 594, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+  /* "questdb/ilp.pyx":594
+ *         return self
+ * 
+ *     def tabular(             # <<<<<<<<<<<<<<
+ *             self,
+ *             table_name: str,
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_16LineSenderBuffer_19tabular, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSenderBuffer_tabular, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__43)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 594, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_6, __pyx_t_5);
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSenderBuffer->tp_dict, __pyx_n_s_tabular, __pyx_t_6) < 0) __PYX_ERR(0, 594, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSenderBuffer);
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_16LineSenderBuffer_21__reduce_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSenderBuffer___reduce_cython, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__45)); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_reduce_cython, __pyx_t_6) < 0) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_16LineSenderBuffer_23__setstate_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSenderBuffer___setstate_cyth, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__47)); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_setstate_cython, __pyx_t_6) < 0) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+  /* "questdb/ilp.pyx":874
+ *             if self._auto_flush_enabled else 0
+ * 
+ *     def new_buffer(self):             # <<<<<<<<<<<<<<
+ *         """
+ *         Make a new configured buffer.
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_3new_buffer, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender_new_buffer, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__49)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 874, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSender->tp_dict, __pyx_n_s_new_buffer, __pyx_t_6) < 0) __PYX_ERR(0, 874, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSender);
+
+  /* "questdb/ilp.pyx":885
+ *             max_name_len=self._max_name_len)
+ * 
+ *     def connect(self):             # <<<<<<<<<<<<<<
+ *         cdef line_sender_error* err = NULL
+ *         if self._opts == NULL:
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_5connect, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender_connect, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__51)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 885, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSender->tp_dict, __pyx_n_s_connect, __pyx_t_6) < 0) __PYX_ERR(0, 885, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSender);
+
+  /* "questdb/ilp.pyx":899
+ *         # self._buffer._row_complete_ctx = self
+ * 
+ *     def __enter__(self):             # <<<<<<<<<<<<<<
+ *         self.connect()
+ *         return self
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_7__enter__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender___enter, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__53)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 899, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSender->tp_dict, __pyx_n_s_enter, __pyx_t_6) < 0) __PYX_ERR(0, 899, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSender);
+
+  /* "questdb/ilp.pyx":907
+ *         return self._buffer
+ * 
+ *     cpdef flush(self, LineSenderBuffer buffer=None, bint clear=True):             # <<<<<<<<<<<<<<
+ *         cdef line_sender_error* err = NULL
+ *         cdef line_sender_buffer* c_buf = NULL
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_9flush, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender_flush, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__55)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 907, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSender->tp_dict, __pyx_n_s_flush, __pyx_t_6) < 0) __PYX_ERR(0, 907, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSender);
+
+  /* "questdb/ilp.pyx":936
+ *             raise
+ * 
+ *     cpdef close(self, bint flush=True):             # <<<<<<<<<<<<<<
+ *         self._buffer._row_complete_cb = NULL
+ *         self._buffer._row_complete_ctx = NULL
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_11close, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender_close, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__57)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 936, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSender->tp_dict, __pyx_n_s_close, __pyx_t_6) < 0) __PYX_ERR(0, 936, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSender);
+
+  /* "questdb/ilp.pyx":950
+ *         self._buffer = None
+ * 
+ *     def __exit__(self, exc_type, _exc_val, _exc_tb):             # <<<<<<<<<<<<<<
+ *         self.close(not exc_type)
+ * 
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_13__exit__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender___exit, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__59)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 950, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem((PyObject *)__pyx_ptype_7questdb_3ilp_LineSender->tp_dict, __pyx_n_s_exit, __pyx_t_6) < 0) __PYX_ERR(0, 950, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+  PyType_Modified(__pyx_ptype_7questdb_3ilp_LineSender);
+
+  /* "(tree fragment)":1
+ * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_17__reduce_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender___reduce_cython, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__61)); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_reduce_cython, __pyx_t_6) < 0) __PYX_ERR(1, 1, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+
+  /* "(tree fragment)":3
+ * def __reduce_cython__(self):
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
+ *     raise TypeError("no default __reduce__ due to non-trivial __cinit__")
+ */
+  __pyx_t_6 = __Pyx_CyFunction_New(&__pyx_mdef_7questdb_3ilp_10LineSender_19__setstate_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_n_s_LineSender___setstate_cython, NULL, __pyx_n_s_questdb_ilp, __pyx_d, ((PyObject *)__pyx_codeobj__63)); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_setstate_cython, __pyx_t_6) < 0) __PYX_ERR(1, 3, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
 
   /* "questdb/ilp.pyx":1
  * ################################################################################             # <<<<<<<<<<<<<<
  * ##     ___                  _   ____  ____
  * ##    / _ \ _   _  ___  ___| |_|  _ \| __ )
  */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 1, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
-  if (PyDict_SetItem(__pyx_d, __pyx_n_s_test, __pyx_t_1) < 0) __PYX_ERR(0, 1, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __pyx_t_6 = __Pyx_PyDict_NewPresized(0); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 1, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_6);
+  if (PyDict_SetItem(__pyx_d, __pyx_n_s_test, __pyx_t_6) < 0) __PYX_ERR(0, 1, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
 
   /* "cpython/datetime.pxd":211
  * 
@@ -13746,6 +15549,155 @@ static CYTHON_INLINE int __Pyx_dict_iter_next(
     return 1;
 }
 
+/* BytesEquals */
+static CYTHON_INLINE int __Pyx_PyBytes_Equals(PyObject* s1, PyObject* s2, int equals) {
+#if CYTHON_COMPILING_IN_PYPY
+    return PyObject_RichCompareBool(s1, s2, equals);
+#else
+    if (s1 == s2) {
+        return (equals == Py_EQ);
+    } else if (PyBytes_CheckExact(s1) & PyBytes_CheckExact(s2)) {
+        const char *ps1, *ps2;
+        Py_ssize_t length = PyBytes_GET_SIZE(s1);
+        if (length != PyBytes_GET_SIZE(s2))
+            return (equals == Py_NE);
+        ps1 = PyBytes_AS_STRING(s1);
+        ps2 = PyBytes_AS_STRING(s2);
+        if (ps1[0] != ps2[0]) {
+            return (equals == Py_NE);
+        } else if (length == 1) {
+            return (equals == Py_EQ);
+        } else {
+            int result;
+#if CYTHON_USE_UNICODE_INTERNALS
+            Py_hash_t hash1, hash2;
+            hash1 = ((PyBytesObject*)s1)->ob_shash;
+            hash2 = ((PyBytesObject*)s2)->ob_shash;
+            if (hash1 != hash2 && hash1 != -1 && hash2 != -1) {
+                return (equals == Py_NE);
+            }
+#endif
+            result = memcmp(ps1, ps2, (size_t)length);
+            return (equals == Py_EQ) ? (result == 0) : (result != 0);
+        }
+    } else if ((s1 == Py_None) & PyBytes_CheckExact(s2)) {
+        return (equals == Py_NE);
+    } else if ((s2 == Py_None) & PyBytes_CheckExact(s1)) {
+        return (equals == Py_NE);
+    } else {
+        int result;
+        PyObject* py_result = PyObject_RichCompare(s1, s2, equals);
+        if (!py_result)
+            return -1;
+        result = __Pyx_PyObject_IsTrue(py_result);
+        Py_DECREF(py_result);
+        return result;
+    }
+#endif
+}
+
+/* UnicodeEquals */
+static CYTHON_INLINE int __Pyx_PyUnicode_Equals(PyObject* s1, PyObject* s2, int equals) {
+#if CYTHON_COMPILING_IN_PYPY
+    return PyObject_RichCompareBool(s1, s2, equals);
+#else
+#if PY_MAJOR_VERSION < 3
+    PyObject* owned_ref = NULL;
+#endif
+    int s1_is_unicode, s2_is_unicode;
+    if (s1 == s2) {
+        goto return_eq;
+    }
+    s1_is_unicode = PyUnicode_CheckExact(s1);
+    s2_is_unicode = PyUnicode_CheckExact(s2);
+#if PY_MAJOR_VERSION < 3
+    if ((s1_is_unicode & (!s2_is_unicode)) && PyString_CheckExact(s2)) {
+        owned_ref = PyUnicode_FromObject(s2);
+        if (unlikely(!owned_ref))
+            return -1;
+        s2 = owned_ref;
+        s2_is_unicode = 1;
+    } else if ((s2_is_unicode & (!s1_is_unicode)) && PyString_CheckExact(s1)) {
+        owned_ref = PyUnicode_FromObject(s1);
+        if (unlikely(!owned_ref))
+            return -1;
+        s1 = owned_ref;
+        s1_is_unicode = 1;
+    } else if (((!s2_is_unicode) & (!s1_is_unicode))) {
+        return __Pyx_PyBytes_Equals(s1, s2, equals);
+    }
+#endif
+    if (s1_is_unicode & s2_is_unicode) {
+        Py_ssize_t length;
+        int kind;
+        void *data1, *data2;
+        if (unlikely(__Pyx_PyUnicode_READY(s1) < 0) || unlikely(__Pyx_PyUnicode_READY(s2) < 0))
+            return -1;
+        length = __Pyx_PyUnicode_GET_LENGTH(s1);
+        if (length != __Pyx_PyUnicode_GET_LENGTH(s2)) {
+            goto return_ne;
+        }
+#if CYTHON_USE_UNICODE_INTERNALS
+        {
+            Py_hash_t hash1, hash2;
+        #if CYTHON_PEP393_ENABLED
+            hash1 = ((PyASCIIObject*)s1)->hash;
+            hash2 = ((PyASCIIObject*)s2)->hash;
+        #else
+            hash1 = ((PyUnicodeObject*)s1)->hash;
+            hash2 = ((PyUnicodeObject*)s2)->hash;
+        #endif
+            if (hash1 != hash2 && hash1 != -1 && hash2 != -1) {
+                goto return_ne;
+            }
+        }
+#endif
+        kind = __Pyx_PyUnicode_KIND(s1);
+        if (kind != __Pyx_PyUnicode_KIND(s2)) {
+            goto return_ne;
+        }
+        data1 = __Pyx_PyUnicode_DATA(s1);
+        data2 = __Pyx_PyUnicode_DATA(s2);
+        if (__Pyx_PyUnicode_READ(kind, data1, 0) != __Pyx_PyUnicode_READ(kind, data2, 0)) {
+            goto return_ne;
+        } else if (length == 1) {
+            goto return_eq;
+        } else {
+            int result = memcmp(data1, data2, (size_t)(length * kind));
+            #if PY_MAJOR_VERSION < 3
+            Py_XDECREF(owned_ref);
+            #endif
+            return (equals == Py_EQ) ? (result == 0) : (result != 0);
+        }
+    } else if ((s1 == Py_None) & s2_is_unicode) {
+        goto return_ne;
+    } else if ((s2 == Py_None) & s1_is_unicode) {
+        goto return_ne;
+    } else {
+        int result;
+        PyObject* py_result = PyObject_RichCompare(s1, s2, equals);
+        #if PY_MAJOR_VERSION < 3
+        Py_XDECREF(owned_ref);
+        #endif
+        if (!py_result)
+            return -1;
+        result = __Pyx_PyObject_IsTrue(py_result);
+        Py_DECREF(py_result);
+        return result;
+    }
+return_eq:
+    #if PY_MAJOR_VERSION < 3
+    Py_XDECREF(owned_ref);
+    #endif
+    return (equals == Py_EQ);
+return_ne:
+    #if PY_MAJOR_VERSION < 3
+    Py_XDECREF(owned_ref);
+    #endif
+    return (equals == Py_NE);
+#endif
+}
+
 /* PyObject_GenericGetAttrNoDict */
 #if CYTHON_USE_TYPE_SLOTS && CYTHON_USE_PYTYPE_LOOKUP && PY_VERSION_HEX < 0x03070000
 static PyObject *__Pyx_RaiseGenericGetAttributeError(PyTypeObject *tp, PyObject *attr_name) {
@@ -14933,6 +16885,122 @@ static PyObject *__Pyx__GetNameInClass(PyObject *nmspace, PyObject *name) {
     return result;
 }
 
+/* GetItemInt */
+static PyObject *__Pyx_GetItemInt_Generic(PyObject *o, PyObject* j) {
+    PyObject *r;
+    if (!j) return NULL;
+    r = PyObject_GetItem(o, j);
+    Py_DECREF(j);
+    return r;
+}
+static CYTHON_INLINE PyObject *__Pyx_GetItemInt_List_Fast(PyObject *o, Py_ssize_t i,
+                                                              CYTHON_NCP_UNUSED int wraparound,
+                                                              CYTHON_NCP_UNUSED int boundscheck) {
+#if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+    Py_ssize_t wrapped_i = i;
+    if (wraparound & unlikely(i < 0)) {
+        wrapped_i += PyList_GET_SIZE(o);
+    }
+    if ((!boundscheck) || likely(__Pyx_is_valid_index(wrapped_i, PyList_GET_SIZE(o)))) {
+        PyObject *r = PyList_GET_ITEM(o, wrapped_i);
+        Py_INCREF(r);
+        return r;
+    }
+    return __Pyx_GetItemInt_Generic(o, PyInt_FromSsize_t(i));
+#else
+    return PySequence_GetItem(o, i);
+#endif
+}
+static CYTHON_INLINE PyObject *__Pyx_GetItemInt_Tuple_Fast(PyObject *o, Py_ssize_t i,
+                                                              CYTHON_NCP_UNUSED int wraparound,
+                                                              CYTHON_NCP_UNUSED int boundscheck) {
+#if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+    Py_ssize_t wrapped_i = i;
+    if (wraparound & unlikely(i < 0)) {
+        wrapped_i += PyTuple_GET_SIZE(o);
+    }
+    if ((!boundscheck) || likely(__Pyx_is_valid_index(wrapped_i, PyTuple_GET_SIZE(o)))) {
+        PyObject *r = PyTuple_GET_ITEM(o, wrapped_i);
+        Py_INCREF(r);
+        return r;
+    }
+    return __Pyx_GetItemInt_Generic(o, PyInt_FromSsize_t(i));
+#else
+    return PySequence_GetItem(o, i);
+#endif
+}
+static CYTHON_INLINE PyObject *__Pyx_GetItemInt_Fast(PyObject *o, Py_ssize_t i, int is_list,
+                                                     CYTHON_NCP_UNUSED int wraparound,
+                                                     CYTHON_NCP_UNUSED int boundscheck) {
+#if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS && CYTHON_USE_TYPE_SLOTS
+    if (is_list || PyList_CheckExact(o)) {
+        Py_ssize_t n = ((!wraparound) | likely(i >= 0)) ? i : i + PyList_GET_SIZE(o);
+        if ((!boundscheck) || (likely(__Pyx_is_valid_index(n, PyList_GET_SIZE(o))))) {
+            PyObject *r = PyList_GET_ITEM(o, n);
+            Py_INCREF(r);
+            return r;
+        }
+    }
+    else if (PyTuple_CheckExact(o)) {
+        Py_ssize_t n = ((!wraparound) | likely(i >= 0)) ? i : i + PyTuple_GET_SIZE(o);
+        if ((!boundscheck) || likely(__Pyx_is_valid_index(n, PyTuple_GET_SIZE(o)))) {
+            PyObject *r = PyTuple_GET_ITEM(o, n);
+            Py_INCREF(r);
+            return r;
+        }
+    } else {
+        PySequenceMethods *m = Py_TYPE(o)->tp_as_sequence;
+        if (likely(m && m->sq_item)) {
+            if (wraparound && unlikely(i < 0) && likely(m->sq_length)) {
+                Py_ssize_t l = m->sq_length(o);
+                if (likely(l >= 0)) {
+                    i += l;
+                } else {
+                    if (!PyErr_ExceptionMatches(PyExc_OverflowError))
+                        return NULL;
+                    PyErr_Clear();
+                }
+            }
+            return m->sq_item(o, i);
+        }
+    }
+#else
+    if (is_list || PySequence_Check(o)) {
+        return PySequence_GetItem(o, i);
+    }
+#endif
+    return __Pyx_GetItemInt_Generic(o, PyInt_FromSsize_t(i));
+}
+
+/* ObjectGetItem */
+#if CYTHON_USE_TYPE_SLOTS
+static PyObject *__Pyx_PyObject_GetIndex(PyObject *obj, PyObject* index) {
+    PyObject *runerr;
+    Py_ssize_t key_value;
+    PySequenceMethods *m = Py_TYPE(obj)->tp_as_sequence;
+    if (unlikely(!(m && m->sq_item))) {
+        PyErr_Format(PyExc_TypeError, "'%.200s' object is not subscriptable", Py_TYPE(obj)->tp_name);
+        return NULL;
+    }
+    key_value = __Pyx_PyIndex_AsSsize_t(index);
+    if (likely(key_value != -1 || !(runerr = PyErr_Occurred()))) {
+        return __Pyx_GetItemInt_Fast(obj, key_value, 0, 1, 1);
+    }
+    if (PyErr_GivenExceptionMatches(runerr, PyExc_OverflowError)) {
+        PyErr_Clear();
+        PyErr_Format(PyExc_IndexError, "cannot fit '%.200s' into an index-sized integer", Py_TYPE(index)->tp_name);
+    }
+    return NULL;
+}
+static PyObject *__Pyx_PyObject_GetItem(PyObject *obj, PyObject* key) {
+    PyMappingMethods *m = Py_TYPE(obj)->tp_as_mapping;
+    if (likely(m && m->mp_subscript)) {
+        return m->mp_subscript(obj, key);
+    }
+    return __Pyx_PyObject_GetIndex(obj, key);
+}
+#endif
+
 /* CLineInTraceback */
 #ifndef CYTHON_CLINE_IN_TRACEBACK
 static int __Pyx_CLineForTraceback(CYTHON_NCP_UNUSED PyThreadState *tstate, int c_line) {
@@ -15204,6 +17272,202 @@ static CYTHON_INLINE PyObject* __Pyx_PyInt_From_enum__line_sender_error_code(enu
         return _PyLong_FromByteArray(bytes, sizeof(enum line_sender_error_code),
                                      little, !is_unsigned);
     }
+}
+
+/* CIntFromPy */
+static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *x) {
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#endif
+    const int neg_one = (int) -1, const_zero = (int) 0;
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic pop
+#endif
+    const int is_unsigned = neg_one > const_zero;
+#if PY_MAJOR_VERSION < 3
+    if (likely(PyInt_Check(x))) {
+        if (sizeof(int) < sizeof(long)) {
+            __PYX_VERIFY_RETURN_INT(int, long, PyInt_AS_LONG(x))
+        } else {
+            long val = PyInt_AS_LONG(x);
+            if (is_unsigned && unlikely(val < 0)) {
+                goto raise_neg_overflow;
+            }
+            return (int) val;
+        }
+    } else
+#endif
+    if (likely(PyLong_Check(x))) {
+        if (is_unsigned) {
+#if CYTHON_USE_PYLONG_INTERNALS
+            const digit* digits = ((PyLongObject*)x)->ob_digit;
+            switch (Py_SIZE(x)) {
+                case  0: return (int) 0;
+                case  1: __PYX_VERIFY_RETURN_INT(int, digit, digits[0])
+                case 2:
+                    if (8 * sizeof(int) > 1 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 2 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) >= 2 * PyLong_SHIFT) {
+                            return (int) (((((int)digits[1]) << PyLong_SHIFT) | (int)digits[0]));
+                        }
+                    }
+                    break;
+                case 3:
+                    if (8 * sizeof(int) > 2 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 3 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) >= 3 * PyLong_SHIFT) {
+                            return (int) (((((((int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0]));
+                        }
+                    }
+                    break;
+                case 4:
+                    if (8 * sizeof(int) > 3 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 4 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) >= 4 * PyLong_SHIFT) {
+                            return (int) (((((((((int)digits[3]) << PyLong_SHIFT) | (int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0]));
+                        }
+                    }
+                    break;
+            }
+#endif
+#if CYTHON_COMPILING_IN_CPYTHON
+            if (unlikely(Py_SIZE(x) < 0)) {
+                goto raise_neg_overflow;
+            }
+#else
+            {
+                int result = PyObject_RichCompareBool(x, Py_False, Py_LT);
+                if (unlikely(result < 0))
+                    return (int) -1;
+                if (unlikely(result == 1))
+                    goto raise_neg_overflow;
+            }
+#endif
+            if (sizeof(int) <= sizeof(unsigned long)) {
+                __PYX_VERIFY_RETURN_INT_EXC(int, unsigned long, PyLong_AsUnsignedLong(x))
+#ifdef HAVE_LONG_LONG
+            } else if (sizeof(int) <= sizeof(unsigned PY_LONG_LONG)) {
+                __PYX_VERIFY_RETURN_INT_EXC(int, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
+#endif
+            }
+        } else {
+#if CYTHON_USE_PYLONG_INTERNALS
+            const digit* digits = ((PyLongObject*)x)->ob_digit;
+            switch (Py_SIZE(x)) {
+                case  0: return (int) 0;
+                case -1: __PYX_VERIFY_RETURN_INT(int, sdigit, (sdigit) (-(sdigit)digits[0]))
+                case  1: __PYX_VERIFY_RETURN_INT(int,  digit, +digits[0])
+                case -2:
+                    if (8 * sizeof(int) - 1 > 1 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 2 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) - 1 > 2 * PyLong_SHIFT) {
+                            return (int) (((int)-1)*(((((int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                        }
+                    }
+                    break;
+                case 2:
+                    if (8 * sizeof(int) > 1 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 2 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) - 1 > 2 * PyLong_SHIFT) {
+                            return (int) ((((((int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                        }
+                    }
+                    break;
+                case -3:
+                    if (8 * sizeof(int) - 1 > 2 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 3 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) - 1 > 3 * PyLong_SHIFT) {
+                            return (int) (((int)-1)*(((((((int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                        }
+                    }
+                    break;
+                case 3:
+                    if (8 * sizeof(int) > 2 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 3 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) - 1 > 3 * PyLong_SHIFT) {
+                            return (int) ((((((((int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                        }
+                    }
+                    break;
+                case -4:
+                    if (8 * sizeof(int) - 1 > 3 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 4 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) - 1 > 4 * PyLong_SHIFT) {
+                            return (int) (((int)-1)*(((((((((int)digits[3]) << PyLong_SHIFT) | (int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                        }
+                    }
+                    break;
+                case 4:
+                    if (8 * sizeof(int) > 3 * PyLong_SHIFT) {
+                        if (8 * sizeof(unsigned long) > 4 * PyLong_SHIFT) {
+                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(int) - 1 > 4 * PyLong_SHIFT) {
+                            return (int) ((((((((((int)digits[3]) << PyLong_SHIFT) | (int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                        }
+                    }
+                    break;
+            }
+#endif
+            if (sizeof(int) <= sizeof(long)) {
+                __PYX_VERIFY_RETURN_INT_EXC(int, long, PyLong_AsLong(x))
+#ifdef HAVE_LONG_LONG
+            } else if (sizeof(int) <= sizeof(PY_LONG_LONG)) {
+                __PYX_VERIFY_RETURN_INT_EXC(int, PY_LONG_LONG, PyLong_AsLongLong(x))
+#endif
+            }
+        }
+        {
+#if CYTHON_COMPILING_IN_PYPY && !defined(_PyLong_AsByteArray)
+            PyErr_SetString(PyExc_RuntimeError,
+                            "_PyLong_AsByteArray() not available in PyPy, cannot convert large numbers");
+#else
+            int val;
+            PyObject *v = __Pyx_PyNumber_IntOrLong(x);
+ #if PY_MAJOR_VERSION < 3
+            if (likely(v) && !PyLong_Check(v)) {
+                PyObject *tmp = v;
+                v = PyNumber_Long(tmp);
+                Py_DECREF(tmp);
+            }
+ #endif
+            if (likely(v)) {
+                int one = 1; int is_little = (int)*(unsigned char *)&one;
+                unsigned char *bytes = (unsigned char *)&val;
+                int ret = _PyLong_AsByteArray((PyLongObject *)v,
+                                              bytes, sizeof(val),
+                                              is_little, !is_unsigned);
+                Py_DECREF(v);
+                if (likely(!ret))
+                    return val;
+            }
+#endif
+            return (int) -1;
+        }
+    } else {
+        int val;
+        PyObject *tmp = __Pyx_PyNumber_IntOrLong(x);
+        if (!tmp) return (int) -1;
+        val = __Pyx_PyInt_As_int(tmp);
+        Py_DECREF(tmp);
+        return val;
+    }
+raise_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "value too large to convert to int");
+    return (int) -1;
+raise_neg_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "can't convert negative value to int");
+    return (int) -1;
 }
 
 /* CIntFromPy */
@@ -15637,26 +17901,26 @@ raise_neg_overflow:
 }
 
 /* CIntFromPy */
-static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *x) {
+static CYTHON_INLINE uint64_t __Pyx_PyInt_As_uint64_t(PyObject *x) {
 #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
 #endif
-    const int neg_one = (int) -1, const_zero = (int) 0;
+    const uint64_t neg_one = (uint64_t) -1, const_zero = (uint64_t) 0;
 #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
 #pragma GCC diagnostic pop
 #endif
     const int is_unsigned = neg_one > const_zero;
 #if PY_MAJOR_VERSION < 3
     if (likely(PyInt_Check(x))) {
-        if (sizeof(int) < sizeof(long)) {
-            __PYX_VERIFY_RETURN_INT(int, long, PyInt_AS_LONG(x))
+        if (sizeof(uint64_t) < sizeof(long)) {
+            __PYX_VERIFY_RETURN_INT(uint64_t, long, PyInt_AS_LONG(x))
         } else {
             long val = PyInt_AS_LONG(x);
             if (is_unsigned && unlikely(val < 0)) {
                 goto raise_neg_overflow;
             }
-            return (int) val;
+            return (uint64_t) val;
         }
     } else
 #endif
@@ -15665,32 +17929,32 @@ static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *x) {
 #if CYTHON_USE_PYLONG_INTERNALS
             const digit* digits = ((PyLongObject*)x)->ob_digit;
             switch (Py_SIZE(x)) {
-                case  0: return (int) 0;
-                case  1: __PYX_VERIFY_RETURN_INT(int, digit, digits[0])
+                case  0: return (uint64_t) 0;
+                case  1: __PYX_VERIFY_RETURN_INT(uint64_t, digit, digits[0])
                 case 2:
-                    if (8 * sizeof(int) > 1 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) > 1 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 2 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) >= 2 * PyLong_SHIFT) {
-                            return (int) (((((int)digits[1]) << PyLong_SHIFT) | (int)digits[0]));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) >= 2 * PyLong_SHIFT) {
+                            return (uint64_t) (((((uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0]));
                         }
                     }
                     break;
                 case 3:
-                    if (8 * sizeof(int) > 2 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) > 2 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 3 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) >= 3 * PyLong_SHIFT) {
-                            return (int) (((((((int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0]));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) >= 3 * PyLong_SHIFT) {
+                            return (uint64_t) (((((((uint64_t)digits[2]) << PyLong_SHIFT) | (uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0]));
                         }
                     }
                     break;
                 case 4:
-                    if (8 * sizeof(int) > 3 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) > 3 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 4 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) >= 4 * PyLong_SHIFT) {
-                            return (int) (((((((((int)digits[3]) << PyLong_SHIFT) | (int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0]));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) >= 4 * PyLong_SHIFT) {
+                            return (uint64_t) (((((((((uint64_t)digits[3]) << PyLong_SHIFT) | (uint64_t)digits[2]) << PyLong_SHIFT) | (uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0]));
                         }
                     }
                     break;
@@ -15704,86 +17968,86 @@ static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *x) {
             {
                 int result = PyObject_RichCompareBool(x, Py_False, Py_LT);
                 if (unlikely(result < 0))
-                    return (int) -1;
+                    return (uint64_t) -1;
                 if (unlikely(result == 1))
                     goto raise_neg_overflow;
             }
 #endif
-            if (sizeof(int) <= sizeof(unsigned long)) {
-                __PYX_VERIFY_RETURN_INT_EXC(int, unsigned long, PyLong_AsUnsignedLong(x))
+            if (sizeof(uint64_t) <= sizeof(unsigned long)) {
+                __PYX_VERIFY_RETURN_INT_EXC(uint64_t, unsigned long, PyLong_AsUnsignedLong(x))
 #ifdef HAVE_LONG_LONG
-            } else if (sizeof(int) <= sizeof(unsigned PY_LONG_LONG)) {
-                __PYX_VERIFY_RETURN_INT_EXC(int, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
+            } else if (sizeof(uint64_t) <= sizeof(unsigned PY_LONG_LONG)) {
+                __PYX_VERIFY_RETURN_INT_EXC(uint64_t, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
 #endif
             }
         } else {
 #if CYTHON_USE_PYLONG_INTERNALS
             const digit* digits = ((PyLongObject*)x)->ob_digit;
             switch (Py_SIZE(x)) {
-                case  0: return (int) 0;
-                case -1: __PYX_VERIFY_RETURN_INT(int, sdigit, (sdigit) (-(sdigit)digits[0]))
-                case  1: __PYX_VERIFY_RETURN_INT(int,  digit, +digits[0])
+                case  0: return (uint64_t) 0;
+                case -1: __PYX_VERIFY_RETURN_INT(uint64_t, sdigit, (sdigit) (-(sdigit)digits[0]))
+                case  1: __PYX_VERIFY_RETURN_INT(uint64_t,  digit, +digits[0])
                 case -2:
-                    if (8 * sizeof(int) - 1 > 1 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) - 1 > 1 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 2 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) - 1 > 2 * PyLong_SHIFT) {
-                            return (int) (((int)-1)*(((((int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) - 1 > 2 * PyLong_SHIFT) {
+                            return (uint64_t) (((uint64_t)-1)*(((((uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0])));
                         }
                     }
                     break;
                 case 2:
-                    if (8 * sizeof(int) > 1 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) > 1 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 2 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) - 1 > 2 * PyLong_SHIFT) {
-                            return (int) ((((((int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) - 1 > 2 * PyLong_SHIFT) {
+                            return (uint64_t) ((((((uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0])));
                         }
                     }
                     break;
                 case -3:
-                    if (8 * sizeof(int) - 1 > 2 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) - 1 > 2 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 3 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) - 1 > 3 * PyLong_SHIFT) {
-                            return (int) (((int)-1)*(((((((int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) - 1 > 3 * PyLong_SHIFT) {
+                            return (uint64_t) (((uint64_t)-1)*(((((((uint64_t)digits[2]) << PyLong_SHIFT) | (uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0])));
                         }
                     }
                     break;
                 case 3:
-                    if (8 * sizeof(int) > 2 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) > 2 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 3 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) - 1 > 3 * PyLong_SHIFT) {
-                            return (int) ((((((((int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) - 1 > 3 * PyLong_SHIFT) {
+                            return (uint64_t) ((((((((uint64_t)digits[2]) << PyLong_SHIFT) | (uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0])));
                         }
                     }
                     break;
                 case -4:
-                    if (8 * sizeof(int) - 1 > 3 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) - 1 > 3 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 4 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) - 1 > 4 * PyLong_SHIFT) {
-                            return (int) (((int)-1)*(((((((((int)digits[3]) << PyLong_SHIFT) | (int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) - 1 > 4 * PyLong_SHIFT) {
+                            return (uint64_t) (((uint64_t)-1)*(((((((((uint64_t)digits[3]) << PyLong_SHIFT) | (uint64_t)digits[2]) << PyLong_SHIFT) | (uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0])));
                         }
                     }
                     break;
                 case 4:
-                    if (8 * sizeof(int) > 3 * PyLong_SHIFT) {
+                    if (8 * sizeof(uint64_t) > 3 * PyLong_SHIFT) {
                         if (8 * sizeof(unsigned long) > 4 * PyLong_SHIFT) {
-                            __PYX_VERIFY_RETURN_INT(int, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if (8 * sizeof(int) - 1 > 4 * PyLong_SHIFT) {
-                            return (int) ((((((((((int)digits[3]) << PyLong_SHIFT) | (int)digits[2]) << PyLong_SHIFT) | (int)digits[1]) << PyLong_SHIFT) | (int)digits[0])));
+                            __PYX_VERIFY_RETURN_INT(uint64_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if (8 * sizeof(uint64_t) - 1 > 4 * PyLong_SHIFT) {
+                            return (uint64_t) ((((((((((uint64_t)digits[3]) << PyLong_SHIFT) | (uint64_t)digits[2]) << PyLong_SHIFT) | (uint64_t)digits[1]) << PyLong_SHIFT) | (uint64_t)digits[0])));
                         }
                     }
                     break;
             }
 #endif
-            if (sizeof(int) <= sizeof(long)) {
-                __PYX_VERIFY_RETURN_INT_EXC(int, long, PyLong_AsLong(x))
+            if (sizeof(uint64_t) <= sizeof(long)) {
+                __PYX_VERIFY_RETURN_INT_EXC(uint64_t, long, PyLong_AsLong(x))
 #ifdef HAVE_LONG_LONG
-            } else if (sizeof(int) <= sizeof(PY_LONG_LONG)) {
-                __PYX_VERIFY_RETURN_INT_EXC(int, PY_LONG_LONG, PyLong_AsLongLong(x))
+            } else if (sizeof(uint64_t) <= sizeof(PY_LONG_LONG)) {
+                __PYX_VERIFY_RETURN_INT_EXC(uint64_t, PY_LONG_LONG, PyLong_AsLongLong(x))
 #endif
             }
         }
@@ -15792,7 +18056,7 @@ static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *x) {
             PyErr_SetString(PyExc_RuntimeError,
                             "_PyLong_AsByteArray() not available in PyPy, cannot convert large numbers");
 #else
-            int val;
+            uint64_t val;
             PyObject *v = __Pyx_PyNumber_IntOrLong(x);
  #if PY_MAJOR_VERSION < 3
             if (likely(v) && !PyLong_Check(v)) {
@@ -15812,24 +18076,62 @@ static CYTHON_INLINE int __Pyx_PyInt_As_int(PyObject *x) {
                     return val;
             }
 #endif
-            return (int) -1;
+            return (uint64_t) -1;
         }
     } else {
-        int val;
+        uint64_t val;
         PyObject *tmp = __Pyx_PyNumber_IntOrLong(x);
-        if (!tmp) return (int) -1;
-        val = __Pyx_PyInt_As_int(tmp);
+        if (!tmp) return (uint64_t) -1;
+        val = __Pyx_PyInt_As_uint64_t(tmp);
         Py_DECREF(tmp);
         return val;
     }
 raise_overflow:
     PyErr_SetString(PyExc_OverflowError,
-        "value too large to convert to int");
-    return (int) -1;
+        "value too large to convert to uint64_t");
+    return (uint64_t) -1;
 raise_neg_overflow:
     PyErr_SetString(PyExc_OverflowError,
-        "can't convert negative value to int");
-    return (int) -1;
+        "can't convert negative value to uint64_t");
+    return (uint64_t) -1;
+}
+
+/* CIntToPy */
+static CYTHON_INLINE PyObject* __Pyx_PyInt_From_int(int value) {
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#endif
+    const int neg_one = (int) -1, const_zero = (int) 0;
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic pop
+#endif
+    const int is_unsigned = neg_one > const_zero;
+    if (is_unsigned) {
+        if (sizeof(int) < sizeof(long)) {
+            return PyInt_FromLong((long) value);
+        } else if (sizeof(int) <= sizeof(unsigned long)) {
+            return PyLong_FromUnsignedLong((unsigned long) value);
+#ifdef HAVE_LONG_LONG
+        } else if (sizeof(int) <= sizeof(unsigned PY_LONG_LONG)) {
+            return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
+#endif
+        }
+    } else {
+        if (sizeof(int) <= sizeof(long)) {
+            return PyInt_FromLong((long) value);
+#ifdef HAVE_LONG_LONG
+        } else if (sizeof(int) <= sizeof(PY_LONG_LONG)) {
+            return PyLong_FromLongLong((PY_LONG_LONG) value);
+#endif
+        }
+    }
+    {
+        int one = 1; int little = (int)*(unsigned char *)&one;
+        unsigned char *bytes = (unsigned char *)&value;
+        return _PyLong_FromByteArray(bytes, sizeof(int),
+                                     little, !is_unsigned);
+    }
 }
 
 /* CIntToPy */

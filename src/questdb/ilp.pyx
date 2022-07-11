@@ -24,6 +24,7 @@
 
 # distutils: language=c
 # cython: language_level=3
+# cython: binding=True
 
 from libc.stdint cimport uint8_t, int64_t
 from cpython.datetime cimport datetime
@@ -65,8 +66,7 @@ cdef extern from "Python.h":
 
 
 from enum import Enum
-from typing import List, Tuple, Dict, Union, Any, Optional, Callable
-from collections.abc import Iterable
+from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
 
 import sys
 
@@ -295,7 +295,7 @@ cdef class LineSenderBuffer:
     cdef row_complete_cb _row_complete_cb
     cdef void* _row_complete_ctx
 
-    def __cinit__(self, init_capacity: int = 65536, max_name_len: int = 127):
+    def __cinit__(self, init_capacity: int=65536, max_name_len: int=127):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_capacity: Initial capacity of the buffer in bytes.
@@ -531,8 +531,8 @@ cdef class LineSenderBuffer:
             self,
             table_name: str,
             *,
-            symbols: Optional[dict[str, str]]=None,
-            columns: Optional[dict[
+            symbols: Optional[Dict[str, str]]=None,
+            columns: Optional[Dict[
                 str,
                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
             at: Union[None, TimestampNanos, datetime]=None):
@@ -752,14 +752,52 @@ cdef class LineSender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef LineSenderBuffer _buffer
+    cdef bint _auto_flush_enabled
+    cdef size_t _auto_flush_watermark
 
-    def __cinit__(self, str host, object port):
+    def __cinit__(
+            self,
+            str host,
+            object port,
+            *,
+            str interface=None,
+            tuple auth=None,
+            object tls=False,
+            object read_timeout=None,
+            int init_capacity=65536,
+            int max_name_len=127,
+            object auto_flush=32768):
         cdef line_sender_error* err = NULL
-        cdef str port_str
+
         cdef line_sender_utf8 host_utf8
         cdef bytes host_owner
+
+        cdef str port_str
         cdef line_sender_utf8 port_utf8
         cdef bytes port_owner
+
+        cdef str interface_str
+        cdef line_sender_utf8 interface_utf8
+        cdef bytes interface_owner
+
+        cdef str a_key_id
+        cdef bytes a_key_id_owner
+        cdef line_sender_utf8 a_key_id_utf8
+
+        cdef str a_priv_key
+        cdef bytes a_priv_key_owner
+        cdef line_sender_utf8 a_priv_key_utf8
+
+        cdef str a_pub_key_x
+        cdef bytes a_pub_key_x_owner
+        cdef line_sender_utf8 a_pub_key_x_utf8
+
+        cdef str a_pub_key_y
+        cdef bytes a_pub_key_y_owner
+        cdef line_sender_utf8 a_pub_key_y_utf8
+
+        cdef bytes ca_owner
+        cdef line_sender_utf8 ca_utf8
 
         self._opts = NULL
         self._impl = NULL
@@ -776,7 +814,65 @@ cdef class LineSender:
         host_owner = str_to_utf8(host, &host_utf8)
         port_owner = str_to_utf8(port_str, &port_utf8)
         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
-        self._buffer = LineSenderBuffer()
+
+        if interface is not None:
+            interface_owner = str_to_utf8(interface, &interface_utf8)
+            line_sender_opts_net_interface(self._opts, interface_utf8)
+
+        if auth is not None:
+            (a_key_id,
+             a_priv_key,
+             a_pub_key_x,
+             a_pub_key_y) = auth
+            a_key_id_owner = str_to_utf8(a_key_id, &a_key_id_utf8)
+            a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)
+            a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)
+            a_pub_key_y_owner = str_to_utf8(a_pub_key_y, &a_pub_key_y_utf8)
+            line_sender_opts_auth(
+                self._opts,
+                a_key_id_utf8,
+                a_priv_key_utf8,
+                a_pub_key_x_utf8,
+                a_pub_key_y_utf8)
+
+        if tls:
+            if tls is True:
+                line_sender_opts_tls(self._opts)
+            elif isinstance(tls, str):
+                if tls == 'insecure_skip_verify':
+                    line_sender_opts_tls_insecure_skip_verify(self._opts)
+                else:
+                    ca_owner = str_to_utf8(tls, &ca_utf8)
+                    line_sender_opts_tls_ca(self._opts, ca_utf8)
+            else:
+                raise TypeError(
+                    'tls must be a bool, a str pointing to CA file or '
+                    f'"insecure_skip_verify", not {type(tls)}')
+
+        if read_timeout is not None:
+            line_sender_opts_read_timeout(self._opts, read_timeout)
+
+        self._init_capacity = init_capacity
+        self._max_name_len = max_name_len
+
+        self._buffer = LineSenderBuffer(
+            init_capacity=init_capacity,
+            max_name_len=max_name_len)
+
+        self._auto_flush_enabled = auto_flush is not None
+        self._auto_flush_watermark = int(auto_flush) \
+            if self._auto_flush_enabled else 0
+
+    def new_buffer(self):
+        """
+        Make a new configured buffer.
+
+        The buffer is set up with the configured `init_capacity` and
+        `max_name_len`.
+        """
+        self._buffer = LineSenderBuffer(
+            init_capacity=self._init_capacity,
+            max_name_len=self._max_name_len)
 
     def connect(self):
         cdef line_sender_error* err = NULL
