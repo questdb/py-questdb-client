@@ -94,7 +94,6 @@ Build wheel and source:
 
     python3 setup.py bdist_wheel sdist
 
-
 Install dependencies for uploading to PyPI:
 
 .. code-block:: bash

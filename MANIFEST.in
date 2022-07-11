@@ -6,3 +6,5 @@ recursive-include src *.pyx
 graft c-questdb-client
 prune c-questdb-client/target
 prune c-questdb-client/src/tests/json_tests.rs
+prune c-questdb-client/.git
+prune c-questdb-client/build
