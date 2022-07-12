@@ -1,19 +1,24 @@
+[project]
+requires-python = ">=3.7"
+
 [build-system]
 requires = [
     "setuptools>=30.3.0",
     "wheel",
-    "cython"
-]
+    "cython"]
 
 [tool.cibuildwheel]
+# See: https://cibuildwheel.readthedocs.io/en/stable/options/#configuration-file
 before-build = """
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > rustup-init.sh
 bash rustup-init.sh -y
 """
 
+test-command = "python {project}/test/test.py -v"
+
 skip = [
-    # No 32-bit musl C
-    # Technically this would work, but it would require cross-compiling.
+    # No 32-bit musl C native tool chain for Rust.
+    # There's a tier 2 target for it, but it would need cross-compiling.
     "*-musllinux_i686"]
 
 [tool.cibuildwheel.environment]

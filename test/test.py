@@ -4,13 +4,12 @@ import sys
 sys.dont_write_bytecode = True
 import os
 import unittest
-import pathlib
 import datetime
 
 import patch_path
 from mock_server import Server
 
-if os.environ['TEST_QUESTDB_INTEGRATION'] == '1':
+if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import TestWithDatabase
 
 import questdb.ilp as ilp

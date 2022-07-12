@@ -127,6 +127,7 @@ Package locally:
 
 .. code-block:: bash
 
-    cibuildwheel --platform linux  # or "macos", or "windows"
+    # Or `--platform` set to `macos` or `windows`
+    cibuildwheel --platform linux --output-dir dist
 
-The wheels will end up in the ``wheelhouse/`` directory when packaging locally.
+The wheels will end up in the ``dist/`` directory when packaging locally.
