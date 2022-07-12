@@ -51,6 +51,15 @@ def ilp_extension():
         extra_objects=extra_objects)
 
 
+def cargo_path():
+    return pathlib.Path(os.environ['HOME']) / '.cargo' / 'bin'
+
+
+def export_cargo_to_path():
+    """Add ``cargo`` to the PATH, assuming it's installed."""
+    os.environ['PATH'] = str(cargo_path()) + ':' + os.environ['PATH']
+
+
 def cargo_build():
     if not (PROJ_ROOT / 'c-questdb-client' / 'src').exists():
         if os.environ.get('SETUP_DO_GIT_SUBMODULE_INIT') == '1':
@@ -65,15 +74,16 @@ def cargo_build():
                 '`SETUP_DO_GIT_SUBMODULE_INIT=1` env variable\n')
             sys.exit(1)
 
-    ran_rustup = False
     if shutil.which('cargo') is None:
-        if os.environ.get('SETUP_DO_RUSTUP_INSTALL') == '1':
+        if cargo_path().exists():
+            export_cargo_to_path()
+        elif os.environ.get('SETUP_DO_RUSTUP_INSTALL') == '1':
             # curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
             subprocess.check_call([
                 'curl', '--proto', '=https', '--tlsv1.2', '-sSf',
                 'https://sh.rustup.rs', '-o', 'rustup-init.sh'])
             subprocess.check_call(['bash', 'rustup-init.sh', '-y'])
-            ran_rustup = True
+            export_cargo_to_path()
         else:
             sys.stderr.write('Could not find `cargo` executable.\n')
             sys.stderr.write('You may install it via http://rustup.rs/.\n')
@@ -82,14 +92,9 @@ def cargo_build():
                 '`SETUP_DO_RUSTUP_INSTALL=1` env variable\n')
             sys.exit(1)
 
-    env = dict(os.environ)
-    if ran_rustup:
-        env['PATH'] = os.path.join(
-            os.environ['HOME'], '.cargo', 'bin') + ':' + env['PATH']
     subprocess.check_call(
         ['cargo', 'build', '--release', '--features', 'ffi'],
-        cwd=str(PROJ_ROOT / 'c-questdb-client'),
-        env=env)
+        cwd=str(PROJ_ROOT / 'c-questdb-client'))
 
 
 class questdb_build_ext(build_ext):

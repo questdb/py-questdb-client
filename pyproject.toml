@@ -4,3 +4,17 @@ requires = [
     "wheel",
     "cython"
 ]
+
+[tool.cibuildwheel]
+before-build = """
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > rustup-init.sh
+bash rustup-init.sh -y
+"""
+
+skip = [
+    # No 32-bit musl C
+    # Technically this would work, but it would require cross-compiling.
+    "*-musllinux_i686"]
+
+[tool.cibuildwheel.environment]
+SETUP_DO_GIT_SUBMODULE_INIT = "1"

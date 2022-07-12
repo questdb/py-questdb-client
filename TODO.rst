@@ -18,10 +18,10 @@ Build Tooling
 * **[MEDIUM]** Figure out how ``bumpversion`` works, how it cuts tags, etc.
   Does ``bumpversion`` help us with ``CHANGELOG.rst``?
 
-* **[LOW]** Consider converting `setup.py` to `built.py` and transitioning to `poetry`.
-  Whilst we don't have other python dependencies for now (though we will have
-  numpy and pandas eventually), it would standardise the way we build other
-  python packages.
+* **[LOW]** Consider converting `setup.py` to `build.py` and transitioning to
+  `poetry`. Whilst we don't have other python dependencies for now
+  (though we will have numpy and pandas eventually), it would standardise the
+  way we build other python packages.
   *This can probably wait for a future release.*
 
 Docs

@@ -106,3 +106,27 @@ Upload to PyPI:
 
     python3 -m twine upload dist/*
 
+
+Building, packaging and testing with ``cibuildwheel``
+=====================================================
+
+Builds, tests and packages across a number of operating systems, architectures
+and configurations.
+
+Testing locally
+---------------
+
+Install ``cibuildwheel``:
+
+.. code-block:: bash
+
+    python3 -m pip install cibuildwheel
+
+
+Package locally:
+
+.. code-block:: bash
+
+    cibuildwheel --platform linux  # or "macos", or "windows"
+
+The wheels will end up in the ``wheelhouse/`` directory when packaging locally.
