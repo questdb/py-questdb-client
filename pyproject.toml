@@ -9,7 +9,10 @@ requires = [
 
 [tool.cibuildwheel]
 # See: https://cibuildwheel.readthedocs.io/en/stable/options/#configuration-file
-before-build = """python3 {project}/install_rust.py"""
+before-build = """
+pip install urllib3
+python3 {project}/install_rust.py
+"""
 
 test-command = "python {project}/test/test.py -v"
 
