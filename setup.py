@@ -4,6 +4,7 @@ import pathlib
 import sys
 import os
 import shutil
+import platform
 
 from setuptools import setup, find_packages
 from setuptools.extension import Extension
@@ -15,12 +16,12 @@ from install_rust import cargo_path, install_rust, export_cargo_to_path
 
 
 PROJ_ROOT = pathlib.Path(__file__).parent
+PLATFORM = sys.platform
+MODE = platform.architecture()[0]  # '32bit' or '64bit'
+WIN_32BIT_CARGO_TARGET = 'i686-pc-windows-msvc'
 
 
 def ilp_extension():
-    questdb_client_lib_dir = (PROJ_ROOT /
-        'c-questdb-client' / 'target' / 'release')
-
     lib_name = None
     lib_paths = []
     libraries = []
@@ -28,19 +29,27 @@ def ilp_extension():
     extra_link_args = []
     extra_objects = []
 
-    if sys.platform == 'darwin':
+    questdb_client_lib_dir = None
+    if PLATFORM == 'win32' and MODE == '32bit':
+        questdb_client_lib_dir = (PROJ_ROOT /
+            'c-questdb-client' / 'target' / WIN_32BIT_CARGO_TARGET / 'release')
+    else:
+        questdb_client_lib_dir = (PROJ_ROOT /
+            'c-questdb-client' / 'target' / 'release')
+
+    if PLATFORM == 'darwin':
         lib_name = 'libquestdb_client.a'
         extra_objects = [str(questdb_client_lib_dir / lib_name)]
         extra_link_args.extend(['-framework', 'Security'])
-    elif sys.platform == 'win32':
+    elif PLATFORM == 'win32':
         lib_name = 'questdb_client.lib'
         extra_objects = [str(questdb_client_lib_dir / lib_name)]
         libraries.extend(['wsock32', 'ws2_32', 'AdvAPI32', 'bcrypt', 'UserEnv'])
-    elif sys.platform == 'linux':
+    elif PLATFORM == 'linux':
         lib_name = 'libquestdb_client.a'
         extra_objects = [str(questdb_client_lib_dir / lib_name)]
     else:
-        raise NotImplementedError(f'Unsupported platform: {sys.platform}')
+        raise NotImplementedError(f'Unsupported platform: {PLATFORM}')
 
     return Extension(
         "questdb.ilp",
@@ -81,9 +90,17 @@ def cargo_build():
                 '`SETUP_DO_RUSTUP_INSTALL=1` env variable\n')
             sys.exit(1)
 
-    subprocess.check_call(
-        ['cargo', 'build', '--release', '--features', 'ffi'],
-        cwd=str(PROJ_ROOT / 'c-questdb-client'))
+    cargo_args = [
+        'cargo',
+        'build',
+        '--release',
+        '--features',
+        'ffi']
+
+    if PLATFORM == 'win32' and MODE == '32bit':
+        cargo_args.append(f'--target={WIN_32BIT_CARGO_TARGET}')
+
+    subprocess.check_call(cargo_args, cwd=str(PROJ_ROOT / 'c-questdb-client'))
 
 
 class questdb_build_ext(build_ext):
