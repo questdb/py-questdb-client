@@ -82,7 +82,11 @@ def tst():
 
 
 @command
-def cibuildwheel(platform, *args):
+def cibuildwheel(*args):
+    platform = {
+        'win32': 'windows',
+        'darwin': 'macosx',
+        'linux': 'linux'}[sys.platform]
     _run('python3', '-m',
         'cibuildwheel', '--platform', platform, '--output-dir', 'dist', *args)
 

@@ -55,6 +55,10 @@ skip = [
     # There's a tier 2 target for it, but it would need cross-compiling.
     "*-musllinux_i686"]
 
+# [tool.cibuildwheel.windows]
+# # This doens't work yet. Windows/ARM64 support is experimental.
+# archs = "auto ARM64"
+
 # [tool.cibuildwheel.linux]
 # # Build wheels for the native platform (i.e. x86) as well as an emulated
 # # build for aarch64.
