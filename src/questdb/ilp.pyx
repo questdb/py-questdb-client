@@ -150,16 +150,16 @@ cdef bytes str_to_utf8(str string, line_sender_utf8* utf8_out):
     """
     # Note that we bypass `line_sender_utf8_init`.
     cdef bytes owner = None
-    PyUnicode_READY(string)
-    if PyUnicode_IS_COMPACT_ASCII(string):
-        utf8_out.len = <size_t>(PyUnicode_GET_LENGTH(string))
-        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
-        return owner
-    else:
-        owner = string.encode('utf-8')
-        utf8_out.len = <size_t>(PyBytes_GET_SIZE(owner))
-        utf8_out.buf = <const char*>(PyBytes_AsString(owner))
-        return owner
+    # PyUnicode_READY(string)
+    # if PyUnicode_IS_COMPACT_ASCII(string):
+    #     utf8_out.len = <size_t>(PyUnicode_GET_LENGTH(string))
+    #     utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
+    #     return owner
+    # else:
+    owner = string.encode('utf-8')
+    utf8_out.len = <size_t>(PyBytes_GET_SIZE(owner))
+    utf8_out.buf = <const char*>(PyBytes_AsString(owner))
+    return owner
 
 
 cdef bytes str_to_table_name(str string, line_sender_table_name* name_out):
@@ -311,6 +311,8 @@ cdef class Buffer:
         self._row_complete_ctx = NULL
 
     def __dealloc__(self):
+        self._row_complete_cb = NULL
+        self._row_complete_ctx = NULL
         line_sender_buffer_free(self._impl)
 
     def reserve(self, additional: int):
@@ -937,25 +939,26 @@ cdef class Sender:
                 line_sender_buffer_clear(c_buf)
             raise
 
-    cpdef close(self, bint flush=True):
-        self._buffer._row_complete_cb = NULL
-        self._buffer._row_complete_ctx = NULL
+    cdef _close(self):
+        self._buffer = None
         line_sender_opts_free(self._opts)
         self._opts = NULL
+        line_sender_close(self._impl)
+        self._impl = NULL
+
+    cpdef close(self, bint flush=True):
         try:
             if (flush and (self._impl != NULL) and
                     (not line_sender_must_close(self._impl))):
                 self.flush(None, True)
         finally:
-            line_sender_close(self._impl)
-        self._impl = NULL
-        self._buffer = None
+            self._close()
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
         self.close(not exc_type)
 
     def __dealloc__(self):
-        self.close(False)
+        self._close()
 
 
 # cdef int may_flush_on_row_complete(

@@ -9,10 +9,10 @@ import datetime
 import patch_path
 from mock_server import Server
 
+import questdb.ilp as ilp
+
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import TestWithDatabase
-
-import questdb.ilp as ilp
 
 
 class TestBuffer(unittest.TestCase):
@@ -121,7 +121,6 @@ class TestSender(unittest.TestCase):
                 sender.close()
 
     def test_row_before_connect(self):
-        sender = None
         try:
             sender = ilp.Sender('localhost', 12345)
             sender.row('tbl1', symbols={'sym1': 'val1'})

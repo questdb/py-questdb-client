@@ -1,25 +1,64 @@
 [project]
+# See: https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
+name = "questdb"
 requires-python = ">=3.7"
+version = "0.0.1"
+description = "QuestDB client library for Python"
+readme = "README.rst"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Plugins",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Cython",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Networking"]
+
+[project.license]
+text = "Apache License 2.0"
+
+[[project.authors]]
+name = "Adam Cimarosti"
+email = "adam@questdb.io"
+
+[project.optional-dependencies]
+publish = ["twine", "wheel"]
+ci = ["cibuildwheel"]
+
+[project.urls]
+Homepage = "https://questdb.io/"
+Changelog = "https://py-questdb-client.readthedocs.io/en/latest/changelog.html"
+Documentation = "https://py-questdb-client.readthedocs.io/en/latest/index.html"
+Source = "https://github.com/questdb/py-questdb-client/"
+Tracker = "https://github.com/questdb/c-questdb-client/issues"
+Slack = "http://slack.questdb.io"
+
 
 [build-system]
 requires = [
-    "setuptools>=30.3.0",
-    "wheel",
-    "cython"]
+    # Setuptools 18.0 and above properly handles Cython extensions.
+    "setuptools>=45.2.0",
+    "wheel>=0.34.2",
+    "cython>=0.29.24"]
+
 
 [tool.cibuildwheel]
 # See: https://cibuildwheel.readthedocs.io/en/stable/options/#configuration-file
-before-build = """
-pip install urllib3
-python3 {project}/install_rust.py
-"""
-
+build-verbosity = "3"
+before-build = "python {project}/install_rust.py"
 test-command = "python {project}/test/test.py -v"
-
 skip = [
     # No 32-bit musl C native tool chain for Rust.
     # There's a tier 2 target for it, but it would need cross-compiling.
     "*-musllinux_i686"]
+
+# [tool.cibuildwheel.linux]
+# # Build wheels for the native platform (i.e. x86) as well as an emulated
+# # build for aarch64.
+# archs = "auto aarch64"
 
 [tool.cibuildwheel.environment]
 SETUP_DO_GIT_SUBMODULE_INIT = "1"

@@ -74,7 +74,7 @@ def cargo_build():
             install_rust()
             export_cargo_to_path()
         else:
-            sys.stderr.write('Could not find `cargo` executable.\n')
+            sys.stderr.write('Could not find the `cargo` executable.\n')
             sys.stderr.write('You may install it via http://rustup.rs/.\n')
             sys.stderr.write('\n')
             sys.stderr.write('Alternatively specify the '
@@ -102,26 +102,6 @@ def readme():
 
 
 setup(
-    name = 'questdb',
-    author='Adam Cimarosti',
-    author_email='adam@questdb.io',
-    version='0.0.1',
-    description='QuestDB client library for Python',
-    long_description=readme(),
-    project_urls={
-        'Homepage':
-            'https://questdb.io/',
-        'Changelog':
-            'https://py-questdb-client.readthedocs.io/en/latest/changelog.html',
-        'Documentation':
-            'https://py-questdb-client.readthedocs.io/en/latest/index.html',
-        'Source':
-            'https://github.com/questdb/py-questdb-client/',
-        'Tracker':
-            'https://github.com/questdb/c-questdb-client/issues',
-        'Slack':
-            'http://slack.questdb.io'},
-    license='Apache License 2.0',
     platforms=['any'],
     python_requires='>=3.7',
     install_requires=[],
@@ -130,21 +110,4 @@ setup(
     zip_safe = False,
     package_dir={'': 'src'},
     test_suite="tests",
-    packages=find_packages('src', exclude=['test']),
-    setup_requires=[
-        # Setuptools 18.0 properly handles Cython extensions.
-        'setuptools>=18.0',
-        'cython'],
-    extras_require={
-        'publish': ['twine', 'wheel']},
-    classifiers=[
-        'Development Status :: 2 - Pre-Alpha',
-        'Environment :: Plugins',
-        'Intended Audience :: Developers',
-        'Programming Language :: Python',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Cython',
-        'Programming Language :: Rust',
-        'License :: OSI Approved :: Apache Software License',
-        'Topic :: Software Development :: Libraries',
-        'Topic :: System :: Networking'])
+    packages=find_packages('src', exclude=['test']))

@@ -1,0 +1,5 @@
+source /project/gdb/python-gdb.py
+set disable-randomization off
+run
+bt
+py-bt

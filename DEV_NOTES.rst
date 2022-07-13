@@ -131,3 +131,83 @@ Package locally:
     cibuildwheel --platform linux --output-dir dist
 
 The wheels will end up in the ``dist/`` directory when packaging locally.
+
+
+Debugging with on Linux
+=======================
+
+GDB
+---
+
+Debugging with GDB is best done with the debug build of the Python interpreter.
+This automatically loads the debug helper scripts for GDB.
+
+On Ubuntu, you can install the debug build of Python with:
+
+.. code-block:: bash
+
+    sudo apt-get install python3-dbg
+
+When in a GDB session, you can now also use additional commands like ``py-bt``.
+
+Read more on the `Python GDB 
+<https://devguide.python.org/advanced-tools/gdb/index.html>`_ documentation.
+
+
+Valgrind
+--------
+
+We can set ``PYTHONMALLOC`` to disable python custom memory pools.
+
+.. code-block:: bash
+
+    export PYTHONMALLOC=malloc
+    valgrind \
+        --leak-check=full \
+        --show-leak-kinds=all \
+        --track-origins=yes \
+        --verbose \
+        python3 test/test.py -v
+
+
+Debugging in side a ``cibuildwheel`` container
+==============================================
+
+In ``pyproject.toml``, add the following to the ``[tool.cibuildwheel]`` section:
+
+.. code-block:: toml
+
+    [tool.cibuildwheel]
+
+    # .. other existing config
+
+    # With GDB
+    test-command = """
+    echo set auto-load python-scripts on >> ~/.gdbinit
+    echo add-auto-load-safe-path {project}/gdb >> ~/.gdbinit
+    cat ~/.gdbinit
+
+    ulimit -u unlimited
+    export PYTHONMALLOC=malloc
+    gdb -x {project}/commands.txt --batch --return-child-result --args \
+        python {project}/test/test.py -v
+    """
+
+    # With Valgrind
+    test-command = """
+    export PYTHONMALLOC=malloc
+    valgrind \
+        --leak-check=full \
+        --show-leak-kinds=all \
+        --track-origins=yes \
+        --verbose \
+        python {project}/test/test.py -v
+    """
+
+    [tool.cibuildwheel.linux]
+    before-all = """
+    yum -y install gdb
+    yum -y install valgrind
+    """
+
+Note the ``gdb/commands.txt`` file. Review it and change it to fit your needs.

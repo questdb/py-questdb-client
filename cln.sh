@@ -5,3 +5,4 @@ rm src/questdb/ilp.cpython-* > /dev/null 2>&1
 rm -fR src/questdb/__pycache__ > /dev/null 2>&1
 rm -fR src/questdb.egg-info > /dev/null 2>&1
 rm -fR dist
+rm -fR venv
