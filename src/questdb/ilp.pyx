@@ -586,157 +586,157 @@ cdef class Buffer:
         self._row(table_name, symbols, columns, at)
         return self
 
-    def tabular(
-            self,
-            table_name: str,
-            data: Iterable[Iterable[Union[
-                bool, int, float, str,
-                TimestampMicros, TimestampNanos, datetime]]],
-            *,
-            header: Optional[List[Optional[str]]]=None,
-            symbols: Union[bool, List[int]]=False,
-            at: Union[None, TimestampNanos, datetime]=None):
-        """
-        Add multiple rows as an iterable of iterables (e.g. list of lists) to
-        the buffer.
+    # def tabular(
+    #         self,
+    #         table_name: str,
+    #         data: Iterable[Iterable[Union[
+    #             bool, int, float, str,
+    #             TimestampMicros, TimestampNanos, datetime]]],
+    #         *,
+    #         header: Optional[List[Optional[str]]]=None,
+    #         symbols: Union[bool, List[int]]=False,
+    #         at: Union[None, TimestampNanos, datetime]=None):
+    #     """
+    #     Add multiple rows as an iterable of iterables (e.g. list of lists) to
+    #     the buffer.
 
-        **Data and header**
+    #     **Data and header**
 
-        The ``data`` argument specifies rows which must all be for the same
-        table. Column names are provided as the ``header``.
+    #     The ``data`` argument specifies rows which must all be for the same
+    #     table. Column names are provided as the ``header``.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            buffer.tabular(
-                'table_name',
-                [[True, 123, 3.14, 'xyz'],
-                 [False, 456, 6.28, 'abc'],
-                 [True, 789, 9.87, 'def']],
-                header=['col1', 'col2', 'col3', 'col4'])
+    #         buffer.tabular(
+    #             'table_name',
+    #             [[True, 123, 3.14, 'xyz'],
+    #              [False, 456, 6.28, 'abc'],
+    #              [True, 789, 9.87, 'def']],
+    #             header=['col1', 'col2', 'col3', 'col4'])
 
-        **Designated Timestamp Column**
+    #     **Designated Timestamp Column**
 
-        QuestDB supports a special `designated timestamp
-        <https://questdb.io/docs/concept/designated-timestamp/>`_ column that it
-        uses to sort the rows by timestamp.
+    #     QuestDB supports a special `designated timestamp
+    #     <https://questdb.io/docs/concept/designated-timestamp/>`_ column that it
+    #     uses to sort the rows by timestamp.
 
-        If the data section contains the same number of columns as the header,
-        then the designated is going to be
-        assigned by the server, unless specified for all columns the `at`
-        argument as either an integer wrapped in a ``TimestampNanos`` object
-        representing nanoseconds since unix epoch (1970-01-01 00:00:00 UTC) or
-        as a ``datetime.datetime`` object.
+    #     If the data section contains the same number of columns as the header,
+    #     then the designated is going to be
+    #     assigned by the server, unless specified for all columns the `at`
+    #     argument as either an integer wrapped in a ``TimestampNanos`` object
+    #     representing nanoseconds since unix epoch (1970-01-01 00:00:00 UTC) or
+    #     as a ``datetime.datetime`` object.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            buffer.tabular(
-                'table_name',
-                [[True, 123, 3.14, 'xyz'],
-                 [False, 456, 6.28, 'abc'],
-                 [True, 789, 9.87, 'def']],
-                header=['col1', 'col2', 'col3', 'col4'],
-                at=datetime.datetime.utcnow())
+    #         buffer.tabular(
+    #             'table_name',
+    #             [[True, 123, 3.14, 'xyz'],
+    #              [False, 456, 6.28, 'abc'],
+    #              [True, 789, 9.87, 'def']],
+    #             header=['col1', 'col2', 'col3', 'col4'],
+    #             at=datetime.datetime.utcnow())
 
-                # or ...
-                # at=TimestampNanos(1657386397157631000))
+    #             # or ...
+    #             # at=TimestampNanos(1657386397157631000))
 
-        If the rows need different `designated timestamp
-        <https://questdb.io/docs/concept/designated-timestamp/>`_ values across
-        different rows, you can provide them as an additional unlabeled column.
-        An unlabled column is one that has its name set to ``None``.
+    #     If the rows need different `designated timestamp
+    #     <https://questdb.io/docs/concept/designated-timestamp/>`_ values across
+    #     different rows, you can provide them as an additional unlabeled column.
+    #     An unlabled column is one that has its name set to ``None``.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            ts1 = datetime.datetime.utcnow()
-            ts2 = (
-                datetime.datetime.utcnow() +
-                datetime.timedelta(microseconds=1))
-            buffer.tabular(
-                'table_name',
-                [[True, 123, ts1],
-                 [False, 456, ts2]],
-                header=['col1', 'col2', None])
+    #         ts1 = datetime.datetime.utcnow()
+    #         ts2 = (
+    #             datetime.datetime.utcnow() +
+    #             datetime.timedelta(microseconds=1))
+    #         buffer.tabular(
+    #             'table_name',
+    #             [[True, 123, ts1],
+    #              [False, 456, ts2]],
+    #             header=['col1', 'col2', None])
 
-        Like the ``at`` argument, the designated timestamp column may also be
-        specified as ``TimestampNanos`` objects.
+    #     Like the ``at`` argument, the designated timestamp column may also be
+    #     specified as ``TimestampNanos`` objects.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            buffer.tabular(
-                'table_name',
-                [[True, 123, TimestampNanos(1657386397157630000)],
-                 [False, 456, TimestampNanos(1657386397157631000)]],
-                header=['col1', 'col2', None])
+    #         buffer.tabular(
+    #             'table_name',
+    #             [[True, 123, TimestampNanos(1657386397157630000)],
+    #              [False, 456, TimestampNanos(1657386397157631000)]],
+    #             header=['col1', 'col2', None])
 
-        The designated timestamp column may appear anywhere positionally.
+    #     The designated timestamp column may appear anywhere positionally.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            ts1 = datetime.datetime.utcnow()
-            ts2 = (
-                datetime.datetime.utcnow() +
-                datetime.timedelta(microseconds=1))
-            buffer.tabular(
-                'table_name',
-                [[1000, ts1, 123],
-                 [2000, ts2, 456]],
-                header=['col1', None, 'col2'])
+    #         ts1 = datetime.datetime.utcnow()
+    #         ts2 = (
+    #             datetime.datetime.utcnow() +
+    #             datetime.timedelta(microseconds=1))
+    #         buffer.tabular(
+    #             'table_name',
+    #             [[1000, ts1, 123],
+    #              [2000, ts2, 456]],
+    #             header=['col1', None, 'col2'])
 
-        **Other timestamp columns**
+    #     **Other timestamp columns**
 
-        Other columns may also contain timestamps. These columns can take
-        ``datetime.datetime`` objects or ``TimestampMicros`` (*not nanos*)
-        objects.
+    #     Other columns may also contain timestamps. These columns can take
+    #     ``datetime.datetime`` objects or ``TimestampMicros`` (*not nanos*)
+    #     objects.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            ts1 = datetime.datetime.utcnow()
-            ts2 = (
-                datetime.datetime.utcnow() +
-                datetime.timedelta(microseconds=1))
-            buffer.tabular(
-                'table_name',
-                [[1000, ts1, 123],
-                 [2000, ts2, 456]],
-                header=['col1', 'col2', 'col3'],
-                at=datetime.datetime.utcnow())
+    #         ts1 = datetime.datetime.utcnow()
+    #         ts2 = (
+    #             datetime.datetime.utcnow() +
+    #             datetime.timedelta(microseconds=1))
+    #         buffer.tabular(
+    #             'table_name',
+    #             [[1000, ts1, 123],
+    #              [2000, ts2, 456]],
+    #             header=['col1', 'col2', 'col3'],
+    #             at=datetime.datetime.utcnow())
 
-        **Symbol Columns**
+    #     **Symbol Columns**
 
-        QuestDB can represent strings via the ``STRING`` or ``SYMBOL`` types.
+    #     QuestDB can represent strings via the ``STRING`` or ``SYMBOL`` types.
 
-        If all the columns of type ``str`` are to be treated as ``STRING``, then
-        specify ``symbols=False`` (default - see exaples above).
+    #     If all the columns of type ``str`` are to be treated as ``STRING``, then
+    #     specify ``symbols=False`` (default - see exaples above).
 
-        If all need to be treated as ``SYMBOL`` specify ``symbols=True``.
+    #     If all need to be treated as ``SYMBOL`` specify ``symbols=True``.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            buffer.tabular(
-                'table_name',
-                [['abc', 123, 3.14, 'xyz'],
-                 ['def', 456, 6.28, 'abc'],
-                 ['ghi', 789, 9.87, 'def']],
-                header=['col1', 'col2', 'col3', 'col4'],
-                symbols=True)  # `col1` and `col4` are SYMBOL columns.
+    #         buffer.tabular(
+    #             'table_name',
+    #             [['abc', 123, 3.14, 'xyz'],
+    #              ['def', 456, 6.28, 'abc'],
+    #              ['ghi', 789, 9.87, 'def']],
+    #             header=['col1', 'col2', 'col3', 'col4'],
+    #             symbols=True)  # `col1` and `col4` are SYMBOL columns.
 
-        Whilst if only a select few are to be treated as ``SYMBOL``, specify a
-        list of column indices to the ``symbols`` arg.
+    #     Whilst if only a select few are to be treated as ``SYMBOL``, specify a
+    #     list of column indices to the ``symbols`` arg.
 
-        .. code-block:: python
+    #     .. code-block:: python
 
-            buffer.tabular(
-                'table_name',
-                [['abc', 123, 3.14, 'xyz'],
-                 ['def', 456, 6.28, 'abc'],
-                 ['ghi', 789, 9.87, 'def']],
-                header=['col1', 'col2', 'col3', 'col4'],
-                symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.
+    #         buffer.tabular(
+    #             'table_name',
+    #             [['abc', 123, 3.14, 'xyz'],
+    #              ['def', 456, 6.28, 'abc'],
+    #              ['ghi', 789, 9.87, 'def']],
+    #             header=['col1', 'col2', 'col3', 'col4'],
+    #             symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.
 
-        Note that column indices are 0-based and negative indices are counted
-        from the end.
-        """
-        raise ValueError('nyi')
+    #     Note that column indices are 0-based and negative indices are counted
+    #     from the end.
+    #     """
+    #     raise ValueError('nyi')
 
     # def pandas(
     #         self,
