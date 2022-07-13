@@ -9,10 +9,7 @@ requires = [
 
 [tool.cibuildwheel]
 # See: https://cibuildwheel.readthedocs.io/en/stable/options/#configuration-file
-before-build = """
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > rustup-init.sh
-bash rustup-init.sh -y
-"""
+before-build = """python3 {project}/install_rust.py"""
 
 test-command = "python {project}/test/test.py -v"
 

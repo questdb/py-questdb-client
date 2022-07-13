@@ -1,5 +1,6 @@
 src/questdb/ilp.html
 src/questdb/ilp.c
+rustup-init.exe
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
