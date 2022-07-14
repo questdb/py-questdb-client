@@ -120,7 +120,7 @@ def readme():
 
 setup(
     name='questdb',
-    version='0.0.1',
+    version='0.0.2',
     platforms=['any'],
     python_requires='>=3.7',
     install_requires=[],
