@@ -48,6 +48,8 @@ def _rmtree(path: pathlib.Path):
 
 
 def _arg2bool(arg):
+    if isinstance(arg, bool):
+        return arg
     return arg.lower() in ('true', 'yes', '1')
 
 
@@ -81,11 +83,11 @@ def doc(http_serve=False, port=None):
 
 
 @command
-def test(all=False, patch_path='1'):
+def test(all=False, patch_path='1', *args):
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
     if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
-    _run('python3', 'test/test.py', '-v',
+    _run('python3', 'test/test.py', '-v', *args,
         env=env)
 
 

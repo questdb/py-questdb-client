@@ -33,8 +33,11 @@ class Server:
         buf = b''
         while True:
             # Block for *some* data.
-            select.select([self._client_sock], [], [])
-            buf += self._client_sock.recv(1024)
+            res =  select.select([self._client_sock], [], [], 1.0)
+            new_data = self._client_sock.recv(1024)
+            if not new_data:
+                return []
+            buf += new_data
             if len(buf) < 2:
                 continue
             if (buf[-1] == ord('\n')) and (buf[-2] != ord('\\')):
@@ -44,10 +47,13 @@ class Server:
         self.msgs.extend(new_msgs)
         return new_msgs
 
-    def __exit__(self, _ex_type, _ex_value, _ex_tb):
+    def close(self):
         if self._client_sock:
             self._client_sock.close()
             self._client_sock = None
         if self._sock:
             self._sock.close()
             self._sock = None
+
+    def __exit__(self, _ex_type, _ex_value, _ex_tb):
+        self.close()

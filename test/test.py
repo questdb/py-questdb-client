@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 import os
 import unittest
 import datetime
+import time
 
 import patch_path
 from mock_server import Server
@@ -128,6 +129,82 @@ class TestSender(unittest.TestCase):
                 sender.flush()
         finally:
             sender.close()
+
+    def test_flush_1(self):
+        with Server() as server:
+            with ilp.Sender('localhost', server.port) as sender:
+                server.accept()
+                with self.assertRaisesRegex(ilp.IlpError, 'Column names'):
+                    sender.row('tbl1', symbols={'...bad name..': 'val1'})
+                self.assertEqual(str(sender), '')
+                sender.flush()
+                self.assertEqual(str(sender), '')
+            msgs = server.recv()
+            self.assertEqual(msgs, [])
+
+    def test_flush_2(self):
+        with Server() as server:
+            with ilp.Sender('localhost', server.port) as sender:
+                server.accept()
+                server.close()
+
+                # We enter a bad state where we can't flush again.
+                with self.assertRaises(ilp.IlpError):
+                    for _ in range(1000):
+                        time.sleep(0.01)
+                        sender.row('tbl1', symbols={'a': 'b'})
+                        sender.flush()
+
+                # We should still be in a bad state.
+                with self.assertRaises(ilp.IlpError):
+                    sender.row('tbl1', symbols={'a': 'b'})
+                    sender.flush()
+
+            # Leaving the `with` scope will call __exit__ and here we test
+            # that a prior exception will not cause subsequent problems.
+
+    def test_flush_3(self):
+        # Same as test_flush_2, but we catch the exception _outside_ the
+        # sender's `with` block, to ensure no exceptions get trapped.
+        with Server() as server:
+            with self.assertRaises(ilp.IlpError):
+                with ilp.Sender('localhost', server.port) as sender:
+                    server.accept()
+                    server.close()
+                    for _ in range(1000):
+                        time.sleep(0.01)
+                        sender.row('tbl1', symbols={'a': 'b'})
+                        sender.flush()
+
+    def test_independent_buffer(self):
+        buf = ilp.Buffer()
+        buf.row('tbl1', symbols={'sym1': 'val1'})
+        exp = 'tbl1,sym1=val1\n'
+        bexp = exp[:-1].encode('utf-8')
+        self.assertEqual(str(buf), exp)
+
+        with Server() as server1, Server() as server2:
+            with ilp.Sender('localhost', server1.port) as sender1, \
+                 ilp.Sender('localhost', server2.port) as sender2:
+                    server1.accept()
+                    server2.accept()
+
+                    sender1.flush(buf, clear=False)
+                    self.assertEqual(str(buf), exp)
+
+                    sender2.flush(buf, clear=False)
+                    self.assertEqual(str(buf), exp)
+
+                    msgs1 = server1.recv()
+                    msgs2 = server2.recv()
+                    self.assertEqual(msgs1, [bexp])
+                    self.assertEqual(msgs2, [bexp])
+
+                    sender1.flush(buf)
+                    self.assertEqual(server1.recv(), [bexp])
+
+                    # The buffer is now auto-cleared.
+                    self.assertEqual(str(buf), '')
 
 
 if __name__ == '__main__':
