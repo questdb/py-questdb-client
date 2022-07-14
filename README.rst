@@ -21,7 +21,7 @@ it's ready for use.
 Installation
 =============
 
-The latest version of the library is 0.0.2.
+The latest version of the library is 0.0.3.
 
 ::
 
