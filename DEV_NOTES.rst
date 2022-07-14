@@ -115,6 +115,26 @@ The `-e` flag links to the current directory rather than copying.
 Uploading to PyPI
 -----------------
 
+Update the change log file that describes the latest changes in aggregate.
+
+.. code-block:: bash
+
+    vim CHANGELOG.rst
+
+
+Create a tag, update versions etc using ``bump2version``.
+
+For more command line options, see: https://pypi.org/project/bump2version/
+
+Note that here ``patch`` would bump from (for example) ``0.1.0`` to
+``0.1.1``. ``minor`` would bump from ``0.1.0`` to ``0.2.0`` and ``major``
+would bump from ``0.1.0`` to ``1.0.0``.
+
+.. code-block:: bash
+
+    bump2version --config-file .bumpversion.cfg patch
+
+
 Once you've triple-checked everything is in ``dist/``, you can upload to PyPI.
 
 .. code-block:: bash
