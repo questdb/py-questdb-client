@@ -21,6 +21,8 @@ it's ready for use.
 Installation
 =============
 
+The latest version of the library is 0.0.2.
+
 ::
 
     python3 -m pip install questdb

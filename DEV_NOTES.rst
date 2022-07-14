@@ -179,8 +179,8 @@ We can set ``PYTHONMALLOC`` to disable python custom memory pools.
         python3 test/test.py -v
 
 
-Debugging in side a ``cibuildwheel`` container
-==============================================
+Debugging inside a ``cibuildwheel`` container
+=============================================
 
 In ``pyproject.toml``, add the following to the ``[tool.cibuildwheel]`` section:
 
