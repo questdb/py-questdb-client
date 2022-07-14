@@ -8,6 +8,7 @@ import subprocess
 import shlex
 import pathlib
 import glob
+import platform
 
 
 PROJ_ROOT = pathlib.Path(__file__).parent
@@ -55,44 +56,58 @@ def command(fn):
 
 
 @command
-def bld():
+def build():
     _run('python3', 'setup.py', 'build_ext', '--inplace')
 
 
 @command
-def srv(port=None):
+def serve(port=None):
     port = port or 8000
     docs_dir = PROJ_ROOT / 'build' / 'docs'
     _run('python3', '-m', 'http.server', port, cwd=docs_dir)
 
 
 @command
-def doc(serve=False):
+def doc(http_serve=False, port=None):
     _run('python3', '-m', 'sphinx.cmd.build',
         '-b', 'html', 'docs', 'build/docs',
         env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
-    if serve:
-        srv()
+    if http_serve:
+        serve(port)
 
 
 @command
-def tst():
+def test(all=False):
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    if all:
+        env['TEST_QUESTDB_INTEGRATION'] = '1'
     _run('python3', 'test/test.py', '-v',
-        env={'TEST_QUESTDB_PATCH_PATH': '1'})
+        env=env)
 
 
 @command
 def cibuildwheel(*args):
-    platform = {
+    plat = {
         'win32': 'windows',
-        'darwin': 'macosx',
+        'darwin': 'macos',
         'linux': 'linux'}[sys.platform]
-    _run('python3', '-m',
-        'cibuildwheel', '--platform', platform, '--output-dir', 'dist', *args)
+    python = 'python3'
+    if sys.platform == 'darwin':
+        # Launching with version other than 3.8 will
+        # fail saying the 3.8 wheel is unsupported.
+        # This is because the 3.8 wheel ends up getting loaded with another
+        # Python version.
+        python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
+    _run(python, '-m',
+        'cibuildwheel',
+        '--platform', plat,
+        '--output-dir', 'dist',
+        '--archs', platform.machine(),
+        *args)
 
 
 @command
-def cln():
+def clean():
     _rmtree(PROJ_ROOT / 'build')
     _rmtree(PROJ_ROOT / 'dist')
     _rmtree(PROJ_ROOT / 'c-questdb-client' / 'target')
