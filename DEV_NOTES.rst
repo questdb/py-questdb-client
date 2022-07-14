@@ -135,6 +135,13 @@ would bump from ``0.1.0`` to ``1.0.0``.
     bump2version --config-file .bumpversion.cfg patch
 
 
+Now make sure you push the tag or it will not show up in GitHub:
+
+.. code-block:: bash
+
+    git push --tags
+
+
 Once you've triple-checked everything is in ``dist/``, you can upload to PyPI.
 
 .. code-block:: bash
