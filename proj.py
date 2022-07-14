@@ -47,6 +47,10 @@ def _rmtree(path: pathlib.Path):
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _arg2bool(arg):
+    return arg.lower() in ('true', 'yes', '1')
+
+
 COMMANDS = set()
 
 
@@ -72,14 +76,14 @@ def doc(http_serve=False, port=None):
     _run('python3', '-m', 'sphinx.cmd.build',
         '-b', 'html', 'docs', 'build/docs',
         env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
-    if http_serve:
+    if _arg2bool(http_serve):
         serve(port)
 
 
 @command
-def test(all=False):
-    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
-    if all:
+def test(all=False, patch_path='1'):
+    env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
+    if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
     _run('python3', 'test/test.py', '-v',
         env=env)
