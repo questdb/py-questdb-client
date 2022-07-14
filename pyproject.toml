@@ -33,7 +33,7 @@ Homepage = "https://questdb.io/"
 Changelog = "https://py-questdb-client.readthedocs.io/en/latest/changelog.html"
 Documentation = "https://py-questdb-client.readthedocs.io/en/latest/index.html"
 Source = "https://github.com/questdb/py-questdb-client/"
-Tracker = "https://github.com/questdb/c-questdb-client/issues"
+Tracker = "https://github.com/questdb/py-questdb-client/issues"
 Slack = "http://slack.questdb.io"
 
 
