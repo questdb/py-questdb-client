@@ -25,13 +25,6 @@ Install Cython:
 
     python3 -m pip install cython
 
-Testing
--------
-
-.. code-block:: bash
-
-    python3 -m pip install tox
-
 Documentation
 -------------
 
@@ -39,6 +32,17 @@ Documentation
 
     python3 -m pip install sphinx
     python3 -m pip install sphinx_rtd_theme
+
+
+Packaging and releasing
+-----------------------
+
+.. code-block:: bash
+
+    python3 -m pip install wheel
+    python3 -m pip install twine
+    python3 -m pip install cibuildwheel
+    python3 -m pip install bump2version
 
 
 Building and packaging
@@ -57,80 +61,65 @@ Sync submodule before building
 Building
 --------
 
-.. code-block:: bash
+This will build in-place and is good enough for quick testing.
 
-    python3 setup.py build_ext --inplace
-
-Creating a wheel
-----------------
+No wheels are made.
 
 .. code-block:: bash
 
-    python3 setup.py bdist_wheel
+    python3 proj.py build
+
+
+Cleaning
+--------
+
+.. code-block:: bash
+
+    python3 proj.py clean
+
+
+Packaging Locally
+-----------------
+
+For each of Linux 64-bit / Linux ARM 64 / Windows 64-bit / MacOS Intel /
+MacOS Apple Silicon, run:
+
+.. code-block:: bash
+
+    python3 proj.py sdist   # source distribution
+    python3 proj.py cibuildwheel
+
+This will end up putting everything in the ``dist/`` directory.
+
+As this is very time-consuming, instead download all targets
+(except for Apple Silicon) from the CI.
+
 
 Checking `pip install` works
 ----------------------------
+
+You can generally skip this if you used ``cibuildwheel`` as the tool did this
+already and ran tests against each built wheel.
 
 .. code-block:: bash
 
     python3 -m pip install -e .
 
-
 The `-e` flag links to the current directory rather than copying.
-
-Creating a source distribution
-------------------------------
 
 .. code-block:: bash
 
-    $ python3 setup.py sdist
+    $ python3  sdist
+
 
 Uploading to PyPI
 -----------------
 
-Build wheel and source:
-
-.. code-block:: bash
-
-    python3 setup.py bdist_wheel sdist
-
-Install dependencies for uploading to PyPI:
-
-.. code-block:: bash
-
-    python3 -m pip install -e ".[publish]"
-
-Upload to PyPI:
+Once you've triple-checked everything is in ``dist/``, you can upload to PyPI.
 
 .. code-block:: bash
 
     python3 -m twine upload dist/*
-
-
-Building, packaging and testing with ``cibuildwheel``
-=====================================================
-
-Builds, tests and packages across a number of operating systems, architectures
-and configurations.
-
-Testing locally
----------------
-
-Install ``cibuildwheel``:
-
-.. code-block:: bash
-
-    python3 -m pip install cibuildwheel
-
-
-Package locally:
-
-.. code-block:: bash
-
-    # Or `--platform` set to `macos` or `windows`
-    cibuildwheel --platform linux --output-dir dist
-
-The wheels will end up in the ``dist/`` directory when packaging locally.
 
 
 Debugging with on Linux
