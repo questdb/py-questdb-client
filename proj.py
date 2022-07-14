@@ -110,6 +110,11 @@ def cibuildwheel(*args):
 
 
 @command
+def sdist():
+    _run('python3', 'setup.py', 'sdist')
+
+
+@command
 def clean():
     _rmtree(PROJ_ROOT / 'build')
     _rmtree(PROJ_ROOT / 'dist')

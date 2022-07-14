@@ -59,12 +59,12 @@ The `-e` flag links to the current directory rather than copying.
 
 This is a CLI offering these developer commands:
 
-- `python proj.py bld` builds the project.
+- `python proj.py build` builds the project.
     ```shell
     # equivalent to
     python setup.py build_ext --inplace
     ```
-- `python proj.py srv` starts document server.
+- `python proj.py serve` starts document server.
     ```shell
     # equivalent to
     python setup.py -m http.server 8000 build/docs
@@ -74,7 +74,7 @@ This is a CLI offering these developer commands:
     # equivalent to
     PYTHONPATH=src python setup.py -m sphinx.cmd.build -b html docs build/docs
     ```
-- `python proj.py tst` runs the project's tests against a locally running QuestDB instance.
+- `python proj.py test` runs the project's tests against a locally running QuestDB instance.
     ```shell
     # equivalent to
     python test/test.py -v
@@ -85,7 +85,7 @@ This is a CLI offering these developer commands:
     # equivalent to
     python setup.py -m cibuildwheel --platform macosx --output-dir dist
     ```
-- `python proj.py cln` deletes temporal/build files, including `venv`.
+- `python proj.py clean` deletes temporal/build files, including `venv`.
         
   
 ### Creating a wheel
