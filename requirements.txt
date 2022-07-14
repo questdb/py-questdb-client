@@ -1,0 +1,7 @@
+setuptools>=45.2.0
+Cython>=0.29.24
+wheel>=0.34.2
+cibuildwheel>=2.8.0
+Sphinx>=5.0.2
+sphinx-rtd-theme>=1.0.0
+tox>=3.25.1

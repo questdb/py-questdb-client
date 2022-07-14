@@ -9,15 +9,6 @@ This client library implements QuestDB's variant of the
 (ILP) over TCP.
 
 
-Status of the library
-=====================
-
-Work in progress: do not use yet.
-
-There will be an announcement on our `slack <http://slack.questdb.io>`_ once
-it's ready for use.
-
-
 Installation
 =============
 
