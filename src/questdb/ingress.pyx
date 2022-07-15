@@ -266,14 +266,13 @@ cdef class TimestampNanos:
 
 
 cdef class Sender
+cdef class Buffer
 
 
-cdef int may_flush_on_row_complete(
-    line_sender_buffer* buf,
-    Sender sender) except -1:
+cdef int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
     if sender._auto_flush_enabled:
-        if line_sender_buffer_size(buf) >= sender._auto_flush_watermark:
-            print('w00t')
+        if len(buffer) >= sender._auto_flush_watermark:
+            sender.flush(buffer)
 
 
 cdef class Buffer:
@@ -476,9 +475,7 @@ cdef class Buffer:
         if self._row_complete_sender != None:
             sender = PyWeakref_GetObject(self._row_complete_sender)
             if sender != NULL:
-                may_flush_on_row_complete(
-                    self._impl,
-                    <Sender><object>sender)
+                may_flush_on_row_complete(self, <Sender><object>sender)
 
     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
@@ -772,7 +769,7 @@ cdef class Sender:
     cdef line_sender* _impl
     cdef Buffer _buffer
     cdef bint _auto_flush_enabled
-    cdef size_t _auto_flush_watermark
+    cdef ssize_t _auto_flush_watermark
     cdef object _init_capacity
     cdef object _max_name_len
 
@@ -785,9 +782,9 @@ cdef class Sender:
             tuple auth=None,
             object tls=False,
             object read_timeout=None,
-            int init_capacity=65536,
+            int init_capacity=65536,  # 64KiB
             int max_name_len=127,
-            object auto_flush=32768):
+            object auto_flush=64512):  # 63KiB
         cdef line_sender_error* err = NULL
 
         cdef line_sender_utf8 host_utf8
@@ -887,6 +884,10 @@ cdef class Sender:
         self._auto_flush_enabled = not not auto_flush
         self._auto_flush_watermark = int(auto_flush) \
             if self._auto_flush_enabled else 0
+        if self._auto_flush_watermark < 0:
+            raise ValueError(
+                'auto_flush_watermark must be >= 0, '
+                f'not {self._auto_flush_watermark}')
 
     def new_buffer(self):
         """

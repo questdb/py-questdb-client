@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import sys
-from turtle import clear
 sys.dont_write_bytecode = True
 import os
 import unittest
@@ -222,8 +221,38 @@ class TestSender(unittest.TestCase):
             with qi.Sender('localhost', server.port, auto_flush=4) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'})
-                # msgs = server.recv()
-                # self.assertEqual(msgs, [b'tbl1,sym1=val1', b'tbl1,sym2=val2'])
+                self.assertEqual(len(sender), 0)  # auto-flushed buffer.
+                msgs = server.recv()
+                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+
+    def test_immediate_auto_flush(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port, auto_flush=True) as sender:
+                server.accept()
+                sender.row('tbl1', symbols={'sym1': 'val1'})
+                self.assertEqual(len(sender), 0)  # auto-flushed buffer.
+                msgs = server.recv()
+                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+
+    def test_dont_auto_flush(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port, auto_flush=0) as sender:
+                server.accept()
+                while len(sender) < 131072:  # 128KiB
+                    sender.row('tbl1', symbols={'sym1': 'val1'})
+                msgs = server.recv()
+                self.assertEqual(msgs, [])
+
+    def test_dont_flush_on_exception(self):
+        with Server() as server:
+            with self.assertRaises(RuntimeError):
+                with qi.Sender('localhost', server.port) as sender:
+                    server.accept()
+                    sender.row('tbl1', symbols={'sym1': 'val1'})
+                    self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
+                    raise RuntimeError('Test exception')
+            msgs = server.recv()
+            self.assertEqual(msgs, [])
 
 
 if __name__ == '__main__':
