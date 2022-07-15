@@ -27,7 +27,7 @@ The latest version of the library is 0.0.3.
 
     from questdb.ingress import Sender
 
-    with qi.Sender('localhost', 9009) as sender:
+    with Sender('localhost', 9009) as sender:
         sender.row(
             'sensors',
             symbols={'id': 'toronto1'},
