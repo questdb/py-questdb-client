@@ -10,7 +10,7 @@ import time
 import patch_path
 from mock_server import Server
 
-import questdb.ilp as ilp
+import questdb.ingress as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import TestWithDatabase
@@ -18,40 +18,40 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
 
 class TestBuffer(unittest.TestCase):
     def test_new(self):
-        buf = ilp.Buffer()
+        buf = qi.Buffer()
         self.assertEqual(len(buf), 0)
         self.assertEqual(buf.capacity(), 64 * 1024)
 
     def test_basic(self):
-        buf = ilp.Buffer()
+        buf = qi.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'})
         self.assertEqual(len(buf), 25)
         self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
 
     def test_bad_table(self):
-        buf = ilp.Buffer()
+        buf = qi.Buffer()
         with self.assertRaisesRegex(
-                ilp.IlpError,
+                qi.IngError,
                 'Table names must have a non-zero length'):
             buf.row('', symbols={'sym1': 'val1'})
         with self.assertRaisesRegex(
-                ilp.IlpError,
+                qi.IngError,
                 'Bad string "x..y": Found invalid dot `.` at position 2.'):
             buf.row('x..y', symbols={'sym1': 'val1'})
 
     def test_symbol(self):
-        buf = ilp.Buffer()
+        buf = qi.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'})
         self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
 
     def test_bad_symbol_column_name(self):
-        buf = ilp.Buffer()
+        buf = qi.Buffer()
         with self.assertRaisesRegex(
-                ilp.IlpError,
+                qi.IngError,
                 'Column names must have a non-zero length.'):
             buf.row('tbl1', symbols={'': 'val1'})
         with self.assertRaisesRegex(
-                ilp.IlpError,
+                qi.IngError,
                 'Bad string "sym.bol": '
                 'Column names can\'t contain a \'.\' character, '
                 'which was found at byte position 3.'):
@@ -60,14 +60,14 @@ class TestBuffer(unittest.TestCase):
     def test_column(self):
         two_h_after_epoch = datetime.datetime(
             1970, 1, 1, 2, tzinfo=datetime.timezone.utc)
-        buf = ilp.Buffer()
+        buf = qi.Buffer()
         buf.row('tbl1', columns={
             'col1': True,
             'col2': False,
             'col3': -1,
             'col4': 0.5,
             'col5': 'val',
-            'col6': ilp.TimestampMicros(12345),
+            'col6': qi.TimestampMicros(12345),
             'col7': two_h_after_epoch})
         exp = (
             'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
@@ -77,7 +77,7 @@ class TestBuffer(unittest.TestCase):
 
 class TestSender(unittest.TestCase):
     def test_basic(self):
-        with Server() as server, ilp.Sender('localhost', server.port) as sender:
+        with Server() as server, qi.Sender('localhost', server.port) as sender:
             server.accept()
             self.assertEqual(server.recv(), [])
             sender.row(
@@ -90,7 +90,7 @@ class TestSender(unittest.TestCase):
                     'f2': 12345,
                     'f3': 10.75,
                     'f4': 'val3'},
-                at=ilp.TimestampNanos(111222233333))
+                at=qi.TimestampNanos(111222233333))
             sender.row(
                 'tab1',
                 symbols={
@@ -110,7 +110,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             sender = None
             try:
-                sender = ilp.Sender('localhost', server.port)
+                sender = qi.Sender('localhost', server.port)
                 sender.connect()
                 server.accept()
                 self.assertEqual(server.recv(), [])
@@ -123,18 +123,18 @@ class TestSender(unittest.TestCase):
 
     def test_row_before_connect(self):
         try:
-            sender = ilp.Sender('localhost', 12345)
+            sender = qi.Sender('localhost', 12345)
             sender.row('tbl1', symbols={'sym1': 'val1'})
-            with self.assertRaisesRegex(ilp.IlpError, 'Not connected'):
+            with self.assertRaisesRegex(qi.IngError, 'Not connected'):
                 sender.flush()
         finally:
             sender.close()
 
     def test_flush_1(self):
         with Server() as server:
-            with ilp.Sender('localhost', server.port) as sender:
+            with qi.Sender('localhost', server.port) as sender:
                 server.accept()
-                with self.assertRaisesRegex(ilp.IlpError, 'Column names'):
+                with self.assertRaisesRegex(qi.IngError, 'Column names'):
                     sender.row('tbl1', symbols={'...bad name..': 'val1'})
                 self.assertEqual(str(sender), '')
                 sender.flush()
@@ -144,19 +144,19 @@ class TestSender(unittest.TestCase):
 
     def test_flush_2(self):
         with Server() as server:
-            with ilp.Sender('localhost', server.port) as sender:
+            with qi.Sender('localhost', server.port) as sender:
                 server.accept()
                 server.close()
 
                 # We enter a bad state where we can't flush again.
-                with self.assertRaises(ilp.IlpError):
+                with self.assertRaises(qi.IngError):
                     for _ in range(1000):
                         time.sleep(0.01)
                         sender.row('tbl1', symbols={'a': 'b'})
                         sender.flush()
 
                 # We should still be in a bad state.
-                with self.assertRaises(ilp.IlpError):
+                with self.assertRaises(qi.IngError):
                     sender.row('tbl1', symbols={'a': 'b'})
                     sender.flush()
 
@@ -167,8 +167,8 @@ class TestSender(unittest.TestCase):
         # Same as test_flush_2, but we catch the exception _outside_ the
         # sender's `with` block, to ensure no exceptions get trapped.
         with Server() as server:
-            with self.assertRaises(ilp.IlpError):
-                with ilp.Sender('localhost', server.port) as sender:
+            with self.assertRaises(qi.IngError):
+                with qi.Sender('localhost', server.port) as sender:
                     server.accept()
                     server.close()
                     for _ in range(1000):
@@ -177,15 +177,15 @@ class TestSender(unittest.TestCase):
                         sender.flush()
 
     def test_independent_buffer(self):
-        buf = ilp.Buffer()
+        buf = qi.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1'})
         exp = 'tbl1,sym1=val1\n'
         bexp = exp[:-1].encode('utf-8')
         self.assertEqual(str(buf), exp)
 
         with Server() as server1, Server() as server2:
-            with ilp.Sender('localhost', server1.port) as sender1, \
-                 ilp.Sender('localhost', server2.port) as sender2:
+            with qi.Sender('localhost', server1.port) as sender1, \
+                 qi.Sender('localhost', server2.port) as sender2:
                     server1.accept()
                     server2.accept()
 
@@ -205,6 +205,14 @@ class TestSender(unittest.TestCase):
 
                     # The buffer is now auto-cleared.
                     self.assertEqual(str(buf), '')
+
+    def test_auto_flush(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port, auto_flush=4) as sender:
+                server.accept()
+                sender.row('tbl1', symbols={'sym1': 'val1'})
+                # msgs = server.recv()
+                # self.assertEqual(msgs, [b'tbl1,sym1=val1', b'tbl1,sym2=val2'])
 
 
 if __name__ == '__main__':

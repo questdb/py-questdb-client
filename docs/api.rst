@@ -2,14 +2,14 @@
 API Reference
 =============
 
-questdb.ilp
-===========
+questdb.ingress
+===============
 
 .. testsetup::
 
-    from questdb.ilp import *
+    from questdb.ingress import *
 
-.. automodule:: questdb.ilp
+.. automodule:: questdb.ingress
    :members:
    :undoc-members:
    :show-inheritance:

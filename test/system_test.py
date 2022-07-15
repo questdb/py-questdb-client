@@ -12,7 +12,7 @@ sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from fixture import QuestDbFixture, install_questdb, CA_PATH, AUTH
 
 
-import questdb.ilp as ilp
+import questdb.ingress as qi
 
 
 QUESTDB_VERSION = '6.4.2'
@@ -69,7 +69,7 @@ class TestWithDatabase(unittest.TestCase):
         port = qdb.tls_line_tcp_port if tls else qdb.line_tcp_port
         pending = None
         table_name = uuid.uuid4().hex
-        with ilp.Sender('localhost', port, auth=auth, tls=tls) as sender:
+        with qi.Sender('localhost', port, auth=auth, tls=tls) as sender:
             for _ in range(3):
                 sender.row(
                     table_name,

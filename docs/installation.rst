@@ -28,9 +28,9 @@ following statements from a ``python3`` interactive shell:
 
 .. code-block:: python
 
-    >>> import questdb.ilp
-    >>> buf = questdb.ilp.Buffer()
+    >>> import questdb.ingress
+    >>> buf = questdb.ingress.Buffer()
     >>> buf.row('test', symbols={'a': 'b'})
-    <questdb.ilp.Buffer object at 0x104b68240>
+    <questdb.ingress.Buffer object at 0x104b68240>
     >>> str(buf)
     'test,a=b\n'
