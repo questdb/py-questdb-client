@@ -49,3 +49,18 @@ html_short_title = '%s-%s' % (project, version)
 napoleon_use_ivar = True
 napoleon_use_rtype = False
 napoleon_use_param = False
+
+autodoc_default_options = {
+    'special-members': '__init__ , __str__ , __enter__ , __exit__',
+    'undoc-members': True
+}
+
+
+# def do_not_skip_dunder_members(_app, _what, name, _obj, would_skip, _options):
+#     if name in ('__init__', '__call__', '__str__', '__enter__', '__exit__'):
+#         return False
+#     return would_skip
+
+
+# def setup(app):
+#     app.connect('autodoc-skip-member', do_not_skip_dunder_members)

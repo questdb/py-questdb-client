@@ -5,9 +5,9 @@ TODO
 
 Build Tooling
 =============
-* **[HIGH]** Integrate tooling to build binaries for a matrix of operating
-  systems, architectures and Python versions. This will also be our CI.
-  This should help: https://github.com/pypa/cibuildwheel
+* **[MEDIUM]** Transition to Azure, move Linux arm to ARM pipeline without QEMU.
+
+* **[MEDIUM]** Automate Apple Silicon.
 
 
 Docs
@@ -27,8 +27,6 @@ Docs
 
 Development
 ===========
-* **[HIGH]** Review API naming!
-
 * **[HIGH]** Implement the auto-commit logic based on a watermark.
 
 * **[MEDIUM]** Once we're done with them, merge in changes in the ``py_client_tweaks`` branch
