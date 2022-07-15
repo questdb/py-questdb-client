@@ -1,4 +1,4 @@
-from questdb.ilp import Sender, TimestampNanos
+from questdb.ingress import Sender
 
 if __name__ == '__main__':
     with Sender('localhost', 9009) as sender:
@@ -9,7 +9,7 @@ if __name__ == '__main__':
         )
         sender.row(
             'line_sender_example',
-            symbols={'id': 'OMEGA'},
+            symbols={'id': 'ZHETA'},
             columns={'price': '111222233330i', 'qty': 2.5}
         )
         sender.flush()
