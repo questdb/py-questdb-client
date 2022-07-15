@@ -12,8 +12,9 @@ Contents
    :maxdepth: 2
 
    installation
-   usage
+   examples
    api
+   troubleshooting
    contributing
    changelog
 

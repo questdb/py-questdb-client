@@ -19,13 +19,14 @@ def _run(*args, env=None, cwd=None):
     Log and run a command within the build dir.
     On error, exit with child's return code.
     """
+    args = [str(arg) for arg in args]
     cwd = cwd or PROJ_ROOT
     sys.stderr.write('[CMD] ')
     if env is not None:
         env_str = ' '.join(f'{k}={shlex.quote(v)}' for k, v in env.items())
         sys.stderr.write(f'{env_str} ')
         env = {**os.environ, **env}
-    escaped_cmd = ' '.join(shlex.quote(str(arg)) for arg in args)
+    escaped_cmd = ' '.join(shlex.quote(arg) for arg in args)
     sys.stderr.write(f'{escaped_cmd}\n')
     ret_code = subprocess.run(args, cwd=str(cwd), env=env).returncode
     if ret_code != 0:
