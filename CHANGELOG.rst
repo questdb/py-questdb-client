@@ -2,6 +2,16 @@
 Changelog
 =========
 
+1.0.0 (2022-07-15)
+------------------
+
+* First stable release.
+* Insert data into QuestDB via ILP.
+* Sender and Buffer APIs.
+* Authentication and TLS support.
+* Auto-flushing of buffers.
+
+
 0.0.3 (2022-07-14)
 ------------------
 

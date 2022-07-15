@@ -6,7 +6,7 @@ version = "0.0.3"
 description = "QuestDB client library for Python"
 readme = "README.rst"
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Plugins",
     "Intended Audience :: Developers",
     "Programming Language :: Python",
@@ -15,7 +15,9 @@ classifiers = [
     "Programming Language :: Rust",
     "License :: OSI Approved :: Apache Software License",
     "Topic :: Software Development :: Libraries",
-    "Topic :: System :: Networking"]
+    "Topic :: System :: Networking",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Scientific/Engineering"]
 
 [project.license]
 text = "Apache License 2.0"
