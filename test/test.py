@@ -176,6 +176,16 @@ class TestSender(unittest.TestCase):
                         sender.row('tbl1', symbols={'a': 'b'})
                         sender.flush()
 
+    def test_flush_4(self):
+        # Clearing of the internal buffer is not allowed.
+        with Server() as server:
+            with self.assertRaises(ValueError):
+                with qi.Sender('localhost', server.port) as sender:
+                    server.accept()
+                    sender.row('tbl1', symbols={'a': 'b'})
+                    sender.flush(buffer=None, clear=False)
+
+
     def test_independent_buffer(self):
         buf = qi.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1'})
@@ -211,8 +221,50 @@ class TestSender(unittest.TestCase):
             with qi.Sender('localhost', server.port, auto_flush=4) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'})
-                # msgs = server.recv()
-                # self.assertEqual(msgs, [b'tbl1,sym1=val1', b'tbl1,sym2=val2'])
+                self.assertEqual(len(sender), 0)  # auto-flushed buffer.
+                msgs = server.recv()
+                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+
+    def test_immediate_auto_flush(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port, auto_flush=True) as sender:
+                server.accept()
+                sender.row('tbl1', symbols={'sym1': 'val1'})
+                self.assertEqual(len(sender), 0)  # auto-flushed buffer.
+                msgs = server.recv()
+                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+
+    def test_dont_auto_flush(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port, auto_flush=0) as sender:
+                server.accept()
+                while len(sender) < 131072:  # 128KiB
+                    sender.row('tbl1', symbols={'sym1': 'val1'})
+                msgs = server.recv()
+                self.assertEqual(msgs, [])
+
+    def test_dont_flush_on_exception(self):
+        with Server() as server:
+            with self.assertRaises(RuntimeError):
+                with qi.Sender('localhost', server.port) as sender:
+                    server.accept()
+                    sender.row('tbl1', symbols={'sym1': 'val1'})
+                    self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
+                    raise RuntimeError('Test exception')
+            msgs = server.recv()
+            self.assertEqual(msgs, [])
+
+    def test_new_buffer(self):
+        sender = qi.Sender(
+            host='localhost',
+            port=9009,
+            init_capacity=1024,
+            max_name_len=10)
+        buffer = sender.new_buffer()
+        self.assertEqual(buffer.init_capacity, 1024)
+        self.assertEqual(buffer.max_name_len, 10)
+        self.assertEqual(buffer.init_capacity, sender.init_capacity)
+        self.assertEqual(buffer.max_name_len, sender.max_name_len)
 
 
 if __name__ == '__main__':

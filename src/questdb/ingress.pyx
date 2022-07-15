@@ -91,7 +91,7 @@ class IngressErrorCode(Enum):
     AuthError = line_sender_error_auth_error
     TlsError = line_sender_error_tls_error
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -266,14 +266,13 @@ cdef class TimestampNanos:
 
 
 cdef class Sender
+cdef class Buffer
 
 
-cdef int may_flush_on_row_complete(
-    line_sender_buffer* buf,
-    Sender sender) except -1:
+cdef int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
     if sender._auto_flush_enabled:
-        if line_sender_buffer_size(buf) >= sender._auto_flush_watermark:
-            print('w00t')
+        if len(buffer) >= sender._auto_flush_watermark:
+            sender.flush(buffer)
 
 
 cdef class Buffer:
@@ -307,6 +306,8 @@ cdef class Buffer:
       * To see the contents, call ``str(buffer)``.
     """
     cdef line_sender_buffer* _impl
+    cdef size_t _init_capacity
+    cdef size_t _max_name_len
     cdef object _row_complete_sender
 
     def __cinit__(self, init_capacity: int=65536, max_name_len: int=127):
@@ -320,11 +321,32 @@ cdef class Buffer:
     cdef inline _cinit_impl(self, size_t init_capacity, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(max_name_len)
         line_sender_buffer_reserve(self._impl, init_capacity)
+        self._init_capacity = init_capacity
+        self._max_name_len = max_name_len
         self._row_complete_sender = None
 
     def __dealloc__(self):
         self._row_complete_sender = None
         line_sender_buffer_free(self._impl)
+
+    @property
+    def init_capacity(self) -> int:
+        """
+        The initial capacity of the buffer when first created.
+
+        This may grow over time, see ``capacity()``.
+        """
+        return self._init_capacity
+
+    @property
+    def max_name_len(self) -> int:
+        """Maximum length of a table or column name."""
+        return self._max_name_len
+
+    @property
+    def max_name_len(self) -> int:
+        """Maximum length of a table or column name."""
+        return self._max_name_len
 
     def reserve(self, additional: int):
         """
@@ -476,9 +498,7 @@ cdef class Buffer:
         if self._row_complete_sender != None:
             sender = PyWeakref_GetObject(self._row_complete_sender)
             if sender != NULL:
-                may_flush_on_row_complete(
-                    self._impl,
-                    <Sender><object>sender)
+                may_flush_on_row_complete(self, <Sender><object>sender)
 
     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
@@ -772,9 +792,9 @@ cdef class Sender:
     cdef line_sender* _impl
     cdef Buffer _buffer
     cdef bint _auto_flush_enabled
-    cdef size_t _auto_flush_watermark
-    cdef object _init_capacity
-    cdef object _max_name_len
+    cdef ssize_t _auto_flush_watermark
+    cdef size_t _init_capacity
+    cdef size_t _max_name_len
 
     def __cinit__(
             self,
@@ -785,9 +805,9 @@ cdef class Sender:
             tuple auth=None,
             object tls=False,
             object read_timeout=None,
-            int init_capacity=65536,
+            int init_capacity=65536,  # 64KiB
             int max_name_len=127,
-            object auto_flush=32768):
+            object auto_flush=64512):  # 63KiB
         cdef line_sender_error* err = NULL
 
         cdef line_sender_utf8 host_utf8
@@ -887,6 +907,10 @@ cdef class Sender:
         self._auto_flush_enabled = not not auto_flush
         self._auto_flush_watermark = int(auto_flush) \
             if self._auto_flush_enabled else 0
+        if self._auto_flush_watermark < 0:
+            raise ValueError(
+                'auto_flush_watermark must be >= 0, '
+                f'not {self._auto_flush_watermark}')
 
     def new_buffer(self):
         """
@@ -895,9 +919,19 @@ cdef class Sender:
         The buffer is set up with the configured `init_capacity` and
         `max_name_len`.
         """
-        self._buffer = Buffer(
+        return Buffer(
             init_capacity=self._init_capacity,
             max_name_len=self._max_name_len)
+
+    @property
+    def init_capacity(self) -> int:
+        """The initial capacity of the sender's internal buffer."""
+        return self._init_capacity
+
+    @property
+    def max_name_len(self) -> int:
+        """Maximum length of a table or column name."""
+        return self._max_name_len
 
     def connect(self):
         cdef line_sender_error* err = NULL
@@ -929,6 +963,9 @@ cdef class Sender:
         self._buffer.row(*args, **kwargs)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
+        if buffer is None and not clear:
+            raise ValueError('The internal buffer must always be cleared.')
+
         cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
         if self._impl == NULL:
