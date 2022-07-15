@@ -19,23 +19,36 @@ Install Rust as per https://rustup.rs/.
 
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-Install Cython:
+Install your local Python3 environment **venv**
+
+.. code-block:: bash
+
+    python3 -m venv venv
+    venv/bin/python install -U pip
+    venv/bin/python install -r dev_requirements.txt
+
+    # or simply:
+    python3 proj.py venv
+
+    # either of the ^ ^ should be followed by:
+    source venv/bin/activate
+
+The development requirements are these if you prefer to install them one by one:
+
+- Install Cython:
 
 .. code-block:: bash
 
     python3 -m pip install cython
 
-Documentation
--------------
+- Documentation
 
 .. code-block:: bash
 
     python3 -m pip install sphinx
     python3 -m pip install sphinx_rtd_theme
 
-
-Packaging and releasing
------------------------
+- Packaging and releasing
 
 .. code-block:: bash
 
@@ -87,7 +100,7 @@ MacOS Apple Silicon, run:
 .. code-block:: bash
 
     python3 proj.py sdist   # source distribution
-    python3 proj.py cibuildwheel
+    python3 proj.py cibuildwheel # the order of these two lines does not matter
 
 This will end up putting everything in the ``dist/`` directory.
 

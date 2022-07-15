@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+
 sys.dont_write_bytecode = True
 import os
 import shutil
@@ -9,7 +10,6 @@ import shlex
 import pathlib
 import glob
 import platform
-
 
 PROJ_ROOT = pathlib.Path(__file__).parent
 
@@ -20,13 +20,12 @@ def _run(*args, env=None, cwd=None):
     On error, exit with child's return code.
     """
     cwd = cwd or PROJ_ROOT
-    args = [str(arg) for arg in args]
     sys.stderr.write('[CMD] ')
     if env is not None:
         env_str = ' '.join(f'{k}={shlex.quote(v)}' for k, v in env.items())
         sys.stderr.write(f'{env_str} ')
         env = {**os.environ, **env}
-    escaped_cmd = ' '.join(shlex.quote(arg) for arg in args)
+    escaped_cmd = ' '.join(shlex.quote(str(arg)) for arg in args)
     sys.stderr.write(f'{escaped_cmd}\n')
     ret_code = subprocess.run(args, cwd=str(cwd), env=env).returncode
     if ret_code != 0:
@@ -53,11 +52,11 @@ def _arg2bool(arg):
     return arg.lower() in ('true', 'yes', '1')
 
 
-COMMANDS = set()
+COMMANDS = []
 
 
 def command(fn):
-    COMMANDS.add(fn.__name__)
+    COMMANDS.append(fn.__name__)
     return fn
 
 
@@ -67,28 +66,28 @@ def build():
 
 
 @command
-def serve(port=None):
-    port = port or 8000
-    docs_dir = PROJ_ROOT / 'build' / 'docs'
-    _run('python3', '-m', 'http.server', port, cwd=docs_dir)
-
-
-@command
-def doc(http_serve=False, port=None):
-    _run('python3', '-m', 'sphinx.cmd.build',
-        '-b', 'html', 'docs', 'build/docs',
-        env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
-    if _arg2bool(http_serve):
-        serve(port)
-
-
-@command
 def test(all=False, patch_path='1', *args):
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
     if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
     _run('python3', 'test/test.py', '-v', *args,
-        env=env)
+         env=env)
+
+
+@command
+def doc(http_serve=False, port=None):
+    _run('python3', '-m', 'sphinx.cmd.build',
+         '-b', 'html', 'docs', 'build/docs',
+         env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
+    if _arg2bool(http_serve):
+        serve(port)
+
+
+@command
+def serve(port=None):
+    port = port or 8000
+    docs_dir = PROJ_ROOT / 'build' / 'docs'
+    _run('python3', '-m', 'http.server', port, cwd=docs_dir)
 
 
 @command
@@ -105,11 +104,16 @@ def cibuildwheel(*args):
         # Python version.
         python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
     _run(python, '-m',
-        'cibuildwheel',
-        '--platform', plat,
-        '--output-dir', 'dist',
-        '--archs', platform.machine(),
-        *args)
+         'cibuildwheel',
+         '--platform', plat,
+         '--output-dir', 'dist',
+         '--archs', platform.machine(),
+         *args)
+
+
+@command
+def cw(*args):
+    cibuildwheel(args)
 
 
 @command
@@ -131,6 +135,17 @@ def clean():
     _rm(PROJ_ROOT / 'src', '**/*.dylib')
     _rm(PROJ_ROOT / 'src', '**/*.c')
     _rm(PROJ_ROOT / 'src', '**/*.html')
+
+
+@command
+def venv():
+    if pathlib.Path('venv').exists():
+        sys.stderr.write('venv already exists, delete it, or run command clean\n')
+        return
+    _run('python3', '-m', 'venv', 'venv')
+    _run('venv/bin/python3', '-m', 'pip', 'install', '-U', 'pip')
+    _run('venv/bin/python3', '-m', 'pip', 'install', '-r', 'dev_requirements.txt')
+    sys.stdout.write('NOTE: remember to activate the environment: source venv/bin/activate\n')
 
 
 def main():
