@@ -31,11 +31,11 @@ class TestBuffer(unittest.TestCase):
     def test_bad_table(self):
         buf = qi.Buffer()
         with self.assertRaisesRegex(
-                qi.IngError,
+                qi.IngressError,
                 'Table names must have a non-zero length'):
             buf.row('', symbols={'sym1': 'val1'})
         with self.assertRaisesRegex(
-                qi.IngError,
+                qi.IngressError,
                 'Bad string "x..y": Found invalid dot `.` at position 2.'):
             buf.row('x..y', symbols={'sym1': 'val1'})
 
@@ -47,11 +47,11 @@ class TestBuffer(unittest.TestCase):
     def test_bad_symbol_column_name(self):
         buf = qi.Buffer()
         with self.assertRaisesRegex(
-                qi.IngError,
+                qi.IngressError,
                 'Column names must have a non-zero length.'):
             buf.row('tbl1', symbols={'': 'val1'})
         with self.assertRaisesRegex(
-                qi.IngError,
+                qi.IngressError,
                 'Bad string "sym.bol": '
                 'Column names can\'t contain a \'.\' character, '
                 'which was found at byte position 3.'):
@@ -125,7 +125,7 @@ class TestSender(unittest.TestCase):
         try:
             sender = qi.Sender('localhost', 12345)
             sender.row('tbl1', symbols={'sym1': 'val1'})
-            with self.assertRaisesRegex(qi.IngError, 'Not connected'):
+            with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
                 sender.flush()
         finally:
             sender.close()
@@ -134,7 +134,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             with qi.Sender('localhost', server.port) as sender:
                 server.accept()
-                with self.assertRaisesRegex(qi.IngError, 'Column names'):
+                with self.assertRaisesRegex(qi.IngressError, 'Column names'):
                     sender.row('tbl1', symbols={'...bad name..': 'val1'})
                 self.assertEqual(str(sender), '')
                 sender.flush()
@@ -149,14 +149,14 @@ class TestSender(unittest.TestCase):
                 server.close()
 
                 # We enter a bad state where we can't flush again.
-                with self.assertRaises(qi.IngError):
+                with self.assertRaises(qi.IngressError):
                     for _ in range(1000):
                         time.sleep(0.01)
                         sender.row('tbl1', symbols={'a': 'b'})
                         sender.flush()
 
                 # We should still be in a bad state.
-                with self.assertRaises(qi.IngError):
+                with self.assertRaises(qi.IngressError):
                     sender.row('tbl1', symbols={'a': 'b'})
                     sender.flush()
 
@@ -167,7 +167,7 @@ class TestSender(unittest.TestCase):
         # Same as test_flush_2, but we catch the exception _outside_ the
         # sender's `with` block, to ensure no exceptions get trapped.
         with Server() as server:
-            with self.assertRaises(qi.IngError):
+            with self.assertRaises(qi.IngressError):
                 with qi.Sender('localhost', server.port) as sender:
                     server.accept()
                     server.close()
