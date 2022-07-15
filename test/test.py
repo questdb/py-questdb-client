@@ -185,6 +185,29 @@ class TestSender(unittest.TestCase):
                     sender.row('tbl1', symbols={'a': 'b'})
                     sender.flush(buffer=None, clear=False)
 
+    def test_two_rows_explicit_buffer(self):
+        with Server() as server, qi.Sender('localhost', server.port) as sender:
+            server.accept()
+            self.assertEqual(server.recv(), [])
+            buffer = sender.new_buffer()
+            buffer.row(
+                'line_sender_buffer_example2',
+                symbols={'id': 'Hola'},
+                columns={'price': '111222233333i', 'qty': 3.5},
+                at=qi.TimestampNanos(111222233333))
+            buffer.row(
+                'line_sender_example',
+                symbols={'id': 'Adios'},
+                columns={'price': '111222233343i', 'qty': 2.5},
+                at=qi.TimestampNanos(111222233343))
+            exp = (
+                'line_sender_buffer_example2,id=Hola price="111222233333i",qty=3.5 111222233333\n'
+                'line_sender_example,id=Adios price="111222233343i",qty=2.5 111222233343\n')
+            self.assertEqual(str(buffer), exp)
+            sender.flush(buffer)
+            msgs = server.recv()
+            bexp = [msg.encode('utf-8') for msg in exp.rstrip().split('\n')]
+            self.assertEqual(msgs, bexp)
 
     def test_independent_buffer(self):
         buf = qi.Buffer()
