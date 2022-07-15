@@ -26,9 +26,15 @@
 # cython: language_level=3
 # cython: binding=True
 
+"""
+API for fast data ingestion into QuestDB.
+"""
+
 from libc.stdint cimport uint8_t, int64_t
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
+from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
+from cpython.object cimport PyObject
 
 from .line_sender cimport *
 
@@ -42,9 +48,12 @@ cdef extern from "Python.h":
         PyUnicode_2BYTE_KIND
         PyUnicode_4BYTE_KIND
 
+    # Note: Returning an `object` rather than `PyObject` as the function
+    # returns a new reference rather than borrowing an existing one.
     object PyUnicode_FromKindAndData(
         int kind, const void* buffer, Py_ssize_t size)
 
+    # Ditto, see comment on why not returning a `PyObject` above.
     str PyUnicode_FromStringAndSize(
         const char* u, Py_ssize_t size)
 
@@ -71,7 +80,7 @@ import pathlib
 
 import sys
 
-class IlpErrorCode(Enum):
+class IngressErrorCode(Enum):
     """Category of Error."""
     CouldNotResolveAddr = line_sender_error_could_not_resolve_addr
     InvalidApiCall = line_sender_error_invalid_api_call
@@ -86,36 +95,36 @@ class IlpErrorCode(Enum):
         return self.name
 
 
-class IlpError(Exception):
+class IngressError(Exception):
     """
-    An error whilst using the line sender or constructing its buffer.
+    An error whilst using the ``Sender`` or constructing its ``Buffer``.
     """
     def __init__(self, code, msg):
         super().__init__(msg)
         self._code = code
 
     @property
-    def code(self) -> IlpErrorCode:
+    def code(self) -> IngressErrorCode:
         return self._code
 
 
 cdef inline object c_err_code_to_py(line_sender_error_code code):
     if code == line_sender_error_could_not_resolve_addr:
-        return IlpErrorCode.CouldNotResolveAddr
+        return IngressErrorCode.CouldNotResolveAddr
     elif code == line_sender_error_invalid_api_call:
-        return IlpErrorCode.InvalidApiCall
+        return IngressErrorCode.InvalidApiCall
     elif code == line_sender_error_socket_error:
-        return IlpErrorCode.SocketError
+        return IngressErrorCode.SocketError
     elif code == line_sender_error_invalid_utf8:
-        return IlpErrorCode.InvalidUtf8
+        return IngressErrorCode.InvalidUtf8
     elif code == line_sender_error_invalid_name:
-        return IlpErrorCode.InvalidName
+        return IngressErrorCode.InvalidName
     elif code == line_sender_error_invalid_timestamp:
-        return IlpErrorCode.InvalidTimestamp
+        return IngressErrorCode.InvalidTimestamp
     elif code == line_sender_error_auth_error:
-        return IlpErrorCode.AuthError
+        return IngressErrorCode.AuthError
     elif code == line_sender_error_tls_error:
-        return IlpErrorCode.TlsError
+        return IngressErrorCode.TlsError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -134,7 +143,7 @@ cdef inline object c_err_to_py(line_sender_error* err):
             PyUnicode_1BYTE_KIND,
             c_msg,
             <Py_ssize_t>c_len)
-        return IlpError(py_code, py_msg)
+        return IngressError(py_code, py_msg)
     finally:
         line_sender_error_free(err)
 
@@ -256,10 +265,15 @@ cdef class TimestampNanos:
         return self._value
 
 
-ctypedef bint (*row_complete_cb)(
-    line_sender_buffer*,
-    void* ctx,
-    line_sender_error**)
+cdef class Sender
+
+
+cdef int may_flush_on_row_complete(
+    line_sender_buffer* buf,
+    Sender sender) except -1:
+    if sender._auto_flush_enabled:
+        if line_sender_buffer_size(buf) >= sender._auto_flush_watermark:
+            print('w00t')
 
 
 cdef class Buffer:
@@ -268,7 +282,7 @@ cdef class Buffer:
 
     .. code-block:: python
 
-        from questdb.ilp import Buffer
+        from questdb.ing import Buffer
 
         buf = Buffer()
         buf.row(
@@ -293,8 +307,7 @@ cdef class Buffer:
       * To see the contents, call ``str(buffer)``.
     """
     cdef line_sender_buffer* _impl
-    cdef row_complete_cb _row_complete_cb
-    cdef void* _row_complete_ctx
+    cdef object _row_complete_sender
 
     def __cinit__(self, init_capacity: int=65536, max_name_len: int=127):
         """
@@ -307,12 +320,10 @@ cdef class Buffer:
     cdef inline _cinit_impl(self, size_t init_capacity, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(max_name_len)
         line_sender_buffer_reserve(self._impl, init_capacity)
-        self._row_complete_cb = NULL
-        self._row_complete_ctx = NULL
+        self._row_complete_sender = None
 
     def __dealloc__(self):
-        self._row_complete_cb = NULL
-        self._row_complete_ctx = NULL
+        self._row_complete_sender = None
         line_sender_buffer_free(self._impl)
 
     def reserve(self, additional: int):
@@ -461,12 +472,13 @@ cdef class Buffer:
 
     cdef inline int _may_trigger_row_complete(self) except -1:
         cdef line_sender_error* err = NULL
-        if self._row_complete_cb != NULL:
-            if not self._row_complete_cb(
+        cdef PyObject* sender = NULL
+        if self._row_complete_sender != None:
+            sender = PyWeakref_GetObject(self._row_complete_sender)
+            if sender != NULL:
+                may_flush_on_row_complete(
                     self._impl,
-                    self._row_complete_ctx,
-                    &err):
-                raise c_err_to_py(err)
+                    <Sender><object>sender)
 
     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
@@ -515,8 +527,8 @@ cdef class Buffer:
         try:
             self._table(table_name)
             if not (symbols or columns):
-                raise IlpError(
-                    IlpErrorCode.InvalidApiCall,
+                raise IngressError(
+                    IngressErrorCode.InvalidApiCall,
                     'Must specify at least one symbol or column')
             if symbols is not None:
                 for name, value in symbols.items():
@@ -752,6 +764,10 @@ cdef class Buffer:
 
 
 cdef class Sender:
+    # We need the Buffer held by a Sender can hold a weakref to its Sender.
+    # This avoids a circular reference that requires the GC to clean up.
+    cdef object __weakref__
+
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
@@ -868,7 +884,7 @@ cdef class Sender:
             init_capacity=init_capacity,
             max_name_len=max_name_len)
 
-        self._auto_flush_enabled = auto_flush is not None
+        self._auto_flush_enabled = not not auto_flush
         self._auto_flush_watermark = int(auto_flush) \
             if self._auto_flush_enabled else 0
 
@@ -886,16 +902,18 @@ cdef class Sender:
     def connect(self):
         cdef line_sender_error* err = NULL
         if self._opts == NULL:
-            raise IlpError(
-                IlpErrorCode.InvalidApiCall,
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
                 'connect() can\'t be called after close().')
         self._impl = line_sender_connect(self._opts, &err)
         if self._impl == NULL:
             raise c_err_to_py(err)
         line_sender_opts_free(self._opts)
         self._opts = NULL
-        # self._buffer._row_complete_cb = may_flush_on_row_complete
-        # self._buffer._row_complete_ctx = self
+
+        # Request callbacks when rows are complete.
+        if self._buffer is not None:
+            self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
 
     def __enter__(self):
         self.connect()
@@ -914,8 +932,8 @@ cdef class Sender:
         cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
         if self._impl == NULL:
-            raise IlpError(
-                IlpErrorCode.InvalidApiCall,
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Not connected.')
         if buffer is not None:
             c_buf = buffer._impl
@@ -959,9 +977,3 @@ cdef class Sender:
 
     def __dealloc__(self):
         self._close()
-
-
-# cdef int may_flush_on_row_complete(
-#         line_sender_buffer* buf,
-#         void* ctx) except -1:
-#     pass

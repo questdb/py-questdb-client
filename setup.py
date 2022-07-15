@@ -21,7 +21,7 @@ MODE = platform.architecture()[0]  # '32bit' or '64bit'
 WIN_32BIT_CARGO_TARGET = 'i686-pc-windows-msvc'
 
 
-def ilp_extension():
+def ingress_extension():
     lib_name = None
     lib_paths = []
     libraries = []
@@ -52,8 +52,8 @@ def ilp_extension():
         raise NotImplementedError(f'Unsupported platform: {PLATFORM}')
 
     return Extension(
-        "questdb.ilp",
-        ["src/questdb/ilp.pyx"],
+        "questdb.ingress",
+        ["src/questdb/ingress.pyx"],
         include_dirs=["c-questdb-client/include"],
         library_dirs=lib_paths,
         libraries=libraries,
@@ -124,7 +124,7 @@ setup(
     platforms=['any'],
     python_requires='>=3.7',
     install_requires=[],
-    ext_modules = cythonize([ilp_extension()], annotate=True),
+    ext_modules = cythonize([ingress_extension()], annotate=True),
     cmdclass={'build_ext': questdb_build_ext},
     zip_safe = False,
     package_dir={'': 'src'},
