@@ -91,7 +91,7 @@ class IngressErrorCode(Enum):
     AuthError = line_sender_error_auth_error
     TlsError = line_sender_error_tls_error
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -929,6 +929,9 @@ cdef class Sender:
         self._buffer.row(*args, **kwargs)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
+        if buffer is None and not clear:
+            raise ValueError('The internal buffer must always be cleared.')
+
         cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
         if self._impl == NULL:

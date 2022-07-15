@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+from turtle import clear
 sys.dont_write_bytecode = True
 import os
 import unittest
@@ -175,6 +176,16 @@ class TestSender(unittest.TestCase):
                         time.sleep(0.01)
                         sender.row('tbl1', symbols={'a': 'b'})
                         sender.flush()
+
+    def test_flush_4(self):
+        # Clearing of the internal buffer is not allowed.
+        with Server() as server:
+            with self.assertRaises(ValueError):
+                with qi.Sender('localhost', server.port) as sender:
+                    server.accept()
+                    sender.row('tbl1', symbols={'a': 'b'})
+                    sender.flush(buffer=None, clear=False)
+
 
     def test_independent_buffer(self):
         buf = qi.Buffer()
