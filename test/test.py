@@ -254,6 +254,18 @@ class TestSender(unittest.TestCase):
             msgs = server.recv()
             self.assertEqual(msgs, [])
 
+    def test_new_buffer(self):
+        sender = qi.Sender(
+            host='localhost',
+            port=9009,
+            init_capacity=1024,
+            max_name_len=10)
+        buffer = sender.new_buffer()
+        self.assertEqual(buffer.init_capacity, 1024)
+        self.assertEqual(buffer.max_name_len, 10)
+        self.assertEqual(buffer.init_capacity, sender.init_capacity)
+        self.assertEqual(buffer.max_name_len, sender.max_name_len)
+
 
 if __name__ == '__main__':
     unittest.main()

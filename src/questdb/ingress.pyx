@@ -306,6 +306,8 @@ cdef class Buffer:
       * To see the contents, call ``str(buffer)``.
     """
     cdef line_sender_buffer* _impl
+    cdef size_t _init_capacity
+    cdef size_t _max_name_len
     cdef object _row_complete_sender
 
     def __cinit__(self, init_capacity: int=65536, max_name_len: int=127):
@@ -319,11 +321,32 @@ cdef class Buffer:
     cdef inline _cinit_impl(self, size_t init_capacity, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(max_name_len)
         line_sender_buffer_reserve(self._impl, init_capacity)
+        self._init_capacity = init_capacity
+        self._max_name_len = max_name_len
         self._row_complete_sender = None
 
     def __dealloc__(self):
         self._row_complete_sender = None
         line_sender_buffer_free(self._impl)
+
+    @property
+    def init_capacity(self) -> int:
+        """
+        The initial capacity of the buffer when first created.
+
+        This may grow over time, see ``capacity()``.
+        """
+        return self._init_capacity
+
+    @property
+    def max_name_len(self) -> int:
+        """Maximum length of a table or column name."""
+        return self._max_name_len
+
+    @property
+    def max_name_len(self) -> int:
+        """Maximum length of a table or column name."""
+        return self._max_name_len
 
     def reserve(self, additional: int):
         """
@@ -770,8 +793,8 @@ cdef class Sender:
     cdef Buffer _buffer
     cdef bint _auto_flush_enabled
     cdef ssize_t _auto_flush_watermark
-    cdef object _init_capacity
-    cdef object _max_name_len
+    cdef size_t _init_capacity
+    cdef size_t _max_name_len
 
     def __cinit__(
             self,
@@ -896,9 +919,19 @@ cdef class Sender:
         The buffer is set up with the configured `init_capacity` and
         `max_name_len`.
         """
-        self._buffer = Buffer(
+        return Buffer(
             init_capacity=self._init_capacity,
             max_name_len=self._max_name_len)
+
+    @property
+    def init_capacity(self) -> int:
+        """The initial capacity of the sender's internal buffer."""
+        return self._init_capacity
+
+    @property
+    def max_name_len(self) -> int:
+        """Maximum length of a table or column name."""
+        return self._max_name_len
 
     def connect(self):
         cdef line_sender_error* err = NULL
