@@ -92,19 +92,19 @@ class IngressErrorCode(Enum):
     TlsError = line_sender_error_tls_error
 
     def __str__(self) -> str:
+        """Return the name of the enum."""
         return self.name
 
 
 class IngressError(Exception):
-    """
-    An error whilst using the ``Sender`` or constructing its ``Buffer``.
-    """
+    """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
     def __init__(self, code, msg):
         super().__init__(msg)
         self._code = code
 
     @property
     def code(self) -> IngressErrorCode:
+        """Return the error code."""
         return self._code
 
 
@@ -159,16 +159,16 @@ cdef bytes str_to_utf8(str string, line_sender_utf8* utf8_out):
     """
     # Note that we bypass `line_sender_utf8_init`.
     cdef bytes owner = None
-    # PyUnicode_READY(string)
-    # if PyUnicode_IS_COMPACT_ASCII(string):
-    #     utf8_out.len = <size_t>(PyUnicode_GET_LENGTH(string))
-    #     utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
-    #     return owner
-    # else:
-    owner = string.encode('utf-8')
-    utf8_out.len = <size_t>(PyBytes_GET_SIZE(owner))
-    utf8_out.buf = <const char*>(PyBytes_AsString(owner))
-    return owner
+    PyUnicode_READY(string)
+    if PyUnicode_IS_COMPACT_ASCII(string):
+        utf8_out.len = <size_t>(PyUnicode_GET_LENGTH(string))
+        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
+        return owner
+    else:
+        owner = string.encode('utf-8')
+        utf8_out.len = <size_t>(PyBytes_GET_SIZE(owner))
+        utf8_out.buf = <const char*>(PyBytes_AsString(owner))
+        return owner
 
 
 cdef bytes str_to_table_name(str string, line_sender_table_name* name_out):
@@ -218,7 +218,34 @@ cdef int64_t datetime_to_nanos(datetime dt):
 
 
 cdef class TimestampMicros:
-    """A timestamp in microseconds since the UNIX epoch."""
+    """
+    A timestamp in microseconds since the UNIX epoch.
+
+    You may construct a ``TimestampMicros`` from an integer or a ``datetime``.
+
+    .. code-block:: python
+
+        # Can't be negative.
+        TimestampMicros(1657888365426838016)
+
+        # Careful with the timezeone!
+        TimestampMicros.from_datetime(datetime.datetime.utcnow())
+
+    When constructing from a ``datetime``, you should take extra care
+    to ensure that the timezone is correct.
+
+    For example, ``datetime.now()`` implies the `local` timezone which
+    is probably not what you want.
+
+    When constructing the ``datetime`` object explicity, you pass in the
+    timezone to use.
+
+    .. code-block:: python
+
+        TimestampMicros.from_datetime(
+            datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+
+    """
     cdef int64_t _value
 
     def __cinit__(self, value: int):
@@ -229,7 +256,7 @@ cdef class TimestampMicros:
     @classmethod
     def from_datetime(cls, dt: datetime):
         """
-        Construct a `TimestampMicros` from a `datetime` object.
+        Construct a ``TimestampMicros`` from a ``datetime.datetime`` object.
         """
         if not isinstance(dt, datetime):
             raise TypeError('dt must be a datetime object.')
@@ -242,7 +269,34 @@ cdef class TimestampMicros:
 
 
 cdef class TimestampNanos:
-    """A timestamp in nanoseconds since the UNIX epoch."""
+    """
+    A timestamp in nanoseconds since the UNIX epoch.
+
+    You may construct a ``TimestampNanos`` from an integer or a ``datetime``.
+
+    .. code-block:: python
+
+        # Can't be negative.
+        TimestampNanos(1657888365426838016)
+
+        # Careful with the timezeone!
+        TimestampNanos.from_datetime(datetime.datetime.utcnow())
+
+    When constructing from a ``datetime``, you should take extra care
+    to ensure that the timezone is correct.
+
+    For example, ``datetime.now()`` implies the `local` timezone which
+    is probably not what you want.
+
+    When constructing the ``datetime`` object explicity, you pass in the
+    timezone to use.
+
+    .. code-block:: python
+
+        TimestampMicros.from_datetime(
+            datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+
+    """
     cdef int64_t _value
 
     def __cinit__(self, value: int):
@@ -253,7 +307,7 @@ cdef class TimestampNanos:
     @classmethod
     def from_datetime(cls, dt: datetime):
         """
-        Construct a `TimestampNanos` from a `datetime` object.
+        Construct a ``TimestampNanos`` from a ``datetime.datetime`` object.
         """
         if not isinstance(dt, datetime):
             raise TypeError('dt must be a datetime object.')
@@ -279,31 +333,65 @@ cdef class Buffer:
     """
     Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
 
+    The :func:`Buffer.row` method is used to add a row to the buffer.
+
+    You can call this many times.
+
     .. code-block:: python
 
-        from questdb.ing import Buffer
+        from questdb.ingress import Buffer
 
         buf = Buffer()
         buf.row(
-            'table_name',
+            'table_name1',
             symbols={'s1', 'v1', 's2', 'v2'},
             columns={'c1': True, 'c2': 0.5})
 
-        # Append any additional rows then, once ready,
-        # call `sender.flush(buffer)` on a `Sender` instance.
+        buf.row(
+            'table_name2',
+            symbols={'questdb': '❤️'},
+            columns={'like': 100000})
 
-    Refer to the
-    `QuestDB documentation <https://questdb.io/docs/concept/symbol/>`_ to
-    understand the difference between the ``SYMBOL`` and ``STRING`` types
-    (TL;DR: symbols are interned strings).
+        # Append any additional rows then, once ready, call
+        sender.flush(buffer)  # a `Sender` instance.
 
-    Appending data:
-      * The ``row`` method appends one row at a time.
-      * The ``tabular`` method appends multiple rows for a single table.
+        # The sender auto-cleared the buffer, ready for reuse.
 
-    Buffer inspection:
-      * For the number of bytes in the buffer, call ``len(buffer)``.
-      * To see the contents, call ``str(buffer)``.
+        buf.row(
+            'table_name1',
+            symbols={'s1', 'v1', 's2', 'v2'},
+            columns={'c1': True, 'c2': 0.5})
+
+        # etc.
+
+
+    Buffer Constructor Arguments:
+      * ``init_capacity`` (``int``): Initial capacity of the buffer in bytes.
+        Defaults to ``65536`` (64KiB).
+      * ``max_name_len`` (``int``): Maximum length of a column name.
+        Defaults to ``127`` which is the same default value as QuestDB.
+        This should match the ``cairo.max.file.name.length`` setting of the
+        QuestDB instance you're connecting to.
+
+    .. code-block:: python
+
+        # These two buffer constructions are equivalent.
+        buf1 = Buffer()
+        buf2 = Buffer(init_capacity=65536, max_name_len=127)
+
+    To avoid having to manually set these arguments every time, you can call
+    the sender's ``new_buffer()`` method instead.
+
+    .. code-block:: python
+
+        from questdb.ingress import Sender, Buffer
+
+        sender = Sender(host='localhost', port=9009,
+            init_capacity=16384, max_name_len=64)
+        buf = sender.new_buffer()
+        assert buf.init_capacity == 16384
+        assert buf.max_name_len == 64
+
     """
     cdef line_sender_buffer* _impl
     cdef size_t _init_capacity
@@ -377,10 +465,13 @@ cdef class Buffer:
     def __len__(self):
         """
         The current number of bytes currently in the buffer.
+
+        Equivalent (but cheaper) to ``len(str(sender))``.
         """
         return line_sender_buffer_size(self._impl)
 
     def __str__(self):
+        """Return the constructed buffer as a string. Use for debugging."""
         return self._to_str()
 
     cdef inline object _to_str(self):
@@ -606,6 +697,16 @@ cdef class Buffer:
                     'humidity': 0.5},
                 at=datetime.datetime.utcnow())
 
+
+        Python strings passed as values to ``symbols`` are going to be encoded
+        as the ``SYMBOL`` type in QuestDB, whilst Python strings passed as
+        values to ``columns`` are going to be encoded as the ``STRING`` type.
+
+        Refer to the
+        `QuestDB documentation <https://questdb.io/docs/concept/symbol/>`_ to
+        understand the difference between the ``SYMBOL`` and ``STRING`` types
+        (TL;DR: symbols are interned strings).
+
         :param table_name: The name of the table to which the row belongs.
         :param symbols: A dictionary of symbol column names to ``str`` values.
         :param columns: A dictionary of column names to ``bool``, ``int``,
@@ -752,18 +853,30 @@ cdef class Buffer:
     #             header=['col1', 'col2', 'col3', 'col4'],
     #             symbols=True)  # `col1` and `col4` are SYMBOL columns.
 
-    #     Whilst if only a select few are to be treated as ``SYMBOL``, specify a
-    #     list of column indices to the ``symbols`` arg.
+    #    Whilst if only a select few are to be treated as ``SYMBOL``, specify a
+    #    list of column indices to the ``symbols`` arg.
 
-    #     .. code-block:: python
+    #    .. code-block:: python
 
-    #         buffer.tabular(
-    #             'table_name',
-    #             [['abc', 123, 3.14, 'xyz'],
-    #              ['def', 456, 6.28, 'abc'],
-    #              ['ghi', 789, 9.87, 'def']],
-    #             header=['col1', 'col2', 'col3', 'col4'],
-    #             symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.
+    #        buffer.tabular(
+    #            'table_name',
+    #            [['abc', 123, 3.14, 'xyz'],
+    #             ['def', 456, 6.28, 'abc'],
+    #             ['ghi', 789, 9.87, 'def']],
+    #            header=['col1', 'col2', 'col3', 'col4'],
+    #            symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.
+
+    #    Alternatively, you can specify a list of symbol column names.
+
+    #    .. code-block:: python
+
+    #        buffer.tabular(
+    #            'table_name',
+    #            [['abc', 123, 3.14, 'xyz'],
+    #             ['def', 456, 6.28, 'abc'],
+    #             ['ghi', 789, 9.87, 'def']],
+    #            header=['col1', 'col2', 'col3', 'col4'],
+    #            symbols=['col1'])  # `col1` is SYMBOL; 'col4' is STRING.
 
     #     Note that column indices are 0-based and negative indices are counted
     #     from the end.
@@ -784,6 +897,130 @@ cdef class Buffer:
 
 
 cdef class Sender:
+    """
+    A sender is a client that inserts rows into QuestDB via the ILP protocol.
+
+    **Inserting two rows**
+
+    In this example, data will be flushed and sent at the end of the ``with``
+    block.
+
+    .. code-block:: python
+
+        with Sender('localhost', 9009) as sender:
+            sender.row(
+                'weather_sensor',
+                symbols={'id': 'toronto1'},
+                columns={'temperature': 23.5, 'humidity': 0.49})
+            sensor.row(
+                'weather_sensor',
+                symbols={'id': 'dubai2'},
+                columns={'temperature': 41.2, 'humidity': 0.34})
+
+    The ``Sender`` object holds an internal buffer. The call to ``.row()``
+    simply forwards all arguments to the :func:`Buffer.row` method.
+
+
+    **Explicit flushing**
+
+    An explicit call to :func:`Sender.flush` will send any pending data
+    immediately.
+
+    .. code-block:: python
+
+        with Sender('localhost', 9009) as sender:
+            sender.row(
+                'weather_sensor',
+                symbols={'id': 'toronto1'},
+                columns={'temperature': 23.5, 'humidity': 0.49})
+            sender.flush()
+            sender.row(
+                'weather_sensor',
+                symbols={'id': 'dubai2'},
+                columns={'temperature': 41.2, 'humidity': 0.34})
+            sender.flush()
+
+
+    **Auto-flushing (on by default)**
+
+    To avoid accumulating very large buffers, the sender will flush the buffer
+    automatically once its buffer reaches a certain byte-size watermark.
+
+    You can control this behavior by setting the ``auto_flush`` argument.
+
+    .. code-block:: python
+
+        # Never flushes automatically.
+        sender = Sender('localhost', 9009, auto_flush=False)
+        sender = Sender('localhost', 9009, auto_flush=None) # Ditto.
+        sender = Sender('localhost', 9009, auto_flush=0)  # Ditto.
+
+        # Flushes automatically when the buffer reaches 1KiB.
+        sender = Sender('localhost', 9009, auto_flush=1024)
+
+        # Flushes automatically after every row.
+        sender = Sender('localhost', 9009, auto_flush=True)
+        sender = Sender('localhost', 9009, auto_flush=1)  # Ditto.
+
+
+    **Authentication and TLS Encryption**
+
+    This implementation supports authentication and TLS full-connection
+    encryption.
+
+    The ``Sender(.., auth=..)`` argument is a tuple of ``(kid, d, x, y)`` as
+    documented on the `QuestDB ILP authentication
+    <https://questdb.io/docs/reference/api/ilp/authenticate>`_ documentation.
+    Authentication is optional and disabled by default.
+
+    The ``Sender(.., tls=..)`` argument is one of:
+
+    * ``False``: No TLS encryption (default).
+
+    * ``True``: TLS encryption, accepting all common certificates as recognized
+      by the `webpki-roots <https://crates.io/crates/webpki-roots>`_ Rust crate
+      which in turn relies on https://mkcert.org/.
+
+    * A ``str`` or ``pathlib.Path``: Path to a PEM-encoded certificate authority
+      file. This is useful for testing with self-signed certificates.
+
+    * A special ``'insecure_skip_verify'`` string: Dangerously disable all
+      TLS certificate verification (do *NOT* use in production environments).
+
+    **Positional constructor arguments for the ``Sender(..)``**
+
+    * ``host``: Hostname or IP address of the QuestDB server.
+
+    * ``port``: Port number of the QuestDB server.
+
+
+    **Keyword-only constructor arguments for the ``Sender(..)``**
+
+    * ``interface`` (``str``): Network interface to bind to.
+      Set this if you have an accelerated network interface (e.g. Solarflare)
+      and want to use it.
+
+    * ``auth`` (``tuple``): Authentication tuple or ``None`` (default).
+      *See above for details*.
+
+    * ``tls`` (``bool``, ``pathlib.Path`` or ``str``): TLS configuration or
+      ``False`` (default). *See above for details*.
+
+    * ``read_timeout`` (``int``): How long to wait for messages from the QuestDB server
+      during the TLS handshake or authentication process.
+      This field is expressed in milliseconds. The default is 15 seconds.
+
+    * ``init_capacity`` (``int``): Initial buffer capacity of the internal buffer.
+      *See :class:`Buffer`'s constructor for more details.*
+
+    * ``max_name_length`` (``int``): Maximum length of a table or column name.
+      *See :class:`Buffer`'s constructor for more details.*
+
+    * ``auto_flush`` (``bool`` or ``int``): Whether to automatically flush the
+      buffer when it reaches a certain byte-size watermark.
+      *See above for details.*
+    """
+
     # We need the Buffer held by a Sender can hold a weakref to its Sender.
     # This avoids a circular reference that requires the GC to clean up.
     cdef object __weakref__
@@ -804,7 +1041,7 @@ cdef class Sender:
             str interface=None,
             tuple auth=None,
             object tls=False,
-            object read_timeout=None,
+            int read_timeout=15000,
             int init_capacity=65536,  # 64KiB
             int max_name_len=127,
             object auto_flush=64512):  # 63KiB
@@ -934,6 +1171,15 @@ cdef class Sender:
         return self._max_name_len
 
     def connect(self):
+        """
+        Connect to the QuestDB server.
+
+        This method is synchronous and will block until the connection is
+        established.
+
+        If the connection is set up with authentication and/or TLS, this
+        method will return only *after* the handshake(s) is/are complete.
+        """
         cdef line_sender_error* err = NULL
         if self._opts == NULL:
             raise IngressError(
@@ -950,19 +1196,66 @@ cdef class Sender:
             self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
 
     def __enter__(self):
+        """Call :func:`Sender.connect` at the start of a ``with`` block."""
         self.connect()
         return self
 
-    def __str__(self):
+    def __str__(self) -> str:
+        """
+        Inspect the contents of the internal buffer.
+
+        The ``str`` value returned represents the unsent data.
+
+        Also see :func:`Sender.__len__`.
+        """
         return str(self._buffer)
 
     def __len__(self):
+        """
+        Number of bytes of unsent data in the internal buffer.
+
+        Equivalent (but cheaper) to ``len(str(sender))``.
+        """
         return len(self._buffer)
 
-    def row(self, *args, **kwargs):
-        self._buffer.row(*args, **kwargs)
+    def row(self,
+            table_name: str,
+            *,
+            symbols: Optional[Dict[str, str]]=None,
+            columns: Optional[Dict[
+                str,
+                Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
+            at: Union[None, TimestampNanos, datetime]=None):
+        """
+        Write a row to the internal buffer.
+
+        This may be sent automatically depending on the ``auto_flush`` setting
+        in the constructor.
+
+        Refer to the :func:`Buffer.row` documentation for details on arguments.
+        """
+        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
+        """
+        If called with no arguments, immediately flushes the internal buffer.
+
+        Alternatively you can flush a buffer that was constructed explicitly
+        by passing ``buffer``.
+
+        The buffer will be cleared by default, unless ``clear`` is set to
+        ``False``.
+
+        This method does nothing if the provided or internal buffer is empty.
+
+        :param buffer: The buffer to flush. If ``None``, the internal buffer
+            is flushed.
+
+        :param clear: If ``True``, the flushed buffer is cleared (default).
+            If ``False``, the flushed buffer is left in the internal buffer.
+            Note that ``clear=False`` is only supported if ``buffer`` is also
+            specified.
+        """
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
 
@@ -1002,6 +1295,15 @@ cdef class Sender:
         self._impl = NULL
 
     cpdef close(self, bint flush=True):
+        """
+        Disconnect.
+
+        This method is idempotent and can be called repeatedly.
+
+        Once a sender is closed, it can't be re-used.
+
+        :param bool flush: If ``True``, flush the internal buffer before closing.
+        """
         try:
             if (flush and (self._impl != NULL) and
                     (not line_sender_must_close(self._impl))):
@@ -1010,6 +1312,14 @@ cdef class Sender:
             self._close()
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
+        """
+        Flush pending and disconnect at the end of a ``with`` block.
+
+        If the ``with`` block raises an exception, any pending data will
+        *NOT* be flushed.
+
+        This is implemented by calling :func:`Sender.close`.
+        """
         self.close(not exc_type)
 
     def __dealloc__(self):

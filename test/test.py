@@ -74,6 +74,11 @@ class TestBuffer(unittest.TestCase):
             'col5="val",col6=12345t,col7=7200000000t\n')
         self.assertEqual(str(buf), exp)
 
+    def test_unicode(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', symbols={'questdb1': '❤️'}, columns={'questdb2': '❤️'})
+        self.assertEqual(str(buf), 'tbl1,questdb1=❤️ questdb2="❤️"\n')
+
 
 class TestSender(unittest.TestCase):
     def test_basic(self):
@@ -288,6 +293,14 @@ class TestSender(unittest.TestCase):
         self.assertEqual(buffer.max_name_len, 10)
         self.assertEqual(buffer.init_capacity, sender.init_capacity)
         self.assertEqual(buffer.max_name_len, sender.max_name_len)
+
+    def test_connect_after_close(self):
+        with Server() as server, qi.Sender('localhost', server.port) as sender:
+            server.accept()
+            sender.row('tbl1', symbols={'sym1': 'val1'})
+            sender.close()
+            with self.assertRaises(qi.IngressError):
+                sender.connect()
 
 
 if __name__ == '__main__':
