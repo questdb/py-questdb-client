@@ -595,7 +595,6 @@ cdef class Buffer:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at(self._impl, ts.value, &err):
             raise c_err_to_py(err)
-        self._may_trigger_row_complete()
         return 0
 
     cdef inline int _at_dt(self, datetime dt) except -1:
@@ -603,14 +602,12 @@ cdef class Buffer:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at(self._impl, value, &err):
             raise c_err_to_py(err)
-        self._may_trigger_row_complete()
         return 0
 
     cdef inline int _at_now(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at_now(self._impl, &err):
             raise c_err_to_py(err)
-        self._may_trigger_row_complete()
         return 0
 
     cdef inline int _at(self, object ts) except -1:
@@ -634,6 +631,7 @@ cdef class Buffer:
         """
         Add a row to the buffer.
         """
+        cdef bint wrote_fields = False
         self._set_marker()
         try:
             self._table(table_name)
@@ -644,15 +642,22 @@ cdef class Buffer:
             if symbols is not None:
                 for name, value in symbols.items():
                     self._symbol(name, value)
+                    wrote_fields = True
             if columns is not None:
                 for name, value in columns.items():
                     if value is not None:
                         self._column(name, value)
-            self._at(at)
-            self._clear_marker()
+                        wrote_fields = True
+            if wrote_fields:
+                self._at(at)
+                self._clear_marker()
+            else:
+                self._rewind_to_marker()
         except:
             self._rewind_to_marker()
             raise
+        if wrote_fields:
+            self._may_trigger_row_complete()
 
     def row(
             self,

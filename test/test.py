@@ -75,6 +75,18 @@ class TestBuffer(unittest.TestCase):
             'col5="val",col6=12345t,col7=7200000000t\n')
         self.assertEqual(str(buf), exp)
 
+    def test_none_column(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', columns={'col1': 1})
+        exp = 'tbl1 col1=1i\n'
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
+
+        # No fields to write, no fields written, therefore a no-op.
+        buf.row('tbl1', columns={'col1': None, 'col2': None})
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
+
     def test_unicode(self):
         buf = qi.Buffer()
         buf.row('tbl1', symbols={'questdb1': '❤️'}, columns={'questdb2': '❤️'})
