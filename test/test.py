@@ -275,6 +275,17 @@ class TestSender(unittest.TestCase):
                 msgs = server.recv()
                 self.assertEqual(msgs, [b'tbl1,sym1=val1'])
 
+    def test_auto_flush_on_closed_socket(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port, auto_flush=True) as sender:
+                server.accept()
+                server.close()
+                exp_err = 'Could not flush buffer'
+                with self.assertRaisesRegexp(qi.IngressError, exp_err):
+                    for _ in range(1000):
+                        time.sleep(0.01)
+                        sender.row('tbl1', symbols={'a': 'b'})
+
     def test_dont_auto_flush(self):
         with Server() as server:
             with qi.Sender('localhost', server.port, auto_flush=0) as sender:
