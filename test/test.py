@@ -68,7 +68,8 @@ class TestBuffer(unittest.TestCase):
             'col4': 0.5,
             'col5': 'val',
             'col6': qi.TimestampMicros(12345),
-            'col7': two_h_after_epoch})
+            'col7': two_h_after_epoch,
+            'col8': None})
         exp = (
             'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
             'col5="val",col6=12345t,col7=7200000000t\n')
