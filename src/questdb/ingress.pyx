@@ -669,8 +669,6 @@ cdef class Buffer:
         """
         Add a single row (line) to the buffer.
 
-        At least one ``symbols`` or ``columns`` must be specified.
-
         .. code-block:: python
 
             # All fields specified.
