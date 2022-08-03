@@ -2,6 +2,16 @@
 Changelog
 =========
 
+1.0.1 (2022-08-03)
+------------------
+
+* As a convenience, the ``Buffer.row`` method can now take ``None`` columnn
+  values. This has the same semantics as skipping the column altogether.
+  Closes (`#3 <https://github.com/questdb/py-questdb-client/issues/3>`_).
+* Fixed a minor bug where an error auto-flush caused a second clean-up error.
+  Closes (`#4 <https://github.com/questdb/py-questdb-client/issues/4>`_).
+
+
 1.0.0 (2022-07-15)
 ------------------
 
