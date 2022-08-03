@@ -68,11 +68,24 @@ class TestBuffer(unittest.TestCase):
             'col4': 0.5,
             'col5': 'val',
             'col6': qi.TimestampMicros(12345),
-            'col7': two_h_after_epoch})
+            'col7': two_h_after_epoch,
+            'col8': None})
         exp = (
             'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
             'col5="val",col6=12345t,col7=7200000000t\n')
         self.assertEqual(str(buf), exp)
+
+    def test_none_column(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', columns={'col1': 1})
+        exp = 'tbl1 col1=1i\n'
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
+
+        # No fields to write, no fields written, therefore a no-op.
+        buf.row('tbl1', columns={'col1': None, 'col2': None})
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
 
     def test_unicode(self):
         buf = qi.Buffer()
@@ -261,6 +274,17 @@ class TestSender(unittest.TestCase):
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
                 msgs = server.recv()
                 self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+
+    def test_auto_flush_on_closed_socket(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port, auto_flush=True) as sender:
+                server.accept()
+                server.close()
+                exp_err = 'Could not flush buffer'
+                with self.assertRaisesRegexp(qi.IngressError, exp_err):
+                    for _ in range(1000):
+                        time.sleep(0.01)
+                        sender.row('tbl1', symbols={'a': 'b'})
 
     def test_dont_auto_flush(self):
         with Server() as server:

@@ -136,6 +136,8 @@ def clean():
     _rm(PROJ_ROOT / 'src', '**/*.dylib')
     _rm(PROJ_ROOT / 'src', '**/*.c')
     _rm(PROJ_ROOT / 'src', '**/*.html')
+    _rm(PROJ_ROOT, 'rustup-init.exe')
+    _rm(PROJ_ROOT, 'rustup-init.sh')
 
 
 @command

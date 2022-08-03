@@ -35,8 +35,8 @@ Explicit Buffers
 
 For more advanced use cases where the same messages need to be sent to multiple
 questdb instances or you want to decouple serialization and sending (as may be
-in a multi-threaded application) construct :class:``questdb.ingress.Buffer``
-objects explicitly, then pass them to the :func:``questdb.ingress.Sender.flush``
+in a multi-threaded application) construct :class:`questdb.ingress.Buffer`
+objects explicitly, then pass them to the :func:`questdb.ingress.Sender.flush`
 method.
 
 Note that this bypasses ``auto-flush`` logic
