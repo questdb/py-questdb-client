@@ -75,6 +75,18 @@ class TestBuffer(unittest.TestCase):
             'col5="val",col6=12345t,col7=7200000000t\n')
         self.assertEqual(str(buf), exp)
 
+    def test_none_symbol(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None})
+        exp = 'tbl1,sym1=val1\n'
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
+
+        # No fields to write, no fields written, therefore a no-op.
+        buf.row('tbl1', symbols={'sym1': None, 'sym2': None})
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
+
     def test_none_column(self):
         buf = qi.Buffer()
         buf.row('tbl1', columns={'col1': 1})
@@ -86,6 +98,11 @@ class TestBuffer(unittest.TestCase):
         buf.row('tbl1', columns={'col1': None, 'col2': None})
         self.assertEqual(str(buf), exp)
         self.assertEqual(len(buf), len(exp))
+
+    def test_no_symbol_or_col_args(self):
+        buf = qi.Buffer()
+        buf.row('table_name')
+        self.assertEqual(str(buf), '')
 
     def test_unicode(self):
         buf = qi.Buffer()
