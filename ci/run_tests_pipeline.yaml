@@ -1,0 +1,43 @@
+trigger: none
+
+variables:
+  OS_MAPPING: none
+  Windows_NT-X86: windows
+  Darwin-X64: osx
+  Darwin-ARM: armosx
+  Linux-ARM: armlinux
+  Linux-X64: linux
+
+stages:
+  - stage: BuildAndTest
+    displayName: "Building and testing"
+    jobs:
+      - job: RunOn
+        displayName: "on"
+        strategy:
+          matrix:
+            linux:
+              imageName: "ubuntu-latest"
+              poolName: "Azure Pipelines"
+              BUILD_WITH_MINGW: "0"
+            mac:
+              imageName: "macos-latest"
+              poolName: "Azure Pipelines"
+              BUILD_WITH_MINGW: "0"
+            windows-msvc-2019:
+              imageName: "windows-2019"
+              poolName: "Azure Pipelines"
+              BUILD_WITH_MINGW: "0"
+        pool:
+          name: $(poolName)
+          vmImage: $(imageName)
+        timeoutInMinutes: 60
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
+          - script: ./proj build
+            displayName: "Build"
+          - script: ./proj test --all
+            displayName: "Test"
