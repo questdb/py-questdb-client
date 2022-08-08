@@ -1,8 +1,8 @@
 from questdb.ingress import Sender
 
 
-def example():
-    with Sender('localhost', 9009) as sender:
+def example(host: str = 'localhost', port: int = 9009):
+    with Sender(host, port) as sender:
         sender.row(
             'line_sender_example',
             symbols={'id': 'OMEGA'},

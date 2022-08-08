@@ -1,8 +1,8 @@
 from questdb.ingress import Sender, TimestampNanos
 
 
-def example():
-    with Sender('localhost', 9009) as sender:
+def example(host: str = 'localhost', port: int = 9009):
+    with Sender(host, port) as sender:
         buffer = sender.new_buffer()
         buffer.row(
             'line_sender_buffer_example',
