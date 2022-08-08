@@ -39,7 +39,7 @@ stages:
             submodules: true
           - script: python3 -m pip install cython
             displayName: Installing Python dependencies
-          - script: ./proj build
+          - script: python3 proj.py build
             displayName: "Build"
-          - script: ./proj test --all
+          - script: python3 proj.py test --all
             displayName: "Test"
