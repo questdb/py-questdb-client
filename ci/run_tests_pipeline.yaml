@@ -19,15 +19,12 @@ stages:
             linux:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
-              BUILD_WITH_MINGW: "0"
             mac:
               imageName: "macos-latest"
               poolName: "Azure Pipelines"
-              BUILD_WITH_MINGW: "0"
             windows-msvc-2019:
               imageName: "windows-2019"
               poolName: "Azure Pipelines"
-              BUILD_WITH_MINGW: "0"
         pool:
           name: $(poolName)
           vmImage: $(imageName)
