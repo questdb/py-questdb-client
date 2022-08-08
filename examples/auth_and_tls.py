@@ -1,14 +1,14 @@
 from questdb.ingress import Sender
 
 
-def example():
+def example(host: str = 'localhost', port: int = 9009):
     # See: https://questdb.io/docs/reference/api/ilp/authenticate
     auth = (
         "testUser1",                                    # kid
         "5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48",  # d
         "fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU",  # x
         "Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac")  # y
-    with Sender('localhost', 9009, auth=auth, tls=True) as sender:
+    with Sender(host, port, auth=auth, tls=True) as sender:
         sender.row(
             'line_sender_example',
             symbols={'id': 'OMEGA'},

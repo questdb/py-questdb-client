@@ -46,3 +46,14 @@ all data is sent.
 .. literalinclude:: ../examples/buffer.py
    :language: python
 
+
+Ticking Random Data and Timer-based Flush
+=========================================
+
+The following example somewhat mimics the behavior of a loop in an application.
+
+It creates random ticking data at a random interval and flushes it explicitly
+based on a timer if the auto-flushing logic was not triggered recently.
+
+.. literalinclude:: ../examples/random_data.py
+   :language: python
