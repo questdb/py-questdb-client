@@ -37,6 +37,8 @@ stages:
             fetchDepth: 1
             lfs: false
             submodules: true
+          - script: python3 -m pip install cython
+            displayName: Installing Python dependencies
           - script: ./proj build
             displayName: "Build"
           - script: ./proj test --all
