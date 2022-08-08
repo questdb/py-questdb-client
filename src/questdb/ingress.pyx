@@ -635,14 +635,11 @@ cdef class Buffer:
         self._set_marker()
         try:
             self._table(table_name)
-            if not (symbols or columns):
-                raise IngressError(
-                    IngressErrorCode.InvalidApiCall,
-                    'Must specify at least one symbol or column')
             if symbols is not None:
                 for name, value in symbols.items():
-                    self._symbol(name, value)
-                    wrote_fields = True
+                    if value is not None:
+                        self._symbol(name, value)
+                        wrote_fields = True
             if columns is not None:
                 for name, value in columns.items():
                     if value is not None:
@@ -663,7 +660,7 @@ cdef class Buffer:
             self,
             table_name: str,
             *,
-            symbols: Optional[Dict[str, str]]=None,
+            symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
                 Union[None, bool, int, float, str, TimestampMicros, datetime]]
@@ -672,14 +669,12 @@ cdef class Buffer:
         """
         Add a single row (line) to the buffer.
 
-        At least one ``symbols`` or ``columns`` must be specified.
-
         .. code-block:: python
 
             # All fields specified.
             buffer.row(
                 'table_name',
-                symbols={'sym1': 'abc', 'sym2': 'def'},
+                symbols={'sym1': 'abc', 'sym2': 'def', 'sym3': None},
                 columns={
                     'col1': True,
                     'col2': 123,
@@ -741,12 +736,16 @@ cdef class Buffer:
 
         :param table_name: The name of the table to which the row belongs.
         :param symbols: A dictionary of symbol column names to ``str`` values.
+            As a convenience, you can also pass a ``None`` value which will
+            have the same effect as skipping the key: If the column already
+            existed, it will be recorded as ``NULL``, otherwise it will not be
+            created.
         :param columns: A dictionary of column names to ``bool``, ``int``,
             ``float``, ``str``, ``TimestampMicros`` or ``datetime`` values.
-            As a convenience, you can also pass a ``None`` value, however - due
-            to ILP protocol limitations - this will skip the column rather
-            necessarily writing a ``NULL`` value, so if the column did not exist
-            yet it will not be created.
+            As a convenience, you can also pass a ``None`` value which will
+            have the same effect as skipping the key: If the column already
+            existed, it will be recorded as ``NULL``, otherwise it will not be
+            created.
         :param at: The timestamp of the row. If ``None``, timestamp is assigned
             by the server. If ``datetime``, the timestamp is converted to
             nanoseconds. A nanosecond unix epoch timestamp can be passed

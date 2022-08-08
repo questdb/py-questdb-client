@@ -28,7 +28,7 @@ Install your local Python3 environment **venv**
     venv/bin/python install -r dev_requirements.txt
 
     # or simply:
-    python3 proj.py venv
+    ./proj venv
 
     # either of the ^ ^ should be followed by:
     source venv/bin/activate
@@ -80,7 +80,7 @@ No wheels are made.
 
 .. code-block:: bash
 
-    python3 proj.py build
+    ./proj build
 
 
 Cleaning
@@ -88,7 +88,7 @@ Cleaning
 
 .. code-block:: bash
 
-    python3 proj.py clean
+    ./proj clean
 
 
 Packaging Locally
@@ -99,8 +99,8 @@ MacOS Apple Silicon, run:
 
 .. code-block:: bash
 
-    python3 proj.py sdist   # source distribution
-    python3 proj.py cibuildwheel # the order of these two lines does not matter
+    ./proj sdist   # source distribution
+    ./proj cibuildwheel # the order of these two lines does not matter
 
 This will end up putting everything in the ``dist/`` directory.
 
