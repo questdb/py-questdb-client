@@ -298,7 +298,7 @@ class TestSender(unittest.TestCase):
                 server.accept()
                 server.close()
                 exp_err = 'Could not flush buffer'
-                with self.assertRaisesRegexp(qi.IngressError, exp_err):
+                with self.assertRaisesRegex(qi.IngressError, exp_err):
                     for _ in range(1000):
                         time.sleep(0.01)
                         sender.row('tbl1', symbols={'a': 'b'})

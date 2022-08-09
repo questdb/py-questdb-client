@@ -1,13 +1,5 @@
 trigger: none
 
-variables:
-  OS_MAPPING: none
-  Windows_NT-X86: windows
-  Darwin-X64: osx
-  Darwin-ARM: armosx
-  Linux-ARM: armlinux
-  Linux-X64: linux
-
 stages:
   - stage: BuildAndTest
     displayName: "Building and testing"
@@ -28,15 +20,19 @@ stages:
         pool:
           name: $(poolName)
           vmImage: $(imageName)
-        timeoutInMinutes: 60
+        timeoutInMinutes: 45
         steps:
           - checkout: self
             fetchDepth: 1
             lfs: false
             submodules: true
+          - task: UsePythonVersion@0
+          - script: python3 --version
           - script: python3 -m pip install cython
             displayName: Installing Python dependencies
           - script: python3 proj.py build
             displayName: "Build"
-          - script: python3 proj.py test --all
+          - script: python3 proj.py test 1
             displayName: "Test"
+            env:
+              JAVA_HOME: $(JAVA_HOME_11_X64)
