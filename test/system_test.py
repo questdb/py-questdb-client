@@ -15,7 +15,7 @@ from fixture import QuestDbFixture, install_questdb, CA_PATH, AUTH
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '6.4.2'
+QUESTDB_VERSION = '6.5'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 

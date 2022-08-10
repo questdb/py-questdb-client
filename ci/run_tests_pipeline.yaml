@@ -1,0 +1,38 @@
+trigger: none
+
+stages:
+  - stage: BuildAndTest
+    displayName: "Building and testing"
+    jobs:
+      - job: RunOn
+        displayName: "on"
+        strategy:
+          matrix:
+            linux:
+              imageName: "ubuntu-latest"
+              poolName: "Azure Pipelines"
+            mac:
+              imageName: "macos-latest"
+              poolName: "Azure Pipelines"
+            windows-msvc-2019:
+              imageName: "windows-2019"
+              poolName: "Azure Pipelines"
+        pool:
+          name: $(poolName)
+          vmImage: $(imageName)
+        timeoutInMinutes: 45
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
+          - task: UsePythonVersion@0
+          - script: python3 --version
+          - script: python3 -m pip install cython
+            displayName: Installing Python dependencies
+          - script: python3 proj.py build
+            displayName: "Build"
+          - script: python3 proj.py test 1
+            displayName: "Test"
+            env:
+              JAVA_HOME: $(JAVA_HOME_11_X64)
