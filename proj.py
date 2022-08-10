@@ -126,7 +126,7 @@ def sdist():
 def clean():
     _rmtree(PROJ_ROOT / 'build')
     _rmtree(PROJ_ROOT / 'dist')
-    _rmtree(PROJ_ROOT / 'c-questdb-client' / 'target')
+    _rmtree(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi' / 'target')
     _rmtree(PROJ_ROOT / 'c-questdb-client' / 'build')
     _rmtree(PROJ_ROOT / 'src' / 'questdb.egg-info')
     _rmtree(PROJ_ROOT / 'venv')
