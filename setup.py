@@ -29,13 +29,13 @@ def ingress_extension():
     extra_link_args = []
     extra_objects = []
 
+    questdb_rs_ffi_dir = PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'
     questdb_client_lib_dir = None
     if PLATFORM == 'win32' and MODE == '32bit':
-        questdb_client_lib_dir = (PROJ_ROOT /
-            'c-questdb-client' / 'target' / WIN_32BIT_CARGO_TARGET / 'release')
+        questdb_client_lib_dir = \
+            questdb_rs_ffi_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
     else:
-        questdb_client_lib_dir = (PROJ_ROOT /
-            'c-questdb-client' / 'target' / 'release')
+        questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
 
     if PLATFORM == 'darwin':
         lib_name = 'libquestdb_client.a'
@@ -63,7 +63,7 @@ def ingress_extension():
 
 
 def cargo_build():
-    if not (PROJ_ROOT / 'c-questdb-client' / 'src').exists():
+    if not (PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi').exists():
         if os.environ.get('SETUP_DO_GIT_SUBMODULE_INIT') == '1':
             subprocess.check_call([
                 'git', 'submodule', 'update', '--init', '--recursive'])
@@ -93,14 +93,14 @@ def cargo_build():
     cargo_args = [
         'cargo',
         'build',
-        '--release',
-        '--features',
-        'ffi']
+        '--release']
 
     if PLATFORM == 'win32' and MODE == '32bit':
         cargo_args.append(f'--target={WIN_32BIT_CARGO_TARGET}')
 
-    subprocess.check_call(cargo_args, cwd=str(PROJ_ROOT / 'c-questdb-client'))
+    subprocess.check_call(
+        cargo_args,
+        cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'))
 
 
 class questdb_build_ext(build_ext):
