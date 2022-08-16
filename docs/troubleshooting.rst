@@ -39,18 +39,66 @@ The :class:`questdb.ingress.Sender` class only  provides auto-flushing based on
 a buffer size and *not on a timer*.
 
 
-Inspecting and debugging errors
-===============================
+Errors during flushing
+----------------------
 
-Both the :class:`questdb.ingress.Sender` and :class:`questdb.ingress.Buffer`
-types support ``__len__`` and ``__str__`` methods to inspect the buffer that is
-about to be flushed.
+Server disconnects
+~~~~~~~~~~~~~~~~~~
 
-Note that the ILP protocol does not send errors back to the client.
+A failure in :func:`questdb.ingress.Sender.flush` generally indicates that the
+network connection was dropped.
 
-On error, the QuestDB server will disconnect and any error messages will be
-present in the `server logs
+The ILP protocol does not send errors back to the client. Instead, by design,
+it will disconnect a client if it encounters any insertion errors. This is to
+avoid errors going unnoticed.
+
+As an example, if a client were to insert a ``STRING`` value into a ``BOOLEAN``
+column, the QuestDB server would disconnect the client.
+
+To determine the root cause of a disconnect, inspect the `server logs
 <https://questdb.io/docs/concept/root-directory-structure#log-directory>`_.
+
+
+Logging outgoing messages
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To understand what data was sent to the server, you may log outgoing messages
+from Python.
+
+Here's an example if you append rows to the ``Sender`` object:
+
+.. code-block:: python
+
+    import textwrap
+
+    with Sender(...) as sender:
+        # sender.row(...)
+        # sender.row(...)
+        # ...
+        pending = str(sender)
+        logging.info('About to flush:\n%s', textwrap.indent(pending, '    '))
+        sender.flush()
+
+Alternatively, if you're constructing buffers explicitly:
+
+.. code-block:: python
+
+    import textwrap
+
+    buffer = sender.new_buffer()
+    # buffer.row(...)
+    # buffer.row(...)
+    # ...
+    pending = str(buffer)
+    logging.info('About to flush:\n%s', textwrap.indent(pending, '    '))
+    sender.flush(buffer)
+
+
+Note that to handle out-of-order messages efficiently, the QuestDB server will
+delay appling changes it receives over ILP after a configurable
+`commit lag <https://questdb.io/docs/guides/out-of-order-commit-lag>`_.
+
+Due to this commit lag, the line that caused the error may not be the last line.
 
 
 Asking for help

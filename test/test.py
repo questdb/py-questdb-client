@@ -327,7 +327,7 @@ class TestSender(unittest.TestCase):
             with qi.Sender('localhost', server.port, auto_flush=True) as sender:
                 server.accept()
                 server.close()
-                exp_err = 'Could not flush buffer'
+                exp_err = 'Could not flush buffer.* - See https'
                 with self.assertRaisesRegex(qi.IngressError, exp_err):
                     for _ in range(1000):
                         time.sleep(0.01)
