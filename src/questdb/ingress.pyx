@@ -30,7 +30,7 @@
 API for fast data ingestion into QuestDB.
 """
 
-from libc.stdint cimport uint8_t, int64_t
+from libc.stdint cimport uint8_t, uint64_t, int64_t
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
@@ -521,9 +521,7 @@ cdef class Buffer:
         return 0
 
     cdef inline int _column_i64(
-            self, line_sender_column_name c_name, int value) except -1:
-        # TODO: Generally audit for int overflows this in the whole codebase.
-        # We pretty certainly have one here :-).
+            self, line_sender_column_name c_name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
@@ -1081,9 +1079,9 @@ cdef class Sender:
             str interface=None,
             tuple auth=None,
             object tls=False,
-            int read_timeout=15000,
-            int init_capacity=65536,  # 64KiB
-            int max_name_len=127,
+            uint64_t read_timeout=15000,
+            uint64_t init_capacity=65536,  # 64KiB
+            uint64_t max_name_len=127,
             object auto_flush=64512):  # 63KiB
         cdef line_sender_error* err = NULL
 
@@ -1121,9 +1119,9 @@ cdef class Sender:
         self._impl = NULL
         self._buffer = None
 
-        if isinstance(port, int):
+        if PyInt_Check(port):
             port_str = str(port)
-        elif isinstance(port, str):
+        elif PyUnicode_Check(port):
             port_str = port
         else:
             raise TypeError(
