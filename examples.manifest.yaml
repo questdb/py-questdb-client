@@ -1,0 +1,28 @@
+- name: ilp
+  lang: python
+  path: examples/basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    ```
+    python3 -m pip install questdb
+    ```
+- name: ilp-auth-tls
+  lang: python
+  path: examples/auth_and_tls.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    ```
+    python3 -m pip install questdb
+    ```
+  auth:
+    kid: testUser1
+    d: 5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48
+    x: fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU
+    y: Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac
+  addr:
+    host: localhost
+    port: 9009
