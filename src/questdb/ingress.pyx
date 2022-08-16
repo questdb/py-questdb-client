@@ -546,7 +546,7 @@ cdef class Buffer:
     cdef inline int _column_ts(
             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_column_ts(self._impl, c_name, ts.value, &err):
+        if not line_sender_buffer_column_ts(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
         return 0
 
@@ -594,7 +594,7 @@ cdef class Buffer:
 
     cdef inline int _at_ts(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_at(self._impl, ts.value, &err):
+        if not line_sender_buffer_at(self._impl, ts._value, &err):
             raise c_err_to_py(err)
         return 0
 
