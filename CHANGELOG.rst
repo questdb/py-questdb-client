@@ -9,7 +9,7 @@ Changelog
   32-bit instead of 64-bit precision. This caused certain ``int`` values to be
   rejected and other ``float`` values to be rounded incorrectly.
   Closes `#13 <https://github.com/questdb/py-questdb-client/issues/13>`_.
-* As a convenience, the ``Buffer.row`` method can now take ``None`` columnn
+* As a matter of convenience, the ``Buffer.row`` method can now take ``None`` column
   values. This has the same semantics as skipping the column altogether.
   Closes `#3 <https://github.com/questdb/py-questdb-client/issues/3>`_.
 * Fixed a minor bug where an error auto-flush caused a second clean-up error.
