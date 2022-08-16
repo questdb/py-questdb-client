@@ -132,8 +132,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         raise ValueError('Internal error converting error code.')
 
 
-cdef inline object c_err_to_py(line_sender_error* err):
-    """Construct a ``SenderError`` from a C error, which will also be freed."""
+cdef inline object c_err_to_code_and_msg(line_sender_error* err):
+    """Construct a ``SenderError`` from a C error, which will be freed."""
     cdef line_sender_error_code code = line_sender_error_get_code(err)
     cdef size_t c_len = 0
     cdef const char* c_msg = line_sender_error_msg(err, &c_len)
@@ -142,13 +142,22 @@ cdef inline object c_err_to_py(line_sender_error* err):
     cdef object py_code
     try:
         py_code = c_err_code_to_py(code)
-        py_msg = PyUnicode_FromKindAndData(
-            PyUnicode_1BYTE_KIND,
-            c_msg,
-            <Py_ssize_t>c_len)
-        return IngressError(py_code, py_msg)
+        py_msg = PyUnicode_FromStringAndSize(c_msg, <Py_ssize_t>c_len)
+        return (py_code, py_msg)
     finally:
         line_sender_error_free(err)
+
+
+cdef inline object c_err_to_py(line_sender_error* err):
+    """Construct an ``IngressError`` from a C error, which will be freed."""
+    cdef object tup = c_err_to_code_and_msg(err)
+    return IngressError(tup[0], tup[1])
+
+
+cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
+    """Construct an ``IngressError`` from a C error, which will be freed."""
+    cdef object tup = c_err_to_code_and_msg(err)
+    return IngressError(tup[0], fmt.format(tup[1]))
 
 
 cdef bytes str_to_utf8(str string, line_sender_utf8* utf8_out):
@@ -932,6 +941,11 @@ cdef class Buffer:
     #     raise ValueError('nyi')
 
 
+_FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
+    'v1.0.1'
+    '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
+
+
 cdef class Sender:
     """
     A sender is a client that inserts rows into QuestDB via the ILP protocol.
@@ -1313,10 +1327,10 @@ cdef class Sender:
         try:
             if clear:
                 if not line_sender_flush(self._impl, c_buf, &err):
-                    raise c_err_to_py(err)
+                    raise c_err_to_py_fmt(err, _FLUSH_FMT)
             else:
                 if not line_sender_flush_and_keep(self._impl, c_buf, &err):
-                    raise c_err_to_py(err)
+                    raise c_err_to_py_fmt(err, _FLUSH_FMT)
         except:
             # Prevent a follow-up call to `.close(flush=True)` (as is usually
             # called from `__exit__`) to raise after the sender entered an error
