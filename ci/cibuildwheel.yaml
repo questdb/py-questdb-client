@@ -75,7 +75,7 @@ stages:
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
-      - job: linux_x64
+      - job: linux_x64_cpython_manylinux_x86_64
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 60
         steps:
@@ -87,6 +87,59 @@ stages:
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
+            env:
+              CIBW_BUILD: cp*-manylinux_x86_64
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: 'wheelhouse'}
+
+      - job: linux_x64_cpython_manylinux_i686
+        pool: {vmImage: 'ubuntu-latest'}
+        timeoutInMinutes: 60
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              pip3 install cibuildwheel==2.8.1
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: cp*-manylinux_i686
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: 'wheelhouse'}
+
+      - job: linux_x64_cpython_musllinux
+        pool: {vmImage: 'ubuntu-latest'}
+        timeoutInMinutes: 60
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              pip3 install cibuildwheel==2.8.1
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: cp*-musllinux*
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: 'wheelhouse'}
+
+      - job: linux_x64_pypy
+        pool: {vmImage: 'ubuntu-latest'}
+        timeoutInMinutes: 60
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              pip3 install cibuildwheel==2.8.1
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: pp*
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
