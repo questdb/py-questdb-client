@@ -109,6 +109,11 @@ class TestBuffer(unittest.TestCase):
         buf.row('tbl1', symbols={'questdb1': '❤️'}, columns={'questdb2': '❤️'})
         self.assertEqual(str(buf), 'tbl1,questdb1=❤️ questdb2="❤️"\n')
 
+    def test_float(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', columns={'num': 1.2345678901234567})
+        self.assertEqual(str(buf), f'tbl1 num=1.2345678901234567\n')
+
 
 class TestSender(unittest.TestCase):
     def test_basic(self):

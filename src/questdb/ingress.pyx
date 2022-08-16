@@ -35,6 +35,9 @@ from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
+from cpython.float cimport PyFloat_Check
+from cpython.int cimport PyInt_Check
+from cpython.unicode cimport PyUnicode_Check
 
 from .line_sender cimport *
 
@@ -527,7 +530,7 @@ cdef class Buffer:
         return 0
 
     cdef inline int _column_f64(
-            self, line_sender_column_name c_name, float value) except -1:
+            self, line_sender_column_name c_name, double value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
@@ -562,11 +565,11 @@ cdef class Buffer:
         cdef bytes owner_name = str_to_column_name(name, &c_name)
         if PyBool_Check(value):
             return self._column_bool(c_name, value)
-        elif isinstance(value, int):
+        elif PyInt_Check(value):
             return self._column_i64(c_name, value)
-        elif isinstance(value, float):
+        elif PyFloat_Check(value):
             return self._column_f64(c_name, value)
-        elif isinstance(value, str):
+        elif PyUnicode_Check(value):
             return self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
             return self._column_ts(c_name, value)
