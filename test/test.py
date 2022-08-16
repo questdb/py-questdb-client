@@ -75,6 +75,18 @@ class TestBuffer(unittest.TestCase):
             'col5="val",col6=12345t,col7=7200000000t\n')
         self.assertEqual(str(buf), exp)
 
+    def test_none_symbol(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None})
+        exp = 'tbl1,sym1=val1\n'
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
+
+        # No fields to write, no fields written, therefore a no-op.
+        buf.row('tbl1', symbols={'sym1': None, 'sym2': None})
+        self.assertEqual(str(buf), exp)
+        self.assertEqual(len(buf), len(exp))
+
     def test_none_column(self):
         buf = qi.Buffer()
         buf.row('tbl1', columns={'col1': 1})
@@ -87,10 +99,45 @@ class TestBuffer(unittest.TestCase):
         self.assertEqual(str(buf), exp)
         self.assertEqual(len(buf), len(exp))
 
+    def test_no_symbol_or_col_args(self):
+        buf = qi.Buffer()
+        buf.row('table_name')
+        self.assertEqual(str(buf), '')
+
     def test_unicode(self):
         buf = qi.Buffer()
         buf.row('tbl1', symbols={'questdb1': '❤️'}, columns={'questdb2': '❤️'})
         self.assertEqual(str(buf), 'tbl1,questdb1=❤️ questdb2="❤️"\n')
+
+    def test_float(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', columns={'num': 1.2345678901234567})
+        self.assertEqual(str(buf), f'tbl1 num=1.2345678901234567\n')
+
+    def test_int_range(self):
+        buf = qi.Buffer()
+        buf.row('tbl1', columns={'num': 0})
+        self.assertEqual(str(buf), f'tbl1 num=0i\n')
+        buf.clear()
+
+        # 32-bit int range.
+        buf.row('tbl1', columns={'min': -2**31, 'max': 2**31-1})
+        self.assertEqual(str(buf), f'tbl1 min=-2147483648i,max=2147483647i\n')
+        buf.clear()
+
+        # 64-bit int range.
+        buf.row('tbl1', columns={'min': -2**63, 'max': 2**63-1})
+        self.assertEqual(str(buf), f'tbl1 min=-9223372036854775808i,max=9223372036854775807i\n')
+        buf.clear()
+
+        # Overflow.
+        with self.assertRaises(OverflowError):
+            buf.row('tbl1', columns={'num': 2**63})
+
+        # Underflow.
+        with self.assertRaises(OverflowError):
+            buf.row('tbl1', columns={'num': -2**63-1})
+
 
 
 class TestSender(unittest.TestCase):
@@ -281,7 +328,7 @@ class TestSender(unittest.TestCase):
                 server.accept()
                 server.close()
                 exp_err = 'Could not flush buffer'
-                with self.assertRaisesRegexp(qi.IngressError, exp_err):
+                with self.assertRaisesRegex(qi.IngressError, exp_err):
                     for _ in range(1000):
                         time.sleep(0.01)
                         sender.row('tbl1', symbols={'a': 'b'})
@@ -325,6 +372,16 @@ class TestSender(unittest.TestCase):
             sender.close()
             with self.assertRaises(qi.IngressError):
                 sender.connect()
+
+    def test_bad_init_args(self):
+        with self.assertRaises(OverflowError):
+            qi.Sender(host='localhost', port=9009, read_timeout=-1)
+
+        with self.assertRaises(OverflowError):
+            qi.Sender(host='localhost', port=9009, init_capacity=-1)
+
+        with self.assertRaises(OverflowError):
+            qi.Sender(host='localhost', port=9009, max_name_len=-1)
 
 
 if __name__ == '__main__':
