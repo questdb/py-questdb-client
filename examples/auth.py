@@ -11,7 +11,7 @@ def example(host: str = 'localhost', port: int = 9009):
             "5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48",  # d
             "fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU",  # x
             "Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac")  # y
-        with Sender(host, port, auth=auth, tls=True) as sender:
+        with Sender(host, port, auth=auth) as sender:
             # Record with provided designated timestamp (using the 'at' param)
             # Notice the designated timestamp is expected in Nanoseconds,
             # but timestamps in other columns are expected in Microseconds. 

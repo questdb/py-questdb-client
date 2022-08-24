@@ -35,7 +35,7 @@ def example(host: str = 'localhost', port: int = 9009):
                                            # or simply be left out.
 
             # We recommend flushing periodically, for example every few seconds.
-            # If you don't flush explicitly, the server will flush automatically
+            # If you don't flush explicitly, the client will flush automatically
             # once the buffer is reaches 63KiB and just before the connection
             # is closed.
             sender.flush()
