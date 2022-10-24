@@ -334,13 +334,22 @@ class TestSender(unittest.TestCase):
                         sender.row('tbl1', symbols={'a': 'b'})
 
     def test_dont_auto_flush(self):
+        msg_counter = 0
         with Server() as server:
             with qi.Sender('localhost', server.port, auto_flush=0) as sender:
                 server.accept()
-                while len(sender) < 131072:  # 128KiB
+                while len(sender) < 32768:  # 32KiB
                     sender.row('tbl1', symbols={'sym1': 'val1'})
+                    msg_counter += 1
                 msgs = server.recv()
                 self.assertEqual(msgs, [])
+            start = time.monotonic()
+            msgs = []
+            while len(msgs) < msg_counter:
+                msgs += server.recv()
+                elapsed = time.monotonic() - start
+                if elapsed > 30.0:
+                    raise TimeoutError()
 
     def test_dont_flush_on_exception(self):
         with Server() as server:
