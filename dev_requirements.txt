@@ -1,7 +1,7 @@
 setuptools>=45.2.0
-Cython>=0.29.24
+Cython>=0.29.32
 wheel>=0.34.2
-cibuildwheel>=2.8.0
+cibuildwheel>=2.11.1
 Sphinx>=5.0.2
 sphinx-rtd-theme>=1.0.0
 twine>=4.0.1
