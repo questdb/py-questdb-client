@@ -30,7 +30,7 @@ Install your local Python3 environment **venv**
     # or simply:
     ./proj venv
 
-    # either of the ^ ^ should be followed by:
+    # either of the above should be followed by:
     source venv/bin/activate
 
 The development requirements are these if you prefer to install them one by one:
