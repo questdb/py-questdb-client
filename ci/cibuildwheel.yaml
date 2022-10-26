@@ -29,7 +29,7 @@ stages:
               functionName: "ondemand-pipeline"
               payload: |
                 {
-                  "pool": "arm64",
+                  "pool": "arm64-clients",
                   "buildid": "$(Build.BuildId)"
                 }
               outputVariable: "functionResult"
@@ -38,11 +38,11 @@ stages:
             name: "Display_Instance"
             displayName: "Display Instance"
           - bash: |
-              echo "Starting agent... for pool arm64"
-              POOLID=$(az pipelines pool list | jq '.[]| select(.name == "arm64") | .id' -r)
-              while [ "$(az pipelines agent list --pool-id $POOLID | jq '.[]| select(.name == "arm64-$(Build.BuildId)") | .enabled' -r)" != "true" ]
+              echo "Starting agent... for pool arm64-clients"
+              POOLID=$(az pipelines pool list | jq '.[]| select(.name == "arm64-clients") | .id' -r)
+              while [ "$(az pipelines agent list --pool-id $POOLID | jq '.[]| select(.name == "arm64-clients-$(Build.BuildId)") | .enabled' -r)" != "true" ]
               do
-                echo "Still waiting for agent arm64-$(Build.BuildId) ... "
+                echo "Still waiting for agent arm64-clients-$(Build.BuildId) ... "
                 sleep 3
               done
               echo "Agent found ..."
@@ -51,10 +51,10 @@ stages:
             timeoutInMinutes: 20
       - job: linux_arm64
         pool:
-          name: "arm64"
+          name: "arm64-clients"
           vmImage:
           demands:
-            - Agent.Name -equals arm64-$(Build.BuildId)
+            - Agent.Name -equals arm64-clients-$(Build.BuildId)
         dependsOn:
           - start_linux_arm64_agent_aws
         timeoutInMinutes: 60
@@ -68,7 +68,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.8.1
+              pip3 install cibuildwheel==2.11.1
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -83,7 +83,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.8.1
+              pip3 install cibuildwheel==2.11.1
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -100,7 +100,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.8.1
+              pip3 install cibuildwheel==2.11.1
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -117,7 +117,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.8.1
+              pip3 install cibuildwheel==2.11.1
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -134,7 +134,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.8.1
+              pip3 install cibuildwheel==2.11.1
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -151,7 +151,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.8.1
+              python3 -m pip install cibuildwheel==2.11.1
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -166,7 +166,7 @@ stages:
           - bash: |
               set -o errexit
               python -m pip install --upgrade pip
-              pip install cibuildwheel==2.8.1
+              pip install cibuildwheel==2.11.1
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
