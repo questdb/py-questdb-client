@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
 import sys
+from typing import Type
 sys.dont_write_bytecode = True
 import os
 import unittest
 import datetime
 import time
+import numpy as np
+import pandas as pd
 
 import patch_path
 from mock_server import Server
@@ -137,7 +140,6 @@ class TestBuffer(unittest.TestCase):
         # Underflow.
         with self.assertRaises(OverflowError):
             buf.row('tbl1', columns={'num': -2**63-1})
-
 
 
 class TestSender(unittest.TestCase):
@@ -391,6 +393,48 @@ class TestSender(unittest.TestCase):
 
         with self.assertRaises(OverflowError):
             qi.Sender(host='localhost', port=9009, max_name_len=-1)
+
+
+def _pandas(*args, **kwargs):
+    buf = qi.Buffer()
+    buf.pandas(*args, **kwargs)
+    return str(buf)
+
+
+DF1 = pd.DataFrame({
+    'A': [1.0, 2.0, 3.0],
+    'B': [1, 2, 3],
+    'C': [
+        pd.Timestamp('20180310'),
+        pd.Timestamp('20180311'),
+        pd.Timestamp('20180312')],
+    'D': ['foo', 'bar', True]})
+
+
+class TestPandas(unittest.TestCase):
+    def test_bad_dataframe(self):
+        with self.assertRaisesRegex(TypeError, 'Expected pandas'):
+            _pandas([])
+
+    def test_no_table_name(self):
+        with self.assertRaisesRegex(ValueError, 'Must specify at least one of'):
+            _pandas(DF1)
+
+    def test_bad_table_name_type(self):
+        with self.assertRaisesRegex(TypeError, 'Must be str'):
+            _pandas(DF1, table_name=1.5)
+
+    def test_invalid_table_name(self):
+        with self.assertRaisesRegex(ValueError, '`table_name`: Bad string "."'):
+            _pandas(DF1, table_name='.')
+
+    def test_invalid_column_dtype(self):
+        with self.assertRaisesRegex(TypeError, '`table_name_col`: Bad dtype'):
+            _pandas(DF1, table_name_col='B')
+
+    def test_bad_str_obj_col(self):
+        with self.assertRaisesRegex(TypeError, 'Found non-string value'):
+            _pandas(DF1, table_name_col='D')
 
 
 if __name__ == '__main__':

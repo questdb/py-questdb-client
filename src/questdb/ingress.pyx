@@ -331,6 +331,16 @@ cdef class TimestampNanos:
         return self._value
 
 
+def _check_is_pandas(data):
+    exp_mod = 'pandas.core.frame'
+    exp_name = 'DataFrame'
+    t = type(data)
+    if (t.__module__ != exp_mod) or (t.__qualname__ != exp_name):
+        raise TypeError(
+            f'Bad argument `data`: Expected {exp_mod}.{exp_name}, ' +
+            f'not {t.__module__}.{t.__qualname__}.')
+
+
 cdef class Sender
 cdef class Buffer
 
@@ -928,17 +938,194 @@ cdef class Buffer:
     #     """
     #     raise ValueError('nyi')
 
-    # def pandas(
-    #         self,
-    #         table_name: str,
-    #         data: pd.DataFrame,
-    #         *,
-    #         symbols: Union[bool, List[int]]=False,
-    #         at: Union[None, TimestampNanos, datetime]=None):
-    #     """
-    #     Add a pandas DataFrame to the buffer.
-    #     """
-    #     raise ValueError('nyi')
+    cdef _pandas(
+            self,
+            object data,
+            object table_name,
+            object table_name_col,
+            object symbols,
+            object at):
+        # First, we need to make sure that `data` is a dataframe.
+        # We specifically avoid using `isinstance` here because we don't want
+        # to add a library dependency on pandas itself. We simply rely on its API.
+        # The only reason to validate here is to avoid obscure "AttributeError"
+        # exceptions later.
+        cdef int name_col
+        cdef object name_owner
+        cdef line_sender_table_name c_table_name
+        cdef list symbol_indices
+        cdef int at_col
+        cdef int64_t at_value
+        _check_is_pandas(data)
+        name_col, name_owner = _pandas_resolve_table_name(
+            data, table_name, table_name_col, &c_table_name)
+        symbol_indices = _pandas_resolve_symbols(data, symbols)
+        at_col, at_value = _pandas_resolve_at(data, at)
+
+    def pandas(
+            self,
+            data,  # : pd.DataFrame
+            *,
+            table_name: Optional[str] = None,
+            table_name_col: Union[None, int, str] = None,
+            symbols: Union[bool, List[int], List[str]] = False,
+            at: Union[None, int, str, TimestampNanos, datetime] = None):
+        """
+        Add a pandas DataFrame to the buffer.
+        """
+        # See https://cython.readthedocs.io/en/latest/src/userguide/
+        #     numpy_tutorial.html#numpy-tutorial
+        self._pandas(data, table_name, table_name_col, symbols, at)
+
+
+cdef tuple _pandas_resolve_table_name(
+        object data,
+        object table_name,
+        object table_name_col,
+        line_sender_table_name* name_out):
+    """
+    Return a tuple-pair of:
+      * int column index
+      * object
+    
+    If the column index is -1, then `name_out` is set and either the returned
+    object is None or a bytes object to track ownership of data in `name_out`.
+
+    Alternatively, if the returned column index > 0, then `name_out` is not set
+    and the column index relates to which pandas column contains the table name
+    on a per-row basis. In such case, the object is always None.
+
+    This method validates input and may raise.
+    """
+    cdef int col_index
+    if table_name is not None:
+        if table_name_col is not None:
+            raise ValueError(
+                'Can specify only one of `table_name` or `table_name_col`.')
+        if isinstance(table_name, str):
+            try:
+                return -1, str_to_table_name(table_name, name_out)
+            except IngressError as ie:
+                raise ValueError(f'Bad argument `table_name`: {ie}')
+        else:
+            raise TypeError(f'Bad argument `table_name`: Must be str.')
+    elif table_name_col is not None:
+        if isinstance(table_name_col, str):
+            col_index = data.columns.get_loc(table_name_col)
+        elif isinstance(table_name_col, int):
+            col_index = _bind_col_index(table_name_col, len(data.columns))
+        else:
+            raise TypeError(
+                f'Bad argument `table_name_col`: ' +
+                'must be a column name (str) or index (int).')
+        _check_column_is_str(
+            data,
+            col_index,
+            'Bad argument `table_name_col`: ',
+            table_name_col)
+        return col_index, None
+    else:
+        raise ValueError(
+            'Must specify at least one of `table_name` or `table_name_col`.')
+
+
+cdef int _bind_col_index(int col_index, int col_count) except -1:
+    """
+    Validate that `col_index` is in bounds for `col_count`.
+    This function also converts negative indicies (e.g. -1 for last column) to
+    positive indicies.
+    """
+    if col_index < 0:
+        col_index += col_count  # We convert negative indicies to positive ones.
+    if not (0 <= col_index < col_count):
+        raise ValueError(f'{col_index} index out of range')
+    return col_index
+
+
+cdef object _column_is_str(object data, int col_index):
+    """
+    Return True if the column at `col_index` is a string column.
+    """
+    cdef str col_kind
+    cdef object[:] obj_col
+    col_kind = data.dtypes[col_index].kind
+    if col_kind == 'S':  # string, string[pyarrow]
+        return True
+    elif col_kind == 'O':  # object
+        for index in range(obj_col.shape[0]):
+            if not isinstance(obj_col[index], str):
+                return False
+        return True
+    else:
+        return False
+
+
+cdef object _check_column_is_str(data, col_index, err_msg_prefix, col_name):
+    cdef str col_kind
+    cdef object[:] obj_col
+    col_kind = data.dtypes[col_index].kind
+    if col_kind in 'SO':
+        if not _column_is_str(data, col_index):
+            raise TypeError(
+                err_msg_prefix +
+                'Found non-string value ' +
+                f'in column {col_name!r}.')
+    else:
+        raise TypeError(
+            err_msg_prefix + 
+            f'Bad dtype `{data.dtypes[col_index]}` for the ' +
+            f'{col_name!r} column: Must be a strings column.')
+
+
+cdef list _pandas_resolve_symbols(object data, list symbols):
+    """
+    Return a list of column indices.
+    """
+    cdef int col_index
+    cdef list symbol_indices = []
+    if symbols is False:
+        return symbol_indices
+    elif symbols is True:
+        for col_index in range(len(data.columns)):
+            if _column_is_str(data, col_index):
+                symbol_indices.append(col_index)
+        return symbol_indices
+    else:
+        symbol_indices = []
+        for symbol in symbols:
+            if isinstance(symbol, str):
+                col_index = data.columns.get_loc(symbol)
+            elif isinstance(symbol, int):
+                col_index = _bind_col_index(symbol, len(data.columns))
+            else:
+                raise TypeError(
+                    f'Bad argument `symbols`: ' +
+                    'must be a column name (str) or index (int).')
+            symbol_indices.append(col_index)
+        return symbol_indices
+
+
+cdef tuple _pandas_resolve_at(object data, object at):
+    cdef int col_index
+    cdef str col_kind
+    if at is None:
+        return -1, 0  # Special value for `at_now`.
+    elif isinstance(at, TimestampNanos):
+        return -1, at._value
+    elif isinstance(at, datetime):
+        return -1, datetime_to_nanos(at)
+    elif isinstance(at, str):
+        col_index = data.columns.get_loc(at)
+    elif isinstance(at, int):
+        col_index = _bind_col_index(at, len(data.columns))
+    else:
+        raise TypeError(
+            f'Bad argument `at`: Unsupported type {type(at)}. ' +
+            'Must be one of: None, TimestampNanos, datetime, ' +
+            'int (column index), str (colum name)')
+    col_kind = data.dtypes[col_index].kind
+    if col_kind == 'M':  # datetime
+        return col_index, 0
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
