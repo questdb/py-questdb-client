@@ -2,6 +2,15 @@
 Changelog
 =========
 
+1.0.2 (2022-10-31)
+------------------
+
+* Support for Python 3.11.
+* Updated to version 2.1.1 of the ``c-questdb-client`` library:
+
+  * Setting ``SO_REUSEADDR`` on outbound socket. This is helpful to users with large number of connections who previously ran out of outbound network ports.
+
+
 1.0.1 (2022-08-16)
 ------------------
 
