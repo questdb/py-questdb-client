@@ -435,6 +435,10 @@ class TestPandas(unittest.TestCase):
     def test_bad_str_obj_col(self):
         with self.assertRaisesRegex(TypeError, 'Found non-string value'):
             _pandas(DF1, table_name_col='D')
+        with self.assertRaisesRegex(TypeError, 'Found non-string value'):
+            _pandas(DF1, table_name_col=3)
+        with self.assertRaisesRegex(TypeError, 'Found non-string value'):
+            _pandas(DF1, table_name_col=-1)
 
 
 if __name__ == '__main__':

@@ -1052,6 +1052,7 @@ cdef object _column_is_str(object data, int col_index):
     if col_kind == 'S':  # string, string[pyarrow]
         return True
     elif col_kind == 'O':  # object
+        obj_col = data.iloc[:, col_index].to_numpy()
         for index in range(obj_col.shape[0]):
             if not isinstance(obj_col[index], str):
                 return False
