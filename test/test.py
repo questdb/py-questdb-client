@@ -458,6 +458,16 @@ class TestPandas(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, '.*element.*symbols.*int.*1'):
             _pandas(DF1, table_name='tbl1', symbols=[1])
 
+    def test_bad_at(self):
+        with self.assertRaisesRegex(KeyError, '`at`.*2018.*not found in the'):
+            _pandas(DF1, table_name='tbl1', at='2018-03-10T00:00:00Z')
+        with self.assertRaisesRegex(TypeError, '`at`.*float64.*be a datetime'):
+            _pandas(DF1, table_name='tbl1', at='A')
+        with self.assertRaisesRegex(TypeError, '`at`.*int64.*be a datetime'):
+            _pandas(DF1, table_name='tbl1', at=1)
+        with self.assertRaisesRegex(TypeError, '`at`.*object.*be a datetime'):
+            _pandas(DF1, table_name='tbl1', at=-1)
+
 
 if __name__ == '__main__':
     unittest.main()

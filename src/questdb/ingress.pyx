@@ -31,6 +31,7 @@ API for fast data ingestion into QuestDB.
 """
 
 from libc.stdint cimport uint8_t, uint64_t, int64_t
+from libc.stdlib cimport malloc, realloc, free, abort
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
@@ -77,6 +78,7 @@ cdef extern from "Python.h":
     char* PyBytes_AsString(object o)
 
 
+import cython
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
 import pathlib
@@ -331,7 +333,7 @@ cdef class TimestampNanos:
         return self._value
 
 
-def _check_is_pandas(data):
+cdef _check_is_pandas(data):
     exp_mod = 'pandas.core.frame'
     exp_name = 'DataFrame'
     t = type(data)
@@ -950,17 +952,31 @@ cdef class Buffer:
         # to add a library dependency on pandas itself. We simply rely on its API.
         # The only reason to validate here is to avoid obscure "AttributeError"
         # exceptions later.
+        cdef int col_count
         cdef int name_col
         cdef object name_owner
         cdef line_sender_table_name c_table_name
-        cdef list symbol_indices
+        cdef IntVec symbol_indices
+        cdef IntVec field_indices
         cdef int at_col
         cdef int64_t at_value
         _check_is_pandas(data)
+        col_count = len(data.columns)
         name_col, name_owner = _pandas_resolve_table_name(
-            data, table_name, table_name_col, &c_table_name)
-        symbol_indices = _pandas_resolve_symbols(data, symbols)
-        at_col, at_value = _pandas_resolve_at(data, at)
+            data, table_name, table_name_col, col_count, &c_table_name)
+        symbol_indices = _pandas_resolve_symbols(data, symbols, col_count)
+        at_col, at_value = _pandas_resolve_at(data, at, col_count)
+        field_indices = _pandas_resolve_fields(
+            name_col, symbol_indices, at_col, col_count)
+        import sys
+        sys.stderr.write(f'_pandas :: (A) ' +
+            'name_col: {name_col}, ' +
+            'name_owner: {name_owner}, ' +
+            'symbol_indices: {symbol_indices}' +
+            'at_col: {at_col}, ' +
+            'at_value: {at_value}, ' +
+            'field_indices: {field_indices}' +
+            '\n')
 
     def pandas(
             self,
@@ -978,10 +994,38 @@ cdef class Buffer:
         self._pandas(data, table_name, table_name_col, symbols, at)
 
 
+@cython.internal
+cdef class IntVec:
+    cdef int capacity
+    cdef int size
+    cdef int* ptr
+
+    def __cinit__(self):
+        self.capacity = 8
+        self.size = 0
+        self.ptr = <int *> malloc(self.capacity * sizeof(int))
+        if not self.ptr:
+            abort()
+
+    def __dealloc__(self):
+        if self.ptr != NULL:
+            free(self.ptr)
+
+    cdef void append(self, int value):
+        if self.size == self.capacity:
+            self.capacity = self.capacity * 2
+            self.ptr = <int*> realloc(self.ptr, self.capacity * sizeof(int))
+            if not self.ptr:
+                abort()
+        self.ptr[self.size] = value
+        self.size += 1
+
+
 cdef tuple _pandas_resolve_table_name(
         object data,
         object table_name,
         object table_name_col,
+        int col_count,
         line_sender_table_name* name_out):
     """
     Return a tuple-pair of:
@@ -1011,10 +1055,10 @@ cdef tuple _pandas_resolve_table_name(
             raise TypeError(f'Bad argument `table_name`: Must be str.')
     elif table_name_col is not None:
         if isinstance(table_name_col, str):
-            col_index = data.columns.get_loc(table_name_col)
+            col_index = _pandas_get_loc(data, table_name_col, 'table_name_col')
         elif isinstance(table_name_col, int):
             col_index = _bind_col_index(
-                'table_name_col', table_name_col, len(data.columns))
+                'table_name_col', table_name_col, col_count)
         else:
             raise TypeError(
                 f'Bad argument `table_name_col`: ' +
@@ -1028,6 +1072,32 @@ cdef tuple _pandas_resolve_table_name(
     else:
         raise ValueError(
             'Must specify at least one of `table_name` or `table_name_col`.')
+
+
+cdef IntVec _pandas_resolve_fields(
+        int name_col, IntVec symbol_indices, int at_col, int col_count):
+    """
+    Return a list of field column indices.
+    i.e. a list of all columns which are not the table name column, symbols or
+    the at timestamp column.
+    """
+    # We rely on `symbol_indices` being sorted.
+    cdef int col_index = 0
+    cdef int sym_index = 0
+    cdef int sym_len = symbol_indices.size
+    cdef IntVec res = IntVec()
+    while col_index < col_count:
+        if col_index == name_col or col_index == at_col:
+            col_index += 1
+            continue
+        while sym_index < sym_len and symbol_indices.ptr[sym_index] < col_index:
+            sym_index += 1
+        if sym_index < sym_len and symbol_indices.ptr[sym_index] == col_index:
+            col_index += 1
+            continue
+        res.append(col_index)
+        col_index += 1
+    return res
 
 
 cdef int _bind_col_index(str arg_name, int col_index, int col_count) except -1:
@@ -1081,17 +1151,17 @@ cdef object _check_column_is_str(data, col_index, err_msg_prefix, col_name):
             f'{col_name!r} column: Must be a strings column.')
 
 
-cdef list _pandas_resolve_symbols(object data, object symbols):
+cdef IntVec _pandas_resolve_symbols(object data, object symbols, int col_count):
     """
     Return a list of column indices.
     """
     cdef int col_index
-    cdef list symbol_indices = []
+    cdef IntVec symbol_indices = IntVec()
     cdef object symbol
     if symbols is False:
         return symbol_indices
     elif symbols is True:
-        for col_index in range(len(data.columns)):
+        for col_index in range(col_count):
             if _column_is_str(data, col_index):
                 symbol_indices.append(col_index)
         return symbol_indices
@@ -1100,12 +1170,11 @@ cdef list _pandas_resolve_symbols(object data, object symbols):
             raise TypeError(
                 f'Bad argument `symbols`: Must be a bool or a tuple or list '+
                 'of column names (str) or indices (int).')
-        symbol_indices = []
         for symbol in symbols:
             if isinstance(symbol, str):
-                col_index = data.columns.get_loc(symbol)
+                col_index = _pandas_get_loc(data, symbol, 'symbols')
             elif isinstance(symbol, int):
-                col_index = _bind_col_index('symbol', symbol, len(data.columns))
+                col_index = _bind_col_index('symbol', symbol, col_count)
             else:
                 raise TypeError(
                     f'Bad argument `symbols`: Elements must ' +
@@ -1119,7 +1188,21 @@ cdef list _pandas_resolve_symbols(object data, object symbols):
         return symbol_indices
 
 
-cdef tuple _pandas_resolve_at(object data, object at):
+cdef int _pandas_get_loc(object data, str col_name, str arg_name) except -1:
+    """
+    Return the column index for `col_name`.
+    """
+    cdef int col_index
+    try:
+        col_index = data.columns.get_loc(col_name)
+    except KeyError:
+        raise KeyError(
+            f'Bad argument `{arg_name}`: ' +
+            f'Column {col_name!r} not found in the dataframe.')
+    return col_index
+
+
+cdef tuple _pandas_resolve_at(object data, object at, int col_count):
     cdef int col_index
     cdef str col_kind
     if at is None:
@@ -1129,9 +1212,9 @@ cdef tuple _pandas_resolve_at(object data, object at):
     elif isinstance(at, datetime):
         return -1, datetime_to_nanos(at)
     elif isinstance(at, str):
-        col_index = data.columns.get_loc(at)
+        col_index = _pandas_get_loc(data, at, 'at')
     elif isinstance(at, int):
-        col_index = _bind_col_index('at', at, len(data.columns))
+        col_index = _bind_col_index('at', at, col_count)
     else:
         raise TypeError(
             f'Bad argument `at`: Unsupported type {type(at)}. ' +
@@ -1140,6 +1223,10 @@ cdef tuple _pandas_resolve_at(object data, object at):
     col_kind = data.dtypes[col_index].kind
     if col_kind == 'M':  # datetime
         return col_index, 0
+    else:
+        raise TypeError(
+            f'Bad argument `at`: Bad dtype `{data.dtypes[col_index]}` ' +
+            f'for the {at!r} column: Must be a datetime column.')
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
