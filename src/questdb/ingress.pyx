@@ -1129,7 +1129,7 @@ cdef tuple _pandas_resolve_at(object data, object at):
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
-    'v1.0.1'
+    'v1.0.2'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 

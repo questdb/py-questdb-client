@@ -1,10 +1,18 @@
 include *.md
+include *.rst
 include *.sh
+include *.bat
+include *.ps1
+include *.py
+include *.toml
+include proj
 recursive-include src *.html
 recursive-include src *.pxd
 recursive-include src *.pyx
 graft c-questdb-client
-prune c-questdb-client/target
 prune c-questdb-client/src/tests/json_tests.rs
 prune c-questdb-client/.git
+prune c-questdb-client/target
+prune c-questdb-client/questdb-rs/target
+prune c-questdb-client/questdb-rs-ffi/target
 prune c-questdb-client/build
