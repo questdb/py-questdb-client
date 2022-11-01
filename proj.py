@@ -113,6 +113,11 @@ def cibuildwheel(*args):
 
 
 @command
+def repl(*args):
+    _run('python3', env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
+
+
+@command
 def cw(*args):
     cibuildwheel(args)
 
