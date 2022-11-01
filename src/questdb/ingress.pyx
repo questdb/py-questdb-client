@@ -1013,7 +1013,8 @@ cdef tuple _pandas_resolve_table_name(
         if isinstance(table_name_col, str):
             col_index = data.columns.get_loc(table_name_col)
         elif isinstance(table_name_col, int):
-            col_index = _bind_col_index(table_name_col, len(data.columns))
+            col_index = _bind_col_index(
+                'table_name_col', table_name_col, len(data.columns))
         else:
             raise TypeError(
                 f'Bad argument `table_name_col`: ' +
@@ -1029,16 +1030,18 @@ cdef tuple _pandas_resolve_table_name(
             'Must specify at least one of `table_name` or `table_name_col`.')
 
 
-cdef int _bind_col_index(int col_index, int col_count) except -1:
+cdef int _bind_col_index(str arg_name, int col_index, int col_count) except -1:
     """
     Validate that `col_index` is in bounds for `col_count`.
     This function also converts negative indicies (e.g. -1 for last column) to
     positive indicies.
     """
+    cdef orig_col_index = col_index
     if col_index < 0:
         col_index += col_count  # We convert negative indicies to positive ones.
     if not (0 <= col_index < col_count):
-        raise ValueError(f'{col_index} index out of range')
+        raise IndexError(
+            f'Bad argument `{arg_name}`: {orig_col_index} index out of range')
     return col_index
 
 
@@ -1078,12 +1081,13 @@ cdef object _check_column_is_str(data, col_index, err_msg_prefix, col_name):
             f'{col_name!r} column: Must be a strings column.')
 
 
-cdef list _pandas_resolve_symbols(object data, list symbols):
+cdef list _pandas_resolve_symbols(object data, object symbols):
     """
     Return a list of column indices.
     """
     cdef int col_index
     cdef list symbol_indices = []
+    cdef object symbol
     if symbols is False:
         return symbol_indices
     elif symbols is True:
@@ -1092,16 +1096,25 @@ cdef list _pandas_resolve_symbols(object data, list symbols):
                 symbol_indices.append(col_index)
         return symbol_indices
     else:
+        if not isinstance(symbols, (tuple, list)):
+            raise TypeError(
+                f'Bad argument `symbols`: Must be a bool or a tuple or list '+
+                'of column names (str) or indices (int).')
         symbol_indices = []
         for symbol in symbols:
             if isinstance(symbol, str):
                 col_index = data.columns.get_loc(symbol)
             elif isinstance(symbol, int):
-                col_index = _bind_col_index(symbol, len(data.columns))
+                col_index = _bind_col_index('symbol', symbol, len(data.columns))
             else:
                 raise TypeError(
-                    f'Bad argument `symbols`: ' +
-                    'must be a column name (str) or index (int).')
+                    f'Bad argument `symbols`: Elements must ' +
+                    'be a column name (str) or index (int).')
+            _check_column_is_str(
+                data,
+                col_index,
+                'Bad element in argument `symbols`: ',
+                symbol)
             symbol_indices.append(col_index)
         return symbol_indices
 
@@ -1118,7 +1131,7 @@ cdef tuple _pandas_resolve_at(object data, object at):
     elif isinstance(at, str):
         col_index = data.columns.get_loc(at)
     elif isinstance(at, int):
-        col_index = _bind_col_index(at, len(data.columns))
+        col_index = _bind_col_index('at', at, len(data.columns))
     else:
         raise TypeError(
             f'Bad argument `at`: Unsupported type {type(at)}. ' +
