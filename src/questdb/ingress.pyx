@@ -953,30 +953,38 @@ cdef class Buffer:
         # The only reason to validate here is to avoid obscure "AttributeError"
         # exceptions later.
         cdef int col_count
+        cdef int row_count
         cdef int name_col
         cdef object name_owner
         cdef line_sender_table_name c_table_name
-        cdef IntVec symbol_indices
-        cdef IntVec field_indices
+        cdef int_vec symbol_indices = int_vec_new()
+        cdef int_vec field_indices = int_vec_new()
         cdef int at_col
         cdef int64_t at_value
-        _check_is_pandas(data)
-        col_count = len(data.columns)
-        name_col, name_owner = _pandas_resolve_table_name(
-            data, table_name, table_name_col, col_count, &c_table_name)
-        symbol_indices = _pandas_resolve_symbols(data, symbols, col_count)
-        at_col, at_value = _pandas_resolve_at(data, at, col_count)
-        field_indices = _pandas_resolve_fields(
-            name_col, symbol_indices, at_col, col_count)
-        import sys
-        sys.stderr.write(f'_pandas :: (A) ' +
-            'name_col: {name_col}, ' +
-            'name_owner: {name_owner}, ' +
-            'symbol_indices: {symbol_indices}' +
-            'at_col: {at_col}, ' +
-            'at_value: {at_value}, ' +
-            'field_indices: {field_indices}' +
-            '\n')
+        cdef int row_index
+        try:
+            _check_is_pandas(data)
+            col_count = len(data.columns)
+            name_col, name_owner = _pandas_resolve_table_name(
+                data, table_name, table_name_col, col_count, &c_table_name)
+            symbol_indices = _pandas_resolve_symbols(data, symbols, col_count)
+            at_col, at_value = _pandas_resolve_at(data, at, col_count)
+            field_indices = _pandas_resolve_fields(
+                name_col, &symbol_indices, at_col, col_count)
+            import sys
+            sys.stderr.write('_pandas :: (A) ' +
+                f'name_col: {name_col}, ' +
+                f'name_owner: {name_owner}, ' +
+                f'symbol_indices: {int_vec_str(&symbol_indices)}, ' +
+                f'at_col: {at_col}, ' +
+                f'at_value: {at_value}, ' +
+                f'field_indices: {int_vec_str(&field_indices)}' +
+                '\n')
+            row_count = len(data)
+        finally:
+            int_vec_free(&field_indices)
+            int_vec_free(&symbol_indices)
+
 
     def pandas(
             self,
@@ -994,31 +1002,41 @@ cdef class Buffer:
         self._pandas(data, table_name, table_name_col, symbols, at)
 
 
-@cython.internal
-cdef class IntVec:
-    cdef int capacity
-    cdef int size
-    cdef int* ptr
+cdef struct c_int_vec:
+    size_t capacity
+    size_t size
+    int* d
 
-    def __cinit__(self):
-        self.capacity = 8
-        self.size = 0
-        self.ptr = <int *> malloc(self.capacity * sizeof(int))
-        if not self.ptr:
+ctypedef c_int_vec int_vec
+
+cdef int_vec int_vec_new():
+    cdef int_vec vec
+    vec.capacity = 0
+    vec.size = 0
+    vec.d = <int*>NULL
+    return vec
+
+cdef void int_vec_free(int_vec* vec):
+    if vec.d:
+        free(vec.d)
+        vec.d = NULL
+
+cdef str int_vec_str(int_vec* vec):
+    return 'int_vec' + str([vec.d[i] for i in range(vec.size)])
+
+cdef void int_vec_push(int_vec* vec, int value):
+    if vec.capacity == 0:
+        vec.capacity = 8
+        vec.d = <int*>malloc(vec.capacity * sizeof(int))
+        if vec.d == NULL:
             abort()
-
-    def __dealloc__(self):
-        if self.ptr != NULL:
-            free(self.ptr)
-
-    cdef void append(self, int value):
-        if self.size == self.capacity:
-            self.capacity = self.capacity * 2
-            self.ptr = <int*> realloc(self.ptr, self.capacity * sizeof(int))
-            if not self.ptr:
-                abort()
-        self.ptr[self.size] = value
-        self.size += 1
+    elif vec.size == vec.capacity:
+        vec.capacity = vec.capacity * 2
+        vec.d = <int*>realloc(vec.d, vec.capacity * sizeof(int))
+        if not vec.d:
+            abort()
+    vec.d[vec.size] = value
+    vec.size += 1
 
 
 cdef tuple _pandas_resolve_table_name(
@@ -1074,8 +1092,8 @@ cdef tuple _pandas_resolve_table_name(
             'Must specify at least one of `table_name` or `table_name_col`.')
 
 
-cdef IntVec _pandas_resolve_fields(
-        int name_col, IntVec symbol_indices, int at_col, int col_count):
+cdef int_vec _pandas_resolve_fields(
+        int name_col, const int_vec* symbol_indices, int at_col, int col_count):
     """
     Return a list of field column indices.
     i.e. a list of all columns which are not the table name column, symbols or
@@ -1085,17 +1103,17 @@ cdef IntVec _pandas_resolve_fields(
     cdef int col_index = 0
     cdef int sym_index = 0
     cdef int sym_len = symbol_indices.size
-    cdef IntVec res = IntVec()
+    cdef int_vec res = int_vec_new()
     while col_index < col_count:
         if col_index == name_col or col_index == at_col:
             col_index += 1
             continue
-        while sym_index < sym_len and symbol_indices.ptr[sym_index] < col_index:
+        while sym_index < sym_len and symbol_indices.d[sym_index] < col_index:
             sym_index += 1
-        if sym_index < sym_len and symbol_indices.ptr[sym_index] == col_index:
+        if sym_index < sym_len and symbol_indices.d[sym_index] == col_index:
             col_index += 1
             continue
-        res.append(col_index)
+        int_vec_push(&res, col_index)
         col_index += 1
     return res
 
@@ -1151,41 +1169,46 @@ cdef object _check_column_is_str(data, col_index, err_msg_prefix, col_name):
             f'{col_name!r} column: Must be a strings column.')
 
 
-cdef IntVec _pandas_resolve_symbols(object data, object symbols, int col_count):
+cdef int_vec _pandas_resolve_symbols(
+        object data, object symbols, int col_count):
     """
     Return a list of column indices.
     """
     cdef int col_index
-    cdef IntVec symbol_indices = IntVec()
+    cdef int_vec symbol_indices = int_vec_new()
     cdef object symbol
-    if symbols is False:
-        return symbol_indices
-    elif symbols is True:
-        for col_index in range(col_count):
-            if _column_is_str(data, col_index):
-                symbol_indices.append(col_index)
-        return symbol_indices
-    else:
-        if not isinstance(symbols, (tuple, list)):
-            raise TypeError(
-                f'Bad argument `symbols`: Must be a bool or a tuple or list '+
-                'of column names (str) or indices (int).')
-        for symbol in symbols:
-            if isinstance(symbol, str):
-                col_index = _pandas_get_loc(data, symbol, 'symbols')
-            elif isinstance(symbol, int):
-                col_index = _bind_col_index('symbol', symbol, col_count)
-            else:
+    try:
+        if symbols is False:
+            return symbol_indices
+        elif symbols is True:
+            for col_index in range(col_count):
+                if _column_is_str(data, col_index):
+                    int_vec_push(&symbol_indices, col_index)
+            return symbol_indices
+        else:
+            if not isinstance(symbols, (tuple, list)):
                 raise TypeError(
-                    f'Bad argument `symbols`: Elements must ' +
-                    'be a column name (str) or index (int).')
-            _check_column_is_str(
-                data,
-                col_index,
-                'Bad element in argument `symbols`: ',
-                symbol)
-            symbol_indices.append(col_index)
-        return symbol_indices
+                    f'Bad argument `symbols`: Must be a bool or a tuple or list '+
+                    'of column names (str) or indices (int).')
+            for symbol in symbols:
+                if isinstance(symbol, str):
+                    col_index = _pandas_get_loc(data, symbol, 'symbols')
+                elif isinstance(symbol, int):
+                    col_index = _bind_col_index('symbol', symbol, col_count)
+                else:
+                    raise TypeError(
+                        f'Bad argument `symbols`: Elements must ' +
+                        'be a column name (str) or index (int).')
+                _check_column_is_str(
+                    data,
+                    col_index,
+                    'Bad element in argument `symbols`: ',
+                    symbol)
+                int_vec_push(&symbol_indices, col_index)
+            return symbol_indices
+    except:
+        int_vec_free(&symbol_indices)
+        raise
 
 
 cdef int _pandas_get_loc(object data, str col_name, str arg_name) except -1:

@@ -411,6 +411,16 @@ DF1 = pd.DataFrame({
     'D': ['foo', 'bar', True]})
 
 
+DF2 = pd.DataFrame({
+    'T': ['t1', 't2', 't1'],
+    'A': [1.0, 2.0, 3.0],
+    'B': [1, 2, 3],
+    'C': [
+        pd.Timestamp('20180310'),
+        pd.Timestamp('20180311'),
+        pd.Timestamp('20180312')]})
+
+
 class TestPandas(unittest.TestCase):
     def test_bad_dataframe(self):
         with self.assertRaisesRegex(TypeError, 'Expected pandas'):
@@ -467,6 +477,9 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name='tbl1', at=1)
         with self.assertRaisesRegex(TypeError, '`at`.*object.*be a datetime'):
             _pandas(DF1, table_name='tbl1', at=-1)
+    
+    def test_basic(self):
+        _pandas(DF2, table_name_col=0, symbols=[0], at=-1)
 
 
 if __name__ == '__main__':
