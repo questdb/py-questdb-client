@@ -44,7 +44,9 @@ requires = [
     # Setuptools 18.0 and above properly handles Cython extensions.
     "setuptools>=45.2.0",
     "wheel>=0.34.2",
-    "cython>=0.29.24"]
+    "cython>=0.29.24",
+    "pandas>=1.5.1",
+    "numpy>=1.23.4"]
 
 
 [tool.cibuildwheel]
