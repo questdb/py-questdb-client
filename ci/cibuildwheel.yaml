@@ -68,7 +68,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
             displayName: Install dependencies
@@ -85,7 +85,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
             displayName: Install dependencies
@@ -104,7 +104,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
             displayName: Install dependencies
@@ -123,7 +123,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
             displayName: Install dependencies
@@ -142,7 +142,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
             displayName: Install dependencies
@@ -161,7 +161,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
             displayName: Install dependencies
@@ -178,7 +178,7 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
             displayName: Install dependencies
