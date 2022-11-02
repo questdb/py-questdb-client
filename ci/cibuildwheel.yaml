@@ -68,8 +68,9 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.11.1
-              pip3 install pandas
+              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install numpy
+              python3 -m pip install pandas
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -84,8 +85,9 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.11.1
-              pip3 install pandas
+              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install numpy
+              python3 -m pip install pandas
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -102,8 +104,9 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.11.1
-              pip3 install pandas
+              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install numpy
+              python3 -m pip install pandas
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -120,8 +123,9 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.11.1
-              pip3 install pandas
+              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install numpy
+              python3 -m pip install pandas
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -138,8 +142,9 @@ stages:
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
-              pip3 install cibuildwheel==2.11.1
-              pip3 install pandas
+              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install numpy
+              python3 -m pip install pandas
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -157,7 +162,8 @@ stages:
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel==2.11.1
-              pip3 install pandas
+              python3 -m pip install numpy
+              python3 -m pip install pandas
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -171,9 +177,10 @@ stages:
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
-              python -m pip install --upgrade pip
-              pip install cibuildwheel==2.11.1
-              pip3 install pandas
+              python3 -m pip install --upgrade pip
+              python3 -m pip install cibuildwheel==2.11.1
+              python3 -m pip install numpy
+              python3 -m pip install pandas
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
