@@ -44,15 +44,17 @@ requires = [
     # Setuptools 18.0 and above properly handles Cython extensions.
     "setuptools>=45.2.0",
     "wheel>=0.34.2",
-    "cython>=0.29.24",
-    "pandas>=1.3.5",
-    "numpy>=1.21.6"]
+    "cython>=0.29.24"]
 
 
 [tool.cibuildwheel]
 # See: https://cibuildwheel.readthedocs.io/en/stable/options/#configuration-file
 build-verbosity = "3"
 before-build = "python {project}/install_rust.py"
+before-test = """
+    python -m pip install numpy>=1.21.6
+    python -m pip install pandas>=1.3.5
+    """
 test-command = "python {project}/test/test.py -v"
 skip = [
     # No 32-bit musl C native tool chain for Rust.
