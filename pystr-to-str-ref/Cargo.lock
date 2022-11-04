@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "pystr_to_str_ref"
+name = "pystr-to-str-ref"
 version = "0.1.0"

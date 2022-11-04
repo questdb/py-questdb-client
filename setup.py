@@ -22,7 +22,8 @@ WIN_32BIT_CARGO_TARGET = 'i686-pc-windows-msvc'
 
 
 def ingress_extension():
-    lib_name = None
+    lib_prefix = ''
+    lib_suffix = ''
     lib_paths = []
     libraries = []
     extra_compile_args = []
@@ -30,26 +31,37 @@ def ingress_extension():
     extra_objects = []
 
     questdb_rs_ffi_dir = PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'
+    pystr_to_str_ref_dir = PROJ_ROOT / 'pystr-to-str-ref'
     questdb_client_lib_dir = None
+    pystr_to_str_ref_lib_dir = None
     if PLATFORM == 'win32' and MODE == '32bit':
         questdb_client_lib_dir = \
             questdb_rs_ffi_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
+        pystr_to_str_ref_lib_dir = \
+            pystr_to_str_ref_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
     else:
         questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
+        pystr_to_str_ref_lib_dir = pystr_to_str_ref_dir / 'target' / 'release'
 
     if PLATFORM == 'darwin':
-        lib_name = 'libquestdb_client.a'
-        extra_objects = [str(questdb_client_lib_dir / lib_name)]
+        lib_prefix = 'lib'
+        lib_suffix = '.a'
         extra_link_args.extend(['-framework', 'Security'])
     elif PLATFORM == 'win32':
-        lib_name = 'questdb_client.lib'
-        extra_objects = [str(questdb_client_lib_dir / lib_name)]
+        lib_prefix = ''
+        lib_suffix = '.lib'
         libraries.extend(['wsock32', 'ws2_32', 'AdvAPI32', 'bcrypt', 'UserEnv'])
     elif PLATFORM == 'linux':
-        lib_name = 'libquestdb_client.a'
-        extra_objects = [str(questdb_client_lib_dir / lib_name)]
+        lib_prefix = 'lib'
+        lib_suffix = '.a'
     else:
         raise NotImplementedError(f'Unsupported platform: {PLATFORM}')
+
+    extra_objects = [
+        str(loc / f'{lib_prefix}{name}{lib_suffix}')
+        for loc, name in (
+            (questdb_client_lib_dir, 'questdb_client'),
+            (pystr_to_str_ref_lib_dir, 'pystr_to_str_ref'))]
 
     return Extension(
         "questdb.ingress",
@@ -101,6 +113,10 @@ def cargo_build():
     subprocess.check_call(
         cargo_args,
         cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'))
+
+    subprocess.check_call(
+        cargo_args,
+        cwd=str(PROJ_ROOT / 'pystr-to-str-ref'))
 
 
 class questdb_build_ext(build_ext):
