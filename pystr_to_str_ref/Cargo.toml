@@ -1,0 +1,11 @@
+[package]
+name = "pystr_to_str_ref"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+widestring = "1.0.2"
+
+[lib]
+name = "pystr_to_str_ref"
+crate-type = ["staticlib"]
