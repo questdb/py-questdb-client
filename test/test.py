@@ -408,7 +408,7 @@ DF1 = pd.DataFrame({
         pd.Timestamp('20180310'),
         pd.Timestamp('20180311'),
         pd.Timestamp('20180312')],
-    'D': ['foo', 'bar', True]})
+    'D': [True, 'foo', 'bar']})
 
 
 DF2 = pd.DataFrame({

@@ -30,8 +30,9 @@
 API for fast data ingestion into QuestDB.
 """
 
+# For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
 from libc.stdint cimport uint8_t, uint64_t, int64_t
-from libc.stdlib cimport malloc, realloc, free, abort
+from libc.stdlib cimport malloc, calloc, realloc, free, abort
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
@@ -39,6 +40,7 @@ from cpython.object cimport PyObject
 from cpython.float cimport PyFloat_Check
 from cpython.int cimport PyInt_Check
 from cpython.unicode cimport PyUnicode_Check
+from cpython.buffer cimport Py_buffer, PyObject_GetBuffer, PyBuffer_Release
 
 from .line_sender cimport *
 
@@ -333,7 +335,7 @@ cdef class TimestampNanos:
         return self._value
 
 
-cdef _check_is_pandas(data):
+cdef _check_is_pandas_dataframe(data):
     exp_mod = 'pandas.core.frame'
     exp_name = 'DataFrame'
     t = type(data)
@@ -946,7 +948,8 @@ cdef class Buffer:
             object table_name,
             object table_name_col,
             object symbols,
-            object at):
+            object at,
+            bint sort):
         # First, we need to make sure that `data` is a dataframe.
         # We specifically avoid using `isinstance` here because we don't want
         # to add a library dependency on pandas itself. We simply rely on its API.
@@ -961,12 +964,15 @@ cdef class Buffer:
         cdef int_vec field_indices = int_vec_new()
         cdef int at_col
         cdef int64_t at_value
-        cdef int row_index
         cdef column_name_vec symbol_names = column_name_vec_new()
         cdef column_name_vec field_names = column_name_vec_new()
-        cdef list name_owners
+        cdef list name_owners = None
+        cdef int row_index
+        cdef dtype_t* dtypes = NULL
+        cdef Py_buffer** col_buffers = NULL
+        cdef int col_index
         try:
-            _check_is_pandas(data)
+            _check_is_pandas_dataframe(data)
             col_count = len(data.columns)
             name_col, name_owner = _pandas_resolve_table_name(
                 data, table_name, table_name_col, col_count, &c_table_name)
@@ -978,6 +984,10 @@ cdef class Buffer:
             name_owners = _pandas_resolve_col_names(
                 data, &symbol_indices, &field_indices,
                 &symbol_names, &field_names)
+            dtypes = <dtype_t*>calloc(col_count, sizeof(dtype_t))
+            _pandas_resolve_dtypes(data, col_count, dtypes)
+            col_buffers = <Py_buffer**>calloc(col_count, sizeof(Py_buffer*))
+            _pandas_resolve_col_buffers(data, col_count, dtypes, col_buffers)            
             import sys
             sys.stderr.write('_pandas :: (A) ' +
                 f'name_col: {name_col}, ' +
@@ -988,7 +998,21 @@ cdef class Buffer:
                 f'field_indices: {int_vec_str(&field_indices)}' +
                 '\n')
             row_count = len(data)
+            # for row_index in range(row_count):
+            #     if name_col > -1:
+            #         data.iloc[:, name_col]
+            #     else:
+            #         if not line_sender_buffer_table(self._impl, c_table_name, &err):
+            #             raise c_err_to_py(err)
         finally:
+            if col_buffers != NULL:
+                for col_index in range(col_count):
+                    if col_buffers[col_index] != NULL:
+                        PyBuffer_Release(col_buffers[col_index])
+                free(col_buffers)
+            free(dtypes)
+            if name_owners:  # no-op to avoid "unused variable" warning
+                pass
             column_name_vec_free(&field_names)
             column_name_vec_free(&symbol_names)
             int_vec_free(&field_indices)
@@ -1001,13 +1025,14 @@ cdef class Buffer:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[bool, List[int], List[str]] = False,
-            at: Union[None, int, str, TimestampNanos, datetime] = None):
+            at: Union[None, int, str, TimestampNanos, datetime] = None,
+            sort: bool = True):
         """
         Add a pandas DataFrame to the buffer.
         """
         # See https://cython.readthedocs.io/en/latest/src/userguide/
         #     numpy_tutorial.html#numpy-tutorial
-        self._pandas(data, table_name, table_name_col, symbols, at)
+        self._pandas(data, table_name, table_name_col, symbols, at, sort)
 
 
 cdef struct c_int_vec:
@@ -1085,6 +1110,34 @@ cdef void column_name_vec_push(
     vec.size += 1
 
 
+cdef enum col_type_t:
+    COL_TYPE_INT = 0
+    COL_TYPE_FLOAT = 1
+    COL_TYPE_STRING = 2
+    COL_TYPE_BOOL = 3
+    COL_TYPE_DATE = 4
+    COL_TYPE_TIME = 5
+    COL_TYPE_DATETIME = 6
+    COL_TYPE_BLOB = 7
+    COL_TYPE_NULL = 8
+
+# Inspired by a Py_buffer.
+# See: https://docs.python.org/3/c-api/buffer.html
+# This is simpler as we discard Python-specifics and it's one-dimensional only,
+# i.e. `ndim` is always 1.
+# If this stuff makes no sense to you:
+# http://jakevdp.github.io/blog/2014/05/05/introduction-to-the-python-buffer-protocol/
+# and https://www.youtube.com/watch?v=10smLBD0kXg
+cdef struct column_buf_t:
+    col_type_t dtype  # internal enum value of supported pandas type.
+    void* d           # start of the buffer (pointer to element 0)
+    ssize_t nbytes    # size of the buffer in bytes
+    ssize_t count     # number of elements in the buffer (aka shape[0])
+    ssize_t itemsize  # element size in bytes (!=nbytes/count due to strides)
+    ssize_t stride    # stride in bytes between elements
+    # NB: We don't support suboffsets.
+
+
 cdef tuple _pandas_resolve_table_name(
         object data,
         object table_name,
@@ -1127,7 +1180,7 @@ cdef tuple _pandas_resolve_table_name(
             raise TypeError(
                 f'Bad argument `table_name_col`: ' +
                 'must be a column name (str) or index (int).')
-        _check_column_is_str(
+        _pandas_check_column_is_str(
             data,
             col_index,
             'Bad argument `table_name_col`: ',
@@ -1175,7 +1228,7 @@ cdef list _pandas_resolve_col_names(
         column_name_vec* field_names_out):
     cdef list name_owners = []
     cdef line_sender_column_name c_name
-    cdef int col_index
+    cdef size_t col_index
     for col_index in range(symbol_indices.size):
         col_index = symbol_indices.d[col_index]
         name_owners.append(str_to_column_name(data.columns[col_index], &c_name))
@@ -1202,31 +1255,31 @@ cdef int _bind_col_index(str arg_name, int col_index, int col_count) except -1:
     return col_index
 
 
-cdef object _column_is_str(object data, int col_index):
+cdef object _pandas_column_is_str(object data, int col_index):
     """
     Return True if the column at `col_index` is a string column.
     """
     cdef str col_kind
-    cdef object[:] obj_col
     col_kind = data.dtypes[col_index].kind
     if col_kind == 'S':  # string, string[pyarrow]
         return True
     elif col_kind == 'O':  # object
-        obj_col = data.iloc[:, col_index].to_numpy()
-        for index in range(obj_col.shape[0]):
-            if not isinstance(obj_col[index], str):
-                return False
-        return True
+        if len(data.index) == 0:
+            return True
+        else:
+            # We only check the first element and hope for the rest.
+            # We also accept None as a null value.
+            return isinstance(data.iloc[0, col_index], (str, None))
     else:
         return False
 
 
-cdef object _check_column_is_str(data, col_index, err_msg_prefix, col_name):
+cdef object _pandas_check_column_is_str(
+        data, col_index, err_msg_prefix, col_name):
     cdef str col_kind
-    cdef object[:] obj_col
     col_kind = data.dtypes[col_index].kind
     if col_kind in 'SO':
-        if not _column_is_str(data, col_index):
+        if not _pandas_column_is_str(data, col_index):
             raise TypeError(
                 err_msg_prefix +
                 'Found non-string value ' +
@@ -1252,7 +1305,7 @@ cdef int _pandas_resolve_symbols(
         return 0
     elif symbols is True:
         for col_index in range(col_count):
-            if _column_is_str(data, col_index):
+            if _pandas_column_is_str(data, col_index):
                 int_vec_push(symbol_indices_out, col_index)
         return 0
     else:
@@ -1269,7 +1322,7 @@ cdef int _pandas_resolve_symbols(
                 raise TypeError(
                     f'Bad argument `symbols`: Elements must ' +
                     'be a column name (str) or index (int).')
-            _check_column_is_str(
+            _pandas_check_column_is_str(
                 data,
                 col_index,
                 'Bad element in argument `symbols`: ',
@@ -1317,6 +1370,68 @@ cdef tuple _pandas_resolve_at(object data, object at, int col_count):
         raise TypeError(
             f'Bad argument `at`: Bad dtype `{data.dtypes[col_index]}` ' +
             f'for the {at!r} column: Must be a datetime column.')
+
+
+cdef struct dtype_t:
+    # A ripoff of a subset of PyArray_Descr as we were able to extract from numpy.dtype.
+    # See: https://numpy.org/doc/stable/reference/generated/numpy.dtype.html?highlight=dtype#numpy.dtype
+    # See: https://numpy.org/doc/stable/reference/c-api/types-and-structures.html#c.PyArray_Descr
+    int alignment
+    char kind
+    int itemsize
+    char byteorder
+    bint hasobject
+
+
+cdef char _str_to_char(str field, str s) except 0:
+    cdef int res
+    if len(s) != 1:
+        raise ValueError(
+            f'dtype.{field}: Expected a single character, got {s!r}')
+    res = ord(s[0])
+    if res <= 0 or res > 127:  ## ascii, exclude nul-termintor
+        raise ValueError(
+            f'dtype.{field}: Character out of ASCII range, got {s!r}')
+    return <char>res
+
+
+cdef int _pandas_parse_dtype(object np_dtype, dtype_t* dtype_out) except -1:
+    """
+    Parse a numpy dtype and return a dtype_t.
+    """
+    dtype_out.alignment = np_dtype.alignment
+    dtype_out.kind = _str_to_char('kind', np_dtype.kind)
+    dtype_out.itemsize = np_dtype.itemsize
+    dtype_out.byteorder = _str_to_char('byteorder', np_dtype.byteorder)
+    dtype_out.hasobject = np_dtype.hasobject
+
+
+cdef int _pandas_resolve_dtypes(
+        object data, int col_count, dtype_t* dtypes_out) except -1:
+    cdef int col_index
+    for col_index in range(col_count):
+        _pandas_parse_dtype(data.dtypes[col_index], &dtypes_out[col_index])
+
+
+cdef Py_buffer* _pandas_buf_from_np(object nparr, const dtype_t* dtype) except? NULL:
+    return NULL
+
+
+cdef int _pandas_resolve_col_buffers(
+        object data, int col_count, const dtype_t* dtypes,
+        Py_buffer** col_buffers) except -1:
+    """
+    Map pandas columns to array of col_buffers.
+    """
+    # Note: By calling "to_numpy" we are throwing away what might be an Arrow.
+    # This is particularly expensive for string columns.
+    # If you want to use Arrow (i.e. your data comes from Parquet) please ask
+    # for the feature in our issue tracker.
+    cdef int col_index
+    for col_index in range(col_count):
+        col_buffers[col_index] = _pandas_buf_from_np(
+            data.iloc[:, col_index].to_numpy(), &dtypes[col_index])
+
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
