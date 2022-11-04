@@ -17,18 +17,52 @@ pub unsafe extern "C" fn questdb_pystr_converter_free(c: *mut converter) {
 }
 
 fn encode_ucs1(dest: &mut String, buf: &[u8]) -> bool {
-    write!(dest, "'nyi").unwrap();
-    false
+    // len(chr(2 ** 8 - 1).encode('utf-8')) == 2
+    let utf8_mult = 2;
+    dest.reserve(utf8_mult * buf.len());
+    for b in buf.iter() {
+        dest.push(*b as char);
+    }
+    true
 }
 
 fn encode_ucs2(dest: &mut String, buf: &[u16]) -> bool {
-    write!(dest, "'nyi").unwrap();
-    false
+    // len(chr(2 ** 16 - 1).encode('utf-8')) == 3
+    let utf8_mult = 3;
+    dest.reserve(utf8_mult * buf.len());
+    for b in buf.iter() {
+        // Checking for validity is not optional:
+        // >>> for n in range(2 ** 16):
+        // >>>     chr(n).encode('utf-8')
+        // UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800'
+        //   in position 0: surrogates not allowed
+        match char::from_u32(*b as u32) {
+            Some(c) => dest.push(c),
+            None => {
+                dest.clear();
+                write!(dest, "invalid ucs2 code point: {}", b).unwrap();
+                return false
+            }
+        }
+    }
+    true
 }
 
 fn encode_ucs4(dest: &mut String, buf: &[u32]) -> bool {
-    write!(dest, "'nyi").unwrap();
-    false
+    // Max 4 bytes allowed by RFC: https://www.rfc-editor.org/rfc/rfc3629#page-4
+    let utf8_mult = 4;
+    dest.reserve(utf8_mult * buf.len());
+    for b in buf.iter() {
+        match char::from_u32(*b) {
+            Some(c) => dest.push(c),
+            None => {
+                dest.clear();
+                write!(dest, "invalid ucs4 code point: {}", b).unwrap();
+                return false
+            }
+        }
+    }
+    true
 }
 
 /// Converts a Python string to a UTF8 buffer.
@@ -64,15 +98,4 @@ pub unsafe extern "C" fn questdb_pystr_to_convert(
     *size_out = sbuf.len();
     *buf_out = sbuf.as_ptr() as *const c_char;
     ok
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
 }
