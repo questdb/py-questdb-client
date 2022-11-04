@@ -40,7 +40,8 @@ from cpython.object cimport PyObject
 from cpython.float cimport PyFloat_Check
 from cpython.int cimport PyInt_Check
 from cpython.unicode cimport PyUnicode_Check
-from cpython.buffer cimport Py_buffer, PyObject_GetBuffer, PyBuffer_Release
+from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
+    PyObject_GetBuffer, PyBuffer_Release, PyBUF_STRIDES
 
 from .line_sender cimport *
 
@@ -955,30 +956,29 @@ cdef class Buffer:
         # to add a library dependency on pandas itself. We simply rely on its API.
         # The only reason to validate here is to avoid obscure "AttributeError"
         # exceptions later.
-        cdef int col_count
-        cdef int row_count
-        cdef int name_col
+        cdef size_t col_count
+        cdef ssize_t name_col
         cdef object name_owner
         cdef line_sender_table_name c_table_name
-        cdef int_vec symbol_indices = int_vec_new()
-        cdef int_vec field_indices = int_vec_new()
-        cdef int at_col
+        cdef size_t_vec symbol_indices = size_t_vec_new()
+        cdef size_t_vec field_indices = size_t_vec_new()
+        cdef ssize_t at_col
         cdef int64_t at_value
         cdef column_name_vec symbol_names = column_name_vec_new()
         cdef column_name_vec field_names = column_name_vec_new()
         cdef list name_owners = None
-        cdef int row_index
         cdef dtype_t* dtypes = NULL
-        cdef Py_buffer** col_buffers = NULL
-        cdef int col_index
+        cdef size_t set_buf_count = 0
+        cdef Py_buffer* col_buffers = NULL
+        cdef size_t col_index
         try:
             _check_is_pandas_dataframe(data)
             col_count = len(data.columns)
             name_col, name_owner = _pandas_resolve_table_name(
                 data, table_name, table_name_col, col_count, &c_table_name)
-            _pandas_resolve_symbols(
-                data, symbols, col_count, &symbol_indices)
             at_col, at_value = _pandas_resolve_at(data, at, col_count)
+            _pandas_resolve_symbols(
+                data, at_col, symbols, col_count, &symbol_indices)
             _pandas_resolve_fields(
                 name_col, &symbol_indices, at_col, col_count, &field_indices)
             name_owners = _pandas_resolve_col_names(
@@ -986,18 +986,19 @@ cdef class Buffer:
                 &symbol_names, &field_names)
             dtypes = <dtype_t*>calloc(col_count, sizeof(dtype_t))
             _pandas_resolve_dtypes(data, col_count, dtypes)
-            col_buffers = <Py_buffer**>calloc(col_count, sizeof(Py_buffer*))
-            _pandas_resolve_col_buffers(data, col_count, dtypes, col_buffers)            
+            col_buffers = <Py_buffer*>calloc(col_count, sizeof(Py_buffer))
+            _pandas_resolve_col_buffers(
+                data, col_count, dtypes, col_buffers, &set_buf_count)
             import sys
             sys.stderr.write('_pandas :: (A) ' +
                 f'name_col: {name_col}, ' +
                 f'name_owner: {name_owner}, ' +
-                f'symbol_indices: {int_vec_str(&symbol_indices)}, ' +
+                f'symbol_indices: {size_t_vec_str(&symbol_indices)}, ' +
                 f'at_col: {at_col}, ' +
                 f'at_value: {at_value}, ' +
-                f'field_indices: {int_vec_str(&field_indices)}' +
+                f'field_indices: {size_t_vec_str(&field_indices)}' +
                 '\n')
-            row_count = len(data)
+            # row_count = len(data)
             # for row_index in range(row_count):
             #     if name_col > -1:
             #         data.iloc[:, name_col]
@@ -1006,17 +1007,16 @@ cdef class Buffer:
             #             raise c_err_to_py(err)
         finally:
             if col_buffers != NULL:
-                for col_index in range(col_count):
-                    if col_buffers[col_index] != NULL:
-                        PyBuffer_Release(col_buffers[col_index])
+                for col_index in range(set_buf_count):
+                    PyBuffer_Release(&col_buffers[col_index])
                 free(col_buffers)
             free(dtypes)
             if name_owners:  # no-op to avoid "unused variable" warning
                 pass
             column_name_vec_free(&field_names)
             column_name_vec_free(&symbol_names)
-            int_vec_free(&field_indices)
-            int_vec_free(&symbol_indices)
+            size_t_vec_free(&field_indices)
+            size_t_vec_free(&symbol_indices)
 
     def pandas(
             self,
@@ -1035,37 +1035,37 @@ cdef class Buffer:
         self._pandas(data, table_name, table_name_col, symbols, at, sort)
 
 
-cdef struct c_int_vec:
+cdef struct c_size_t_vec:
     size_t capacity
     size_t size
-    int* d
+    size_t* d
 
-ctypedef c_int_vec int_vec
+ctypedef c_size_t_vec size_t_vec
 
-cdef int_vec int_vec_new():
-    cdef int_vec vec
+cdef size_t_vec size_t_vec_new():
+    cdef size_t_vec vec
     vec.capacity = 0
     vec.size = 0
-    vec.d = <int*>NULL
+    vec.d = <size_t*>NULL
     return vec
 
-cdef void int_vec_free(int_vec* vec):
+cdef void size_t_vec_free(size_t_vec* vec):
     if vec.d:
         free(vec.d)
         vec.d = NULL
 
-cdef str int_vec_str(int_vec* vec):
-    return 'int_vec' + str([vec.d[i] for i in range(vec.size)])
+cdef str size_t_vec_str(size_t_vec* vec):
+    return 'size_t_vec' + str([vec.d[i] for i in range(vec.size)])
 
-cdef void int_vec_push(int_vec* vec, int value):
+cdef void size_t_vec_push(size_t_vec* vec, size_t value):
     if vec.capacity == 0:
         vec.capacity = 8
-        vec.d = <int*>malloc(vec.capacity * sizeof(int))
+        vec.d = <size_t*>malloc(vec.capacity * sizeof(size_t))
         if vec.d == NULL:
             abort()
     elif vec.size == vec.capacity:
         vec.capacity = vec.capacity * 2
-        vec.d = <int*>realloc(vec.d, vec.capacity * sizeof(int))
+        vec.d = <size_t*>realloc(vec.d, vec.capacity * sizeof(size_t))
         if not vec.d:
             abort()
     vec.d[vec.size] = value
@@ -1142,7 +1142,7 @@ cdef tuple _pandas_resolve_table_name(
         object data,
         object table_name,
         object table_name_col,
-        int col_count,
+        size_t col_count,
         line_sender_table_name* name_out):
     """
     Return a tuple-pair of:
@@ -1158,7 +1158,7 @@ cdef tuple _pandas_resolve_table_name(
 
     This method validates input and may raise.
     """
-    cdef int col_index
+    cdef size_t col_index = 0
     if table_name is not None:
         if table_name_col is not None:
             raise ValueError(
@@ -1169,16 +1169,16 @@ cdef tuple _pandas_resolve_table_name(
             except IngressError as ie:
                 raise ValueError(f'Bad argument `table_name`: {ie}')
         else:
-            raise TypeError(f'Bad argument `table_name`: Must be str.')
+            raise TypeError('Bad argument `table_name`: Must be str.')
     elif table_name_col is not None:
         if isinstance(table_name_col, str):
-            col_index = _pandas_get_loc(data, table_name_col, 'table_name_col')
+            _pandas_get_loc(data, table_name_col, 'table_name_col', &col_index)
         elif isinstance(table_name_col, int):
-            col_index = _bind_col_index(
-                'table_name_col', table_name_col, col_count)
+            _bind_col_index(
+                'table_name_col', table_name_col, col_count, &col_index)
         else:
             raise TypeError(
-                f'Bad argument `table_name_col`: ' +
+                'Bad argument `table_name_col`: ' +
                 'must be a column name (str) or index (int).')
         _pandas_check_column_is_str(
             data,
@@ -1193,21 +1193,24 @@ cdef tuple _pandas_resolve_table_name(
 
 cdef int _pandas_resolve_fields(
         int name_col,
-        const int_vec* symbol_indices,
+        const size_t_vec* symbol_indices,
         int at_col,
-        int col_count,
-        int_vec* field_indices_out) except -1:
+        size_t col_count,
+        size_t_vec* field_indices_out) except -1:
     """
     Return a list of field column indices.
     i.e. a list of all columns which are not the table name column, symbols or
     the at timestamp column.
     """
     # We rely on `symbol_indices` being sorted.
-    cdef int col_index = 0
-    cdef int sym_index = 0
-    cdef int sym_len = symbol_indices.size
+    cdef size_t col_index = 0
+    cdef size_t sym_index = 0
+    cdef size_t sym_len = symbol_indices.size
     while col_index < col_count:
-        if col_index == name_col or col_index == at_col:
+        if (name_col >= 0) and (col_index == <size_t>name_col):
+            col_index += 1
+            continue
+        if (at_col >= 0) and (col_index == <size_t>at_col):
             col_index += 1
             continue
         while sym_index < sym_len and symbol_indices.d[sym_index] < col_index:
@@ -1215,15 +1218,15 @@ cdef int _pandas_resolve_fields(
         if sym_index < sym_len and symbol_indices.d[sym_index] == col_index:
             col_index += 1
             continue
-        int_vec_push(field_indices_out, col_index)
+        size_t_vec_push(field_indices_out, col_index)
         col_index += 1
     return 0
 
 
 cdef list _pandas_resolve_col_names(
         object data,
-        const int_vec* symbol_indices,
-        const int_vec* field_indices,
+        const size_t_vec* symbol_indices,
+        const size_t_vec* field_indices,
         column_name_vec* symbol_names_out,
         column_name_vec* field_names_out):
     cdef list name_owners = []
@@ -1240,19 +1243,27 @@ cdef list _pandas_resolve_col_names(
     return name_owners
 
 
-cdef int _bind_col_index(str arg_name, int col_index, int col_count) except -1:
+cdef bint _bind_col_index(
+        str arg_name, int col_num, size_t col_count,
+        size_t* col_index) except False:
     """
     Validate that `col_index` is in bounds for `col_count`.
     This function also converts negative indicies (e.g. -1 for last column) to
     positive indicies.
     """
-    cdef orig_col_index = col_index
-    if col_index < 0:
-        col_index += col_count  # We convert negative indicies to positive ones.
-    if not (0 <= col_index < col_count):
+    cdef bint bad = False
+    cdef int orig_col_num = col_num
+    if col_num < 0:
+        col_num += col_count  # Try convert negative offsets to positive ones.
+    if col_num < 0:
+        bad = True
+    if (not bad) and (<size_t>col_num >= col_count):
+        bad = True
+    if bad:
         raise IndexError(
-            f'Bad argument `{arg_name}`: {orig_col_index} index out of range')
-    return col_index
+            f'Bad argument `{arg_name}`: {orig_col_num} index out of range')
+    col_index[0] = <size_t>col_num
+    return True
 
 
 cdef object _pandas_column_is_str(object data, int col_index):
@@ -1260,6 +1271,7 @@ cdef object _pandas_column_is_str(object data, int col_index):
     Return True if the column at `col_index` is a string column.
     """
     cdef str col_kind
+    cdef object col
     col_kind = data.dtypes[col_index].kind
     if col_kind == 'S':  # string, string[pyarrow]
         return True
@@ -1269,13 +1281,14 @@ cdef object _pandas_column_is_str(object data, int col_index):
         else:
             # We only check the first element and hope for the rest.
             # We also accept None as a null value.
-            return isinstance(data.iloc[0, col_index], (str, None))
+            col = data.iloc[0, col_index]
+            return (col is None) or isinstance(col, str)
     else:
         return False
 
 
 cdef object _pandas_check_column_is_str(
-        data, col_index, err_msg_prefix, col_name):
+        object data, size_t col_index, str err_msg_prefix, object col_name):
     cdef str col_kind
     col_kind = data.dtypes[col_index].kind
     if col_kind in 'SO':
@@ -1293,20 +1306,21 @@ cdef object _pandas_check_column_is_str(
 
 cdef int _pandas_resolve_symbols(
         object data,
+        ssize_t at_col,
         object symbols,
-        int col_count,
-        int_vec* symbol_indices_out) except -1:
+        size_t col_count,
+        size_t_vec* symbol_indices_out) except -1:
     """
     Return a list of column indices.
     """
-    cdef int col_index
+    cdef size_t col_index = 0
     cdef object symbol
     if symbols is False:
         return 0
     elif symbols is True:
         for col_index in range(col_count):
             if _pandas_column_is_str(data, col_index):
-                int_vec_push(symbol_indices_out, col_index)
+                size_t_vec_push(symbol_indices_out, col_index)
         return 0
     else:
         if not isinstance(symbols, (tuple, list)):
@@ -1315,38 +1329,43 @@ cdef int _pandas_resolve_symbols(
                 'of column names (str) or indices (int).')
         for symbol in symbols:
             if isinstance(symbol, str):
-                col_index = _pandas_get_loc(data, symbol, 'symbols')
+                _pandas_get_loc(data, symbol, 'symbols', &col_index)
             elif isinstance(symbol, int):
-                col_index = _bind_col_index('symbol', symbol, col_count)
+                _bind_col_index('symbol', symbol, col_count, &col_index) 
             else:
                 raise TypeError(
                     f'Bad argument `symbols`: Elements must ' +
                     'be a column name (str) or index (int).')
+            if (at_col >= 0) and (col_index == <size_t>at_col):
+                raise ValueError(
+                    f'Bad argument `symbols`: Cannot use the `at` column ' +
+                    f'({data.columns[at_col]!r}) as a symbol column.')
             _pandas_check_column_is_str(
                 data,
                 col_index,
                 'Bad element in argument `symbols`: ',
                 symbol)
-            int_vec_push(symbol_indices_out, col_index)
+            size_t_vec_push(symbol_indices_out, col_index)
         return 0
 
 
-cdef int _pandas_get_loc(object data, str col_name, str arg_name) except -1:
+cdef bint _pandas_get_loc(
+        object data, str col_name, str arg_name,
+        size_t* col_index_out) except False:
     """
     Return the column index for `col_name`.
     """
-    cdef int col_index
     try:
-        col_index = data.columns.get_loc(col_name)
+        col_index_out[0] = data.columns.get_loc(col_name)
+        return True
     except KeyError:
         raise KeyError(
             f'Bad argument `{arg_name}`: ' +
             f'Column {col_name!r} not found in the dataframe.')
-    return col_index
 
 
-cdef tuple _pandas_resolve_at(object data, object at, int col_count):
-    cdef int col_index
+cdef tuple _pandas_resolve_at(object data, object at, size_t col_count):
+    cdef size_t col_index
     cdef str col_kind
     if at is None:
         return -1, 0  # Special value for `at_now`.
@@ -1355,9 +1374,9 @@ cdef tuple _pandas_resolve_at(object data, object at, int col_count):
     elif isinstance(at, datetime):
         return -1, datetime_to_nanos(at)
     elif isinstance(at, str):
-        col_index = _pandas_get_loc(data, at, 'at')
+        _pandas_get_loc(data, at, 'at', &col_index)
     elif isinstance(at, int):
-        col_index = _bind_col_index('at', at, col_count)
+        _bind_col_index('at', at, col_count, &col_index)
     else:
         raise TypeError(
             f'Bad argument `at`: Unsupported type {type(at)}. ' +
@@ -1407,19 +1426,15 @@ cdef int _pandas_parse_dtype(object np_dtype, dtype_t* dtype_out) except -1:
 
 
 cdef int _pandas_resolve_dtypes(
-        object data, int col_count, dtype_t* dtypes_out) except -1:
-    cdef int col_index
+        object data, size_t col_count, dtype_t* dtypes_out) except -1:
+    cdef size_t col_index
     for col_index in range(col_count):
         _pandas_parse_dtype(data.dtypes[col_index], &dtypes_out[col_index])
 
 
-cdef Py_buffer* _pandas_buf_from_np(object nparr, const dtype_t* dtype) except? NULL:
-    return NULL
-
-
 cdef int _pandas_resolve_col_buffers(
-        object data, int col_count, const dtype_t* dtypes,
-        Py_buffer** col_buffers) except -1:
+        object data, size_t col_count, const dtype_t* dtypes,
+        Py_buffer* col_buffers, size_t* set_buf_count) except -1:
     """
     Map pandas columns to array of col_buffers.
     """
@@ -1427,11 +1442,19 @@ cdef int _pandas_resolve_col_buffers(
     # This is particularly expensive for string columns.
     # If you want to use Arrow (i.e. your data comes from Parquet) please ask
     # for the feature in our issue tracker.
-    cdef int col_index
+    cdef size_t col_index
+    cdef object nparr
+    cdef Py_buffer* view
+    cdef const dtype_t* dtype
     for col_index in range(col_count):
-        col_buffers[col_index] = _pandas_buf_from_np(
-            data.iloc[:, col_index].to_numpy(), &dtypes[col_index])
-
+        nparr = data.iloc[:, col_index].to_numpy()
+        view = &col_buffers[col_index]
+        dtype = &dtypes[col_index]
+        if not PyObject_CheckBuffer(nparr):
+            raise TypeError(
+                f'Bad column: Expected a numpy array, got {nparr!r}')
+        PyObject_GetBuffer(nparr, view, PyBUF_STRIDES)
+        set_buf_count[0] += 1   # Set to avoid wrongly calling `PyBuffer_Release`.
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
