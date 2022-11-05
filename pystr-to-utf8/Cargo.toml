@@ -1,8 +1,8 @@
 [package]
-name = "pystr-to-str-ref"
+name = "pystr-to-utf8"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "pystr_to_str_ref"
+name = "pystr_to_utf8"
 crate-type = ["staticlib"]
