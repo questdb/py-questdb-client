@@ -1,3 +1,27 @@
+/*******************************************************************************
+ *     ___                  _   ____  ____
+ *    / _ \ _   _  ___  ___| |_|  _ \| __ )
+ *   | | | | | | |/ _ \/ __| __| | | |  _ \
+ *   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+ *    \__\_\\__,_|\___||___/\__|____/|____/
+ *
+ *  Copyright (c) 2014-2019 Appsicle
+ *  Copyright (c) 2019-2022 QuestDB
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ ******************************************************************************/
+
 use std::ffi::c_char;
 use std::fmt::Write;
 use std::slice::from_raw_parts;
@@ -5,6 +29,8 @@ use std::slice::from_raw_parts;
 #[allow(non_camel_case_types)]
 pub struct qdb_pystr_buf(String);
 
+/// Prepare a new buffer. The buffer must be freed with `qdb_pystr_free`.
+/// The `qdb_ucsX_to_utf8` functions will write to this buffer.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_pystr_buf_new() -> *mut qdb_pystr_buf {
     Box::into_raw(Box::new(qdb_pystr_buf(String::with_capacity(64))))
@@ -17,7 +43,7 @@ pub unsafe extern "C" fn qdb_pystr_buf_tell(b: *mut qdb_pystr_buf) -> usize {
     b.0.len()
 }
 
-/// Trim the string to the given length. Use in conjunction with `tell`.
+/// Trim the buffer to the given length. Use in conjunction with `tell`.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_pystr_buf_truncate(
         b: *mut qdb_pystr_buf, len: usize) {
@@ -32,6 +58,7 @@ pub unsafe extern "C" fn qdb_pystr_buf_clear(b: *mut qdb_pystr_buf) {
     b.0.clear()
 }
 
+/// Free the buffer. Must be called after `qdb_pystr_buf_new`.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_pystr_buf_free(b: *mut qdb_pystr_buf) {
     if !b.is_null() {
@@ -49,6 +76,9 @@ fn encode_ucs1(dest: &mut String, buf: &[u8]) {
     }
 }
 
+/// Convert a Py_UCS1 string to UTF-8.
+/// Returns a `buf_out` borrowed ptr of `size_out` len.
+/// The buffer is borrowed either from `input` or from `b`.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_ucs1_to_utf8(
         b: *mut qdb_pystr_buf,
@@ -95,6 +125,10 @@ fn encode_ucs2(dest: &mut String, buf: &[u16]) -> bool {
     true
 }
 
+/// Convert a Py_UCS2 string to UTF-8.
+/// Returns a `buf_out` borrowed ptr of `size_out` len.
+/// The buffer is borrowed from `b`.
+/// In case of errors, returns `false` and the buffer is an error message.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_ucs2_to_utf8(b: *mut qdb_pystr_buf,
         count: usize, input: *const u16,
@@ -126,6 +160,10 @@ fn encode_ucs4(dest: &mut String, buf: &[u32]) -> bool {
     true
 }
 
+/// Convert a Py_UCS4 string to UTF-8.
+/// Returns a `buf_out` borrowed ptr of `size_out` len.
+/// The buffer is borrowed from `b`.
+/// In case of errors, returns `false` and the buffer is an error message.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_ucs4_to_utf8(b: *mut qdb_pystr_buf,
         count: usize, input: *const u32,
