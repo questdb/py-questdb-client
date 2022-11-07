@@ -1,6 +1,7 @@
 #[cfg(feature = "cbindgen")]
 extern crate cbindgen;
 
+#[cfg(feature = "cbindgen")]
 const BAD_PXD: &str = "
 cdef extern from *:
   ctypedef bint bool

@@ -66,7 +66,9 @@ def ingress_extension():
     return Extension(
         "questdb.ingress",
         ["src/questdb/ingress.pyx"],
-        include_dirs=["c-questdb-client/include"],
+        include_dirs=[
+            "c-questdb-client/include",
+            "pystr-to-utf8/include"],
         library_dirs=lib_paths,
         libraries=libraries,
         extra_compile_args=extra_compile_args,
