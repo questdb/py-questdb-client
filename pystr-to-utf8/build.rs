@@ -40,8 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let pxd = pxd.replace(BAD_PXD, "");
     let pxd = pxd.replace("bool", "bint");
+    let pxd = pxd.replace(";", "");
     // println!("{}", &pxd);
-    std::fs::write("include/pystr_to_utf8.pxd", &pxd)?;
+    std::fs::write("../src/questdb/pystr_to_utf8.pxd", &pxd)?;
     Ok(())
 }
 

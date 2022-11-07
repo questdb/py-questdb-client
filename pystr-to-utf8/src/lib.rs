@@ -86,20 +86,10 @@ pub unsafe extern "C" fn qdb_ucs1_to_utf8(
         size_out: *mut usize, buf_out: *mut *const c_char) {
     let b = &mut *b;
     let i = from_raw_parts(input, count);
-    if i.is_ascii() {
-        // Zero-copy optmization:
-        // is_ascii does a WORD-sized scan, so it's faster than the copy logic.
-        // We can also avoid the copy altogether and return back the same ptr.
-        // We get away with this because 7-bit ascii is a subset of UTF-8.
-        *size_out = count;
-        *buf_out = input as *const c_char;
-    }
-    else {
-        let last = b.0.len();
-        encode_ucs1(&mut b.0, i);
-        *size_out = b.0.len() - last;
-        *buf_out = b.0.as_ptr() as *const c_char;
-    }
+    let last = b.0.len();
+    encode_ucs1(&mut b.0, i);
+    *size_out = b.0.len() - last;
+    *buf_out = b.0.as_ptr() as *const c_char;
 }
 
 #[inline]
@@ -117,7 +107,7 @@ fn encode_ucs2(dest: &mut String, buf: &[u16]) -> bool {
             Some(c) => dest.push(c),
             None => {
                 dest.clear();
-                write!(dest, "invalid ucs2 code point: {}", b).unwrap();
+                write!(dest, "invalid UCS-2 code point: {}", b).unwrap();
                 return false
             }
         }
@@ -152,7 +142,7 @@ fn encode_ucs4(dest: &mut String, buf: &[u32]) -> bool {
             Some(c) => dest.push(c),
             None => {
                 dest.clear();
-                write!(dest, "invalid ucs4 code point: {}", b).unwrap();
+                write!(dest, "invalid UCS-4 code point: {}", b).unwrap();
                 return false
             }
         }

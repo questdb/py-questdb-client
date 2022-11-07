@@ -1,3 +1,4 @@
 {
-    "esbonio.sphinx.confDir": ""
+    "esbonio.sphinx.confDir": "",
+    "cmake.configureOnOpen": false
 }

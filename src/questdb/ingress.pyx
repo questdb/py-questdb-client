@@ -31,7 +31,7 @@ API for fast data ingestion into QuestDB.
 """
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
-from libc.stdint cimport uint8_t, uint64_t, int64_t
+from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t
 from libc.stdlib cimport malloc, calloc, realloc, free, abort
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
@@ -41,12 +41,16 @@ from cpython.float cimport PyFloat_Check
 from cpython.int cimport PyInt_Check
 from cpython.unicode cimport PyUnicode_Check
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
-    PyObject_GetBuffer, PyBuffer_Release, PyBUF_STRIDES
+    PyObject_GetBuffer, PyBuffer_Release, PyBUF_READ, PyBUF_STRIDES
+from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *
+from .pystr_to_utf8 cimport *
 
 cdef extern from "Python.h":
     ctypedef uint8_t Py_UCS1  # unicodeobject.h
+    ctypedef uint16_t Py_UCS2
+    ctypedef uint32_t Py_UCS4
 
     ctypedef unsigned int uint
 
@@ -73,8 +77,11 @@ cdef extern from "Python.h":
     # Get length.
     Py_ssize_t PyUnicode_GET_LENGTH(object o)
 
-    # Zero-copy access to buffer.
+    # Zero-copy access to string buffer.
+    int PyUnicode_KIND(object o)
     Py_UCS1* PyUnicode_1BYTE_DATA(object o)
+    Py_UCS2* PyUnicode_2BYTE_DATA(object o)
+    Py_UCS4* PyUnicode_4BYTE_DATA(object o)
 
     Py_ssize_t PyBytes_GET_SIZE(object o)
 
@@ -163,6 +170,68 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Construct an ``IngressError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_code_and_msg(err)
     return IngressError(tup[0], fmt.format(tup[1]))
+
+
+cdef object _unpack_utf8_decode_error(line_sender_utf8* err_msg):
+    cdef object mview
+    cdef str msg
+    mview = PyMemoryView_FromMemory(
+        <char*>err_msg.buf,
+        <Py_ssize_t>err_msg.len,
+        PyBUF_READ)
+    return IngressError(IngressErrorCode.InvalidUtf8, mview.decode('utf-8'))
+
+
+cdef bint str_to_buffered_utf8(
+        qdb_pystr_buf* b,
+        str string,
+        line_sender_utf8* utf8_out) except False:
+    cdef size_t count
+    cdef int kind
+    PyUnicode_READY(string)
+    count = <size_t>(PyUnicode_GET_LENGTH(string))
+
+    # We optimize the common case of ASCII strings.
+    # This avoid memory allocations and copies altogether.
+    # We get away with this because ASCII is a subset of UTF-8.
+    if PyUnicode_IS_COMPACT_ASCII(string):
+        utf8_out.len = count
+        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
+        return True
+
+    kind = PyUnicode_KIND(string)
+    if kind == PyUnicode_1BYTE_KIND:
+        # No error handling for UCS1: All code points translate into valid UTF8.
+        qdb_ucs1_to_utf8(
+            b,
+            count,
+            PyUnicode_1BYTE_DATA(string),
+            &utf8_out.len,
+            &utf8_out.buf)
+    elif kind == PyUnicode_2BYTE_KIND:
+        if not qdb_ucs2_to_utf8(
+                b,
+                count,
+                PyUnicode_2BYTE_DATA(string),
+                &utf8_out.len,
+                &utf8_out.buf):
+            raise _unpack_utf8_decode_error(utf8_out)
+    elif kind == PyUnicode_4BYTE_KIND:
+        if not qdb_ucs4_to_utf8(
+                b,
+                count,
+
+                # This cast is required and is possibly a Cython compiler bug.
+                # It doesn't recognize that `const Py_UCS4*`
+                # is the same as `const uint32_t*`.
+                <const uint32_t*>PyUnicode_4BYTE_DATA(string),
+
+                &utf8_out.len,
+                &utf8_out.buf):
+            raise _unpack_utf8_decode_error(utf8_out)
+    else:
+        raise ValueError(f'Unknown UCS kind: {kind}.')
+    return True
 
 
 cdef bytes str_to_utf8(str string, line_sender_utf8* utf8_out):
