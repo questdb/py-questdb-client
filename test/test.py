@@ -109,8 +109,11 @@ class TestBuffer(unittest.TestCase):
 
     def test_unicode(self):
         buf = qi.Buffer()
-        buf.row('tbl1', symbols={'questdb1': '❤️'}, columns={'questdb2': '❤️'})
-        self.assertEqual(str(buf), 'tbl1,questdb1=❤️ questdb2="❤️"\n')
+        buf.row(
+            'tbl1',
+            symbols={'questdb1': '❤️'},
+            columns={'questdb2': '❤️' * 100})
+        self.assertEqual(str(buf), f'tbl1,questdb1=❤️ questdb2="{"❤️" * 100}"\n')
 
     def test_float(self):
         buf = qi.Buffer()
