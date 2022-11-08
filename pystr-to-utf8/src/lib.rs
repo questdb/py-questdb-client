@@ -104,13 +104,15 @@ fn get_dest<'a>(chain: &'a mut Vec<String>, len: usize) -> &'a mut String {
 }
 
 #[inline]
-fn encode_ucs1(chain: &mut Vec<String>, buf: &[u8]) {
+fn encode_ucs1<'a, 'b>(chain: &'a mut Vec<String>, buf: &'b [u8]) -> &'a str {
     // len(chr(2 ** 8 - 1).encode('utf-8')) == 2
     let utf8_mult = 2;
     let dest = get_dest(chain, utf8_mult * buf.len());
+    let last = dest.len();
     for &b in buf.iter() {
         dest.push(b as char);
     }
+    &dest[last..]
 }
 
 /// Convert a Py_UCS1 string to UTF-8.
@@ -123,17 +125,19 @@ pub unsafe extern "C" fn qdb_ucs1_to_utf8(
         size_out: *mut usize, buf_out: *mut *const c_char) {
     let b = &mut *b;
     let i = from_raw_parts(input, count);
-    let last = b.0.len();
-    encode_ucs1(&mut b.0, i);
-    *size_out = b.0.len() - last;
-    *buf_out = b.0.as_ptr() as *const c_char;
+    let res = encode_ucs1(&mut b.0, i);
+    *size_out = res.len();
+    *buf_out = res.as_ptr() as *const c_char;
 }
 
 #[inline]
-fn encode_ucs2(chain: &mut Vec<String>, buf: &[u16]) -> bool {
+fn encode_ucs2<'a, 'b>(
+        chain: &'a mut Vec<String>, buf: &'b [u16]) -> (bool, &'a str) {
     // len(chr(2 ** 16 - 1).encode('utf-8')) == 3
     let utf8_mult = 3;
     let dest = get_dest(chain, utf8_mult * buf.len());
+    let last = dest.len();
+    let mut ok = true;
     for b in buf.iter() {
         // Checking for validity is not optional:
         // >>> for n in range(2 ** 16):
@@ -143,13 +147,14 @@ fn encode_ucs2(chain: &mut Vec<String>, buf: &[u16]) -> bool {
         match char::from_u32(*b as u32) {
             Some(c) => dest.push(c),
             None => {
-                dest.clear();
+                dest.truncate(last);
                 write!(dest, "invalid UCS-2 code point: {}", b).unwrap();
-                return false
+                ok = false;
+                break;
             }
         }
     }
-    true
+    (ok, &dest[last..])
 }
 
 /// Convert a Py_UCS2 string to UTF-8.
@@ -162,29 +167,32 @@ pub unsafe extern "C" fn qdb_ucs2_to_utf8(b: *mut qdb_pystr_buf,
         size_out: *mut usize, buf_out: *mut *const c_char) -> bool {
     let b = &mut *b;
     let i = from_raw_parts(input, count);
-    let last = b.0.len();
-    let ok = encode_ucs2(&mut b.0, i);
-    *size_out = b.0.len() - last;
-    *buf_out = b.0.as_ptr() as *const c_char;
+    let (ok, res) = encode_ucs2(&mut b.0, i);
+    *size_out = res.len();
+    *buf_out = res.as_ptr() as *const c_char;
     ok
 }
 
 #[inline]
-fn encode_ucs4(chain: &mut Vec<String>, buf: &[u32]) -> bool {
+fn encode_ucs4<'a, 'b>(
+        chain: &'a mut Vec<String>, buf: &'b[u32]) -> (bool, &'a str) {
     // Max 4 bytes allowed by RFC: https://www.rfc-editor.org/rfc/rfc3629#page-4
     let utf8_mult = 4;
     let dest = get_dest(chain, utf8_mult * buf.len());
+    let last = dest.len();
+    let mut ok = true;
     for b in buf.iter() {
         match char::from_u32(*b) {
             Some(c) => dest.push(c),
             None => {
-                dest.clear();
+                dest.truncate(last);
                 write!(dest, "invalid UCS-4 code point: {}", b).unwrap();
-                return false
+                ok = false;
+                break;
             }
         }
     }
-    true
+    (ok, &dest[last..])
 }
 
 /// Convert a Py_UCS4 string to UTF-8.
@@ -197,9 +205,8 @@ pub unsafe extern "C" fn qdb_ucs4_to_utf8(b: *mut qdb_pystr_buf,
         size_out: *mut usize, buf_out: *mut *const c_char) -> bool {
     let b = &mut *b;
     let i = from_raw_parts(input, count);
-    let last = b.0.len();
-    let ok = encode_ucs4(&mut b.0, i);
-    *size_out = b.0.len() - last;
-    *buf_out = b.0.as_ptr() as *const c_char;
+    let (ok, res) = encode_ucs4(&mut b.0, i);
+    *size_out = res.len();
+    *buf_out = res.as_ptr() as *const c_char;
     ok
 }
