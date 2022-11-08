@@ -182,10 +182,18 @@ cdef object _unpack_utf8_decode_error(line_sender_utf8* err_msg):
     return IngressError(IngressErrorCode.InvalidUtf8, mview.decode('utf-8'))
 
 
-cdef bint str_to_buffered_utf8(
+cdef bint str_to_utf8(
         qdb_pystr_buf* b,
         str string,
         line_sender_utf8* utf8_out) except False:
+    """
+    Convert a Python string to a UTF-8 borrowed buffer.
+    This is done without allocating new Python `bytes` objects.
+    In case the string is an ASCII string, it's also generally zero-copy.
+    The `utf8_out` param will point to (borrow from) either the ASCII buffer
+    inside the original Python object or a part of memory allocated inside the
+    `b` buffer.
+    """
     cdef size_t count
     cdef int kind
     PyUnicode_READY(string)
@@ -234,53 +242,36 @@ cdef bint str_to_buffered_utf8(
     return True
 
 
-cdef bytes str_to_utf8(str string, line_sender_utf8* utf8_out):
-    """
-    Init the `utf8_out` object from the `string`.
-    If the string is held as a UCS1 and is purely ascii, then
-    the memory is borrowed.
-    Otherwise the string is first encoded to UTF-8 into a bytes object
-    and such bytes object is returned to transfer ownership and extend
-    the lifetime of the buffer pointed to by `utf8_out`.
-    """
-    # Note that we bypass `line_sender_utf8_init`.
-    cdef bytes owner = None
-    PyUnicode_READY(string)
-    if PyUnicode_IS_COMPACT_ASCII(string):
-        utf8_out.len = <size_t>(PyUnicode_GET_LENGTH(string))
-        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
-        return owner
-    else:
-        owner = string.encode('utf-8')
-        utf8_out.len = <size_t>(PyBytes_GET_SIZE(owner))
-        utf8_out.buf = <const char*>(PyBytes_AsString(owner))
-        return owner
-
-
-cdef bytes str_to_table_name(str string, line_sender_table_name* name_out):
+cdef bint str_to_table_name(
+        qdb_pystr_buf* b,
+        str string,
+        line_sender_table_name* name_out) except False:
     """
     Python string to borrowed C table name.
     Also see `str_to_utf8`.
     """
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    cdef bytes owner = str_to_utf8(string, &utf8)
+    str_to_utf8(b, string, &utf8)
     if not line_sender_table_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
-    return owner
+    return True
 
 
-cdef bytes str_to_column_name(str string, line_sender_column_name* name_out):
+cdef bint str_to_column_name(
+        qdb_pystr_buf* b,
+        str string,
+        line_sender_column_name* name_out) except False:
     """
     Python string to borrowed C column name.
     Also see `str_to_utf8`.
     """
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    cdef bytes owner = str_to_utf8(string, &utf8)
+    str_to_utf8(b, string, &utf8)
     if not line_sender_column_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
-    return owner
+    return True
 
 
 cdef int64_t datetime_to_micros(datetime dt):
@@ -490,6 +481,7 @@ cdef class Buffer:
 
     """
     cdef line_sender_buffer* _impl
+    cdef qdb_pystr_buf* _b
     cdef size_t _init_capacity
     cdef size_t _max_name_len
     cdef object _row_complete_sender
@@ -504,6 +496,7 @@ cdef class Buffer:
 
     cdef inline _cinit_impl(self, size_t init_capacity, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(max_name_len)
+        self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_capacity)
         self._init_capacity = init_capacity
         self._max_name_len = max_name_len
@@ -511,6 +504,7 @@ cdef class Buffer:
 
     def __dealloc__(self):
         self._row_complete_sender = None
+        qdb_pystr_buf_free(self._b)
         line_sender_buffer_free(self._impl)
 
     @property
@@ -557,6 +551,7 @@ cdef class Buffer:
         ``sender.flush(buffer, clear=False)``.
         """
         line_sender_buffer_clear(self._impl)
+        qdb_pystr_buf_clear(self._b)
 
     def __len__(self) -> int:
         """
@@ -591,17 +586,21 @@ cdef class Buffer:
     cdef inline int _table(self, str table_name) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_table_name c_table_name
-        cdef bytes owner = str_to_table_name(table_name, &c_table_name)
+        str_to_table_name(self._cleared_b(), table_name, &c_table_name)
         if not line_sender_buffer_table(self._impl, c_table_name, &err):
             raise c_err_to_py(err)
         return 0
+
+    cdef inline qdb_pystr_buf* _cleared_b(self):
+        qdb_pystr_buf_clear(self._b)
+        return self._b
 
     cdef inline int _symbol(self, str name, str value) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_column_name c_name
         cdef line_sender_utf8 c_value
-        cdef bytes owner_name = str_to_column_name(name, &c_name)
-        cdef bytes owner_value = str_to_utf8(value, &c_value)
+        str_to_column_name(self._cleared_b(), name, &c_name)
+        str_to_utf8(self._b, value, &c_value)
         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
         return 0
@@ -631,7 +630,7 @@ cdef class Buffer:
             self, line_sender_column_name c_name, str value) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_value
-        cdef bytes owner_value = str_to_utf8(value, &c_value)
+        str_to_utf8(self._b, value, &c_value)
         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
         return 0
@@ -653,7 +652,7 @@ cdef class Buffer:
 
     cdef inline int _column(self, str name, object value) except -1:
         cdef line_sender_column_name c_name
-        cdef bytes owner_name = str_to_column_name(name, &c_name)
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if PyBool_Check(value):
             return self._column_bool(c_name, value)
         elif PyInt_Check(value):
@@ -1012,14 +1011,14 @@ cdef class Buffer:
     #     """
     #     raise ValueError('nyi')
 
-    cdef _pandas(
+    cdef bint _pandas(
             self,
             object data,
             object table_name,
             object table_name_col,
             object symbols,
             object at,
-            bint sort):
+            bint sort) except False:
         # First, we need to make sure that `data` is a dataframe.
         # We specifically avoid using `isinstance` here because we don't want
         # to add a library dependency on pandas itself. We simply rely on its API.
@@ -1032,7 +1031,7 @@ cdef class Buffer:
         cdef size_t_vec symbol_indices = size_t_vec_new()
         cdef size_t_vec field_indices = size_t_vec_new()
         cdef ssize_t at_col
-        cdef int64_t at_value
+        cdef int64_t at_value = 0
         cdef column_name_vec symbol_names = column_name_vec_new()
         cdef column_name_vec field_names = column_name_vec_new()
         cdef list name_owners = None
@@ -1043,14 +1042,17 @@ cdef class Buffer:
         try:
             _check_is_pandas_dataframe(data)
             col_count = len(data.columns)
-            name_col, name_owner = _pandas_resolve_table_name(
+            qdb_pystr_buf_clear(self._b)
+            name_col = _pandas_resolve_table_name(
+                self._b,
                 data, table_name, table_name_col, col_count, &c_table_name)
-            at_col, at_value = _pandas_resolve_at(data, at, col_count)
+            at_col = _pandas_resolve_at(data, at, col_count, &at_value)
             _pandas_resolve_symbols(
                 data, at_col, symbols, col_count, &symbol_indices)
             _pandas_resolve_fields(
                 name_col, &symbol_indices, at_col, col_count, &field_indices)
-            name_owners = _pandas_resolve_col_names(
+            _pandas_resolve_col_names(
+                self._b,
                 data, &symbol_indices, &field_indices,
                 &symbol_names, &field_names)
             dtypes = <dtype_t*>calloc(col_count, sizeof(dtype_t))
@@ -1061,7 +1063,6 @@ cdef class Buffer:
             import sys
             sys.stderr.write('_pandas :: (A) ' +
                 f'name_col: {name_col}, ' +
-                f'name_owner: {name_owner}, ' +
                 f'symbol_indices: {size_t_vec_str(&symbol_indices)}, ' +
                 f'at_col: {at_col}, ' +
                 f'at_value: {at_value}, ' +
@@ -1074,6 +1075,7 @@ cdef class Buffer:
             #     else:
             #         if not line_sender_buffer_table(self._impl, c_table_name, &err):
             #             raise c_err_to_py(err)
+            return True
         finally:
             if col_buffers != NULL:
                 for col_index in range(set_buf_count):
@@ -1101,7 +1103,22 @@ cdef class Buffer:
         """
         # See https://cython.readthedocs.io/en/latest/src/userguide/
         #     numpy_tutorial.html#numpy-tutorial
+        import sys
+        sys.stderr.write('pandas :: (A) ' +
+            f'table_name: {table_name}, ' +
+            f'table_name_col: {table_name_col}, ' +
+            f'symbols: {symbols}, ' +
+            f'at: {at}, ' +
+            f'sort: {sort}' +
+            '\n')
         self._pandas(data, table_name, table_name_col, symbols, at, sort)
+        sys.stderr.write('pandas :: (B) ' +
+            f'table_name: {table_name}, ' +
+            f'table_name_col: {table_name_col}, ' +
+            f'symbols: {symbols}, ' +
+            f'at: {at}, ' +
+            f'sort: {sort}' +
+            '\n')
 
 
 cdef struct c_size_t_vec:
@@ -1207,12 +1224,13 @@ cdef struct column_buf_t:
     # NB: We don't support suboffsets.
 
 
-cdef tuple _pandas_resolve_table_name(
+cdef ssize_t _pandas_resolve_table_name(
+        qdb_pystr_buf* b,
         object data,
         object table_name,
         object table_name_col,
         size_t col_count,
-        line_sender_table_name* name_out):
+        line_sender_table_name* name_out) except -2:
     """
     Return a tuple-pair of:
       * int column index
@@ -1234,7 +1252,8 @@ cdef tuple _pandas_resolve_table_name(
                 'Can specify only one of `table_name` or `table_name_col`.')
         if isinstance(table_name, str):
             try:
-                return -1, str_to_table_name(table_name, name_out)
+                str_to_table_name(b, table_name, name_out)
+                return -1  # Magic value for "no column index".
             except IngressError as ie:
                 raise ValueError(f'Bad argument `table_name`: {ie}')
         else:
@@ -1254,7 +1273,7 @@ cdef tuple _pandas_resolve_table_name(
             col_index,
             'Bad argument `table_name_col`: ',
             table_name_col)
-        return col_index, None
+        return col_index
     else:
         raise ValueError(
             'Must specify at least one of `table_name` or `table_name_col`.')
@@ -1267,9 +1286,10 @@ cdef int _pandas_resolve_fields(
         size_t col_count,
         size_t_vec* field_indices_out) except -1:
     """
-    Return a list of field column indices.
-    i.e. a list of all columns which are not the table name column, symbols or
-    the at timestamp column.
+    Populate vec of field column indices via `field_indices_out`.
+    Returns the length of the list.
+    The vec will contain all columns which are not the table name column,
+    symbols or the at timestamp column.
     """
     # We rely on `symbol_indices` being sorted.
     cdef size_t col_index = 0
@@ -1292,24 +1312,24 @@ cdef int _pandas_resolve_fields(
     return 0
 
 
-cdef list _pandas_resolve_col_names(
+cdef bint _pandas_resolve_col_names(
+        qdb_pystr_buf* b,
         object data,
         const size_t_vec* symbol_indices,
         const size_t_vec* field_indices,
         column_name_vec* symbol_names_out,
-        column_name_vec* field_names_out):
-    cdef list name_owners = []
+        column_name_vec* field_names_out) except False:
     cdef line_sender_column_name c_name
     cdef size_t col_index
     for col_index in range(symbol_indices.size):
         col_index = symbol_indices.d[col_index]
-        name_owners.append(str_to_column_name(data.columns[col_index], &c_name))
+        str_to_column_name(b, data.columns[col_index], &c_name)
         column_name_vec_push(symbol_names_out, c_name)
     for col_index in range(field_indices.size):
         col_index = field_indices.d[col_index]
-        name_owners.append(str_to_column_name(data.columns[col_index], &c_name))
+        str_to_column_name(b, data.columns[col_index], &c_name)
         column_name_vec_push(field_names_out, c_name)
-    return name_owners
+    return True
 
 
 cdef bint _bind_col_index(
@@ -1339,6 +1359,7 @@ cdef object _pandas_column_is_str(object data, int col_index):
     """
     Return True if the column at `col_index` is a string column.
     """
+    # NB: Returning `object` rather than `bint` to allow for exceptions.
     cdef str col_kind
     cdef object col
     col_kind = data.dtypes[col_index].kind
@@ -1380,7 +1401,8 @@ cdef int _pandas_resolve_symbols(
         size_t col_count,
         size_t_vec* symbol_indices_out) except -1:
     """
-    Return a list of column indices.
+    Populate vec of symbol column indices via `symbol_indices_out`.
+    Returns the length of the vec.
     """
     cdef size_t col_index = 0
     cdef object symbol
@@ -1433,15 +1455,22 @@ cdef bint _pandas_get_loc(
             f'Column {col_name!r} not found in the dataframe.')
 
 
-cdef tuple _pandas_resolve_at(object data, object at, size_t col_count):
+cdef ssize_t _pandas_resolve_at(
+        object data,
+        object at,
+        size_t col_count,
+        int64_t* at_value_out) except -2:
     cdef size_t col_index
     cdef str col_kind
     if at is None:
-        return -1, 0  # Special value for `at_now`.
+        at_value_out[0] = 0  # Special value for `at_now`.
+        return -1
     elif isinstance(at, TimestampNanos):
-        return -1, at._value
+        at_value_out[0] = at._value
+        return -1
     elif isinstance(at, datetime):
-        return -1, datetime_to_nanos(at)
+        at_value_out[0] = datetime_to_nanos(at)
+        return -1
     elif isinstance(at, str):
         _pandas_get_loc(data, at, 'at', &col_index)
     elif isinstance(at, int):
@@ -1453,7 +1482,8 @@ cdef tuple _pandas_resolve_at(object data, object at, size_t col_count):
             'int (column index), str (colum name)')
     col_kind = data.dtypes[col_index].kind
     if col_kind == 'M':  # datetime
-        return col_index, 0
+        at_value_out[0] = 0
+        return col_index
     else:
         raise TypeError(
             f'Bad argument `at`: Bad dtype `{data.dtypes[col_index]}` ' +
@@ -1483,7 +1513,7 @@ cdef char _str_to_char(str field, str s) except 0:
     return <char>res
 
 
-cdef int _pandas_parse_dtype(object np_dtype, dtype_t* dtype_out) except -1:
+cdef bint _pandas_parse_dtype(object np_dtype, dtype_t* dtype_out) except False:
     """
     Parse a numpy dtype and return a dtype_t.
     """
@@ -1492,18 +1522,20 @@ cdef int _pandas_parse_dtype(object np_dtype, dtype_t* dtype_out) except -1:
     dtype_out.itemsize = np_dtype.itemsize
     dtype_out.byteorder = _str_to_char('byteorder', np_dtype.byteorder)
     dtype_out.hasobject = np_dtype.hasobject
+    return True
 
 
-cdef int _pandas_resolve_dtypes(
-        object data, size_t col_count, dtype_t* dtypes_out) except -1:
+cdef bint _pandas_resolve_dtypes(
+        object data, size_t col_count, dtype_t* dtypes_out) except False:
     cdef size_t col_index
     for col_index in range(col_count):
         _pandas_parse_dtype(data.dtypes[col_index], &dtypes_out[col_index])
+    return True
 
 
-cdef int _pandas_resolve_col_buffers(
+cdef bint _pandas_resolve_col_buffers(
         object data, size_t col_count, const dtype_t* dtypes,
-        Py_buffer* col_buffers, size_t* set_buf_count) except -1:
+        Py_buffer* col_buffers, size_t* set_buf_count) except False:
     """
     Map pandas columns to array of col_buffers.
     """
@@ -1523,7 +1555,8 @@ cdef int _pandas_resolve_col_buffers(
             raise TypeError(
                 f'Bad column: Expected a numpy array, got {nparr!r}')
         PyObject_GetBuffer(nparr, view, PyBUF_STRIDES)
-        set_buf_count[0] += 1   # Set to avoid wrongly calling `PyBuffer_Release`.
+        set_buf_count[0] += 1   # Set to avoid wrongly calling PyBuffer_Release.
+    return True
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
@@ -1685,15 +1718,12 @@ cdef class Sender:
         cdef line_sender_error* err = NULL
 
         cdef line_sender_utf8 host_utf8
-        cdef bytes host_owner
 
         cdef str port_str
         cdef line_sender_utf8 port_utf8
-        cdef bytes port_owner
 
         cdef str interface_str
         cdef line_sender_utf8 interface_utf8
-        cdef bytes interface_owner
 
         cdef str a_key_id
         cdef bytes a_key_id_owner
@@ -1711,12 +1741,21 @@ cdef class Sender:
         cdef bytes a_pub_key_y_owner
         cdef line_sender_utf8 a_pub_key_y_utf8
 
-        cdef bytes ca_owner
         cdef line_sender_utf8 ca_utf8
+
+        cdef qdb_pystr_buf* b
 
         self._opts = NULL
         self._impl = NULL
-        self._buffer = None
+
+        self._init_capacity = init_capacity
+        self._max_name_len = max_name_len
+
+        self._buffer = Buffer(
+            init_capacity=init_capacity,
+            max_name_len=max_name_len)
+
+        b = self._buffer._b
 
         if PyInt_Check(port):
             port_str = str(port)
@@ -1726,12 +1765,12 @@ cdef class Sender:
             raise TypeError(
                 f'port must be an integer or a string, not {type(port)}')
 
-        host_owner = str_to_utf8(host, &host_utf8)
-        port_owner = str_to_utf8(port_str, &port_utf8)
+        str_to_utf8(b, host, &host_utf8)
+        str_to_utf8(b, port_str, &port_utf8)
         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
 
         if interface is not None:
-            interface_owner = str_to_utf8(interface, &interface_utf8)
+            str_to_utf8(b, interface, &interface_utf8)
             line_sender_opts_net_interface(self._opts, interface_utf8)
 
         if auth is not None:
@@ -1739,10 +1778,10 @@ cdef class Sender:
              a_priv_key,
              a_pub_key_x,
              a_pub_key_y) = auth
-            a_key_id_owner = str_to_utf8(a_key_id, &a_key_id_utf8)
-            a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)
-            a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)
-            a_pub_key_y_owner = str_to_utf8(a_pub_key_y, &a_pub_key_y_utf8)
+            str_to_utf8(b, a_key_id, &a_key_id_utf8)
+            str_to_utf8(b, a_priv_key, &a_priv_key_utf8)
+            str_to_utf8(b, a_pub_key_x, &a_pub_key_x_utf8)
+            str_to_utf8(b, a_pub_key_y, &a_pub_key_y_utf8)
             line_sender_opts_auth(
                 self._opts,
                 a_key_id_utf8,
@@ -1757,11 +1796,11 @@ cdef class Sender:
                 if tls == 'insecure_skip_verify':
                     line_sender_opts_tls_insecure_skip_verify(self._opts)
                 else:
-                    ca_owner = str_to_utf8(tls, &ca_utf8)
+                    str_to_utf8(b, tls, &ca_utf8)
                     line_sender_opts_tls_ca(self._opts, ca_utf8)
             elif isinstance(tls, pathlib.Path):
                 tls = str(tls)
-                ca_owner = str_to_utf8(tls, &ca_utf8)
+                str_to_utf8(b, tls, &ca_utf8)
                 line_sender_opts_tls_ca(self._opts, ca_utf8)
             else:
                 raise TypeError(
@@ -1771,13 +1810,6 @@ cdef class Sender:
         if read_timeout is not None:
             line_sender_opts_read_timeout(self._opts, read_timeout)
 
-        self._init_capacity = init_capacity
-        self._max_name_len = max_name_len
-
-        self._buffer = Buffer(
-            init_capacity=init_capacity,
-            max_name_len=max_name_len)
-
         self._auto_flush_enabled = not not auto_flush
         self._auto_flush_watermark = int(auto_flush) \
             if self._auto_flush_enabled else 0
@@ -1785,6 +1817,8 @@ cdef class Sender:
             raise ValueError(
                 'auto_flush_watermark must be >= 0, '
                 f'not {self._auto_flush_watermark}')
+        
+        qdb_pystr_buf_clear(b)
 
     def new_buffer(self):
         """

@@ -78,7 +78,7 @@ fn encode_ucs1(dest: &mut String, buf: &[u8]) {
 
 /// Convert a Py_UCS1 string to UTF-8.
 /// Returns a `buf_out` borrowed ptr of `size_out` len.
-/// The buffer is borrowed either from `input` or from `b`.
+/// The buffer is borrowed from `b`.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_ucs1_to_utf8(
         b: *mut qdb_pystr_buf,
