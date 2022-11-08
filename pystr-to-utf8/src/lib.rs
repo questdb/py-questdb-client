@@ -31,7 +31,7 @@ pub struct qdb_pystr_buf(Vec<String>);
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct qdb_pystr_pos {
     pub chain: usize,
     pub string: usize
@@ -47,8 +47,8 @@ pub unsafe extern "C" fn qdb_pystr_buf_new() -> *mut qdb_pystr_buf {
 /// Get current position. Use in conjunction with `truncate`.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_pystr_buf_tell(
-        b: *mut qdb_pystr_buf) -> qdb_pystr_pos {
-    let b = &mut *b;
+        b: *const qdb_pystr_buf) -> qdb_pystr_pos {
+    let b = &*b;
     let chain_pos = b.0.len();
     let string_pos = if chain_pos > 0 {
             b.0[chain_pos - 1].len()
@@ -63,9 +63,9 @@ pub unsafe extern "C" fn qdb_pystr_buf_tell(
 pub unsafe extern "C" fn qdb_pystr_buf_truncate(
         b: *mut qdb_pystr_buf, pos: qdb_pystr_pos) {
     let b = &mut *b;
-    b.0.truncate(pos.chain + 1);
+    b.0.truncate(pos.chain);
     if !b.0.is_empty() {
-        b.0[pos.chain].truncate(pos.string);
+        b.0[pos.chain - 1].truncate(pos.string);
     }
 }
 
@@ -74,7 +74,8 @@ pub unsafe extern "C" fn qdb_pystr_buf_truncate(
 pub unsafe extern "C" fn qdb_pystr_buf_clear(b: *mut qdb_pystr_buf) {
     let b = &mut *b;
     if !b.0.is_empty() {
-        b.0.clear();
+        b.0.truncate(1);
+        b.0[0].clear();
     }
 }
 
@@ -210,3 +211,6 @@ pub unsafe extern "C" fn qdb_ucs4_to_utf8(b: *mut qdb_pystr_buf,
     *buf_out = res.as_ptr() as *const c_char;
     ok
 }
+
+#[cfg(test)]
+mod tests;
