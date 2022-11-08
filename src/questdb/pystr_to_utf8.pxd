@@ -6,15 +6,19 @@ cdef extern from "pystr_to_utf8.h":
   cdef struct qdb_pystr_buf:
     pass
 
+  cdef struct qdb_pystr_pos:
+    size_t chain
+    size_t string
+
   # Prepare a new buffer. The buffer must be freed with `qdb_pystr_free`.
   # The `qdb_ucsX_to_utf8` functions will write to this buffer.
   qdb_pystr_buf *qdb_pystr_buf_new()
 
   # Get current position. Use in conjunction with `truncate`.
-  size_t qdb_pystr_buf_tell(qdb_pystr_buf *b)
+  qdb_pystr_pos qdb_pystr_buf_tell(qdb_pystr_buf *b)
 
   # Trim the buffer to the given length. Use in conjunction with `tell`.
-  void qdb_pystr_buf_truncate(qdb_pystr_buf *b, size_t len)
+  void qdb_pystr_buf_truncate(qdb_pystr_buf *b, qdb_pystr_pos pos)
 
   # Reset the converter's buffer to zero length.
   void qdb_pystr_buf_clear(qdb_pystr_buf *b)
@@ -24,7 +28,7 @@ cdef extern from "pystr_to_utf8.h":
 
   # Convert a Py_UCS1 string to UTF-8.
   # Returns a `buf_out` borrowed ptr of `size_out` len.
-  # The buffer is borrowed either from `input` or from `b`.
+  # The buffer is borrowed from `b`.
   void qdb_ucs1_to_utf8(qdb_pystr_buf *b,
                         size_t count,
                         const uint8_t *input,

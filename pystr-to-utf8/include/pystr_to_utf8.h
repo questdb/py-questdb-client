@@ -32,6 +32,12 @@
 
 typedef struct qdb_pystr_buf qdb_pystr_buf;
 
+typedef struct
+{
+    size_t chain;
+    size_t string;
+} qdb_pystr_pos;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -45,13 +51,13 @@ qdb_pystr_buf *qdb_pystr_buf_new(void);
 /**
  * Get current position. Use in conjunction with `truncate`.
  */
-size_t qdb_pystr_buf_tell(qdb_pystr_buf *b);
+qdb_pystr_pos qdb_pystr_buf_tell(qdb_pystr_buf *b);
 
 /**
  * Trim the buffer to the given length. Use in conjunction with `tell`.
  */
 void qdb_pystr_buf_truncate(qdb_pystr_buf *b,
-                            size_t len);
+                            qdb_pystr_pos pos);
 
 /**
  * Reset the converter's buffer to zero length.
@@ -66,7 +72,7 @@ void qdb_pystr_buf_free(qdb_pystr_buf *b);
 /**
  * Convert a Py_UCS1 string to UTF-8.
  * Returns a `buf_out` borrowed ptr of `size_out` len.
- * The buffer is borrowed either from `input` or from `b`.
+ * The buffer is borrowed from `b`.
  */
 void qdb_ucs1_to_utf8(qdb_pystr_buf *b,
                       size_t count,
