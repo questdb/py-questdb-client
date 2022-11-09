@@ -15,9 +15,9 @@ cdef extern from "pystr_to_utf8.h":
   qdb_pystr_buf *qdb_pystr_buf_new()
 
   # Get current position. Use in conjunction with `truncate`.
-  qdb_pystr_pos qdb_pystr_buf_tell(qdb_pystr_buf *b)
+  qdb_pystr_pos qdb_pystr_buf_tell(const qdb_pystr_buf *b)
 
-  # Trim the buffer to the given length. Use in conjunction with `tell`.
+  # Trim the buffer to the given position. Use in conjunction with `tell`.
   void qdb_pystr_buf_truncate(qdb_pystr_buf *b, qdb_pystr_pos pos)
 
   # Reset the converter's buffer to zero length.
@@ -38,19 +38,23 @@ cdef extern from "pystr_to_utf8.h":
   # Convert a Py_UCS2 string to UTF-8.
   # Returns a `buf_out` borrowed ptr of `size_out` len.
   # The buffer is borrowed from `b`.
-  # In case of errors, returns `false` and the buffer is an error message.
+  # In case of errors, returns `false` and bad_codepoint_out is set to the
+  # offending codepoint.
   bint qdb_ucs2_to_utf8(qdb_pystr_buf *b,
                         size_t count,
                         const uint16_t *input,
                         size_t *size_out,
-                        const char **buf_out)
+                        const char **buf_out,
+                        uint32_t *bad_codepoint_out)
 
   # Convert a Py_UCS4 string to UTF-8.
   # Returns a `buf_out` borrowed ptr of `size_out` len.
   # The buffer is borrowed from `b`.
-  # In case of errors, returns `false` and the buffer is an error message.
+  # In case of errors, returns `false` and bad_codepoint_out is set to the
+  # offending codepoint.
   bint qdb_ucs4_to_utf8(qdb_pystr_buf *b,
                         size_t count,
                         const uint32_t *input,
                         size_t *size_out,
-                        const char **buf_out)
+                        const char **buf_out,
+                        uint32_t *bad_codepoint_out)

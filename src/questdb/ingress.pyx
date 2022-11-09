@@ -172,14 +172,11 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     return IngressError(tup[0], fmt.format(tup[1]))
 
 
-cdef object _unpack_utf8_decode_error(line_sender_utf8* err_msg):
-    cdef object mview
-    cdef str msg
-    mview = PyMemoryView_FromMemory(
-        <char*>err_msg.buf,
-        <Py_ssize_t>err_msg.len,
-        PyBUF_READ)
-    return IngressError(IngressErrorCode.InvalidUtf8, mview.decode('utf-8'))
+cdef object _utf8_decode_error(str string, uint32_t bad_codepoint):
+    return IngressError(
+        IngressErrorCode.InvalidUtf8,
+        f'Invalid codepoint 0x{bad_codepoint:x} in string {string!r}: ' +
+        'Cannot be encoded as UTF-8.')
 
 
 cdef bint str_to_utf8(
@@ -196,6 +193,7 @@ cdef bint str_to_utf8(
     """
     cdef size_t count
     cdef int kind
+    cdef uint32_t bad_codepoint = 0
     PyUnicode_READY(string)
     count = <size_t>(PyUnicode_GET_LENGTH(string))
 
@@ -222,8 +220,9 @@ cdef bint str_to_utf8(
                 count,
                 PyUnicode_2BYTE_DATA(string),
                 &utf8_out.len,
-                &utf8_out.buf):
-            raise _unpack_utf8_decode_error(utf8_out)
+                &utf8_out.buf,
+                &bad_codepoint):
+            raise _utf8_decode_error(string, bad_codepoint)
     elif kind == PyUnicode_4BYTE_KIND:
         if not qdb_ucs4_to_utf8(
                 b,
@@ -235,8 +234,9 @@ cdef bint str_to_utf8(
                 <const uint32_t*>PyUnicode_4BYTE_DATA(string),
 
                 &utf8_out.len,
-                &utf8_out.buf):
-            raise _unpack_utf8_decode_error(utf8_out)
+                &utf8_out.buf,
+                &bad_codepoint):
+            raise _utf8_decode_error(string, bad_codepoint)
     else:
         raise ValueError(f'Unknown UCS kind: {kind}.')
     return True

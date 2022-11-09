@@ -23,7 +23,6 @@
  ******************************************************************************/
 
 use std::ffi::c_char;
-use std::fmt::Write;
 use std::slice::from_raw_parts;
 
 #[allow(non_camel_case_types)]
@@ -58,7 +57,7 @@ pub unsafe extern "C" fn qdb_pystr_buf_tell(
     qdb_pystr_pos { chain: chain_pos, string: string_pos }
 }
 
-/// Trim the buffer to the given length. Use in conjunction with `tell`.
+/// Trim the buffer to the given position. Use in conjunction with `tell`.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_pystr_buf_truncate(
         b: *mut qdb_pystr_buf, pos: qdb_pystr_pos) {
@@ -87,7 +86,7 @@ pub unsafe extern "C" fn qdb_pystr_buf_free(b: *mut qdb_pystr_buf) {
     }
 }
 
-const MIN_BUF_LEN: usize = 64;
+const MIN_BUF_LEN: usize = 1024;
 
 /// A carefully crafted buffer with spare capacity for `len` bytes.
 /// This is necessary to return "stable" addresses and avoid segfaults.
@@ -133,12 +132,11 @@ pub unsafe extern "C" fn qdb_ucs1_to_utf8(
 
 #[inline]
 fn encode_ucs2<'a, 'b>(
-        chain: &'a mut Vec<String>, buf: &'b [u16]) -> (bool, &'a str) {
+        chain: &'a mut Vec<String>, buf: &'b [u16]) -> Result<&'a str, u32> {
     // len(chr(2 ** 16 - 1).encode('utf-8')) == 3
     let utf8_mult = 3;
     let dest = get_dest(chain, utf8_mult * buf.len());
     let last = dest.len();
-    let mut ok = true;
     for b in buf.iter() {
         // Checking for validity is not optional:
         // >>> for n in range(2 ** 16):
@@ -149,67 +147,84 @@ fn encode_ucs2<'a, 'b>(
             Some(c) => dest.push(c),
             None => {
                 dest.truncate(last);
-                write!(dest, "invalid UCS-2 code point: {}", b).unwrap();
-                ok = false;
-                break;
+                return Err(*b as u32);
             }
         }
     }
-    (ok, &dest[last..])
+    Ok(&dest[last..])
 }
 
 /// Convert a Py_UCS2 string to UTF-8.
 /// Returns a `buf_out` borrowed ptr of `size_out` len.
 /// The buffer is borrowed from `b`.
-/// In case of errors, returns `false` and the buffer is an error message.
+/// In case of errors, returns `false` and bad_codepoint_out is set to the
+/// offending codepoint.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_ucs2_to_utf8(b: *mut qdb_pystr_buf,
-        count: usize, input: *const u16,
-        size_out: *mut usize, buf_out: *mut *const c_char) -> bool {
+        count: usize,
+        input: *const u16,
+        size_out: *mut usize,
+        buf_out: *mut *const c_char,
+        bad_codepoint_out: *mut u32) -> bool {
     let b = &mut *b;
     let i = from_raw_parts(input, count);
-    let (ok, res) = encode_ucs2(&mut b.0, i);
-    *size_out = res.len();
-    *buf_out = res.as_ptr() as *const c_char;
-    ok
+    match encode_ucs2(&mut b.0, i) {
+        Ok(res) => {
+            *size_out = res.len();
+            *buf_out = res.as_ptr() as *const c_char;
+            true
+        }
+        Err(bad) => {
+            *bad_codepoint_out = bad;
+            false
+        }
+    }
 }
 
 #[inline]
 fn encode_ucs4<'a, 'b>(
-        chain: &'a mut Vec<String>, buf: &'b[u32]) -> (bool, &'a str) {
+        chain: &'a mut Vec<String>, buf: &'b[u32]) -> Result<&'a str, u32> {
     // Max 4 bytes allowed by RFC: https://www.rfc-editor.org/rfc/rfc3629#page-4
     let utf8_mult = 4;
     let dest = get_dest(chain, utf8_mult * buf.len());
     let last = dest.len();
-    let mut ok = true;
     for b in buf.iter() {
         match char::from_u32(*b) {
             Some(c) => dest.push(c),
             None => {
                 dest.truncate(last);
-                write!(dest, "invalid UCS-4 code point: {}", b).unwrap();
-                ok = false;
-                break;
+                return Err(*b);
             }
         }
     }
-    (ok, &dest[last..])
+    Ok(&dest[last..])
 }
 
 /// Convert a Py_UCS4 string to UTF-8.
 /// Returns a `buf_out` borrowed ptr of `size_out` len.
 /// The buffer is borrowed from `b`.
-/// In case of errors, returns `false` and the buffer is an error message.
+/// In case of errors, returns `false` and bad_codepoint_out is set to the
+/// offending codepoint.
 #[no_mangle]
 pub unsafe extern "C" fn qdb_ucs4_to_utf8(b: *mut qdb_pystr_buf,
-        count: usize, input: *const u32,
-        size_out: *mut usize, buf_out: *mut *const c_char) -> bool {
+        count: usize,
+        input: *const u32,
+        size_out: *mut usize,
+        buf_out: *mut *const c_char,
+        bad_codepoint_out: *mut u32) -> bool {
     let b = &mut *b;
     let i = from_raw_parts(input, count);
-    let (ok, res) = encode_ucs4(&mut b.0, i);
-    *size_out = res.len();
-    *buf_out = res.as_ptr() as *const c_char;
-    ok
+    match encode_ucs4(&mut b.0, i) {
+        Ok(res) => {
+            *size_out = res.len();
+            *buf_out = res.as_ptr() as *const c_char;
+            true
+        }
+        Err(bad) => {
+            *bad_codepoint_out = bad;
+            false
+        }
+    }
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_config(config)
         .generate()?;
 
-    // Insted of just writing out the file:
+    // Instead of just writing out the file:
     //     bindings.write_to_file("include/pystr_to_utf8.pxd");
     // We need to do some post-processing to make it work our code.
     // The default output is too opinionated and has unwanted typedefs.
