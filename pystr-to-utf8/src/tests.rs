@@ -225,4 +225,91 @@ fn test_ucs2() {
     // Even though 0x061 (ASCII char 'a') was valid and successfully encoded,
     // we also want to be sure that the buffer was not modified and appended to.
     assert_eq!(b.tell(), before_pos);
+
+    // Now we check that the buffer is still in a valid state.
+    let s6 = b.ucs2_to_utf8(&[0x062, 0x063]).unwrap();
+    assert_eq!(s6, "bc");
+    assert_eq!(b.tell(), qdb_pystr_pos {
+        chain: 1,
+        string: [s1, s2, s3, s4, s6].iter().map(|s| s.len()).sum() });
+}
+
+#[test]
+fn test_ucs4() {
+    let mut b = Buf::new();
+
+    // We first check code points within the ASCII range.
+    let s1 = b.ucs4_to_utf8(
+        &[0x61, 0x62, 0x63, 0x64, 0x65]).unwrap();
+    assert_eq!(s1, "abcde");
+    assert_eq!(s1.len(), 5);
+    
+    // Now chars outside ASCII range, but within UCS-1 range.
+    // These will yield two bytes each in UTF-8.
+    let s2 = b.ucs4_to_utf8(
+        &[0x00f0, 0x00e3, 0x00b5, 0x00b6])
+        .unwrap();
+    assert_eq!(s2, "ðãµ¶");
+    assert_eq!(s2.len(), 8);
+
+    // Now chars that actually require two bytes in UCS-2, but also fit in
+    // two bytes in UTF-8.
+    let s3 = b.ucs4_to_utf8(
+        &[0x0100, 0x069c])
+        .unwrap();
+    assert_eq!(s3, "Āڜ");
+    assert_eq!(s3.len(), 4);
+
+    // Now chars that require two bytes in UCS-2 and 3 bytes in UTF-8.
+    let s4 = b.ucs4_to_utf8(
+        &[0x569c, 0xa4c2])
+        .unwrap();
+    assert_eq!(s4, "嚜꓂");
+    assert_eq!(s4.len(), 6);
+
+    // Now chars that require four bytes in UCS-4 and 4 bytes in UTF-8.
+    let s5 = b.ucs4_to_utf8(
+        &[0x1f4a9, 0x1f99e])
+        .unwrap();
+    assert_eq!(s5, "💩🦞");
+    assert_eq!(s5.len(), 8);
+
+    // Quick check that we're just writing to the same buffer.
+    assert_eq!(b.tell(), qdb_pystr_pos {
+        chain: 1,
+        string: [s1, s2, s3, s4, s5].iter().map(|s| s.len()).sum() });
+
+    // Now we finally check that errors are captured.
+    // For this, we use a code point which is valid in a Python string
+    // (in UCS-4), but which is not valid when encoded as UTF-8.
+    // >>> chr(0xd800).encode('utf-8')
+    // Traceback (most recent call last):
+    // File "<stdin>", line 1, in <module>
+    // UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800'
+    //                                     in position 0: surrogates not allowed
+    let before_pos = b.tell();
+    let s6 = b.ucs4_to_utf8(&[0x061, 0xd800]);
+    assert!(s6.is_err());
+    assert_eq!(s6.unwrap_err(), 0xd800 as u32);
+
+    // Even though 0x061 (ASCII char 'a') was valid and successfully encoded,
+    // we also want to be sure that the buffer was not modified and appended to.
+    assert_eq!(b.tell(), before_pos);
+
+    // We repeat the same with chars with code points higher than the u16 type.
+    let before_pos = b.tell();
+    let s7 = b.ucs4_to_utf8(&[0x061, 0x110000]);
+    assert!(s7.is_err());
+    assert_eq!(s7.unwrap_err(), 0x110000);
+
+    // Even though 0x061 (ASCII char 'a') was valid and successfully encoded,
+    // we also want to be sure that the buffer was not modified and appended to.
+    assert_eq!(b.tell(), before_pos);
+
+    // Now we check that the buffer is still in a valid state.
+    let s8 = b.ucs4_to_utf8(&[0x062, 0x063]).unwrap();
+    assert_eq!(s8, "bc");
+    assert_eq!(b.tell(), qdb_pystr_pos {
+        chain: 1,
+        string: [s1, s2, s3, s4, s5, s8].iter().map(|s| s.len()).sum() });
 }
