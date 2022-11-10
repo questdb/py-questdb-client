@@ -110,10 +110,42 @@ class TestBuffer(unittest.TestCase):
     def test_unicode(self):
         buf = qi.Buffer()
         buf.row(
+            'tbl1',                            # ASCII
+            symbols={'questdb1': 'q❤️p'},       # Mixed ASCII and UCS-2
+            columns={'questdb2': '❤️' * 1200})  # Over the 1024 buffer prealloc.
+        buf.row(
             'tbl1',
-            symbols={'questdb1': '❤️'},
-            columns={'questdb2': '❤️' * 100})
-        self.assertEqual(str(buf), f'tbl1,questdb1=❤️ questdb2="{"❤️" * 100}"\n')
+            symbols={
+                'Questo è il nome di una colonna':  # Non-ASCII UCS-1
+                'Це символьне значення'},  # UCS-2, 2 bytes for UTF-8.
+            columns={
+                'questdb1': '',  # Empty string
+                'questdb2': '嚜꓂',  # UCS-2, 3 bytes for UTF-8.
+                'questdb3': '💩🦞'})  # UCS-4, 4 bytes for UTF-8.
+        self.assertEqual(str(buf),
+            f'tbl1,questdb1=q❤️p questdb2="{"❤️" * 1200}"\n' +
+            'tbl1,Questo\\ è\\ il\\ nome\\ di\\ una\\ colonna=' +
+            'Це\\ символьне\\ значення ' +
+            'questdb1="",questdb2="嚜꓂",questdb3="💩🦞"\n')
+
+        buf.clear()
+        buf.row('tbl1', symbols={'questdb1': 'q❤️p'})
+        self.assertEqual(str(buf), 'tbl1,questdb1=q❤️p\n')
+
+        # A bad char in Python.
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                '.*codepoint 0xd800 in string .*'):
+            buf.row('tbl1', symbols={'questdb1': 'a\ud800'})
+
+        # Strong exception safety: no partial writes.
+        # Ensure we can continue using the buffer after an error.
+        buf.row('tbl1', symbols={'questdb1': 'another line of input'})
+        self.assertEqual(
+            str(buf),
+            'tbl1,questdb1=q❤️p\n' +
+            # Note: No partially written failed line here.
+            'tbl1,questdb1=another\\ line\\ of\\ input\n')
 
     def test_float(self):
         buf = qi.Buffer()
