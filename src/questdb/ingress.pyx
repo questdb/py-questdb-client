@@ -1026,7 +1026,6 @@ cdef class Buffer:
         # exceptions later.
         cdef size_t col_count
         cdef ssize_t name_col
-        cdef object name_owner
         cdef line_sender_table_name c_table_name
         cdef size_t_vec symbol_indices = size_t_vec_new()
         cdef size_t_vec field_indices = size_t_vec_new()
@@ -1034,11 +1033,13 @@ cdef class Buffer:
         cdef int64_t at_value = 0
         cdef column_name_vec symbol_names = column_name_vec_new()
         cdef column_name_vec field_names = column_name_vec_new()
-        cdef list name_owners = None
         cdef dtype_t* dtypes = NULL
         cdef size_t set_buf_count = 0
         cdef Py_buffer* col_buffers = NULL
         cdef size_t col_index
+        cdef qdb_pystr_pos str_buf_marker
+        cdef size_t row_count
+        cdef Py_buffer* cur_col
         try:
             _check_is_pandas_dataframe(data)
             col_count = len(data.columns)
@@ -1048,7 +1049,7 @@ cdef class Buffer:
                 data, table_name, table_name_col, col_count, &c_table_name)
             at_col = _pandas_resolve_at(data, at, col_count, &at_value)
             _pandas_resolve_symbols(
-                data, at_col, symbols, col_count, &symbol_indices)
+                data, name_col, at_col, symbols, col_count, &symbol_indices)
             _pandas_resolve_fields(
                 name_col, &symbol_indices, at_col, col_count, &field_indices)
             _pandas_resolve_col_names(
@@ -1060,6 +1061,12 @@ cdef class Buffer:
             col_buffers = <Py_buffer*>calloc(col_count, sizeof(Py_buffer))
             _pandas_resolve_col_buffers(
                 data, col_count, dtypes, col_buffers, &set_buf_count)
+
+            # We've used the str buffer up to a point for the headers.
+            # Instead of clearing it (which would clear the headers' memory)
+            # we will truncate (rewind) back to this position.
+            str_buf_marker = qdb_pystr_buf_tell(self._b)
+
             import sys
             sys.stderr.write('_pandas :: (A) ' +
                 f'name_col: {name_col}, ' +
@@ -1068,26 +1075,52 @@ cdef class Buffer:
                 f'at_value: {at_value}, ' +
                 f'field_indices: {size_t_vec_str(&field_indices)}' +
                 '\n')
-            # row_count = len(data)
-            # for row_index in range(row_count):
-            #     if name_col > -1:
-            #         data.iloc[:, name_col]
-            #     else:
-            #         if not line_sender_buffer_table(self._impl, c_table_name, &err):
-            #             raise c_err_to_py(err)
+            row_count = len(data)
+            self._clear_marker()
+            for row_index in range(row_count):
+                qdb_pystr_buf_truncate(self._b, str_buf_marker)
+                try:
+                    self._set_marker()
+                    _pandas_row_table_name(
+                        self._impl,
+                        self._b,
+                        dtypes,
+                        col_buffers,
+                        name_col,
+                        row_index,
+                        c_table_name)
+                    _pandas_row_symbols(
+                        self._impl,
+                        self._b,
+                        dtypes,
+                        col_buffers,
+                        row_index,
+                        &symbol_names,
+                        &symbol_indices)
+                    # _pandas_row_fields(...)  # TODO [amunra]: implement
+                    _pandas_row_at(
+                        self._impl,
+                        dtypes,
+                        col_buffers,
+                        row_index,
+                        at_col,
+                        at_value)
+                except:
+                    self._rewind_to_marker()
+                    raise
             return True
         finally:
+            self._clear_marker()
             if col_buffers != NULL:
                 for col_index in range(set_buf_count):
                     PyBuffer_Release(&col_buffers[col_index])
                 free(col_buffers)
             free(dtypes)
-            if name_owners:  # no-op to avoid "unused variable" warning
-                pass
             column_name_vec_free(&field_names)
             column_name_vec_free(&symbol_names)
             size_t_vec_free(&field_indices)
             size_t_vec_free(&symbol_indices)
+            qdb_pystr_buf_clear(self._b)
 
     def pandas(
             self,
@@ -1396,6 +1429,7 @@ cdef object _pandas_check_column_is_str(
 
 cdef int _pandas_resolve_symbols(
         object data,
+        ssize_t table_name_col,
         ssize_t at_col,
         object symbols,
         size_t col_count,
@@ -1427,6 +1461,10 @@ cdef int _pandas_resolve_symbols(
                 raise TypeError(
                     f'Bad argument `symbols`: Elements must ' +
                     'be a column name (str) or index (int).')
+            if (table_name_col >= 0) and (col_index == <size_t>table_name_col):
+                raise ValueError(
+                    f'Bad argument `symbols`: Cannot use the same column ' +
+                    f'{symbol!r} as both the table_name and as a symbol.')
             if (at_col >= 0) and (col_index == <size_t>at_col):
                 raise ValueError(
                     f'Bad argument `symbols`: Cannot use the `at` column ' +
@@ -1461,7 +1499,7 @@ cdef ssize_t _pandas_resolve_at(
         size_t col_count,
         int64_t* at_value_out) except -2:
     cdef size_t col_index
-    cdef str col_kind
+    cdef object dtype
     if at is None:
         at_value_out[0] = 0  # Special value for `at_now`.
         return -1
@@ -1480,14 +1518,24 @@ cdef ssize_t _pandas_resolve_at(
             f'Bad argument `at`: Unsupported type {type(at)}. ' +
             'Must be one of: None, TimestampNanos, datetime, ' +
             'int (column index), str (colum name)')
-    col_kind = data.dtypes[col_index].kind
-    if col_kind == 'M':  # datetime
+    dtype = data.dtypes[col_index]
+    if _pandas_is_supported_datetime(dtype):
         at_value_out[0] = 0
         return col_index
     else:
         raise TypeError(
-            f'Bad argument `at`: Bad dtype `{data.dtypes[col_index]}` ' +
-            f'for the {at!r} column: Must be a datetime column.')
+            f'Bad argument `at`: Bad dtype `{dtype}` ' +
+            f'for the {at!r} column: Must be a datetime64[ns] column.')
+
+
+cdef object _pandas_is_supported_datetime(object dtype):
+    # We currently only accept datetime64[ns] columns.
+    return (
+        (dtype.kind == 'M') and
+        (dtype.itemsize == 8) and
+        (dtype.byteorder == '=') and
+        (dtype.alignment == 8) and
+        (not dtype.hasobject))
 
 
 cdef struct dtype_t:
@@ -1506,8 +1554,8 @@ cdef char _str_to_char(str field, str s) except 0:
     if len(s) != 1:
         raise ValueError(
             f'dtype.{field}: Expected a single character, got {s!r}')
-    res = ord(s[0])
-    if res <= 0 or res > 127:  ## ascii, exclude nul-termintor
+    res = ord(s)
+    if res <= 0 or res > 127:  # Check if ASCII, excluding the nul-termintor.
         raise ValueError(
             f'dtype.{field}: Character out of ASCII range, got {s!r}')
     return <char>res
@@ -1555,8 +1603,128 @@ cdef bint _pandas_resolve_col_buffers(
             raise TypeError(
                 f'Bad column: Expected a numpy array, got {nparr!r}')
         PyObject_GetBuffer(nparr, view, PyBUF_STRIDES)
+        # TODO [amunra]: We should check that the buffer metadata and the dtype match. We currently risk a segfault.
         set_buf_count[0] += 1   # Set to avoid wrongly calling PyBuffer_Release.
     return True
+
+
+cdef inline const void* _pandas_get_cell(
+        Py_buffer* col_buffer, size_t row_index):
+    return col_buffer.buf + (<ssize_t>row_index * col_buffer.strides[0])
+
+
+cdef char _PANDAS_DTYPE_KIND_OBJECT = <char>79  # 'O'
+cdef char _PANDAS_DTYPE_KIND_DATETIME = <char>77  # 'M'
+
+
+cdef bint _pandas_get_str_cell(
+        qdb_pystr_buf* b,
+        dtype_t* dtype,
+        Py_buffer* col_buffer,
+        size_t row_index,
+        line_sender_utf8* utf8_out) except False:
+    cdef const void* cell = _pandas_get_cell(col_buffer, row_index)
+    if dtype.kind == _PANDAS_DTYPE_KIND_OBJECT:
+        # TODO [amunra]: Check in the generated .C code that it doesn't produce an INCREF.
+        # TODO: Improve error messaging. Error message should include the column name.
+        str_to_utf8(b, <object>((<PyObject**>cell)[0]), utf8_out)
+    else:
+        raise TypeError(
+            f'NOT YET IMPLEMENTED. Kind: {dtype.kind}')  # TODO [amunra]: Implement and test.
+    return True
+
+
+cdef int64_t _pandas_get_timestamp_cell(
+        dtype_t* dtype,
+        Py_buffer* col_buffer,
+        size_t row_index) except -1:
+    # Note: Type is pre-validated by `_pandas_is_supported_datetime`.
+    cdef const void* cell = _pandas_get_cell(col_buffer, row_index)
+    cdef int64_t res = (<int64_t*>cell)[0]
+    if res < 0:
+        # TODO [amunra]: Improve error messaging. Add column name.
+        raise ValueError(  
+            f'Bad value: Negative timestamp, got {res}')
+    return res
+
+
+cdef bint _pandas_row_table_name(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        dtype_t* dtypes,
+        Py_buffer* col_buffers,
+        ssize_t name_col,
+        size_t row_index,
+        line_sender_table_name c_table_name) except False:
+    cdef line_sender_error* err = NULL
+    cdef line_sender_utf8 utf8
+    if name_col >= 0:
+        _pandas_get_str_cell(
+            b,
+            &dtypes[<size_t>name_col],
+            &col_buffers[<size_t>name_col],
+            row_index,
+            &utf8)
+        if not line_sender_table_name_init(&c_table_name, utf8.len, utf8.buf, &err):
+            raise c_err_to_py(err)
+    if not line_sender_buffer_table(impl, c_table_name, &err):
+        raise c_err_to_py(err)
+    return True
+
+    
+cdef bint _pandas_row_symbols(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        dtype_t* dtypes,
+        Py_buffer* col_buffers,
+        size_t row_index,
+        const column_name_vec* symbol_names,
+        const size_t_vec* symbol_indices) except False:
+    cdef line_sender_error* err = NULL
+    cdef size_t sym_index
+    cdef size_t col_index
+    cdef dtype_t* dtype
+    cdef Py_buffer* col_buffer
+    cdef line_sender_column_name col_name
+    cdef line_sender_utf8 symbol
+    for sym_index in range(symbol_indices.size):
+        col_name = symbol_names.d[sym_index]
+        col_index = symbol_indices.d[sym_index]
+        col_buffer = &col_buffers[col_index]
+        dtype = &dtypes[col_index]
+        _pandas_get_str_cell(
+            b,
+            dtype,
+            col_buffer,
+            row_index,
+            &symbol)
+        if not line_sender_buffer_symbol(impl, col_name, symbol, &err):
+            raise c_err_to_py(err)
+    return True
+
+
+cdef bint _pandas_row_at(
+        line_sender_buffer* impl,
+        dtype_t* dtypes,
+        Py_buffer* col_buffers,
+        size_t row_index,
+        ssize_t at_col,
+        int64_t at_value) except False:
+    cdef line_sender_error* err = NULL
+    cdef Py_buffer* col_buffer
+    cdef dtype_t* dtype
+    if at_col >= 0:
+        col_buffer = &col_buffers[<size_t>at_col]
+        dtype = &dtypes[<size_t>at_col]
+        at_value = _pandas_get_timestamp_cell(dtype, col_buffer, row_index)
+    if at_value > 0:
+        if not line_sender_buffer_at(impl, at_value, &err):
+            raise c_err_to_py(err)
+    else:
+        if not line_sender_buffer_at_now(impl, &err):
+            raise c_err_to_py(err)
+    return True
+        
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
