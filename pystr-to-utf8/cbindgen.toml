@@ -52,7 +52,7 @@ documentation = true
 documentation_style = "doxy"
 
 # Codegen Options
-style = "type"
+style = "both"
 usize_is_size_t = true
 
 [fn]

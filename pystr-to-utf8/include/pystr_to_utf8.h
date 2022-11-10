@@ -32,7 +32,7 @@
 
 typedef struct qdb_pystr_buf qdb_pystr_buf;
 
-typedef struct
+typedef struct qdb_pystr_pos
 {
     size_t chain;
     size_t string;
@@ -46,35 +46,35 @@ extern "C" {
  * Prepare a new buffer. The buffer must be freed with `qdb_pystr_free`.
  * The `qdb_ucsX_to_utf8` functions will write to this buffer.
  */
-qdb_pystr_buf *qdb_pystr_buf_new(void);
+struct qdb_pystr_buf *qdb_pystr_buf_new(void);
 
 /**
  * Get current position. Use in conjunction with `truncate`.
  */
-qdb_pystr_pos qdb_pystr_buf_tell(const qdb_pystr_buf *b);
+struct qdb_pystr_pos qdb_pystr_buf_tell(const struct qdb_pystr_buf *b);
 
 /**
  * Trim the buffer to the given position. Use in conjunction with `tell`.
  */
-void qdb_pystr_buf_truncate(qdb_pystr_buf *b,
-                            qdb_pystr_pos pos);
+void qdb_pystr_buf_truncate(struct qdb_pystr_buf *b,
+                            struct qdb_pystr_pos pos);
 
 /**
  * Reset the converter's buffer to zero length.
  */
-void qdb_pystr_buf_clear(qdb_pystr_buf *b);
+void qdb_pystr_buf_clear(struct qdb_pystr_buf *b);
 
 /**
  * Free the buffer. Must be called after `qdb_pystr_buf_new`.
  */
-void qdb_pystr_buf_free(qdb_pystr_buf *b);
+void qdb_pystr_buf_free(struct qdb_pystr_buf *b);
 
 /**
  * Convert a Py_UCS1 string to UTF-8.
  * Returns a `buf_out` borrowed ptr of `size_out` len.
  * The buffer is borrowed from `b`.
  */
-void qdb_ucs1_to_utf8(qdb_pystr_buf *b,
+void qdb_ucs1_to_utf8(struct qdb_pystr_buf *b,
                       size_t count,
                       const uint8_t *input,
                       size_t *size_out,
@@ -87,7 +87,7 @@ void qdb_ucs1_to_utf8(qdb_pystr_buf *b,
  * In case of errors, returns `false` and bad_codepoint_out is set to the
  * offending codepoint.
  */
-bool qdb_ucs2_to_utf8(qdb_pystr_buf *b,
+bool qdb_ucs2_to_utf8(struct qdb_pystr_buf *b,
                       size_t count,
                       const uint16_t *input,
                       size_t *size_out,
@@ -101,7 +101,7 @@ bool qdb_ucs2_to_utf8(qdb_pystr_buf *b,
  * In case of errors, returns `false` and bad_codepoint_out is set to the
  * offending codepoint.
  */
-bool qdb_ucs4_to_utf8(qdb_pystr_buf *b,
+bool qdb_ucs4_to_utf8(struct qdb_pystr_buf *b,
                       size_t count,
                       const uint32_t *input,
                       size_t *size_out,
