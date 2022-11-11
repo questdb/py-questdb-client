@@ -1040,6 +1040,7 @@ cdef class Buffer:
         cdef qdb_pystr_pos str_buf_marker
         cdef size_t row_count
         cdef Py_buffer* cur_col
+        _pandas_may_set_na_type()
         try:
             _check_is_pandas_dataframe(data)
             col_count = len(data.columns)
@@ -1255,6 +1256,16 @@ cdef struct column_buf_t:
     ssize_t itemsize  # element size in bytes (!=nbytes/count due to strides)
     ssize_t stride    # stride in bytes between elements
     # NB: We don't support suboffsets.
+
+
+cdef object _PANDAS_NA = None
+
+
+cdef object _pandas_may_set_na_type():
+    global _PANDAS_NA
+    if _PANDAS_NA is None:
+        import pandas as pd
+        _PANDAS_NA = pd.NA
 
 
 cdef ssize_t _pandas_resolve_table_name(
@@ -1565,11 +1576,12 @@ cdef bint _pandas_parse_dtype(object np_dtype, dtype_t* dtype_out) except False:
     """
     Parse a numpy dtype and return a dtype_t.
     """
-    dtype_out.alignment = np_dtype.alignment
+    dtype_out.alignment = getattr(np_dtype, 'alignment' , 0)
     dtype_out.kind = _str_to_char('kind', np_dtype.kind)
-    dtype_out.itemsize = np_dtype.itemsize
-    dtype_out.byteorder = _str_to_char('byteorder', np_dtype.byteorder)
-    dtype_out.hasobject = np_dtype.hasobject
+    dtype_out.itemsize = getattr(np_dtype, 'itemsize', 0)
+    dtype_out.byteorder = _str_to_char(
+        'byteorder', getattr(np_dtype, 'byteorder', '='))
+    dtype_out.hasobject = getattr(np_dtype, 'hasobject', False)
     return True
 
 
@@ -1622,12 +1634,24 @@ cdef bint _pandas_get_str_cell(
         dtype_t* dtype,
         Py_buffer* col_buffer,
         size_t row_index,
+        bint* is_null_out,
         line_sender_utf8* utf8_out) except False:
     cdef const void* cell = _pandas_get_cell(col_buffer, row_index)
+    cdef object obj
     if dtype.kind == _PANDAS_DTYPE_KIND_OBJECT:
         # TODO [amunra]: Check in the generated .C code that it doesn't produce an INCREF.
         # TODO: Improve error messaging. Error message should include the column name.
-        str_to_utf8(b, <object>((<PyObject**>cell)[0]), utf8_out)
+        obj = <object>((<PyObject**>cell)[0])
+        if (obj is None) or (obj is _PANDAS_NA):
+            is_null_out[0] = True
+        else:
+            is_null_out[0] = False
+            try:
+                str_to_utf8(b, obj, utf8_out)
+            except TypeError as e:
+                raise TypeError(
+                    'Bad column: Expected a string, ' +
+                    f'got {obj!r} ({type(obj)!r})') from e
     else:
         raise TypeError(
             f'NOT YET IMPLEMENTED. Kind: {dtype.kind}')  # TODO [amunra]: Implement and test.
@@ -1657,6 +1681,7 @@ cdef bint _pandas_row_table_name(
         size_t row_index,
         line_sender_table_name c_table_name) except False:
     cdef line_sender_error* err = NULL
+    cdef bint is_null = False
     cdef line_sender_utf8 utf8
     if name_col >= 0:
         _pandas_get_str_cell(
@@ -1664,8 +1689,14 @@ cdef bint _pandas_row_table_name(
             &dtypes[<size_t>name_col],
             &col_buffers[<size_t>name_col],
             row_index,
+            &is_null,
             &utf8)
-        if not line_sender_table_name_init(&c_table_name, utf8.len, utf8.buf, &err):
+        if is_null:
+            # TODO [amunra]: Improve error messaging. Add column name.
+            raise ValueError(
+                f'Bad value: `None` table name value at row {row_index}.')
+        if not line_sender_table_name_init(
+                &c_table_name, utf8.len, utf8.buf, &err):
             raise c_err_to_py(err)
     if not line_sender_buffer_table(impl, c_table_name, &err):
         raise c_err_to_py(err)
@@ -1687,6 +1718,7 @@ cdef bint _pandas_row_symbols(
     cdef Py_buffer* col_buffer
     cdef line_sender_column_name col_name
     cdef line_sender_utf8 symbol
+    cdef bint is_null = False
     for sym_index in range(symbol_indices.size):
         col_name = symbol_names.d[sym_index]
         col_index = symbol_indices.d[sym_index]
@@ -1697,9 +1729,11 @@ cdef bint _pandas_row_symbols(
             dtype,
             col_buffer,
             row_index,
+            &is_null,
             &symbol)
-        if not line_sender_buffer_symbol(impl, col_name, symbol, &err):
-            raise c_err_to_py(err)
+        if not is_null:
+            if not line_sender_buffer_symbol(impl, col_name, symbol, &err):
+                raise c_err_to_py(err)
     return True
 
 

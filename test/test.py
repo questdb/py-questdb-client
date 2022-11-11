@@ -449,10 +449,12 @@ DF1 = pd.DataFrame({
 DF2 = pd.DataFrame({
     'T': ['t1', 't2', 't1'],
     'A': ['a1', 'a2', 'a3'],
-    'B': ['b1', 'b2', 'b3'],
-    'C': [1.0, 2.0, 3.0],
-    'D': [1, 2, 3],
-    'E': [
+    'B': ['b1', None, 'b3'],
+    'C': pd.Series(['b1', None, 'b3'], dtype='string'),
+    'D': pd.Series(['a1', 'a2', 'a3'], dtype='string'),
+    'E': [1.0, 2.0, 3.0],
+    'F': [1, 2, 3],
+    'G': [
         pd.Timestamp('20180310'),
         pd.Timestamp('20180311'),
         pd.Timestamp('20180312')]})
@@ -516,7 +518,11 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name='tbl1', at=-1)
     
     def test_basic(self):
-        buf = _pandas(DF2, table_name_col='T', symbols=['A', 'B'], at=-1)
+        buf = _pandas(
+            DF2,
+            table_name_col='T',
+            symbols=['A', 'B', 'C', 'D'],
+            at=-1)
         self.assertEqual(
             buf,
             't1,A=a1,B=b1 1520640000000000000\n' +
