@@ -1,106 +1,76 @@
+include "size_t_vec.pxi"
+include "column_name_vec.pxi"
+
+# See: pandas_helpers.md for technical overview.
+
+cdef struct dtype_t:
+    # See: https://numpy.org/doc/stable/reference/generated/numpy.dtype.html
+    #          ?highlight=dtype#numpy.dtype
+    # See: https://numpy.org/doc/stable/reference/c-api
+    #          /types-and-structures.html#c.PyArray_Descr
+    int alignment
+    char kind
+    int itemsize
+    char byteorder
+    bint hasobject
 
 
-cdef struct c_size_t_vec:
-    size_t capacity
-    size_t size
-    size_t* d
-
-ctypedef c_size_t_vec size_t_vec
-
-cdef size_t_vec size_t_vec_new():
-    cdef size_t_vec vec
-    vec.capacity = 0
-    vec.size = 0
-    vec.d = <size_t*>NULL
-    return vec
-
-cdef void size_t_vec_free(size_t_vec* vec):
-    if vec.d:
-        free(vec.d)
-        vec.d = NULL
-
-cdef str size_t_vec_str(size_t_vec* vec):
-    return 'size_t_vec' + str([vec.d[i] for i in range(vec.size)])
-
-cdef void size_t_vec_push(size_t_vec* vec, size_t value):
-    if vec.capacity == 0:
-        vec.capacity = 8
-        vec.d = <size_t*>malloc(vec.capacity * sizeof(size_t))
-        if vec.d == NULL:
-            abort()
-    elif vec.size == vec.capacity:
-        vec.capacity = vec.capacity * 2
-        vec.d = <size_t*>realloc(vec.d, vec.capacity * sizeof(size_t))
-        if not vec.d:
-            abort()
-    vec.d[vec.size] = value
-    vec.size += 1
+cdef struct col_numpy_data_t:
+    dtype_t dtype
+    Py_buffer pybuf
 
 
-cdef struct c_column_name_vec:
-    size_t capacity
-    size_t size
-    line_sender_column_name* d
-
-ctypedef c_column_name_vec column_name_vec
-
-cdef column_name_vec column_name_vec_new():
-    cdef column_name_vec vec
-    vec.capacity = 0
-    vec.size = 0
-    vec.d = <line_sender_column_name*>NULL
-    return vec
-
-cdef void column_name_vec_free(column_name_vec* vec):
-    if vec.d:
-        free(vec.d)
-        vec.d = NULL
-
-cdef void column_name_vec_push(
-        column_name_vec* vec, line_sender_column_name value):
-    if vec.capacity == 0:
-        vec.capacity = 8
-        vec.d = <line_sender_column_name*>malloc(
-            vec.capacity * sizeof(line_sender_column_name))
-        if vec.d == NULL:
-            abort()
-    elif vec.size == vec.capacity:
-        vec.capacity = vec.capacity * 2
-        vec.d = <line_sender_column_name*>realloc(
-            vec.d,
-            vec.capacity * sizeof(line_sender_column_name))
-        if not vec.d:
-            abort()
-    vec.d[vec.size] = value
-    vec.size += 1
+cdef struct col_arrow_data_t:
+    ArrowSchema schema
+    size_t n_chunks
+    ArrowArray chunks
 
 
-cdef enum col_type_t:
-    COL_TYPE_INT = 0
-    COL_TYPE_FLOAT = 1
-    COL_TYPE_STRING = 2
-    COL_TYPE_BOOL = 3
-    COL_TYPE_DATE = 4
-    COL_TYPE_TIME = 5
-    COL_TYPE_DATETIME = 6
-    COL_TYPE_BLOB = 7
-    COL_TYPE_NULL = 8
+cdef enum col_access_tag_t:
+    numpy
+    arrow
 
-# Inspired by a Py_buffer.
-# See: https://docs.python.org/3/c-api/buffer.html
-# This is simpler as we discard Python-specifics and it's one-dimensional only,
-# i.e. `ndim` is always 1.
-# If this stuff makes no sense to you:
-# http://jakevdp.github.io/blog/2014/05/05/introduction-to-the-python-buffer-protocol/
-# and https://www.youtube.com/watch?v=10smLBD0kXg
-cdef struct column_buf_t:
-    col_type_t dtype  # internal enum value of supported pandas type.
-    void* d           # start of the buffer (pointer to element 0)
-    ssize_t nbytes    # size of the buffer in bytes
-    ssize_t count     # number of elements in the buffer (aka shape[0])
-    ssize_t itemsize  # element size in bytes (!=nbytes/count due to strides)
-    ssize_t stride    # stride in bytes between elements
-    # NB: We don't support suboffsets.
+
+cdef union col_access_t:
+    col_numpy_data_t numpy
+    col_arrow_data_t arrow
+
+
+cdef struct col_cursor_t:
+    size_t chunk_index
+    size_t n_chunks
+    size_t offset  # i.e. the element index (not byte offset)
+    size_t length  # number of elements in current chunk
+
+    # Expanded pointers to Numpy or Arrow buffers
+
+    # https://arrow.apache.org/docs/format/Columnar.html#validity-bitmaps
+    # Always NULL for Numpy, optionally null for Arrow.
+    uint8_t* validity
+
+    # Must cast to correct datatype
+    void* data
+
+    # NULL for Numpy, may be set for Arrow strings.
+    uint8_t* utf8_buf
+
+
+cdef enum col_line_sender_target_t:
+    table
+    symbol
+    column_bool
+    column_i64
+    column_f64
+    column_str
+    column_ts
+    at
+
+
+cdef struct col_handle_t:
+    col_access_tag_t access_tag
+    col_access_t access
+    col_cursor_t cursor
+    col_line_sender_target_t target
 
 
 cdef object _PANDAS_NA = None
@@ -394,15 +364,7 @@ cdef object _pandas_is_supported_datetime(object dtype):
         (not dtype.hasobject))
 
 
-cdef struct dtype_t:
-    # A ripoff of a subset of PyArray_Descr as we were able to extract from numpy.dtype.
-    # See: https://numpy.org/doc/stable/reference/generated/numpy.dtype.html?highlight=dtype#numpy.dtype
-    # See: https://numpy.org/doc/stable/reference/c-api/types-and-structures.html#c.PyArray_Descr
-    int alignment
-    char kind
-    int itemsize
-    char byteorder
-    bint hasobject
+
 
 
 cdef char _str_to_char(str field, str s) except 0:

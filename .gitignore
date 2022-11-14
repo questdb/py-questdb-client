@@ -1,6 +1,4 @@
-src/questdb/ingress.html
-src/questdb/ingress.c
-src/questdb/pandas_helpers.html
+src/questdb/*.html
 rustup-init.exe
 
 # Byte-compiled / optimized / DLL files
