@@ -1,3 +1,4 @@
+src/questdb/ingress.c
 src/questdb/*.html
 rustup-init.exe
 
