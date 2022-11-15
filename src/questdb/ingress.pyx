@@ -360,16 +360,6 @@ cdef class TimestampNanos:
         return self._value
 
 
-cdef _check_is_pandas_dataframe(data):
-    exp_mod = 'pandas.core.frame'
-    exp_name = 'DataFrame'
-    t = type(data)
-    if (t.__module__ != exp_mod) or (t.__qualname__ != exp_name):
-        raise TypeError(
-            f'Bad argument `data`: Expected {exp_mod}.{exp_name}, ' +
-            f'not {t.__module__}.{t.__qualname__}.')
-
-
 cdef class Sender
 cdef class Buffer
 
@@ -975,118 +965,6 @@ cdef class Buffer:
     #     """
     #     raise ValueError('nyi')
 
-    cdef bint _pandas(
-            self,
-            object data,
-            object table_name,
-            object table_name_col,
-            object symbols,
-            object at,
-            bint sort) except False:
-        # First, we need to make sure that `data` is a dataframe.
-        # We specifically avoid using `isinstance` here because we don't want
-        # to add a library dependency on pandas itself. We simply rely on its API.
-        # The only reason to validate here is to avoid obscure "AttributeError"
-        # exceptions later.
-        cdef size_t col_count
-        cdef ssize_t name_col
-        cdef line_sender_table_name c_table_name
-        cdef size_t_vec symbol_indices = size_t_vec_new()
-        cdef size_t_vec field_indices = size_t_vec_new()
-        cdef ssize_t at_col
-        cdef int64_t at_value = 0
-        cdef column_name_vec symbol_names = column_name_vec_new()
-        cdef column_name_vec field_names = column_name_vec_new()
-        cdef dtype_t* dtypes = NULL
-        cdef size_t set_buf_count = 0
-        cdef Py_buffer* col_buffers = NULL
-        cdef size_t col_index
-        cdef qdb_pystr_pos str_buf_marker
-        cdef size_t row_count
-        cdef Py_buffer* cur_col
-        _pandas_may_set_na_type()
-        try:
-            _check_is_pandas_dataframe(data)
-            col_count = len(data.columns)
-            qdb_pystr_buf_clear(self._b)
-            name_col = _pandas_resolve_table_name(
-                self._b,
-                data, table_name, table_name_col, col_count, &c_table_name)
-            at_col = _pandas_resolve_at(data, at, col_count, &at_value)
-            _pandas_resolve_symbols(
-                data, name_col, at_col, symbols, col_count, &symbol_indices)
-            _pandas_resolve_fields(
-                name_col, &symbol_indices, at_col, col_count, &field_indices)
-            _pandas_resolve_col_names(
-                self._b,
-                data, &symbol_indices, &field_indices,
-                &symbol_names, &field_names)
-            dtypes = <dtype_t*>calloc(col_count, sizeof(dtype_t))
-            _pandas_resolve_dtypes(data, col_count, dtypes)
-            col_buffers = <Py_buffer*>calloc(col_count, sizeof(Py_buffer))
-            _pandas_resolve_col_buffers(
-                data, col_count, dtypes, col_buffers, &set_buf_count)
-
-            # We've used the str buffer up to a point for the headers.
-            # Instead of clearing it (which would clear the headers' memory)
-            # we will truncate (rewind) back to this position.
-            str_buf_marker = qdb_pystr_buf_tell(self._b)
-
-            import sys
-            sys.stderr.write('_pandas :: (A) ' +
-                f'name_col: {name_col}, ' +
-                f'symbol_indices: {size_t_vec_str(&symbol_indices)}, ' +
-                f'at_col: {at_col}, ' +
-                f'at_value: {at_value}, ' +
-                f'field_indices: {size_t_vec_str(&field_indices)}' +
-                '\n')
-            row_count = len(data)
-            self._clear_marker()
-            for row_index in range(row_count):
-                qdb_pystr_buf_truncate(self._b, str_buf_marker)
-                try:
-                    self._set_marker()
-                    _pandas_row_table_name(
-                        self._impl,
-                        self._b,
-                        dtypes,
-                        col_buffers,
-                        name_col,
-                        row_index,
-                        c_table_name)
-                    _pandas_row_symbols(
-                        self._impl,
-                        self._b,
-                        dtypes,
-                        col_buffers,
-                        row_index,
-                        &symbol_names,
-                        &symbol_indices)
-                    # _pandas_row_fields(...)  # TODO [amunra]: implement
-                    _pandas_row_at(
-                        self._impl,
-                        dtypes,
-                        col_buffers,
-                        row_index,
-                        at_col,
-                        at_value)
-                except:
-                    self._rewind_to_marker()
-                    raise
-            return True
-        finally:
-            self._clear_marker()
-            if col_buffers != NULL:
-                for col_index in range(set_buf_count):
-                    PyBuffer_Release(&col_buffers[col_index])
-                free(col_buffers)
-            free(dtypes)
-            column_name_vec_free(&field_names)
-            column_name_vec_free(&symbol_names)
-            size_t_vec_free(&field_indices)
-            size_t_vec_free(&symbol_indices)
-            qdb_pystr_buf_clear(self._b)
-
     def pandas(
             self,
             data,  # : pd.DataFrame
@@ -1109,7 +987,7 @@ cdef class Buffer:
             f'at: {at}, ' +
             f'sort: {sort}' +
             '\n')
-        self._pandas(data, table_name, table_name_col, symbols, at, sort)
+        _pandas(self._impl, self._b, data, table_name, table_name_col, symbols, at, sort)
         sys.stderr.write('pandas :: (B) ' +
             f'table_name: {table_name}, ' +
             f'table_name_col: {table_name_col}, ' +
