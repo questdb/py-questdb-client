@@ -77,10 +77,9 @@ _Multiple of these `ArrowArray` structs per column. Chunked._
     * `buffers[1]` is int32 offsets buffer
     * `children[0]` is ArrowArray of int8
     * See: https://arrow.apache.org/docs/format/Columnar.html#variable-size-list-layout
-* `ArrowArray* dictionary`: Needed to support Pandas categories. **`[INITIALLY OUT OF SCOPE]`**
-    * Given the complexity of supporting this feature
-      (and it being less common in use) we instead validate that it's not set.
-      See: https://pandas.pydata.org/docs/reference/api/pandas.CategoricalDtype.html
+* `ArrowArray* dictionary`: Needed to support Pandas categories.
+    * This ends up being an array of strings, whilst the index is kept in the
+      parent `buffers[1]` with `buffers[0]` (possibly) as the validity bitmap.
 
 ## Mapping Datatypes
 
@@ -422,6 +421,62 @@ string[pyarrow]
 >>> type(df.dtypes['a']).mro()
 [<class 'pandas.core.arrays.string_.StringDtype'>, <class 'pandas.core.dtypes.base.StorageExtensionDtype'>, <class 'pandas.core.dtypes.base.ExtensionDtype'>, <class 'object'>]
 ```
+
+#### Symbol-like Categorical Data
+
+Pandas supports categories. These are backed by Arrow.
+
+```python
+>>> df = pd.DataFrame({'a': pd.Series(
+...     ['symbol', 'like', 'type', 'symbol', 'like', 'like', 'like', None],
+...     dtype='category')})
+>>> df
+        a
+0  symbol
+1    like
+2    type
+3  symbol
+4    like
+5    like
+6    like
+7     NaN
+>>> df.dtypes['a']
+CategoricalDtype(categories=['like', 'symbol', 'type'], ordered=False)
+>>> type(df.dtypes['a']).mro()
+[<class 'pandas.core.dtypes.dtypes.CategoricalDtype'>, <class 'pandas.core.dtypes.dtypes.PandasExtensionDtype'>, <class 'pandas.core.dtypes.base.ExtensionDtype'>, <class 'object'>]
+```
+
+This is how it's represented:
+
+```python
+>>> pa.Array.from_pandas(df.a)
+<pyarrow.lib.DictionaryArray object at 0x7f7a965fee30>
+
+-- dictionary:
+  [
+    "like",
+    "symbol",
+    "type"
+  ]
+-- indices:
+  [
+    1,
+    0,
+    2,
+    1,
+    0,
+    0,
+    0,
+    null
+  ]
+```
+
+For this, we need the `dictionary` field in the `ArrowArray` struct.
+
+What's also neat is that we know the categories in advance _before_ running the
+encoding. This means we can build up our `line_sender_utf8` objects in advance,
+though they are all UTF-8 buffers already so.. little gain.
+
 
 ### Nanosecond-precision UTC unix epoch 64-bit signed int timestamps
 
