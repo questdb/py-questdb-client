@@ -49,7 +49,7 @@ from .pystr_to_utf8 cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
 
-include "pandas_helpers.pxi"
+include "pandas_integration.pxi"
 
 
 import cython

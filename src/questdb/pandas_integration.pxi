@@ -1,7 +1,7 @@
 include "size_t_vec.pxi"
 include "column_name_vec.pxi"
 
-# See: pandas_helpers.md for technical overview.
+# See: pandas_integration.md for technical overview.
 
 cdef struct dtype_t:
     # See: https://numpy.org/doc/stable/reference/generated/numpy.dtype.html
