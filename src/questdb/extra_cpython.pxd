@@ -1,3 +1,5 @@
+# Custom definitions that aren't provided in the standard `cpython` module.
+
 from libc.stdint cimport uint8_t, uint16_t, uint32_t
 
 cdef extern from "Python.h":
