@@ -232,7 +232,8 @@ Name: big_e, dtype: uint32
 
 ### 64-bit floats
 
-32-bit and 64-bit floats. They all support nullability.
+32-bit and 64-bit floats. They all support nullability. We will disallow 16-bit
+floats.
 
 64-bit is default.
 
@@ -264,6 +265,21 @@ Name: b, dtype: float32
 Name: c, dtype: float64
 ```
 
+16-bit floats _are_ allowed, but we will disallow them:
+
+```python
+>>> df = pd.DataFrame({'a': pd.Series([1.0, 1.5, 2.0], dtype='float16')})
+>>> df
+     a
+0  1.0
+1  1.5
+2  2.0
+>>> df.a
+0    1.0
+1    1.5
+2    2.0
+Name: a, dtype: float16
+```
 
 ### UTF-8 string buffers
 
@@ -274,7 +290,8 @@ Strings are.. hard. Strings in dataframes are harder.
 Numpy usually holds strings as Python objects.
 
 ```python
->>> df = pd.DataFrame({'a': ['Strings', 'in', 'Pandas', 'are', 'objects', 'by', 'default']})
+>>> df = pd.DataFrame({'a': [
+...     'Strings', 'in', 'Pandas', 'are', 'objects', 'by', 'default']})
 >>> df.dtypes['a']
 dtype('O')
 >>> type(df.dtypes['a']).mro()
@@ -355,6 +372,8 @@ It doesn't really matter much though. Their Pandas datatype is actually just
 dtype('O')
 >>> df.dtypes['b']
 dtype('O')
+>>> type(df.dtypes['b'])
+<class 'numpy.dtype[object_]'>
 ```
 
 We should:
@@ -397,6 +416,9 @@ but as `pandas.NA` objects.
 >>> df.a[1]
 <NA>
 ```
+
+At other times, we end up with `nan` python float objects to represent nulls.
+_Yay!_.
 
 #### Arrow-backed Strings
 

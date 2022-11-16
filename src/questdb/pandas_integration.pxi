@@ -47,14 +47,35 @@ cdef struct col_cursor_t:
 
 
 cdef enum col_line_sender_target_t:
-    table
-    symbol
-    column_bool
-    column_i64
-    column_f64
-    column_str
-    column_ts
-    at
+    table = 1
+    symbol = 2
+    column_bool = 3
+    column_i64 = 4
+    column_f64 = 5
+    column_str = 6
+    column_ts = 7
+    at = 8
+
+
+cdef enum col_source_t:
+    bool_pyobj = 11000
+    bool_numpy = 12000
+    bool_arrow = 13000
+    int_pyobj =  21000
+    u8_num =     22000
+    i8_num =     23000
+    u16_num =    24000
+    i16_num =    25000
+    u32_num =    26000
+    i32_num =    27000
+    u64_num =    28000
+    i64_num =    29000
+    f32_num =    31000
+    f64_num =    32000
+    str_pyobj =  41000
+    str_arrow =  42000
+    str_categ =  43000
+    dt64 =       51000
 
 
 cdef struct col_t:
