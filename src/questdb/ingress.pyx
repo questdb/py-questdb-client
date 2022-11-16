@@ -49,10 +49,10 @@ from .pystr_to_utf8 cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
 
+import cython
 include "pandas_integration.pxi"
 
 
-import cython
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
 import pathlib

@@ -21,9 +21,8 @@ cdef struct col_numpy_data_t:
 
 
 cdef struct col_arrow_data_t:
-    ArrowSchema schema
+    ArrowSchema schema  # Schema of first chunk.
     size_t n_chunks
-    ArrowArray chunks
 
 
 cdef enum col_access_tag_t:
@@ -36,23 +35,15 @@ cdef union col_access_t:
     col_arrow_data_t arrow
 
 
-cdef struct col_cursor_t:
-    size_t chunk_index
+cdef struct col_chunks_t:
     size_t n_chunks
+    ArrowArray* chunks  # We calloc `n_chunks + 1` of these.
+
+
+cdef struct col_cursor_t:
+    ArrowArray* chunk  # Current chunk.
+    size_t chunk_index
     size_t offset  # i.e. the element index (not byte offset)
-    size_t length  # number of elements in current chunk
-
-    # Expanded pointers to Numpy or Arrow buffers
-
-    # https://arrow.apache.org/docs/format/Columnar.html#validity-bitmaps
-    # Always NULL for Numpy, optionally null for Arrow.
-    uint8_t* validity
-
-    # Must cast to correct datatype
-    void* data
-
-    # NULL for Numpy, may be set for Arrow strings.
-    uint8_t* utf8_buf
 
 
 cdef enum col_line_sender_target_t:
@@ -66,16 +57,55 @@ cdef enum col_line_sender_target_t:
     at
 
 
-cdef struct col_handle_t:
+cdef struct col_t:
+    line_sender_utf8 col_name
     col_access_tag_t access_tag
     col_access_t access
+    col_chunks_t chunks
     col_cursor_t cursor
     col_line_sender_target_t target
 
 
-cdef object _PANDAS = None
-cdef object _PYARROW = None
-cdef object _PANDAS_NA = None
+cdef void col_t_release(col_t* col):
+    # TODO: Implement cleanup, PyBuffer_Release, etc.
+    pass
+
+
+cdef struct col_t_arr:
+    size_t capacity
+    size_t size  # Number of elements we've populated. Needed for cleanup.
+    col_t* d
+
+
+cdef col_t_arr col_t_arr_blank():
+    cdef col_t_arr arr
+    arr.capacity = 0
+    arr.size = 0
+    arr.d = NULL
+    return arr
+
+
+cdef col_t_arr col_t_arr_new(size_t capacity):
+    cdef col_t_arr arr
+    arr.capacity = capacity
+    arr.size = 0
+    arr.d = <col_t*>calloc(capacity, sizeof(col_t))
+    return arr
+
+
+cdef void col_t_arr_release(col_t_arr* arr):
+    if arr.d:
+        for i in range(arr.size):
+            col_t_release(&arr.d[i])
+        free(arr.d)
+        arr.size = 0
+        arr.capacity = 0
+        arr.d = NULL
+
+
+cdef object _PANDAS = None  # module object
+cdef object _PANDAS_NA = None  # pandas.NA
+cdef object _PYARROW = None  # module object, if available or None
 
 
 cdef object _pandas_may_import_deps():
@@ -102,6 +132,7 @@ cdef object _check_is_pandas_dataframe(object data):
 cdef ssize_t _pandas_resolve_table_name(
         qdb_pystr_buf* b,
         object data,
+        list tagged_cols,
         object table_name,
         object table_name_col,
         size_t col_count,
@@ -148,43 +179,13 @@ cdef ssize_t _pandas_resolve_table_name(
             col_index,
             'Bad argument `table_name_col`: ',
             table_name_col)
+        tagged_cols[col_index][3] = -2  # Sort column to front as table name.
+        name_out.len = 0
+        name_out.buf = NULL
         return col_index
     else:
         raise ValueError(
             'Must specify at least one of `table_name` or `table_name_col`.')
-
-
-cdef int _pandas_resolve_fields(
-        int name_col,
-        const size_t_vec* symbol_indices,
-        int at_col,
-        size_t col_count,
-        size_t_vec* field_indices_out) except -1:
-    """
-    Populate vec of field column indices via `field_indices_out`.
-    Returns the length of the list.
-    The vec will contain all columns which are not the table name column,
-    symbols or the at timestamp column.
-    """
-    # We rely on `symbol_indices` being sorted.
-    cdef size_t col_index = 0
-    cdef size_t sym_index = 0
-    cdef size_t sym_len = symbol_indices.size
-    while col_index < col_count:
-        if (name_col >= 0) and (col_index == <size_t>name_col):
-            col_index += 1
-            continue
-        if (at_col >= 0) and (col_index == <size_t>at_col):
-            col_index += 1
-            continue
-        while sym_index < sym_len and symbol_indices.d[sym_index] < col_index:
-            sym_index += 1
-        if sym_index < sym_len and symbol_indices.d[sym_index] == col_index:
-            col_index += 1
-            continue
-        size_t_vec_push(field_indices_out, col_index)
-        col_index += 1
-    return 0
 
 
 cdef bint _pandas_resolve_col_names(
@@ -269,17 +270,35 @@ cdef object _pandas_check_column_is_str(
             f'{col_name!r} column: Must be a strings column.')
 
 
-cdef int _pandas_resolve_symbols(
+@cython.internal
+cdef class TaggedEntry:
+    """Python object representing a column whilst parsing .pandas arguments."""
+
+    cdef size_t index
+    cdef str name
+    cdef object series
+    cdef int sort_key
+
+    def __init__(self, size_t index, str name, object series, int sort_key):
+        self.index = index
+        self.name = name
+        self.series = series
+        self.sort_key = sort_key
+
+
+cdef int _SORT_AS_FIELD = 0
+cdef int _SORT_AS_TABLE_NAME = -2
+cdef int _SORT_AS_SYMBOL = -1
+cdef int _SORT_AS_AT = 1
+
+
+cdef bint _pandas_resolve_symbols(
         object data,
+        list tagged_cols,
         ssize_t table_name_col,
         ssize_t at_col,
         object symbols,
-        size_t col_count,
-        size_t_vec* symbol_indices_out) except -1:
-    """
-    Populate vec of symbol column indices via `symbol_indices_out`.
-    Returns the length of the vec.
-    """
+        size_t col_count) except False:
     cdef size_t col_index = 0
     cdef object symbol
     if symbols is False:
@@ -287,8 +306,8 @@ cdef int _pandas_resolve_symbols(
     elif symbols is True:
         for col_index in range(col_count):
             if _pandas_column_is_str(data, col_index):
-                size_t_vec_push(symbol_indices_out, col_index)
-        return 0
+                tagged_cols[col_index].sort_key = -1  # Sort col as as symbol.
+        return True
     else:
         if not isinstance(symbols, (tuple, list)):
             raise TypeError(
@@ -316,8 +335,8 @@ cdef int _pandas_resolve_symbols(
                 col_index,
                 'Bad element in argument `symbols`: ',
                 symbol)
-            size_t_vec_push(symbol_indices_out, col_index)
-        return 0
+            tagged_cols[col_index].sort_key = -1  # Sort col as as symbol.
+        return True
 
 
 cdef bint _pandas_get_loc(
@@ -335,8 +354,14 @@ cdef bint _pandas_get_loc(
             f'Column {col_name!r} not found in the dataframe.')
 
 
+# The -1 value is safe to use as a sentinel because the TimestampNanos type
+# already validates that the value is >= 0.
+cdef int64_t _AT_SET_BY_COLUMN = -1
+
+
 cdef ssize_t _pandas_resolve_at(
         object data,
+        list tagged_cols,
         object at,
         size_t col_count,
         int64_t* at_value_out) except -2:
@@ -362,7 +387,8 @@ cdef ssize_t _pandas_resolve_at(
             'int (column index), str (colum name)')
     dtype = data.dtypes[col_index]
     if _pandas_is_supported_datetime(dtype):
-        at_value_out[0] = 0
+        at_value_out[0] = _AT_SET_BY_COLUMN
+        tagged_cols[col_index].sort_key = 1  # Ordering key for "at" column.
         return col_index
     else:
         raise TypeError(
@@ -378,9 +404,6 @@ cdef object _pandas_is_supported_datetime(object dtype):
         (dtype.byteorder == '=') and
         (dtype.alignment == 8) and
         (not dtype.hasobject))
-
-
-
 
 
 cdef char _str_to_char(str field, str s) except 0:
@@ -583,6 +606,91 @@ cdef bint _pandas_row_at(
     return True
 
 
+cdef bint _pandas_resolve_args(
+        object data,
+        object table_name,
+        object table_name_col,
+        object symbols,
+        object at,
+        qdb_pystr_buf* b,
+        size_t col_count,
+        line_sender_table_name* c_table_name_out,
+        int64_t* at_value_out,
+        col_t_arr* cols_out) except False:
+    cdef ssize_t name_col
+    cdef ssize_t at_col
+
+    # List of Lists with col index, col name, series object, sorting key.
+    cdef list tagged_cols = [
+        TaggedEntry(
+            index,
+            name,
+            series,
+            _SORT_AS_FIELD)
+        for index, (name, series) in data.items()]
+    name_col = _pandas_resolve_table_name(
+        b,
+        data, tagged_cols, table_name, table_name_col, col_count, c_table_name_out)
+    at_col = _pandas_resolve_at(data, tagged_cols, at, col_count, at_value_out)
+    _pandas_resolve_symbols(
+        data, tagged_cols, name_col, at_col, symbols, col_count)
+
+    # Sort with table name is first, then the symbols, then fields, then at.
+    # Note: Python 3.6+ guarantees stable sort.
+    tagged_cols.sort(key=lambda x: x.sort_key)
+
+    return True
+
+
+    # _pandas_resolve_col_names(
+    #     b,
+    #     data, &symbol_indices, &field_indices,
+    #     &symbol_names, &field_names)
+    # cdef dtype_t* dtypes = NULL
+    # cdef size_t set_buf_count = 0
+    # cdef Py_buffer* col_buffers = NULL
+    # dtypes = <dtype_t*>calloc(col_count, sizeof(dtype_t))
+    # _pandas_resolve_dtypes(data, col_count, dtypes)
+    # col_buffers = <Py_buffer*>calloc(col_count, sizeof(Py_buffer))
+    # _pandas_resolve_col_buffers(
+    #     data, col_count, dtypes, col_buffers, &set_buf_count)
+
+
+cdef bint _pandas_serialize_cell(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    pass
+
+
+cdef void _pandas_col_advance(col_t* col):
+    # Branchless version of:
+    #     cdef bint new_chunk = cursor.offset == <size_t>cursor.chunk.length
+    #     if new_chunk == 0:
+    #         cursor.chunk_index += 1
+    #         cursor.chunk += 1  # pointer advance
+    #
+    #     if new_chunk:
+    #         cursor.offset = cursor.chunk.offset
+    #     else:
+    #         cursor.offset += 1
+    #
+    #
+    # (Checked with Godbolt, GCC -O3 code was rather "jumpy")
+    cdef col_cursor_t* cursor = &col.cursor
+    cdef size_t new_chunk  # disguised bint. Either 0 or 1.
+    cursor.offset += 1
+    new_chunk = cursor.offset == <size_t>cursor.chunk.length
+    cursor.chunk_index += new_chunk
+    cursor.chunk += new_chunk
+    # Note: We get away with this because we've allocated one extra blank chunk.
+    # This ensures that `cursor.chunk.offset` is always valid.
+    cursor.offset = (
+        (new_chunk * cursor.chunk.offset) +
+        ((not new_chunk) * cursor.offset))
+
+
 cdef bint _pandas(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
@@ -592,64 +700,47 @@ cdef bint _pandas(
         object symbols,
         object at,
         bint sort) except False:
-    # First, we need to make sure that `data` is a dataframe.
-    # We specifically avoid using `isinstance` here because we don't want
-    # to add a library dependency on pandas itself. We simply rely on its API.
-    # The only reason to validate here is to avoid obscure "AttributeError"
-    # exceptions later.
     cdef size_t col_count
-    cdef ssize_t name_col
     cdef line_sender_table_name c_table_name
-    cdef size_t_vec symbol_indices = size_t_vec_new()
-    cdef size_t_vec field_indices = size_t_vec_new()
-    cdef ssize_t at_col
-    cdef int64_t at_value = 0
-    cdef column_name_vec symbol_names = column_name_vec_new()
-    cdef column_name_vec field_names = column_name_vec_new()
-    cdef dtype_t* dtypes = NULL
-    cdef size_t set_buf_count = 0
-    cdef Py_buffer* col_buffers = NULL
-    cdef size_t col_index
+    cdef int64_t at_value = _AT_SET_BY_COLUMN
+    cdef col_t_arr cols = col_t_arr_blank()
     cdef qdb_pystr_pos str_buf_marker
-    cdef line_sender_error* err = NULL
     cdef size_t row_count
-    cdef Py_buffer* cur_col
+    cdef line_sender_error* err = NULL
+    cdef size_t col_index
+    cdef col_t* col
+
     _pandas_may_import_deps()
     try:
+        qdb_pystr_buf_clear(b)
         _check_is_pandas_dataframe(data)
         col_count = len(data.columns)
-        qdb_pystr_buf_clear(b)
-        name_col = _pandas_resolve_table_name(
+        cols = col_t_arr_new(col_count)
+        _pandas_resolve_args(
+            data,
+            table_name,
+            table_name_col,
+            symbols,
+            at,
             b,
-            data, table_name, table_name_col, col_count, &c_table_name)
-        at_col = _pandas_resolve_at(data, at, col_count, &at_value)
-        _pandas_resolve_symbols(
-            data, name_col, at_col, symbols, col_count, &symbol_indices)
-        _pandas_resolve_fields(
-            name_col, &symbol_indices, at_col, col_count, &field_indices)
-        _pandas_resolve_col_names(
-            b,
-            data, &symbol_indices, &field_indices,
-            &symbol_names, &field_names)
-        dtypes = <dtype_t*>calloc(col_count, sizeof(dtype_t))
-        _pandas_resolve_dtypes(data, col_count, dtypes)
-        col_buffers = <Py_buffer*>calloc(col_count, sizeof(Py_buffer))
-        _pandas_resolve_col_buffers(
-            data, col_count, dtypes, col_buffers, &set_buf_count)
+            col_count,
+            &c_table_name,
+            &at_value,
+            &cols)
 
         # We've used the str buffer up to a point for the headers.
         # Instead of clearing it (which would clear the headers' memory)
         # we will truncate (rewind) back to this position.
         str_buf_marker = qdb_pystr_buf_tell(b)
 
-        import sys
-        sys.stderr.write('_pandas :: (A) ' +
-            f'name_col: {name_col}, ' +
-            f'symbol_indices: {size_t_vec_str(&symbol_indices)}, ' +
-            f'at_col: {at_col}, ' +
-            f'at_value: {at_value}, ' +
-            f'field_indices: {size_t_vec_str(&field_indices)}' +
-            '\n')
+        # import sys
+        # sys.stderr.write('_pandas :: (A) ' +
+        #     f'name_col: {name_col}, ' +
+        #     f'symbol_indices: {size_t_vec_str(&symbol_indices)}, ' +
+        #     f'at_col: {at_col}, ' +
+        #     f'at_value: {at_value}, ' +
+        #     f'field_indices: {size_t_vec_str(&field_indices)}' +
+        #     '\n')
         row_count = len(data)
         line_sender_buffer_clear_marker(impl)
         for row_index in range(row_count):
@@ -657,30 +748,26 @@ cdef bint _pandas(
             try:
                 if not line_sender_buffer_set_marker(impl, &err):
                     raise c_err_to_py(err)
-                _pandas_row_table_name(
-                    impl,
-                    b,
-                    dtypes,
-                    col_buffers,
-                    name_col,
-                    row_index,
-                    c_table_name)
-                _pandas_row_symbols(
-                    impl,
-                    b,
-                    dtypes,
-                    col_buffers,
-                    row_index,
-                    &symbol_names,
-                    &symbol_indices)
-                # _pandas_row_fields(...)  # TODO [amunra]: implement
-                _pandas_row_at(
-                    impl,
-                    dtypes,
-                    col_buffers,
-                    row_index,
-                    at_col,
-                    at_value)
+
+                # Fixed table-name.
+                if c_table_name.buf != NULL:
+                    if not line_sender_buffer_table(impl, c_table_name, &err):
+                        raise c_err_to_py(err)
+
+                # Serialize columns cells.
+                # Note: Columns are sorted: table name, symbols, fields, at.
+                for col_index in range(col_count):
+                    col = &cols.d[col_index]
+                    _pandas_serialize_cell(impl, b, col, row_index)
+                    _pandas_col_advance(col)
+
+                # Fixed "at" value (not from a column).
+                if at_value == 0:
+                    if not line_sender_buffer_at_now(impl, &err):
+                        raise c_err_to_py(err)
+                elif at_value > 0:
+                    if not line_sender_buffer_at(impl, at_value, &err):
+                        raise c_err_to_py(err)
             except:
                 if not line_sender_buffer_rewind_to_marker(impl, &err):
                     raise c_err_to_py(err)
@@ -688,13 +775,5 @@ cdef bint _pandas(
         return True
     finally:
         line_sender_buffer_clear_marker(impl)
-        if col_buffers != NULL:
-            for col_index in range(set_buf_count):
-                PyBuffer_Release(&col_buffers[col_index])
-            free(col_buffers)
-        free(dtypes)
-        column_name_vec_free(&field_names)
-        column_name_vec_free(&symbol_names)
-        size_t_vec_free(&field_indices)
-        size_t_vec_free(&symbol_indices)
+        col_t_arr_release(&cols)
         qdb_pystr_buf_clear(b)
