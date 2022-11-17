@@ -444,6 +444,11 @@ string[pyarrow]
 [<class 'pandas.core.arrays.string_.StringDtype'>, <class 'pandas.core.dtypes.base.StorageExtensionDtype'>, <class 'pandas.core.dtypes.base.ExtensionDtype'>, <class 'object'>]
 ```
 
+Note that these strings will always have indicies based on `int32_t`.
+
+Arrow also has a `pyarrow.large_string()` type, but
+pandas doesn't support it.
+
 #### Symbol-like Categorical Data
 
 Pandas supports categories. These are backed by Arrow.

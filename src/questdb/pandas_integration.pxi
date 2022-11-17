@@ -46,7 +46,7 @@ cdef struct col_cursor_t:
     size_t offset  # i.e. the element index (not byte offset)
 
 
-cdef enum col_line_sender_target_t:
+cdef enum col_target_t:
     table = 1
     symbol = 2
     column_bool = 3
@@ -58,33 +58,97 @@ cdef enum col_line_sender_target_t:
 
 
 cdef enum col_source_t:
-    bool_pyobj = 11000
-    bool_numpy = 12000
-    bool_arrow = 13000
-    int_pyobj =  21000
-    u8_num =     22000
-    i8_num =     23000
-    u16_num =    24000
-    i16_num =    25000
-    u32_num =    26000
-    i32_num =    27000
-    u64_num =    28000
-    i64_num =    29000
-    f32_num =    31000
-    f64_num =    32000
-    str_pyobj =  41000
-    str_arrow =  42000
-    str_categ =  43000
-    dt64 =       51000
+    bool_pyobj =  11000
+    bool_numpy =  12000
+    bool_arrow =  13000
+    int_pyobj =   21000
+    u8_num =      22000
+    i8_num =      23000
+    u16_num =     24000
+    i16_num =     25000
+    u32_num =     26000
+    i32_num =     27000
+    u64_num =     28000
+    i64_num =     29000
+    f32_num =     31000
+    f64_num =     32000
+    str_pyobj =   41000
+    str_arrow =   42000
+    str_i8_cat =  43000
+    str_i16_cat = 44000
+    str_i32_cat = 45000
+    str_i64_cat = 46000
+    dt64_numpy =  51000
+
+
+cdef dict _TARGET_TO_SOURCE = {
+    col_target_t.table: {
+        col_source_t.str_pyobj,
+        col_source_t.str_arrow,
+    },
+    col_target_t.symbol: {
+        col_source_t.str_pyobj,
+        col_source_t.str_arrow,
+    },
+    col_target_t.column_bool: {
+        col_source_t.bool_pyobj,
+        col_source_t.bool_numpy,
+        col_source_t.bool_arrow,
+    },
+    col_target_t.column_i64: {
+        col_source_t.int_pyobj,
+        col_source_t.u8_num,
+        col_source_t.i8_num,
+        col_source_t.u16_num,
+        col_source_t.i16_num,
+        col_source_t.u32_num,
+        col_source_t.i32_num,
+        col_source_t.u64_num,
+        col_source_t.i64_num,
+    },
+    col_target_t.column_f64: {
+        col_source_t.f32_num,
+        col_source_t.f64_num,
+    },
+    col_target_t.column_str: {
+        col_source_t.str_pyobj,
+        col_source_t.str_arrow,
+    },
+    col_target_t.column_ts: {
+        col_source_t.dt64_numpy,
+    },
+    col_target_t.at: {
+        col_source_t.dt64_numpy
+    },
+}
+
+
+cdef dict _invert_dict(dict d):
+    cdef dict res = {}
+    cdef object key
+    cdef set value_set
+    cdef object value
+    for key, value_set in d.items():
+        for value in value_set:
+            if value not in res:
+                res[value] = set()
+            res[value].add(key)
+    return res
+
+
+cdef dict _SOURCE_TO_TARGET = _invert_dict(_TARGET_TO_SOURCE)
 
 
 cdef struct col_t:
-    line_sender_utf8 col_name
+    size_t orig_index
+    line_sender_column_name name
     col_access_tag_t access_tag
     col_access_t access
     col_chunks_t chunks
     col_cursor_t cursor
-    col_line_sender_target_t target
+    col_source_t source
+    col_target_t target
+    int dispatch_code  # source + target. Determines cell encoder function.
 
 
 cdef void col_t_release(col_t* col):
@@ -209,26 +273,6 @@ cdef ssize_t _pandas_resolve_table_name(
             'Must specify at least one of `table_name` or `table_name_col`.')
 
 
-cdef bint _pandas_resolve_col_names(
-        qdb_pystr_buf* b,
-        object data,
-        const size_t_vec* symbol_indices,
-        const size_t_vec* field_indices,
-        column_name_vec* symbol_names_out,
-        column_name_vec* field_names_out) except False:
-    cdef line_sender_column_name c_name
-    cdef size_t col_index
-    for col_index in range(symbol_indices.size):
-        col_index = symbol_indices.d[col_index]
-        str_to_column_name(b, data.columns[col_index], &c_name)
-        column_name_vec_push(symbol_names_out, c_name)
-    for col_index in range(field_indices.size):
-        col_index = field_indices.d[col_index]
-        str_to_column_name(b, data.columns[col_index], &c_name)
-        column_name_vec_push(field_names_out, c_name)
-    return True
-
-
 cdef bint _bind_col_index(
         str arg_name, int col_num, size_t col_count,
         size_t* col_index) except False:
@@ -295,22 +339,23 @@ cdef object _pandas_check_column_is_str(
 cdef class TaggedEntry:
     """Python object representing a column whilst parsing .pandas arguments."""
 
-    cdef size_t index
+    cdef size_t orig_index
     cdef str name
     cdef object series
-    cdef int sort_key
+    cdef int meta_target
 
-    def __init__(self, size_t index, str name, object series, int sort_key):
-        self.index = index
+    def __init__(
+            self, size_t orig_index, str name, object series, int meta_target):
+        self.orig_index = orig_index
         self.name = name
         self.series = series
-        self.sort_key = sort_key
+        self.meta_target = meta_target
 
 
-cdef int _SORT_AS_FIELD = 0
-cdef int _SORT_AS_TABLE_NAME = -2
-cdef int _SORT_AS_SYMBOL = -1
-cdef int _SORT_AS_AT = 1
+cdef int _META_TARGET_FIELD = 0
+cdef int _META_TARGET_TABLE_NAME = -2
+cdef int _META_TARGET_SYMBOL = -1
+cdef int _META_TARGET_AT = 1
 
 
 cdef bint _pandas_resolve_symbols(
@@ -327,7 +372,7 @@ cdef bint _pandas_resolve_symbols(
     elif symbols is True:
         for col_index in range(col_count):
             if _pandas_column_is_str(data, col_index):
-                tagged_cols[col_index].sort_key = -1  # Sort col as as symbol.
+                tagged_cols[col_index].meta_target = _META_TARGET_SYMBOL
         return True
     else:
         if not isinstance(symbols, (tuple, list)):
@@ -356,7 +401,7 @@ cdef bint _pandas_resolve_symbols(
                 col_index,
                 'Bad element in argument `symbols`: ',
                 symbol)
-            tagged_cols[col_index].sort_key = -1  # Sort col as as symbol.
+            tagged_cols[col_index].meta_target = _META_TARGET_SYMBOL
         return True
 
 
@@ -409,7 +454,7 @@ cdef ssize_t _pandas_resolve_at(
     dtype = data.dtypes[col_index]
     if _pandas_is_supported_datetime(dtype):
         at_value_out[0] = _AT_SET_BY_COLUMN
-        tagged_cols[col_index].sort_key = 1  # Ordering key for "at" column.
+        tagged_cols[col_index].meta_target = _META_TARGET_AT
         return col_index
     else:
         raise TypeError(
@@ -627,6 +672,45 @@ cdef bint _pandas_row_at(
     return True
 
 
+cdef int _pandas_resolve_source(TaggedEntry entry) except -1:
+    raise ValueError('nyi')
+
+
+cdef int _pandas_resolve_target(
+        TaggedEntry entry, col_source_t source) except -1:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_resolve_col(
+        qdb_pystr_buf* b,
+        size_t index,
+        TaggedEntry entry,
+        col_t* col_out) except False:
+    col_out.orig_index = entry.orig_index
+
+    # Since we don't need to send the column names for 'table' and 'at' columns,
+    # we don't need to validate and encode them as column names.
+    if ((entry.meta_target != _META_TARGET_TABLE_NAME) and
+            (entry.meta_target != _META_TARGET_AT)):
+        str_to_column_name(b, entry.name, &col_out.name)
+
+    col_out.source = <col_source_t>_pandas_resolve_source(entry)
+    col_out.target = <col_target_t>_pandas_resolve_target(entry, col_out.source)
+
+    col_out.dispatch_code = <int>col_out.source + <int>col_out.target
+
+
+
+
+cdef bint _pandas_resolve_cols(
+        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except False:
+    cdef size_t index
+    for index in range(len(tagged_cols)):
+        _pandas_resolve_col(b, index, tagged_cols[index], &cols_out.d[index])
+        cols_out.size += 1
+    return True
+
+
 cdef bint _pandas_resolve_args(
         object data,
         object table_name,
@@ -647,7 +731,7 @@ cdef bint _pandas_resolve_args(
             index,
             name,
             series,
-            _SORT_AS_FIELD)
+            _META_TARGET_FIELD)  # FIELD is a `bool`, `f64`, `string` or `ts`.
         for index, (name, series) in data.items()]
     name_col = _pandas_resolve_table_name(
         b,
@@ -658,15 +742,12 @@ cdef bint _pandas_resolve_args(
 
     # Sort with table name is first, then the symbols, then fields, then at.
     # Note: Python 3.6+ guarantees stable sort.
-    tagged_cols.sort(key=lambda x: x.sort_key)
+    tagged_cols.sort(key=lambda x: x.meta_target)
+    _pandas_resolve_cols(b, tagged_cols, cols_out)
 
     return True
 
 
-    # _pandas_resolve_col_names(
-    #     b,
-    #     data, &symbol_indices, &field_indices,
-    #     &symbol_names, &field_names)
     # cdef dtype_t* dtypes = NULL
     # cdef size_t set_buf_count = 0
     # cdef Py_buffer* col_buffers = NULL
