@@ -3,36 +3,21 @@ include "column_name_vec.pxi"
 
 # See: pandas_integration.md for technical overview.
 
-cdef struct dtype_t:
-    # See: https://numpy.org/doc/stable/reference/generated/numpy.dtype.html
-    #          ?highlight=dtype#numpy.dtype
-    # See: https://numpy.org/doc/stable/reference/c-api
-    #          /types-and-structures.html#c.PyArray_Descr
-    int alignment
-    char kind
-    int itemsize
-    char byteorder
-    bint hasobject
-
-
-cdef struct col_numpy_data_t:
-    dtype_t dtype
-    Py_buffer pybuf
-
-
-cdef struct col_arrow_data_t:
-    ArrowSchema schema  # Schema of first chunk.
-    size_t n_chunks
+# cdef struct dtype_t:
+#     # See: https://numpy.org/doc/stable/reference/generated/numpy.dtype.html
+#     #          ?highlight=dtype#numpy.dtype
+#     # See: https://numpy.org/doc/stable/reference/c-api
+#     #          /types-and-structures.html#c.PyArray_Descr
+#     int alignment
+#     char kind
+#     int itemsize
+#     char byteorder
+#     bint hasobject
 
 
 cdef enum col_access_tag_t:
     numpy
     arrow
-
-
-cdef union col_access_t:
-    col_numpy_data_t numpy
-    col_arrow_data_t arrow
 
 
 cdef struct col_chunks_t:
@@ -57,28 +42,51 @@ cdef enum col_target_t:
     at = 8
 
 
+cdef dict _TARGET_NAMES = {
+    col_target_t.table: "table name",
+    col_target_t.symbol: "symbol",
+    col_target_t.column_bool: "boolean",
+    col_target_t.column_i64: "integer",
+    col_target_t.column_f64: "float",
+    col_target_t.column_str: "string",
+    col_target_t.column_ts: "timestamp",
+    col_target_t.at: "designated timestamp",
+}
+
+
 cdef enum col_source_t:
-    bool_pyobj =  11000
-    bool_numpy =  12000
-    bool_arrow =  13000
-    int_pyobj =   21000
-    u8_num =      22000
-    i8_num =      23000
-    u16_num =     24000
-    i16_num =     25000
-    u32_num =     26000
-    i32_num =     27000
-    u64_num =     28000
-    i64_num =     29000
-    f32_num =     31000
-    f64_num =     32000
-    str_pyobj =   41000
-    str_arrow =   42000
-    str_i8_cat =  43000
-    str_i16_cat = 44000
-    str_i32_cat = 45000
-    str_i64_cat = 46000
-    dt64_numpy =  51000
+    bool_pyobj =  101000
+    bool_numpy =  102000
+    bool_arrow =  103000
+    int_pyobj =   201000
+    u8_numpy =    202000
+    i8_numpy =    203000
+    u16_numpy =   204000
+    i16_numpy =   205000
+    u32_numpy =   206000
+    i32_numpy =   207000
+    u64_numpy =   208000
+    i64_numpy =   209000
+    u8_arrow =    210000
+    i8_arrow =    211000
+    u16_arrow =   212000
+    i16_arrow =   213000
+    u32_arrow =   214000
+    i32_arrow =   215000
+    u64_arrow =   216000
+    i64_arrow =   217000
+    float_pyobj = 301000
+    f32_numpy =   302000
+    f64_numpy =   303000
+    f32_arrow =   304000
+    f64_arrow =   305000
+    str_pyobj =   401000
+    str_arrow =   402000
+    str_i8_cat =  403000
+    str_i16_cat = 404000
+    str_i32_cat = 405000
+    str_i64_cat = 406000
+    dt64_numpy =  501000
 
 
 cdef dict _TARGET_TO_SOURCE = {
@@ -97,14 +105,14 @@ cdef dict _TARGET_TO_SOURCE = {
     },
     col_target_t.column_i64: {
         col_source_t.int_pyobj,
-        col_source_t.u8_num,
-        col_source_t.i8_num,
-        col_source_t.u16_num,
-        col_source_t.i16_num,
-        col_source_t.u32_num,
-        col_source_t.i32_num,
-        col_source_t.u64_num,
-        col_source_t.i64_num,
+        col_source_t.u8_numpy,
+        col_source_t.i8_numpy,
+        col_source_t.u16_numpy,
+        col_source_t.i16_numpy,
+        col_source_t.u32_numpy,
+        col_source_t.i32_numpy,
+        col_source_t.u64_numpy,
+        col_source_t.i64_numpy,
     },
     col_target_t.column_f64: {
         col_source_t.f32_num,
@@ -123,27 +131,12 @@ cdef dict _TARGET_TO_SOURCE = {
 }
 
 
-cdef dict _invert_dict(dict d):
-    cdef dict res = {}
-    cdef object key
-    cdef set value_set
-    cdef object value
-    for key, value_set in d.items():
-        for value in value_set:
-            if value not in res:
-                res[value] = set()
-            res[value].add(key)
-    return res
-
-
-cdef dict _SOURCE_TO_TARGET = _invert_dict(_TARGET_TO_SOURCE)
-
-
 cdef struct col_t:
     size_t orig_index
     line_sender_column_name name
-    col_access_tag_t access_tag
-    col_access_t access
+    col_access_tag_t tag
+    Py_buffer pybuf
+    ArrowSchema arrow_schema  # Schema of first chunk.
     col_chunks_t chunks
     col_cursor_t cursor
     col_source_t source
@@ -152,7 +145,10 @@ cdef struct col_t:
 
 
 cdef void col_t_release(col_t* col):
+    # We can use `col.tag` to determine what to release.
+    # Arrow chunks might be "synthetic" borrowing from `col.pybuf`.
     # TODO: Implement cleanup, PyBuffer_Release, etc.
+    # TODO: Do we need to call Arrow's cleanup functions when done?
     pass
 
 
@@ -188,21 +184,35 @@ cdef void col_t_arr_release(col_t_arr* arr):
         arr.d = NULL
 
 
+cdef object _NUMPY = None  # module object
 cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
 cdef object _PYARROW = None  # module object, if available or None
 
 
 cdef object _pandas_may_import_deps():
-    global _PANDAS, _PYARROW, _PANDAS_NA
-    if _PANDAS_NA is not None:
+    """"
+    Lazily import module dependencies on first use to avoid startup overhead.
+
+    $ cat imp_test.py 
+    import numpy
+    import pandas
+    import pyarrow
+
+    $ time python3 ./imp_test.py
+    python3 ./imp_test.py  0.56s user 1.60s system 852% cpu 0.254 total
+    """
+    global _NUMPY, _PANDAS, _PYARROW, _PANDAS_NA
+    if _NUMPY is not None:
         return
+    import numpy
+    _NUMPY = numpy
     import pandas
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
     try:
-        import pyarrow as pa
-        _PYARROW = pa
+        import pyarrow
+        _PYARROW = pyarrow
     except ImportError:
         _PYARROW = None
 
@@ -341,13 +351,20 @@ cdef class TaggedEntry:
 
     cdef size_t orig_index
     cdef str name
+    cdef object dtype
     cdef object series
     cdef int meta_target
 
     def __init__(
-            self, size_t orig_index, str name, object series, int meta_target):
+            self,
+            size_t orig_index,
+            str name,
+            object dtype,
+            object series,
+            int meta_target):
         self.orig_index = orig_index
         self.name = name
+        self.dtype = dtype
         self.series = series
         self.meta_target = meta_target
 
@@ -672,8 +689,167 @@ cdef bint _pandas_row_at(
     return True
 
 
-cdef int _pandas_resolve_source(TaggedEntry entry) except -1:
-    raise ValueError('nyi')
+cdef int _pandas_series_as_pybuf(
+        TaggedEntry entry, col_t* col_out) except -1:
+    cdef object nparr = entry.series.to_numpy()
+    if not PyObject_CheckBuffer(nparr):
+        raise TypeError(
+            f'Bad column {entry.name!r}: Expected a buffer, got ' +
+            f'{entry.series!r} ({type(entry.series)!r})')
+    col_out.tag = col_access_tag_t.numpy
+    return PyObject_GetBuffer(nparr, &col_out.pybuf, PyBUF_STRIDES)
+    # TODO: Wrap exception from `PyObject_GetBuffer` informatively.
+    # Then change to `except False` and `bint` return type.
+    # Then manually map the `pybuf` to the arrow `col.chunks` even if we're
+    # not using arrow. This allows is to give us a single consistent iterating
+    # device.
+    # TODO: Set stride.
+
+
+cdef bint _pandas_series_as_arrow(
+        TaggedEntry entry,
+        col_t* col_out,
+        col_source_t np_fallback) except False:
+    cdef object array
+    cdef list chunks
+    cdef size_t chunk_index
+    if _PYARROW is None:
+        col_out.source = np_fallback
+        _pandas_series_as_pybuf(entry, col_out)
+        return True
+
+    col_out.tag = col_access_tag_t.arrow
+    array = _PYARROW.Array.from_pandas(entry.series)
+    if isinstance(array, _PYARROW.ChunkedArray):
+        chunks = array.chunks
+    else:
+        chunks = [array]
+
+    col_out.chunks.n_chunks = len(chunks)
+    col_out.chunks.chunks = <ArrowArray*>calloc(
+        col_out.chunks.n_chunks + 1,  # See `_pandas_col_advance` on why +1.
+        sizeof(ArrowArray))
+
+    for chunk_index in range(len(chunks)):
+        array = chunks[chunk_index]
+        if chunk_index == 0:
+            chunks[chunk_index]._export_to_c(
+                &col_out.chunks.chunks[chunk_index],
+                &col_out.arrow_schema)
+        else:
+            chunks[chunk_index]._export_to_c(
+                &col_out.chunks.chunks[chunk_index])
+    return True
+    
+
+cdef bint _pandas_category_series_as_arrow(
+        TaggedEntry entry, col_t* col_out) except False:
+    col_out.source = <col_source_t>0  # place holder value
+    _pandas_series_as_arrow(entry, col_out, col_source_t.str_pyobj)
+    if col_out.source == col_source_t.str_pyobj:
+        return True
+    
+
+
+cdef bint _pandas_resolve_source_and_buffers(
+        TaggedEntry entry, col_t* col_out) except False:
+    cdef object dtype = entry.dtype
+    if isinstance(dtype, _PANDAS.dtype('bool')):
+        col_out.source = col_source_t.bool_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _PANDAS.BooleanDtype):
+        col_out.source = col_source_t.bool_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.bool_pyobj)
+    elif isinstance(dtype, _NUMPY.dtype('uint8')):
+        col_out.source = col_source_t.u8_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('int8')):
+        col_out.source = col_source_t.i8_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('uint16')):
+        col_out.source = col_source_t.u16_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('int16')):
+        col_out.source = col_source_t.i16_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('uint32')):
+        col_out.source = col_source_t.u32_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('int32')):
+        col_out.source = col_source_t.i32_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('uint64')):
+        col_out.source = col_source_t.u64_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('int64')):
+        col_out.source = col_source_t.i64_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _PANDAS.UInt8Dtype):
+        col_out.source = col_source_t.u8_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _PANDAS.Int8Dtype):
+        col_out.source = col_source_t.i8_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _PANDAS.UInt16Dtype):
+        col_out.source = col_source_t.u16_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _PANDAS.Int16Dtype):
+        col_out.source = col_source_t.i16_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _PANDAS.UInt32Dtype):
+        col_out.source = col_source_t.u32_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _PANDAS.Int32Dtype):
+        col_out.source = col_source_t.i32_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _PANDAS.UInt64Dtype):
+        col_out.source = col_source_t.u64_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _PANDAS.Int64Dtype):
+        col_out.source = col_source_t.i64_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.int_pyobj)
+    elif isinstance(dtype, _NUMPY.dtype('float32')):
+        col_out.source = col_source_t.f32_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('float64')):
+        col_out.source = col_source_t.f64_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _PANDAS.Float32Dtype):
+        col_out.source = col_source_t.f32_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.float_pyobj)
+    elif isinstance(dtype, _PANDAS.Float64Dtype):
+        col_out.source = col_source_t.f64_arrow
+        _pandas_series_as_arrow(entry, col_out, col_source_t.float_pyobj)
+    elif isinstance(dtype, _PANDAS.StringDtype):
+        if dtype.storage == 'pyarrow':
+            col_out.source = col_source_t.str_arrow
+            _pandas_series_as_arrow(entry, col_out, col_source_t.str_pyobj)
+        elif dtype.storage == 'python':
+            col_out.source = col_source_t.str_pyobj
+            _pandas_series_as_pybuf(entry, col_out)
+        else:
+            raise ValueError(
+                f'Unknown string dtype storage: f{dtype.storage} ' +
+                f'for column {entry.name} of dtype {dtype}.')
+    elif isinstance(dtype, _PANDAS.CategoricalDtype):
+        _pandas_category_series_as_arrow(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('object')):
+        # We need to sniff the objects
+        # TODO: bool_pyobj, int_pyobj, str_pyobj
+
+    # TODO
+
+    # f32_num =     31000
+    # f64_num =     32000
+    # str_pyobj =   41000
+    # str_arrow =   42000
+    # str_i8_cat =  43000
+    # str_i16_cat = 44000
+    # str_i32_cat = 45000
+    # str_i64_cat = 46000
+    # dt64_numpy =  51000
+    
+    raise ValueError('nyi')  # TODO [amunra]: Implement and test.
 
 
 cdef int _pandas_resolve_target(
@@ -694,11 +870,13 @@ cdef bint _pandas_resolve_col(
             (entry.meta_target != _META_TARGET_AT)):
         str_to_column_name(b, entry.name, &col_out.name)
 
-    col_out.source = <col_source_t>_pandas_resolve_source(entry)
+    _pandas_resolve_source_and_buffers(entry, col_out)
     col_out.target = <col_target_t>_pandas_resolve_target(entry, col_out.source)
-
+    if col_out.source not in _TARGET_TO_SOURCE[col_out.target]:
+        raise ValueError(
+            f'Bad value: Column {entry.name!r} ({entry.dtype}) is not ' +
+            f'supported as a {_TARGET_NAMES[col_out.target]} column.')
     col_out.dispatch_code = <int>col_out.source + <int>col_out.target
-
 
 
 
@@ -730,6 +908,7 @@ cdef bint _pandas_resolve_args(
         TaggedEntry(
             index,
             name,
+            data.dtypes[index]
             series,
             _META_TARGET_FIELD)  # FIELD is a `bool`, `f64`, `string` or `ts`.
         for index, (name, series) in data.items()]
@@ -778,7 +957,6 @@ cdef void _pandas_col_advance(col_t* col):
     #     else:
     #         cursor.offset += 1
     #
-    #
     # (Checked with Godbolt, GCC -O3 code was rather "jumpy")
     cdef col_cursor_t* cursor = &col.cursor
     cdef size_t new_chunk  # disguised bint. Either 0 or 1.
@@ -787,7 +965,7 @@ cdef void _pandas_col_advance(col_t* col):
     cursor.chunk_index += new_chunk
     cursor.chunk += new_chunk
     # Note: We get away with this because we've allocated one extra blank chunk.
-    # This ensures that `cursor.chunk.offset` is always valid.
+    # This ensures that accessing `cursor.chunk.offset` doesn't segfault.
     cursor.offset = (
         (new_chunk * cursor.chunk.offset) +
         ((not new_chunk) * cursor.offset))

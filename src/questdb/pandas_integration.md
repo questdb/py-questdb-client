@@ -265,7 +265,16 @@ Name: b, dtype: float32
 Name: c, dtype: float64
 ```
 
-16-bit floats _are_ allowed, but we will disallow them:
+#### Arrow floats
+
+Pandas also has arrow-compatible floats.
+These have an additiona bitvector to represent nulls.
+
+
+
+#### 16-bit floats
+
+16-bit floats _do exist_ in Pandas, but we will disallow them:
 
 ```python
 >>> df = pd.DataFrame({'a': pd.Series([1.0, 1.5, 2.0], dtype='float16')})
