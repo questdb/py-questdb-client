@@ -1,6 +1,3 @@
-include "size_t_vec.pxi"
-include "column_name_vec.pxi"
-
 # See: pandas_integration.md for technical overview.
 
 # cdef struct dtype_t:
@@ -741,21 +738,59 @@ cdef object _pandas_is_supported_datetime(object dtype):
 #     return True
 
 
-cdef int _pandas_series_as_pybuf(
-        TaggedEntry entry, col_t* col_out) except -1:
+cdef bint _pandas_alloc_chunks(size_t n_chunks, col_t* col_out) except False:
+    col_out.chunks.n_chunks = n_chunks
+    col_out.chunks.chunks = <ArrowArray*>calloc(
+        col_out.chunks.n_chunks + 1,  # See `_pandas_col_advance` on why +1.
+        sizeof(ArrowArray))
+
+
+cdef void _pandas_free_mapped_arrow(ArrowArray* arr):
+    free(arr.buffers)
+    arr.buffers = NULL
+    arr.release = NULL
+
+
+cdef bint _pandas_series_as_pybuf(
+        TaggedEntry entry, col_t* col_out) except False:
     cdef object nparr = entry.series.to_numpy()
+    cdef ArrowArray* mapped
     if not PyObject_CheckBuffer(nparr):
         raise TypeError(
             f'Bad column {entry.name!r}: Expected a buffer, got ' +
             f'{entry.series!r} ({type(entry.series)!r})')
     col_out.tag = col_access_tag_t.numpy
-    return PyObject_GetBuffer(nparr, &col_out.pybuf, PyBUF_STRIDES)
-    # TODO: Wrap exception from `PyObject_GetBuffer` informatively.
-    # Then change to `except False` and `bint` return type.
-    # Then manually map the `pybuf` to the arrow `col.chunks` even if we're
-    # not using arrow. This allows is to give us a single consistent iterating
-    # device.
-    # TODO: Set stride.
+
+    try:
+        # Note! We don't need to support numpy strides since Pandas doesn't.
+        PyObject_GetBuffer(nparr, &col_out.pybuf, PyBUF_SIMPLE)
+    except BufferError as be:
+        raise TypeError(
+            f'Bad column {entry.name!r}: Expected a buffer, got ' +
+            f'{entry.series!r} ({type(entry.series)!r})') from be
+    
+    if col_out.pybuf.ndim != 1:
+        raise ValueError(
+            f'Bad column {entry.name!r}: Expected a 1D column, ' +
+            f'got a {col_out.pybuf.ndim}D column.')
+
+    _pandas_alloc_chunks(1, col_out)
+    mapped = &col_out.chunks.chunks[0]
+
+    # Total number of elements.
+    mapped.length = (
+        <int64_t>col_out.pybuf.len // <int64_t>col_out.pybuf.itemsize)
+    mapped.null_count = 0
+    mapped.offset = 0
+    mapped.n_buffers = 2
+    mapped.n_children = 0
+    mapped.buffers = <const void**>calloc(2, sizeof(const void*))
+    mapped.buffers[0] = NULL
+    mapped.buffers[1] = <const void*>col_out.pybuf.buf
+    mapped.children = NULL
+    mapped.dictionary = NULL
+    mapped.release = _pandas_free_mapped_arrow  # to cleanup allocated array.
+    return True
 
 
 cdef bint _pandas_series_as_arrow(
@@ -764,6 +799,7 @@ cdef bint _pandas_series_as_arrow(
         col_source_t np_fallback) except False:
     cdef object array
     cdef list chunks
+    cdef size_t n_chunks
     cdef size_t chunk_index
     if _PYARROW is None:
         col_out.source = np_fallback
@@ -777,12 +813,10 @@ cdef bint _pandas_series_as_arrow(
     else:
         chunks = [array]
 
-    col_out.chunks.n_chunks = len(chunks)
-    col_out.chunks.chunks = <ArrowArray*>calloc(
-        col_out.chunks.n_chunks + 1,  # See `_pandas_col_advance` on why +1.
-        sizeof(ArrowArray))
+    n_chunks = len(chunks)
+    _pandas_alloc_chunks(n_chunks, col_out)
 
-    for chunk_index in range(len(chunks)):
+    for chunk_index in range(n_chunks):
         array = chunks[chunk_index]
         if chunk_index == 0:
             chunks[chunk_index]._export_to_c(
@@ -794,10 +828,10 @@ cdef bint _pandas_series_as_arrow(
     return True
     
 
-cdef const char* _ARROW_INT8_FMT = "c"
-cdef const char* _ARROW_INT16_FMT = "s"
-cdef const char* _ARROW_INT32_FMT = "i"
-cdef const char* _ARROW_INT64_FMT = "l"
+cdef const char* _ARROW_FMT_INT8 = "c"
+cdef const char* _ARROW_FMT_INT16 = "s"
+cdef const char* _ARROW_FMT_INT32 = "i"
+cdef const char* _ARROW_FMT_INT64 = "l"
 
 
 cdef bint _pandas_category_series_as_arrow(
@@ -808,13 +842,13 @@ cdef bint _pandas_category_series_as_arrow(
     if col_out.source == col_source_t.col_source_str_pyobj:
         return True  # PyArrow not imported.
     format = col_out.arrow_schema.format
-    if strncmp(format, _ARROW_INT8_FMT, 1) == 0:
+    if strncmp(format, _ARROW_FMT_INT8, 1) == 0:
         col_out.source = col_source_t.col_source_str_i8_cat
-    elif strncmp(format, _ARROW_INT16_FMT, 1) == 0:
+    elif strncmp(format, _ARROW_FMT_INT16, 1) == 0:
         col_out.source = col_source_t.col_source_str_i16_cat
-    elif strncmp(format, _ARROW_INT32_FMT, 1) == 0:
+    elif strncmp(format, _ARROW_FMT_INT32, 1) == 0:
         col_out.source = col_source_t.col_source_str_i32_cat
-    elif strncmp(format, _ARROW_INT64_FMT, 1) == 0:
+    elif strncmp(format, _ARROW_FMT_INT64, 1) == 0:
         col_out.source = col_source_t.col_source_str_i64_cat
     else:
         raise TypeError(
@@ -838,18 +872,9 @@ cdef bint _pandas_series_sniff_pyobj(
     cdef size_t el_index
     cdef size_t n_elements = len(entry.series)
     _pandas_series_as_pybuf(entry, col_out)
-    # cdef int _pandas_series_as_pybuf(
-    #     TaggedEntry entry, col_t* col_out) except -1:
-    # cdef object nparr = entry.series.to_numpy()
-    # if not PyObject_CheckBuffer(nparr):
-    #     raise TypeError(
-    #         f'Bad column {entry.name!r}: Expected a buffer, got ' +
-    #         f'{entry.series!r} ({type(entry.series)!r})')
-    # col_out.tag = col_access_tag_t.numpy
-    # return PyObject_GetBuffer(nparr, &col_out.pybuf, PyBUF_STRIDES)
     for el_index in range(n_elements):
         # TODO: Check there's no pointless INCREF/DECREF going on here.
-        obj = <object><PyObject*>_pandas_col_get_el(col_out, el_index)
+        obj = <object>&(<PyObject*>(col_out.pybuf.buf))[el_index]
         if _pandas_is_null_pyobj(obj):
             continue
         elif isinstance(obj, bool):
@@ -1016,11 +1041,11 @@ cdef bint _pandas_resolve_col(
 
 
 cdef bint _pandas_resolve_cols(
-        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except False:
+        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except False:  # TODO: Remove `col_t_arr*` type.
     cdef size_t index
-    for index in range(len(tagged_cols)):
+    cdef size_t len_tagged_cols = len(tagged_cols)
+    for index in range(len_tagged_cols):
         _pandas_resolve_col(b, index, tagged_cols[index], &cols_out.d[index])
-        cols_out.size += 1
     return True
 
 

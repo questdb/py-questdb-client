@@ -42,7 +42,7 @@ from cpython.float cimport PyFloat_Check
 from cpython.int cimport PyInt_Check
 from cpython.unicode cimport PyUnicode_Check
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
-    PyObject_GetBuffer, PyBuffer_Release, PyBUF_READ, PyBUF_STRIDES
+    PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *

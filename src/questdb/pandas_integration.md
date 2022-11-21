@@ -581,6 +581,81 @@ timezone), so no timezone conversion logic is required here.
 **Note**: We don't need PyArrow to access the buffer as
 it's only used here to show raw data.
 
+
+## Strided Numpy Arrays
+
+Numpy arrays need not be contiguous. In Pandas, however, we
+need not worry about this.
+
+If we construct a `(4, 3)`-shaped 2D numpy array
+
+```python
+>>> import numpy as np
+>>> a1 = np.array([[1, 10, 100], [2, 20, 200], [3, 30, 300], [4, 40, 400]])
+>>> a1
+array([[  1,  10, 100],
+       [  2,  20, 200],
+       [  3,  30, 300],
+       [  4,  40, 400]])
+>>> a1.dtype
+dtype('int64')
+```
+
+and then select it's second column
+
+```python
+>>> a2 = a1[:, 1]
+>>> a2
+array([10, 20, 30, 40])
+```
+
+We encounter a non-contiguous array.
+
+```python
+>>> a2.data
+<memory at 0x7faefaaac4c0>
+>>> a2.data.contiguous
+False
+>>> a2.data.strides
+(24,)
+```
+
+If we then wrap up the array in a dataframe and convert the series back to numpy
+
+```python
+>>> df = pd.DataFrame({'a': a2})
+>>> df
+    a
+0  10
+1  20
+2  30
+3  40
+>>> df.a
+0    10
+1    20
+2    30
+3    40
+Name: a, dtype: int64
+>>> a3 = df.a.to_numpy()
+```
+
+We see that we get a new object back, and that the new object actually _is_
+contiguous.
+
+```python
+>>> id(a2)
+140389455034672
+>>> id(a3)
+140388032511696
+>>> a3.data
+<memory at 0x7faea2c17880>
+>>> a3.data.contiguous
+True
+```
+
+For this reason, supporting strides is not necessary.
+
+
 ## Unified Cursor
 
 TO BE CONTINUED
