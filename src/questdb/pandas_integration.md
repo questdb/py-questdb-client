@@ -516,7 +516,7 @@ though they are all UTF-8 buffers already so.. little gain.
 
 ### Nanosecond-precision UTC unix epoch 64-bit signed int timestamps
 
-This one's easy:
+#### Timezone-free timestamp
 
 ```python
 >>> n1 = pd.Timestamp(dt.datetime.utcnow())
@@ -551,6 +551,35 @@ Null values _are_ supported.
 
 Unclear what the sentinel value for `NaT` is yet, but we want to map it internally to 0 for the designated timestamp and to recognise it
 and skip the column otherwise.
+
+#### Additionally, we can also have datetimes with a timezone
+
+```python
+>>> ts = pd.Timestamp(
+...    year=2020, month=1, day=1, hour=12, minute=0, second=0,
+...    tz=zoneinfo.ZoneInfo('America/Los_Angeles'))
+>>> df = pd.DataFrame({'a': [ts]})
+>>> df.dtypes['a']
+datetime64[ns, America/Los_Angeles]
+>>> type(_)
+<class 'pandas.core.dtypes.dtypes.DatetimeTZDtype'>
+>>> df.dtypes['a'].tz
+zoneinfo.ZoneInfo(key='America/Los_Angeles')
+```
+
+The good news here is that the timestamp is still held as UTC (regardless of
+timezone), so no timezone conversion logic is required here.
+
+```python
+>>> pa.Array.from_pandas(df.a)
+<pyarrow.lib.TimestampArray object at 0x7ff63914c4c0>
+[
+  2020-01-01 20:00:00.000000000
+]
+```
+
+**Note**: We don't need PyArrow to access the buffer as
+it's only used here to show raw data.
 
 ## Unified Cursor
 

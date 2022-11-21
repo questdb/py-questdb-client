@@ -55,38 +55,39 @@ cdef dict _TARGET_NAMES = {
 
 
 cdef enum col_source_t:
-    bool_pyobj =  101000
-    bool_numpy =  102000
-    bool_arrow =  103000
-    int_pyobj =   201000
-    u8_numpy =    202000
-    i8_numpy =    203000
-    u16_numpy =   204000
-    i16_numpy =   205000
-    u32_numpy =   206000
-    i32_numpy =   207000
-    u64_numpy =   208000
-    i64_numpy =   209000
-    u8_arrow =    210000
-    i8_arrow =    211000
-    u16_arrow =   212000
-    i16_arrow =   213000
-    u32_arrow =   214000
-    i32_arrow =   215000
-    u64_arrow =   216000
-    i64_arrow =   217000
-    float_pyobj = 301000
-    f32_numpy =   302000
-    f64_numpy =   303000
-    f32_arrow =   304000
-    f64_arrow =   305000
-    str_pyobj =   401000
-    str_arrow =   402000
-    str_i8_cat =  403000
-    str_i16_cat = 404000
-    str_i32_cat = 405000
-    str_i64_cat = 406000
-    dt64_numpy =  501000
+    bool_pyobj =      101000
+    bool_numpy =      102000
+    bool_arrow =      103000
+    int_pyobj =       201000
+    u8_numpy =        202000
+    i8_numpy =        203000
+    u16_numpy =       204000
+    i16_numpy =       205000
+    u32_numpy =       206000
+    i32_numpy =       207000
+    u64_numpy =       208000
+    i64_numpy =       209000
+    u8_arrow =        210000
+    i8_arrow =        211000
+    u16_arrow =       212000
+    i16_arrow =       213000
+    u32_arrow =       214000
+    i32_arrow =       215000
+    u64_arrow =       216000
+    i64_arrow =       217000
+    float_pyobj =     301000
+    f32_numpy =       302000
+    f64_numpy =       303000
+    f32_arrow =       304000
+    f64_arrow =       305000
+    str_pyobj =       401000
+    str_arrow =       402000
+    str_i8_cat =      403000
+    str_i16_cat =     404000
+    str_i32_cat =     405000
+    str_i64_cat =     406000
+    dt64ns_numpy =    501000
+    dt64ns_tz_numpy = 502000
 
 
 cdef dict _TARGET_TO_SOURCE = {
@@ -833,21 +834,18 @@ cdef bint _pandas_resolve_source_and_buffers(
                 f'for column {entry.name} of dtype {dtype}.')
     elif isinstance(dtype, _PANDAS.CategoricalDtype):
         _pandas_category_series_as_arrow(entry, col_out)
+    elif isinstance(dtype, _NUMPY.dtype('datetime64[ns]')):
+        col_out.source = col_source_t.dt64ns_numpy
+        _pandas_series_as_pybuf(entry, col_out)
+    elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
+        col_out.source = col_source_t.dt64ns_tz_numpy
+        col_out.tz_offset_ns = _pandas_get_tz_offset_ns(dtype.tz)
+        _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _NUMPY.dtype('object')):
         # We need to sniff the objects
         # TODO: bool_pyobj, int_pyobj, str_pyobj
 
-    # TODO
-
-    # f32_num =     31000
-    # f64_num =     32000
-    # str_pyobj =   41000
-    # str_arrow =   42000
-    # str_i8_cat =  43000
-    # str_i16_cat = 44000
-    # str_i32_cat = 45000
-    # str_i64_cat = 46000
-    # dt64_numpy =  51000
+    
     
     raise ValueError('nyi')  # TODO [amunra]: Implement and test.
 
