@@ -178,6 +178,113 @@ cdef set _DIRECT_META_TARGETS = {
 }
 
 
+# This is verbose, but..
+#   * Enums give us constants.
+#   * Constants allow unfolding `if` statements into `switch`
+#   * Switch statements can be more heavily optimized by the C compiler.
+cdef enum col_dispatch_code_t:
+    col_dispatch_code_skip_nulls = \
+        col_target_t.col_target_skip + col_source_t.col_source_nulls
+
+    col_dispatch_code_table__str_pyobj = \
+        col_target_t.col_target_table + col_source_t.col_source_str_pyobj
+    col_dispatch_code_table__str_arrow = \
+        col_target_t.col_target_table + col_source_t.col_source_str_arrow
+    col_dispatch_code_table__str_i8_cat = \
+        col_target_t.col_target_table + col_source_t.col_source_str_i8_cat
+    col_dispatch_code_table__str_i16_cat = \
+        col_target_t.col_target_table + col_source_t.col_source_str_i16_cat
+    col_dispatch_code_table__str_i32_cat = \
+        col_target_t.col_target_table + col_source_t.col_source_str_i32_cat
+    col_dispatch_code_table__str_i64_cat = \
+        col_target_t.col_target_table + col_source_t.col_source_str_i64_cat
+
+    col_dispatch_code_symbol__str_pyobj = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_pyobj
+    col_dispatch_code_symbol__str_arrow = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_arrow
+    col_dispatch_code_symbol__str_i8_cat = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_i8_cat
+    col_dispatch_code_symbol__str_i16_cat = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_i16_cat
+    col_dispatch_code_symbol__str_i32_cat = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_i32_cat
+    col_dispatch_code_symbol__str_i64_cat = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_i64_cat
+
+    col_dispatch_code_column_bool__bool_pyobj = \
+        col_target_t.col_target_column_bool + col_source_t.col_source_bool_pyobj
+    col_dispatch_code_column_bool__bool_numpy = \
+        col_target_t.col_target_column_bool + col_source_t.col_source_bool_numpy
+    col_dispatch_code_column_bool__bool_arrow = \
+        col_target_t.col_target_column_bool + col_source_t.col_source_bool_arrow
+
+    col_dispatch_code_column_i64__int_pyobj = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_int_pyobj
+    col_dispatch_code_column_i64__u8_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u8_numpy
+    col_dispatch_code_column_i64__i8_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i8_numpy
+    col_dispatch_code_column_i64__u16_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u16_numpy
+    col_dispatch_code_column_i64__i16_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i16_numpy
+    col_dispatch_code_column_i64__u32_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u32_numpy
+    col_dispatch_code_column_i64__i32_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i32_numpy
+    col_dispatch_code_column_i64__u64_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u64_numpy
+    col_dispatch_code_column_i64__i64_numpy = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i64_numpy
+    col_dispatch_code_column_i64__u8_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u8_arrow
+    col_dispatch_code_column_i64__i8_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i8_arrow
+    col_dispatch_code_column_i64__u16_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u16_arrow
+    col_dispatch_code_column_i64__i16_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i16_arrow
+    col_dispatch_code_column_i64__u32_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u32_arrow
+    col_dispatch_code_column_i64__i32_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i32_arrow
+    col_dispatch_code_column_i64__u64_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_u64_arrow
+    col_dispatch_code_column_i64__i64_arrow = \
+        col_target_t.col_target_column_i64 + col_source_t.col_source_i64_arrow
+
+    col_dispatch_code_column_f64__float_pyobj = \
+        col_target_t.col_target_column_f64 + col_source_t.col_source_float_pyobj
+    col_dispatch_code_column_f64__f32_numpy = \
+        col_target_t.col_target_column_f64 + col_source_t.col_source_f32_numpy
+    col_dispatch_code_column_f64__f64_numpy = \
+        col_target_t.col_target_column_f64 + col_source_t.col_source_f64_numpy
+    col_dispatch_code_column_f64__f32_arrow = \
+        col_target_t.col_target_column_f64 + col_source_t.col_source_f32_arrow
+    col_dispatch_code_column_f64__f64_arrow = \
+        col_target_t.col_target_column_f64 + col_source_t.col_source_f64_arrow
+
+    col_dispatch_code_column_str__str_pyobj = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_pyobj
+    col_dispatch_code_column_str__str_arrow = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_arrow
+    col_dispatch_code_column_str__str_i8_cat = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_i8_cat
+    col_dispatch_code_column_str__str_i16_cat = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_i16_cat
+    col_dispatch_code_column_str__str_i32_cat = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_i32_cat
+    col_dispatch_code_column_str__str_i64_cat = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_i64_cat
+
+    col_dispatch_code_column_ts__dt64ns_numpy = \
+        col_target_t.col_target_column_ts + col_source_t.col_source_dt64ns_numpy
+    col_dispatch_code_column_ts__dt64ns_tz_numpy = \
+        col_target_t.col_target_column_ts + \
+        col_source_t.col_source_dt64ns_tz_numpy
+
+
 cdef struct col_t:
     size_t orig_index
     line_sender_column_name name
@@ -188,7 +295,7 @@ cdef struct col_t:
     col_cursor_t cursor
     col_source_t source
     col_target_t target
-    int dispatch_code  # source + target. Determines cell encoder function.
+    col_dispatch_code_t dispatch_code  # source + target. Determines serializer.
 
 
 cdef void col_t_release(col_t* col):
@@ -436,7 +543,8 @@ cdef bint _pandas_resolve_symbols(
     elif symbols is True:
         for col_index in range(col_count):
             if _pandas_column_is_str(data, col_index):
-                tagged_cols[col_index].meta_target = meta_target_t.meta_target_symbol
+                tagged_cols[col_index].meta_target = \
+                    meta_target_t.meta_target_symbol
         return True
     else:
         if not isinstance(symbols, (tuple, list)):
@@ -465,7 +573,8 @@ cdef bint _pandas_resolve_symbols(
                 col_index,
                 'Bad element in argument `symbols`: ',
                 symbol)
-            tagged_cols[col_index].meta_target = meta_target_t.meta_target_symbol
+            tagged_cols[col_index].meta_target = \
+                meta_target_t.meta_target_symbol
         return True
 
 
@@ -737,10 +846,10 @@ cdef const char* _ARROW_FMT_INT64 = "l"
 cdef bint _pandas_category_series_as_arrow(
         TaggedEntry entry, col_t* col_out) except False:
     cdef const char* format
-    col_out.source = col_source_t.col_source_nulls  # placeholder, maybe overwritten below.
+    col_out.source = col_source_t.col_source_nulls  # placeholder value.
     _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_str_pyobj)
     if col_out.source == col_source_t.col_source_str_pyobj:
-        return True  # PyArrow not imported.
+        return True  # PyArrow wasn't imported.
     format = col_out.arrow_schema.format
     if strncmp(format, _ARROW_FMT_INT8, 1) == 0:
         col_out.source = col_source_t.col_source_str_i8_cat
@@ -814,7 +923,8 @@ cdef bint _pandas_resolve_source_and_buffers(
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.BooleanDtype):
         col_out.source = col_source_t.col_source_bool_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_bool_pyobj)
+        _pandas_series_as_arrow(
+                entry, col_out, col_source_t.col_source_bool_pyobj)
     elif isinstance(dtype, _NUMPY.dtype('uint8')):
         col_out.source = col_source_t.col_source_u8_numpy
         _pandas_series_as_pybuf(entry, col_out)
@@ -841,44 +951,57 @@ cdef bint _pandas_resolve_source_and_buffers(
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.UInt8Dtype):
         col_out.source = col_source_t.col_source_u8_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _PANDAS.Int8Dtype):
         col_out.source = col_source_t.col_source_i8_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _PANDAS.UInt16Dtype):
         col_out.source = col_source_t.col_source_u16_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _PANDAS.Int16Dtype):
         col_out.source = col_source_t.col_source_i16_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _PANDAS.UInt32Dtype):
         col_out.source = col_source_t.col_source_u32_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _PANDAS.Int32Dtype):
         col_out.source = col_source_t.col_source_i32_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _PANDAS.UInt64Dtype):
         col_out.source = col_source_t.col_source_u64_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _PANDAS.Int64Dtype):
         col_out.source = col_source_t.col_source_i64_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_int_pyobj)
     elif isinstance(dtype, _NUMPY.dtype('float32')):
         col_out.source = col_source_t.col_source_f32_numpy
-        _pandas_series_as_pybuf(entry, col_out)
+        _pandas_series_as_pybuf(
+            entry, col_out)
     elif isinstance(dtype, _NUMPY.dtype('float64')):
         col_out.source = col_source_t.col_source_f64_numpy
-        _pandas_series_as_pybuf(entry, col_out)
+        _pandas_series_as_pybuf(
+            entry, col_out)
     elif isinstance(dtype, _PANDAS.Float32Dtype):
         col_out.source = col_source_t.col_source_f32_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_float_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_float_pyobj)
     elif isinstance(dtype, _PANDAS.Float64Dtype):
         col_out.source = col_source_t.col_source_f64_arrow
-        _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_float_pyobj)
+        _pandas_series_as_arrow(
+            entry, col_out, col_source_t.col_source_float_pyobj)
     elif isinstance(dtype, _PANDAS.StringDtype):
         if dtype.storage == 'pyarrow':
             col_out.source = col_source_t.col_source_str_arrow
-            _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_str_pyobj)
+            _pandas_series_as_arrow(
+                entry, col_out, col_source_t.col_source_str_pyobj)
         elif dtype.storage == 'python':
             col_out.source = col_source_t.col_source_str_pyobj
             _pandas_series_as_pybuf(entry, col_out)
@@ -921,6 +1044,12 @@ cdef bint _pandas_resolve_target(
         f'{entry.dtype!r}) {entry.name}.')
 
 
+cdef void _pandas_init_cursor(col_t* col_out):
+    col_out.cursor.chunk = col_out.chunks.chunks
+    col_out.cursor.chunk_index = 0
+    col_out.cursor.offset = col_out.cursor.chunk.offset
+
+
 cdef bint _pandas_resolve_col(
         qdb_pystr_buf* b,
         size_t index,
@@ -940,7 +1069,10 @@ cdef bint _pandas_resolve_col(
         raise ValueError(
             f'Bad value: Column {entry.name!r} ({entry.dtype}) is not ' +
             f'supported as a {_TARGET_NAMES[col_out.target]} column.')
-    col_out.dispatch_code = <int>col_out.source + <int>col_out.target
+    col_out.dispatch_code = <col_dispatch_code_t>(
+        <int>col_out.source + <int>col_out.target)
+    _pandas_init_cursor(col_out)
+    return True
 
 
 
@@ -974,7 +1106,7 @@ cdef bint _pandas_resolve_args(
             name,
             data.dtypes[index],
             series,
-            meta_target_t.meta_target_field)  # Later resolved to one of column_* targets.
+            meta_target_t.meta_target_field)  # Later resolved to a target.
         for index, (name, series) in data.items()]
     name_col = _pandas_resolve_table_name(
         b,
@@ -992,18 +1124,367 @@ cdef bint _pandas_resolve_args(
     # Note: Python 3.6+ guarantees stable sort.
     tagged_cols.sort(key=lambda x: x.meta_target)
     _pandas_resolve_cols(b, tagged_cols, cols_out)
-
     return True
 
 
-    # cdef dtype_t* dtypes = NULL
-    # cdef size_t set_buf_count = 0
-    # cdef Py_buffer* col_buffers = NULL
-    # dtypes = <dtype_t*>calloc(col_count, sizeof(dtype_t))
-    # _pandas_resolve_dtypes(data, col_count, dtypes)
-    # col_buffers = <Py_buffer*>calloc(col_count, sizeof(Py_buffer))
-    # _pandas_resolve_col_buffers(
-    #     data, col_count, dtypes, col_buffers, &set_buf_count)
+cdef bint _pandas_serialize_cell_table__str_pyobj(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_table__str_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_table__str_i8_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_table__str_i16_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_table__str_i32_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_table__str_i64_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_symbol__str_pyobj(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_symbol__str_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_symbol__str_i8_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_symbol__str_i16_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_symbol__str_i32_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_symbol__str_i64_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_bool__bool_pyobj(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_bool__bool_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_bool__bool_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__int_pyobj(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u8_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i8_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u16_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i16_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u32_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i32_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u64_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i64_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u8_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i8_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u16_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i16_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u32_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i32_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__u64_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_i64__i64_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_f64__float_pyobj(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_f64__f32_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_f64__f64_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_f64__f32_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_f64__f64_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_str__str_pyobj(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_str__str_arrow(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_str__str_i8_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_str__str_i16_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_str__str_i32_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_str__str_i64_cat(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_ts__dt64ns_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    raise ValueError('nyi')
 
 
 cdef bint _pandas_serialize_cell(
@@ -1011,7 +1492,101 @@ cdef bint _pandas_serialize_cell(
         qdb_pystr_buf* b,
         col_t* col,
         size_t row_index) except False:
-    pass
+    cdef col_dispatch_code_t dc = col.dispatch_code
+    # TODO: Check that this `if/elif` gets compiled into a C switch statement.
+    if dc == col_dispatch_code_t.col_dispatch_code_skip_nulls:
+        pass  # We skip a null column. Nothing to do.
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_pyobj:
+        _pandas_serialize_cell_table__str_pyobj(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_arrow:
+        _pandas_serialize_cell_table__str_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i8_cat:
+        _pandas_serialize_cell_table__str_i8_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i16_cat:
+        _pandas_serialize_cell_table__str_i16_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i32_cat:
+        _pandas_serialize_cell_table__str_i32_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i64_cat:
+        _pandas_serialize_cell_table__str_i64_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_pyobj:
+        _pandas_serialize_cell_symbol__str_pyobj(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_arrow:
+        _pandas_serialize_cell_symbol__str_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i8_cat:
+        _pandas_serialize_cell_symbol__str_i8_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i16_cat:
+        _pandas_serialize_cell_symbol__str_i16_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i32_cat:
+        _pandas_serialize_cell_symbol__str_i32_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i64_cat:
+        _pandas_serialize_cell_symbol__str_i64_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_bool__bool_pyobj:
+        _pandas_serialize_cell_column_bool__bool_pyobj(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_bool__bool_numpy:
+        _pandas_serialize_cell_column_bool__bool_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_bool__bool_arrow:
+        _pandas_serialize_cell_column_bool__bool_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__int_pyobj:
+        _pandas_serialize_cell_column_i64__int_pyobj(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u8_numpy:
+        _pandas_serialize_cell_column_i64__u8_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i8_numpy:
+        _pandas_serialize_cell_column_i64__i8_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u16_numpy:
+        _pandas_serialize_cell_column_i64__u16_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i16_numpy:
+        _pandas_serialize_cell_column_i64__i16_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u32_numpy:
+        _pandas_serialize_cell_column_i64__u32_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i32_numpy:
+        _pandas_serialize_cell_column_i64__i32_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u64_numpy:
+        _pandas_serialize_cell_column_i64__u64_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i64_numpy:
+        _pandas_serialize_cell_column_i64__i64_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u8_arrow:
+        _pandas_serialize_cell_column_i64__u8_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i8_arrow:
+        _pandas_serialize_cell_column_i64__i8_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u16_arrow:
+        _pandas_serialize_cell_column_i64__u16_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i16_arrow:
+        _pandas_serialize_cell_column_i64__i16_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u32_arrow:
+        _pandas_serialize_cell_column_i64__u32_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i32_arrow:
+        _pandas_serialize_cell_column_i64__i32_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u64_arrow:
+        _pandas_serialize_cell_column_i64__u64_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i64_arrow:
+        _pandas_serialize_cell_column_i64__i64_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__float_pyobj:
+        _pandas_serialize_cell_column_f64__float_pyobj(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f32_numpy:
+        _pandas_serialize_cell_column_f64__f32_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f64_numpy:
+        _pandas_serialize_cell_column_f64__f64_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f32_arrow:
+        _pandas_serialize_cell_column_f64__f32_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f64_arrow:
+        _pandas_serialize_cell_column_f64__f64_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_pyobj:
+        _pandas_serialize_cell_column_str__str_pyobj(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_arrow:
+        _pandas_serialize_cell_column_str__str_arrow(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i8_cat:
+        _pandas_serialize_cell_column_str__str_i8_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i16_cat:
+        _pandas_serialize_cell_column_str__str_i16_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i32_cat:
+        _pandas_serialize_cell_column_str__str_i32_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i64_cat:
+        _pandas_serialize_cell_column_str__str_i64_cat(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
+        _pandas_serialize_cell_column_ts__dt64ns_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_numpy:
+        _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
+            impl, b, col, row_index)
 
 
 cdef void _pandas_col_advance(col_t* col):
