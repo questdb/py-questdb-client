@@ -34,11 +34,12 @@ API for fast data ingestion into QuestDB.
 from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t
 from libc.stdlib cimport malloc, calloc, realloc, free, abort
 from libc.string import strncmp
+from libc.math cimport isnan
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
-from cpython.float cimport PyFloat_Check
+from cpython.float cimport PyFloat_Check, PyFloat_CheckExact, PyFloat_AS_DOUBLE
 from cpython.int cimport PyInt_Check
 from cpython.unicode cimport PyUnicode_Check
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \

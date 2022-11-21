@@ -199,35 +199,33 @@ cdef void col_t_release(col_t* col):
     pass
 
 
+# Calloc'd array of col_t.
 cdef struct col_t_arr:
-    size_t capacity
-    size_t size  # Number of elements we've populated. Needed for cleanup.
+    size_t size
     col_t* d
 
 
 cdef col_t_arr col_t_arr_blank():
     cdef col_t_arr arr
-    arr.capacity = 0
     arr.size = 0
     arr.d = NULL
     return arr
 
 
-cdef col_t_arr col_t_arr_new(size_t capacity):
+cdef col_t_arr col_t_arr_new(size_t size):
     cdef col_t_arr arr
-    arr.capacity = capacity
-    arr.size = 0
-    arr.d = <col_t*>calloc(capacity, sizeof(col_t))
+    arr.size = size
+    arr.d = <col_t*>calloc(size, sizeof(col_t))
     return arr
 
 
 cdef void col_t_arr_release(col_t_arr* arr):
+    cdef size_t index
     if arr.d:
-        for i in range(arr.size):
-            col_t_release(&arr.d[i])
+        for index in range(arr.size):
+            col_t_release(&arr.d[index])
         free(arr.d)
         arr.size = 0
-        arr.capacity = 0
         arr.d = NULL
 
 
@@ -538,104 +536,6 @@ cdef object _pandas_is_supported_datetime(object dtype):
         (not dtype.hasobject))
 
 
-# cdef char _str_to_char(str field, str s) except 0:
-#     cdef int res
-#     if len(s) != 1:
-#         raise ValueError(
-#             f'dtype.{field}: Expected a single character, got {s!r}')
-#     res = ord(s)
-#     if res <= 0 or res > 127:  # Check if ASCII, excluding the nul-termintor.
-#         raise ValueError(
-#             f'dtype.{field}: Character out of ASCII range, got {s!r}')
-#     return <char>res
-
-
-# cdef bint _pandas_parse_dtype(object np_dtype, dtype_t* dtype_out) except False:
-#     """
-#     Parse a numpy dtype and return a dtype_t.
-#     """
-#     dtype_out.alignment = getattr(np_dtype, 'alignment' , 0)
-#     dtype_out.kind = _str_to_char('kind', np_dtype.kind)
-#     dtype_out.itemsize = getattr(np_dtype, 'itemsize', 0)
-#     dtype_out.byteorder = _str_to_char(
-#         'byteorder', getattr(np_dtype, 'byteorder', '='))
-#     dtype_out.hasobject = getattr(np_dtype, 'hasobject', False)
-#     return True
-
-
-# cdef bint _pandas_resolve_dtypes(
-#         object data, size_t col_count, dtype_t* dtypes_out) except False:
-#     cdef size_t col_index
-#     for col_index in range(col_count):
-#         _pandas_parse_dtype(data.dtypes[col_index], &dtypes_out[col_index])
-#     return True
-
-
-# cdef bint _pandas_resolve_col_buffers(
-#         object data, size_t col_count, const dtype_t* dtypes,
-#         Py_buffer* col_buffers, size_t* set_buf_count) except False:
-#     """
-#     Map pandas columns to array of col_buffers.
-#     """
-#     # Note: By calling "to_numpy" we are throwing away what might be an Arrow.
-#     # This is particularly expensive for string columns.
-#     # If you want to use Arrow (i.e. your data comes from Parquet) please ask
-#     # for the feature in our issue tracker.
-#     cdef size_t col_index
-#     cdef object nparr
-#     cdef Py_buffer* view
-#     cdef const dtype_t* dtype
-#     for col_index in range(col_count):
-#         nparr = data.iloc[:, col_index].to_numpy()
-#         view = &col_buffers[col_index]
-#         dtype = &dtypes[col_index]
-#         if not PyObject_CheckBuffer(nparr):
-#             raise TypeError(
-#                 f'Bad column: Expected a numpy array, got {nparr!r}')
-#         PyObject_GetBuffer(nparr, view, PyBUF_STRIDES)
-#         # TODO [amunra]: We should check that the buffer metadata and the dtype match. We currently risk a segfault.
-#         set_buf_count[0] += 1   # Set to avoid wrongly calling PyBuffer_Release.
-#     return True
-
-
-# cdef inline const void* _pandas_get_cell(
-#         Py_buffer* col_buffer, size_t row_index):
-#     return col_buffer.buf + (<ssize_t>row_index * col_buffer.strides[0])
-
-
-# cdef char _PANDAS_DTYPE_KIND_OBJECT = <char>79  # 'O'
-# cdef char _PANDAS_DTYPE_KIND_DATETIME = <char>77  # 'M'
-
-
-# cdef bint _pandas_get_str_cell(
-#         qdb_pystr_buf* b,
-#         dtype_t* dtype,
-#         Py_buffer* col_buffer,
-#         size_t row_index,
-#         bint* is_null_out,
-#         line_sender_utf8* utf8_out) except False:
-#     cdef const void* cell = _pandas_get_cell(col_buffer, row_index)
-#     cdef object obj
-#     if dtype.kind == _PANDAS_DTYPE_KIND_OBJECT:
-#         # TODO [amunra]: Check in the generated .C code that it doesn't produce an INCREF.
-#         # TODO: Improve error messaging. Error message should include the column name.
-#         obj = <object>((<PyObject**>cell)[0])
-#         if (obj is None) or (obj is _PANDAS_NA):
-#             is_null_out[0] = True
-#         else:
-#             is_null_out[0] = False
-#             try:
-#                 str_to_utf8(b, obj, utf8_out)
-#             except TypeError as e:
-#                 raise TypeError(
-#                     'Bad column: Expected a string, ' +
-#                     f'got {obj!r} ({type(obj)!r})') from e
-#     else:
-#         raise TypeError(
-#             f'NOT YET IMPLEMENTED. Kind: {dtype.kind}')  # TODO [amunra]: Implement and test.
-#     return True
-
-
 # cdef int64_t _pandas_get_timestamp_cell(
 #         dtype_t* dtype,
 #         Py_buffer* col_buffer,
@@ -857,8 +757,12 @@ cdef bint _pandas_category_series_as_arrow(
     return True
 
 
+cdef inline bint _pandas_is_float_nan(obj):
+    return PyFloat_CheckExact(obj) and isnan(PyFloat_AS_DOUBLE(obj))
+
+
 cdef inline bint _pandas_is_null_pyobj(object obj):
-    return (obj is None) or (obj is _PANDAS_NA)
+    return (obj is None) or (obj is _PANDAS_NA) or _pandas_is_float_nan(obj)
 
 
 cdef bint _pandas_series_sniff_pyobj(
@@ -1041,7 +945,7 @@ cdef bint _pandas_resolve_col(
 
 
 cdef bint _pandas_resolve_cols(
-        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except False:  # TODO: Remove `col_t_arr*` type.
+        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except False:
     cdef size_t index
     cdef size_t len_tagged_cols = len(tagged_cols)
     for index in range(len_tagged_cols):
