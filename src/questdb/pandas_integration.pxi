@@ -337,6 +337,19 @@ cdef void col_t_arr_release(col_t_arr* arr):
 
 
 cdef object _NUMPY = None  # module object
+cdef object _NUMPY_BOOL = None
+cdef object _NUMPY_UINT8 = None
+cdef object _NUMPY_INT8 = None
+cdef object _NUMPY_UINT16 = None
+cdef object _NUMPY_INT16 = None
+cdef object _NUMPY_UINT32 = None
+cdef object _NUMPY_INT32 = None
+cdef object _NUMPY_UINT64 = None
+cdef object _NUMPY_INT64 = None
+cdef object _NUMPY_FLOAT32 = None
+cdef object _NUMPY_FLOAT64 = None
+cdef object _NUMPY_DATETIME64_NS = None
+cdef object _NUMPY_OBJECT = None
 cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
 cdef object _PYARROW = None  # module object, if available or None
@@ -355,10 +368,36 @@ cdef object _pandas_may_import_deps():
     python3 ./imp_test.py  0.56s user 1.60s system 852% cpu 0.254 total
     """
     global _NUMPY, _PANDAS, _PYARROW, _PANDAS_NA
+    global _NUMPY_BOOL
+    global _NUMPY_UINT8
+    global _NUMPY_INT8
+    global _NUMPY_UINT16
+    global _NUMPY_INT16
+    global _NUMPY_UINT32
+    global _NUMPY_INT32
+    global _NUMPY_UINT64
+    global _NUMPY_INT64
+    global _NUMPY_FLOAT32
+    global _NUMPY_FLOAT64
+    global _NUMPY_DATETIME64_NS
+    global _NUMPY_OBJECT
     if _NUMPY is not None:
         return
     import numpy
     _NUMPY = numpy
+    _NUMPY_BOOL = type(_NUMPY.dtype('bool'))
+    _NUMPY_UINT8 = type(_NUMPY.dtype('uint8'))
+    _NUMPY_INT8 = type(_NUMPY.dtype('int8'))
+    _NUMPY_UINT16 = type(_NUMPY.dtype('uint16'))
+    _NUMPY_INT16 = type(_NUMPY.dtype('int16'))
+    _NUMPY_UINT32 = type(_NUMPY.dtype('uint32'))
+    _NUMPY_INT32 = type(_NUMPY.dtype('int32'))
+    _NUMPY_UINT64 = type(_NUMPY.dtype('uint64'))
+    _NUMPY_INT64 = type(_NUMPY.dtype('int64'))
+    _NUMPY_FLOAT32 = type(_NUMPY.dtype('float32'))
+    _NUMPY_FLOAT64 = type(_NUMPY.dtype('float64'))
+    _NUMPY_DATETIME64_NS = type(_NUMPY.dtype('datetime64[ns]'))
+    _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
     import pandas
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
@@ -781,16 +820,12 @@ cdef bint _pandas_series_as_pybuf(
 
     try:
         # Note! We don't need to support numpy strides since Pandas doesn't.
+        # Also note that this guarantees a 1D buffer.
         PyObject_GetBuffer(nparr, &col_out.pybuf, PyBUF_SIMPLE)
     except BufferError as be:
         raise TypeError(
             f'Bad column {entry.name!r}: Expected a buffer, got ' +
             f'{entry.series!r} ({_fqn(type(entry.series))})') from be
-    
-    if col_out.pybuf.ndim != 1:
-        raise ValueError(
-            f'Bad column {entry.name!r}: Expected a 1D column, ' +
-            f'got a {col_out.pybuf.ndim}D column.')
 
     _pandas_alloc_chunks(1, col_out)
     mapped = &col_out.chunks.chunks[0]
@@ -927,35 +962,35 @@ cdef bint _pandas_series_sniff_pyobj(
 cdef bint _pandas_resolve_source_and_buffers(
         TaggedEntry entry, col_t* col_out) except False:
     cdef object dtype = entry.dtype
-    if isinstance(dtype, _NUMPY.dtype('bool')):
+    if isinstance(dtype, _NUMPY_BOOL):
         col_out.source = col_source_t.col_source_bool_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.BooleanDtype):
         col_out.source = col_source_t.col_source_bool_arrow
         _pandas_series_as_arrow(
                 entry, col_out, col_source_t.col_source_bool_pyobj)
-    elif isinstance(dtype, _NUMPY.dtype('uint8')):
+    elif isinstance(dtype, _NUMPY_UINT8):
         col_out.source = col_source_t.col_source_u8_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('int8')):
+    elif isinstance(dtype, _NUMPY_INT8):
         col_out.source = col_source_t.col_source_i8_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('uint16')):
+    elif isinstance(dtype, _NUMPY_UINT16):
         col_out.source = col_source_t.col_source_u16_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('int16')):
+    elif isinstance(dtype, _NUMPY_INT16):
         col_out.source = col_source_t.col_source_i16_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('uint32')):
+    elif isinstance(dtype, _NUMPY_UINT32):
         col_out.source = col_source_t.col_source_u32_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('int32')):
+    elif isinstance(dtype, _NUMPY_INT32):
         col_out.source = col_source_t.col_source_i32_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('uint64')):
+    elif isinstance(dtype, _NUMPY_UINT64):
         col_out.source = col_source_t.col_source_u64_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('int64')):
+    elif isinstance(dtype, _NUMPY_INT64):
         col_out.source = col_source_t.col_source_i64_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.UInt8Dtype):
@@ -990,11 +1025,11 @@ cdef bint _pandas_resolve_source_and_buffers(
         col_out.source = col_source_t.col_source_i64_arrow
         _pandas_series_as_arrow(
             entry, col_out, col_source_t.col_source_int_pyobj)
-    elif isinstance(dtype, _NUMPY.dtype('float32')):
+    elif isinstance(dtype, _NUMPY_FLOAT32):
         col_out.source = col_source_t.col_source_f32_numpy
         _pandas_series_as_pybuf(
             entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('float64')):
+    elif isinstance(dtype, _NUMPY_FLOAT64):
         col_out.source = col_source_t.col_source_f64_numpy
         _pandas_series_as_pybuf(
             entry, col_out)
@@ -1020,13 +1055,13 @@ cdef bint _pandas_resolve_source_and_buffers(
                 f'for column {entry.name} of dtype {dtype}.')
     elif isinstance(dtype, _PANDAS.CategoricalDtype):
         _pandas_category_series_as_arrow(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('datetime64[ns]')):
+    elif isinstance(dtype, _NUMPY_DATETIME64_NS):
         col_out.source = col_source_t.col_source_dt64ns_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
         col_out.source = col_source_t.col_source_dt64ns_tz_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _NUMPY.dtype('object')):
+    elif isinstance(dtype, _NUMPY_OBJECT):
         _pandas_series_sniff_pyobj(entry, col_out)
     else:
         raise ValueError(
