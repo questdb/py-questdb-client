@@ -284,6 +284,11 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_ts + \
         col_source_t.col_source_dt64ns_tz_numpy
 
+    col_dispatch_code_at__dt64ns_numpy = \
+        col_target_t.col_target_at + col_source_t.col_source_dt64ns_numpy
+    col_dispatch_code_at__dt64ns_tz_numpy = \
+        col_target_t.col_target_at + col_source_t.col_source_dt64ns_tz_numpy
+
 
 cdef struct col_t:
     size_t orig_index
@@ -929,6 +934,7 @@ cdef inline bint _pandas_is_float_nan(obj):
     return PyFloat_CheckExact(obj) and isnan(PyFloat_AS_DOUBLE(obj))
 
 
+# TODO: Check for pointless incref at callsite or here.
 cdef inline bint _pandas_is_null_pyobj(object obj):
     return (obj is None) or (obj is _PANDAS_NA) or _pandas_is_float_nan(obj)
 
@@ -1220,7 +1226,15 @@ cdef bint _pandas_serialize_cell_table__str_pyobj(
         qdb_pystr_buf* b,
         col_t* col,
         size_t row_index) except False:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef object cell = <object>access[row_index]
+    cdef line_sender_table_name c_table_name
+    # TODO: Check if object is not none and check if string. Then see if there's silly increfs.
+    str_to_table_name(b, cell, &c_table_name)
+    if not line_sender_buffer_table(impl, c_table_name, &err):
+        raise c_err_to_py(err)
+    return True
 
 
 cdef bint _pandas_serialize_cell_table__str_arrow(
@@ -1268,7 +1282,15 @@ cdef bint _pandas_serialize_cell_symbol__str_pyobj(
         qdb_pystr_buf* b,
         col_t* col,
         size_t row_index) except False:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef object cell = <object>access[row_index]
+    cdef line_sender_utf8 utf8
+    # TODO: Null checks, string checks, no incref verifications.
+    str_to_utf8(b, cell, &utf8)
+    if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
+        raise c_err_to_py(err)
+    return True
 
 
 cdef bint _pandas_serialize_cell_symbol__str_arrow(
@@ -1404,7 +1426,12 @@ cdef bint _pandas_serialize_cell_column_i64__i64_numpy(
         qdb_pystr_buf* b,
         col_t* col,
         size_t row_index) except False:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
+    cdef int64_t cell = access[row_index]
+    if not line_sender_buffer_column_i64(impl, col.name, cell, &err):
+        raise c_err_to_py(err)
+    return True
 
 
 cdef bint _pandas_serialize_cell_column_i64__u8_arrow(
@@ -1492,7 +1519,16 @@ cdef bint _pandas_serialize_cell_column_f64__f64_numpy(
         qdb_pystr_buf* b,
         col_t* col,
         size_t row_index) except False:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef double* access = <double*>col.cursor.chunk.buffers[1]
+    cdef double cell = access[row_index]
+    # TODO: Skip if NaN, then test degenerate case where all cells are NaN for a row.
+    if isnan(cell):
+        return True
+    if not line_sender_buffer_column_f64(impl, col.name, cell, &err):
+        raise c_err_to_py(err)
+    return True
+
 
 
 cdef bint _pandas_serialize_cell_column_f64__f32_arrow(
@@ -1573,6 +1609,32 @@ cdef bint _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
         col_t* col,
         size_t row_index) except False:
     raise ValueError('nyi')
+
+
+cdef bint _pandas_serialize_cell_at_dt64ns_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    cdef line_sender_error* err = NULL
+    cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
+    cdef int64_t cell = access[row_index]
+    if cell == 0:
+        if not line_sender_buffer_at_now(impl, &err):
+            raise c_err_to_py(err)
+    else:
+        # Note: impl will validate against negative numbers.
+        if not line_sender_buffer_at(impl, cell, &err):
+            raise c_err_to_py(err)
+    return True
+
+
+cdef bint _pandas_serialize_cell_at_dt64ns_tz_numpy(
+        line_sender_buffer* impl,
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index) except False:
+    _pandas_serialize_cell_at_dt64ns_numpy(impl, b, col, row_index)
 
 
 cdef bint _pandas_serialize_cell(
@@ -1675,6 +1737,10 @@ cdef bint _pandas_serialize_cell(
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_numpy:
         _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
             impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:
+        _pandas_serialize_cell_at_dt64ns_numpy(impl, b, col, row_index)
+    elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_tz_numpy:
+        _pandas_serialize_cell_at_dt64ns_tz_numpy(impl, b, col, row_index)
     else:
         raise RuntimeError(f"Unknown column dispatch code: {dc}")
     return True
@@ -1780,6 +1846,8 @@ cdef bint _pandas(
                 # Note: Columns are sorted: table name, symbols, fields, at.
                 for col_index in range(col_count):
                     col = &cols.d[col_index]
+                    # TODO: Wrap error exceptions messaging with column name
+                    # and row index. Ideally, extract value in python too.
                     _pandas_serialize_cell(impl, b, col, row_index)
                     _pandas_col_advance(col)
 
