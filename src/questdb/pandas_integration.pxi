@@ -90,7 +90,7 @@ cdef enum col_source_t:
     col_source_dt64ns_tz_numpy = 502000
 
 
-cdef dict _TARGET_TO_SOURCE = {
+cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_skip: {
         col_source_t.col_source_nulls,
     },
@@ -813,9 +813,12 @@ cdef void _pandas_free_mapped_arrow(ArrowArray* arr):
 
 cdef bint _pandas_series_as_pybuf(
         TaggedEntry entry, col_t* col_out) except False:
-    import sys; sys.stderr.write('_pandas_series_as_pybuf :: (A)\n')
     cdef object nparr = entry.series.to_numpy()
     cdef ArrowArray* mapped
+    cdef int get_buf_ret
+    cdef bytes format
+    cdef Py_buffer* view
+    import sys; sys.stderr.write(f'_pandas_series_as_pybuf :: (A) entry.name: {entry.name}\n')
     sys.stderr.write('_pandas_series_as_pybuf :: (C)\n')
     if not PyObject_CheckBuffer(nparr):
         sys.stderr.write('_pandas_series_as_pybuf :: (D)\n')
@@ -826,11 +829,13 @@ cdef bint _pandas_series_as_pybuf(
     col_out.tag = col_access_tag_t.numpy
     sys.stderr.write('_pandas_series_as_pybuf :: (F)\n')
     try:
-        sys.stderr.write('_pandas_series_as_pybuf :: (G)\n')
+        sys.stderr.write(f'_pandas_series_as_pybuf :: (G) {<uintptr_t>col_out.pybuf.buf}, nparr: {nparr!r}\n')
         # Note! We don't need to support numpy strides since Pandas doesn't.
         # Also note that this guarantees a 1D buffer.
-        PyObject_GetBuffer(nparr, &col_out.pybuf, PyBUF_SIMPLE)
-        sys.stderr.write('_pandas_series_as_pybuf :: (H)\n')
+        view = &col_out.pybuf
+        get_buf_ret = PyObject_GetBuffer(nparr, view, PyBUF_STRIDES)
+        sys.stderr.write(f'_pandas_series_as_pybuf :: (H1) {<uintptr_t>col_out.pybuf.buf}, ret: {get_buf_ret}, ndim: {col_out.pybuf.ndim}, strides[0]: {col_out.pybuf.strides[0]}, itemsize: {col_out.pybuf.itemsize}, len: {col_out.pybuf.len}, count: {col_out.pybuf.len // col_out.pybuf.itemsize}\n')
+
     except BufferError as be:
         sys.stderr.write('_pandas_series_as_pybuf :: (I)\n')
         raise TypeError(
@@ -938,14 +943,16 @@ cdef bint _pandas_series_sniff_pyobj(
     cdef object obj
     cdef size_t el_index
     cdef size_t n_elements = len(entry.series)
-    cdef PyObject* obj_arr = <PyObject*>(col_out.pybuf.buf)
-    import sys; sys.stderr.write('_pandas_series_sniff_pyobj :: (A)\n')
+    cdef PyObject** obj_arr
+    import sys; sys.stderr.write(f'_pandas_series_sniff_pyobj :: (A) buf: {<uintptr_t>col_out.pybuf.buf}, n_elements: {n_elements}, series:\n{entry.series}\n')
     _pandas_series_as_pybuf(entry, col_out)
+    obj_arr = <PyObject**>(col_out.pybuf.buf)
     sys.stderr.write('_pandas_series_sniff_pyobj :: (B)\n')
     for el_index in range(n_elements):
+        sys.stderr.write(f'_pandas_series_sniff_pyobj :: (C1) {el_index}, ptr: {<uintptr_t>&obj_arr[el_index]}\n')
         # TODO: Check there's no pointless INCREF/DECREF going on here.
-        obj = <object>&(obj_arr[el_index])
-        sys.stderr.write(f'_pandas_series_sniff_pyobj :: (C) obj: {obj!r}\n')
+        obj = <object>obj_arr[el_index]
+        sys.stderr.write(f'_pandas_series_sniff_pyobj :: (C2) obj: {obj!r}\n')
         if _pandas_is_null_pyobj(obj):
             continue
         elif PyBool_Check(obj):
@@ -1099,7 +1106,7 @@ cdef bint _pandas_resolve_target(
         col_out.target = <col_target_t><int>entry.meta_target
         return True
     for target in _FIELD_TARGETS:
-        target_sources = _FIELD_TARGETS[target]
+        target_sources = _TARGET_TO_SOURCES[target]
         if col_out.source in target_sources:
             col_out.target = target
             return True
@@ -1135,7 +1142,7 @@ cdef bint _pandas_resolve_col(
     sys.stderr.write('_pandas_resolve_col :: (E)\n')
     _pandas_resolve_target(entry, col_out)
     sys.stderr.write('_pandas_resolve_col :: (F)\n')
-    if col_out.source not in _TARGET_TO_SOURCE[col_out.target]:
+    if col_out.source not in _TARGET_TO_SOURCES[col_out.target]:
         sys.stderr.write('_pandas_resolve_col :: (G)\n')
         raise ValueError(
             f'Bad value: Column {entry.name!r} ({entry.dtype}) is not ' +

@@ -43,7 +43,7 @@ from cpython.float cimport PyFloat_Check, PyFloat_CheckExact, PyFloat_AS_DOUBLE
 from cpython.long cimport PyLong_Check
 from cpython.unicode cimport PyUnicode_Check
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
-    PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
+    PyObject_GetBuffer, PyBuffer_Release, PyBUF_STRIDES
 from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *
