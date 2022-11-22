@@ -77,6 +77,13 @@ def test(all=False, patch_path='1', *args):
 
 
 @command
+def gdb_test(*args):
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    _run('gdb', '-ex', 'r', '--args', 'python3', 'test/test.py', '-v', *args,
+         env=env)
+
+
+@command
 def doc(http_serve=False, port=None):
     _run('python3', '-m', 'sphinx.cmd.build',
          '-b', 'html', 'docs', 'build/docs',

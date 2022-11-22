@@ -40,7 +40,7 @@ from cpython.bool cimport bool, PyBool_Check
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
 from cpython.float cimport PyFloat_Check, PyFloat_CheckExact, PyFloat_AS_DOUBLE
-from cpython.int cimport PyInt_Check
+from cpython.long cimport PyLong_Check
 from cpython.unicode cimport PyUnicode_Check
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
@@ -611,7 +611,7 @@ cdef class Buffer:
         str_to_column_name(self._cleared_b(), name, &c_name)
         if PyBool_Check(value):
             return self._column_bool(c_name, value)
-        elif PyInt_Check(value):
+        elif PyLong_Check(value):
             return self._column_i64(c_name, value)
         elif PyFloat_Check(value):
             return self._column_f64(c_name, value)
@@ -1197,7 +1197,7 @@ cdef class Sender:
 
         b = self._buffer._b
 
-        if PyInt_Check(port):
+        if PyLong_Check(port):
             port_str = str(port)
         elif PyUnicode_Check(port):
             port_str = port
