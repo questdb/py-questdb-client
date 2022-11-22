@@ -369,11 +369,15 @@ cdef object _pandas_may_import_deps():
         _PYARROW = None
 
 
+cdef str _fqn(type obj):
+    return obj.__module__ + '.' + obj.__qualname__
+
+
 cdef object _check_is_pandas_dataframe(object data):
     if not isinstance(data, _PANDAS.DataFrame):
         raise TypeError(
-            f'Bad argument `data`: Expected {_PANDAS.DataFrame}, ' +
-            f'not an object of type {type(data)}.')
+            f'Bad argument `data`: Expected {_fqn(_PANDAS.DataFrame)}, ' +
+            f'not an object of type {_fqn(type(data))}.')
 
 
 cdef ssize_t _pandas_resolve_table_name(
@@ -399,6 +403,7 @@ cdef ssize_t _pandas_resolve_table_name(
     This method validates input and may raise.
     """
     cdef size_t col_index = 0
+    cdef TaggedEntry entry
     if table_name is not None:
         if table_name_col is not None:
             raise ValueError(
@@ -426,7 +431,8 @@ cdef ssize_t _pandas_resolve_table_name(
             col_index,
             'Bad argument `table_name_col`: ',
             table_name_col)
-        tagged_cols[col_index][3] = -2  # Sort column to front as table name.
+        entry = tagged_cols[col_index]
+        entry.meta_target = meta_target_t.meta_target_table
         name_out.len = 0
         name_out.buf = NULL
         return col_index
@@ -538,6 +544,7 @@ cdef bint _pandas_resolve_symbols(
         size_t col_count) except False:
     cdef size_t col_index = 0
     cdef object symbol
+    cdef TaggedEntry entry
     if symbols is False:
         return 0
     elif symbols is True:
@@ -573,8 +580,8 @@ cdef bint _pandas_resolve_symbols(
                 col_index,
                 'Bad element in argument `symbols`: ',
                 symbol)
-            tagged_cols[col_index].meta_target = \
-                meta_target_t.meta_target_symbol
+            entry = tagged_cols[col_index]
+            entry.meta_target = meta_target_t.meta_target_symbol
         return True
 
 
@@ -606,6 +613,7 @@ cdef ssize_t _pandas_resolve_at(
         int64_t* at_value_out) except -2:
     cdef size_t col_index
     cdef object dtype
+    cdef TaggedEntry entry
     if at is None:
         at_value_out[0] = 0  # Special value for `at_now`.
         return -1
@@ -621,13 +629,14 @@ cdef ssize_t _pandas_resolve_at(
         _bind_col_index('at', at, col_count, &col_index)
     else:
         raise TypeError(
-            f'Bad argument `at`: Unsupported type {type(at)}. ' +
+            f'Bad argument `at`: Unsupported type {_fqn(type(at))}. ' +
             'Must be one of: None, TimestampNanos, datetime, ' +
             'int (column index), str (colum name)')
     dtype = data.dtypes[col_index]
     if _pandas_is_supported_datetime(dtype):
         at_value_out[0] = _AT_SET_BY_COLUMN
-        tagged_cols[col_index].meta_target = meta_target_t.meta_target_at
+        entry = tagged_cols[col_index]
+        entry.meta_target = meta_target_t.meta_target_at
         return col_index
     else:
         raise TypeError(
@@ -767,7 +776,7 @@ cdef bint _pandas_series_as_pybuf(
     if not PyObject_CheckBuffer(nparr):
         raise TypeError(
             f'Bad column {entry.name!r}: Expected a buffer, got ' +
-            f'{entry.series!r} ({type(entry.series)!r})')
+            f'{entry.series!r} ({_fqn(type(entry.series))})')
     col_out.tag = col_access_tag_t.numpy
 
     try:
@@ -776,7 +785,7 @@ cdef bint _pandas_series_as_pybuf(
     except BufferError as be:
         raise TypeError(
             f'Bad column {entry.name!r}: Expected a buffer, got ' +
-            f'{entry.series!r} ({type(entry.series)!r})') from be
+            f'{entry.series!r} ({_fqn(type(entry.series))})') from be
     
     if col_out.pybuf.ndim != 1:
         raise ValueError(
@@ -907,7 +916,7 @@ cdef bint _pandas_series_sniff_pyobj(
         else:
             raise TypeError(
                 f'Bad column {entry.name!r}: ' +
-                f'Unsupported object column containing an {type(obj)!r}')
+                f'Unsupported object column containing an {_fqn(type(obj))}')
 
     # We've hit an object column that exclusively has null values.
     # We will just skip this column.
@@ -918,7 +927,7 @@ cdef bint _pandas_series_sniff_pyobj(
 cdef bint _pandas_resolve_source_and_buffers(
         TaggedEntry entry, col_t* col_out) except False:
     cdef object dtype = entry.dtype
-    if isinstance(dtype, _PANDAS.dtype('bool')):
+    if isinstance(dtype, _NUMPY.dtype('bool')):
         col_out.source = col_source_t.col_source_bool_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.BooleanDtype):
@@ -1107,7 +1116,7 @@ cdef bint _pandas_resolve_args(
             data.dtypes[index],
             series,
             meta_target_t.meta_target_field)  # Later resolved to a target.
-        for index, (name, series) in data.items()]
+        for index, (name, series) in enumerate(data.items())]
     name_col = _pandas_resolve_table_name(
         b,
         data,
@@ -1122,7 +1131,7 @@ cdef bint _pandas_resolve_args(
 
     # Sort with table name is first, then the symbols, then fields, then at.
     # Note: Python 3.6+ guarantees stable sort.
-    tagged_cols.sort(key=lambda x: x.meta_target)
+    tagged_cols.sort(key=lambda x: (<TaggedEntry>x).meta_target)
     _pandas_resolve_cols(b, tagged_cols, cols_out)
     return True
 

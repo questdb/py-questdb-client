@@ -33,7 +33,7 @@ API for fast data ingestion into QuestDB.
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
 from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t
 from libc.stdlib cimport malloc, calloc, realloc, free, abort
-from libc.string import strncmp
+from libc.string cimport strncmp
 from libc.math cimport isnan
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool, PyBool_Check
