@@ -528,6 +528,21 @@ class TestPandas(unittest.TestCase):
             't1,A=a1,B=b1,C=b1,D=a1 E=1.0,F=1i 1520640000000000000\n' +
             't2,A=a2,D=a2 E=2.0,F=2i 1520726400000000000\n' +
             't1,A=a3,B=b3,C=b3,D=a3 E=3.0,F=3i 1520812800000000000\n')
+    
+    def test_i32_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                -2147483648,  # i32 min
+                0,
+                2147483647],  # i32 max
+            dtype='int32')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1,a=1i 0\n' +
+            'tbl1,a=2i 0\n' +
+            'tbl1,a=3i 0\n')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -84,6 +84,37 @@ def gdb_test(*args):
 
 
 @command
+def rr_test(*args):
+    """
+    Linux-only reverse debugger.
+    https://github.com/rr-debugger/rr
+    https://www.youtube.com/watch?v=61kD3x4Pu8I
+
+    Install rr:
+    $ sudo apt install rr
+    $ sudo vim /proc/sys/kernel/perf_event_paranoid  # set to -1
+    """
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    try:
+        _run('rr', 'record', 'python3', 'test/test.py', '-v', *args,
+             env=env)
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        red = '\033[01;31m'
+        reset = '\033[0m'
+        sys.stderr.write(f'''\n{red}
+            Now first re-run marking stdout/stderr events with a unique ID:
+                $ rr -M replay -a
+                
+            Then re-run inside GDB, running up to a specific event:
+                $ rr replay -g $EVENT_ID
+                (rr) break ingress.c:9999
+                (rr) continue  # or step, next, etc.{reset}\n\n''')
+    
+
+
+@command
 def doc(http_serve=False, port=None):
     _run('python3', '-m', 'sphinx.cmd.build',
          '-b', 'html', 'docs', 'build/docs',

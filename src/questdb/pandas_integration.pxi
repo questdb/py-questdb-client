@@ -1,16 +1,6 @@
 # See: pandas_integration.md for technical overview.
 
-# cdef struct dtype_t:
-#     # See: https://numpy.org/doc/stable/reference/generated/numpy.dtype.html
-#     #          ?highlight=dtype#numpy.dtype
-#     # See: https://numpy.org/doc/stable/reference/c-api
-#     #          /types-and-structures.html#c.PyArray_Descr
-#     int alignment
-#     char kind
-#     int itemsize
-#     char byteorder
-#     bint hasobject
-
+import sys  # TODO, remove me.
 
 cdef enum col_access_tag_t:
     numpy
@@ -586,12 +576,13 @@ cdef bint _pandas_resolve_symbols(
     cdef object symbol
     cdef TaggedEntry entry
     if symbols is False:
-        return 0
+        return True
     elif symbols is True:
         for col_index in range(col_count):
             if _pandas_column_is_str(data, col_index):
                 tagged_cols[col_index].meta_target = \
                     meta_target_t.meta_target_symbol
+        
         return True
     else:
         if not isinstance(symbols, (tuple, list)):
@@ -819,7 +810,7 @@ cdef bint _pandas_series_as_pybuf(
     cdef int get_buf_ret
     cdef bytes format
     cdef Py_buffer* view
-    import sys; sys.stderr.write(f'_pandas_series_as_pybuf :: (A) entry.name: {entry.name}\n')
+    sys.stderr.write(f'_pandas_series_as_pybuf :: (A) entry.name: {entry.name}\n')
     sys.stderr.write('_pandas_series_as_pybuf :: (C)\n')
     if not PyObject_CheckBuffer(nparr):
         sys.stderr.write('_pandas_series_as_pybuf :: (D)\n')
@@ -949,7 +940,7 @@ cdef bint _pandas_series_sniff_pyobj(
     cdef size_t n_elements = len(entry.series)
     cdef PyObject** obj_arr
     cdef PyObject* obj
-    import sys; sys.stderr.write(f'_pandas_series_sniff_pyobj :: (A) buf: {<uintptr_t>col_out.pybuf.buf}, n_elements: {n_elements}, series:\n{entry.series}\n')
+    sys.stderr.write(f'_pandas_series_sniff_pyobj :: (A) buf: {<uintptr_t>col_out.pybuf.buf}, n_elements: {n_elements}, series:\n{entry.series}\n')
     _pandas_series_as_pybuf(entry, col_out)
     obj_arr = <PyObject**>(col_out.pybuf.buf)
     sys.stderr.write('_pandas_series_sniff_pyobj :: (B)\n')
@@ -1089,9 +1080,9 @@ cdef bint _pandas_resolve_source_and_buffers(
         col_out.source = col_source_t.col_source_dt64ns_tz_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _NUMPY_OBJECT):
-        import sys; sys.stderr.write(f'_pandas_resolve_source_and_buffers :: (A)\n')
+        sys.stderr.write(f'_pandas_resolve_source_and_buffers :: (A)\n')
         _pandas_series_sniff_pyobj(entry, col_out)
-        import sys; sys.stderr.write(f'_pandas_resolve_source_and_buffers :: (B)\n')
+        sys.stderr.write(f'_pandas_resolve_source_and_buffers :: (B)\n')
     else:
         raise ValueError(
             f'Unsupported dtype {dtype} for column {entry.name}. ' +
@@ -1132,7 +1123,7 @@ cdef bint _pandas_resolve_col(
 
     # Since we don't need to send the column names for 'table' and 'at' columns,
     # we don't need to validate and encode them as column names.
-    import sys; sys.stderr.write(f'_pandas_resolve_col :: (A) name: {entry.name}, dtype: {entry.dtype}\n')
+    sys.stderr.write(f'_pandas_resolve_col :: (A) name: {entry.name}, dtype: {entry.dtype}\n')
     if ((entry.meta_target != meta_target_t.meta_target_table) and
             (entry.meta_target != meta_target_t.meta_target_at)):
         sys.stderr.write('_pandas_resolve_col :: (B)\n')
@@ -1182,7 +1173,7 @@ cdef bint _pandas_resolve_args(
     cdef ssize_t name_col
     cdef ssize_t at_col
 
-    import sys; sys.stderr.write('_pandas_resolve_args :: (A)\n')
+    sys.stderr.write('_pandas_resolve_args :: (A)\n')
     # List of Lists with col index, col name, series object, sorting key.
     cdef list tagged_cols = [
         TaggedEntry(
@@ -1774,7 +1765,7 @@ cdef bint _pandas(
 
     _pandas_may_import_deps()
     try:
-        import sys; sys.stderr.write(' :: :: (A)\n')
+        sys.stderr.write(' :: :: (A)\n')
         qdb_pystr_buf_clear(b)
         sys.stderr.write(' :: :: (B)\n')
         _check_is_pandas_dataframe(data)
@@ -1811,40 +1802,63 @@ cdef bint _pandas(
         #     f'field_indices: {size_t_vec_str(&field_indices)}' +
         #     '\n')
         row_count = len(data)
+        sys.stderr.write(' :: :: (H)\n')
         line_sender_buffer_clear_marker(impl)
+        sys.stderr.write(' :: :: (I)\n')
         for _row_index in range(row_count):
+            sys.stderr.write(' :: :: (J)\n')
             qdb_pystr_buf_truncate(b, str_buf_marker)
+            sys.stderr.write(' :: :: (K)\n')
             try:
+                sys.stderr.write(' :: :: (L)\n')
                 if not line_sender_buffer_set_marker(impl, &err):
                     raise c_err_to_py(err)
 
+                sys.stderr.write(' :: :: (M)\n')
                 # Fixed table-name.
                 if c_table_name.buf != NULL:
                     if not line_sender_buffer_table(impl, c_table_name, &err):
                         raise c_err_to_py(err)
 
+                sys.stderr.write(' :: :: (N)\n')
                 # Serialize columns cells.
                 # Note: Columns are sorted: table name, symbols, fields, at.
                 for col_index in range(col_count):
+                    sys.stderr.write(' :: :: (O)\n')
                     col = &cols.d[col_index]
                     # TODO: Wrap error exceptions messaging with column name
                     # and row index. Ideally, extract value in python too.
                     _pandas_serialize_cell(impl, b, col)
+                    sys.stderr.write(' :: :: (P)\n')
                     _pandas_col_advance(col)
+                    sys.stderr.write(' :: :: (Q)\n')
 
+                sys.stderr.write(' :: :: (R)\n')
                 # Fixed "at" value (not from a column).
                 if at_value == 0:
+                    sys.stderr.write(' :: :: (S)\n')
                     if not line_sender_buffer_at_now(impl, &err):
                         raise c_err_to_py(err)
+                    sys.stderr.write(' :: :: (T)\n')
                 elif at_value > 0:
+                    sys.stderr.write(' :: :: (U)\n')
                     if not line_sender_buffer_at(impl, at_value, &err):
                         raise c_err_to_py(err)
+                    sys.stderr.write(' :: :: (V)\n')
             except:
+                sys.stderr.write(' :: :: (W)\n')
                 if not line_sender_buffer_rewind_to_marker(impl, &err):
                     raise c_err_to_py(err)
+                sys.stderr.write(' :: :: (X)\n')
                 raise
+            sys.stderr.write(' :: :: (Y)\n')
     finally:
+        sys.stderr.write(' :: :: (Z)\n')
         line_sender_buffer_clear_marker(impl)
+        sys.stderr.write(' :: :: (a)\n')
         col_t_arr_release(&cols)
+        sys.stderr.write(' :: :: (b)\n')
         qdb_pystr_buf_clear(b)
+        sys.stderr.write(' :: :: (c)\n')
+    sys.stderr.write(' :: :: (d)\n')
     return True
