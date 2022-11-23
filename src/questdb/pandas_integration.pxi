@@ -413,10 +413,6 @@ cdef object _pandas_may_import_deps():
         _PYARROW = None
 
 
-cdef str _fqn(type obj):
-    return obj.__module__ + '.' + obj.__qualname__
-
-
 cdef object _check_is_pandas_dataframe(object data):
     if not isinstance(data, _PANDAS.DataFrame):
         raise TypeError(
@@ -454,7 +450,7 @@ cdef ssize_t _pandas_resolve_table_name(
                 'Can specify only one of `table_name` or `table_name_col`.')
         if isinstance(table_name, str):
             try:
-                str_to_table_name(b, table_name, name_out)
+                str_to_table_name(b, <PyObject*>table_name, name_out)
                 return -1  # Magic value for "no column index".
             except IngressError as ie:
                 raise ValueError(f'Bad argument `table_name`: {ie}')
@@ -838,8 +834,8 @@ cdef bint _pandas_series_as_pybuf(
         # Note! We don't need to support numpy strides since Pandas doesn't.
         # Also note that this guarantees a 1D buffer.
         view = &col_out.pybuf
-        get_buf_ret = PyObject_GetBuffer(nparr, view, PyBUF_STRIDES)
-        sys.stderr.write(f'_pandas_series_as_pybuf :: (H1) {<uintptr_t>col_out.pybuf.buf}, ret: {get_buf_ret}, ndim: {col_out.pybuf.ndim}, strides[0]: {col_out.pybuf.strides[0]}, itemsize: {col_out.pybuf.itemsize}, len: {col_out.pybuf.len}, count: {col_out.pybuf.len // col_out.pybuf.itemsize}\n')
+        get_buf_ret = PyObject_GetBuffer(nparr, view, PyBUF_SIMPLE)
+        sys.stderr.write(f'_pandas_series_as_pybuf :: (H1) {<uintptr_t>col_out.pybuf.buf}, ret: {get_buf_ret}, ndim: {col_out.pybuf.ndim}, itemsize: {col_out.pybuf.itemsize}, len: {col_out.pybuf.len}, count: {col_out.pybuf.len // col_out.pybuf.itemsize}\n')
 
     except BufferError as be:
         sys.stderr.write('_pandas_series_as_pybuf :: (I)\n')
@@ -930,13 +926,16 @@ cdef bint _pandas_category_series_as_arrow(
     return True
 
 
-cdef inline bint _pandas_is_float_nan(obj):
+cdef inline bint _pandas_is_float_nan(PyObject* obj):
     return PyFloat_CheckExact(obj) and isnan(PyFloat_AS_DOUBLE(obj))
 
 
 # TODO: Check for pointless incref at callsite or here.
-cdef inline bint _pandas_is_null_pyobj(object obj):
-    return (obj is None) or (obj is _PANDAS_NA) or _pandas_is_float_nan(obj)
+cdef inline bint _pandas_is_null_pyobj(PyObject* obj):
+    return (
+        (obj == Py_None) or
+        (obj == <PyObject*>_PANDAS_NA) or
+        _pandas_is_float_nan(obj))
 
 
 cdef bint _pandas_series_sniff_pyobj(
@@ -946,30 +945,27 @@ cdef bint _pandas_series_sniff_pyobj(
     Object columns can contain pretty much anything, but they usually don't.
     We make an educated guess by finding the first non-null value in the column.
     """
-    cdef object obj
     cdef size_t el_index
     cdef size_t n_elements = len(entry.series)
     cdef PyObject** obj_arr
+    cdef PyObject* obj
     import sys; sys.stderr.write(f'_pandas_series_sniff_pyobj :: (A) buf: {<uintptr_t>col_out.pybuf.buf}, n_elements: {n_elements}, series:\n{entry.series}\n')
     _pandas_series_as_pybuf(entry, col_out)
     obj_arr = <PyObject**>(col_out.pybuf.buf)
     sys.stderr.write('_pandas_series_sniff_pyobj :: (B)\n')
     for el_index in range(n_elements):
-        sys.stderr.write(f'_pandas_series_sniff_pyobj :: (C1) {el_index}, ptr: {<uintptr_t>&obj_arr[el_index]}\n')
-        # TODO: Check there's no pointless INCREF/DECREF going on here.
-        obj = <object>obj_arr[el_index]
-        sys.stderr.write(f'_pandas_series_sniff_pyobj :: (C2) obj: {obj!r}\n')
+        obj = obj_arr[el_index]
         if _pandas_is_null_pyobj(obj):
             continue
         elif PyBool_Check(obj):
             col_out.source = col_source_t.col_source_bool_pyobj
-        elif PyLong_Check(obj):
+        elif PyLong_CheckExact(obj):
             col_out.source = col_source_t.col_source_int_pyobj
-        elif PyFloat_Check(obj):
+        elif PyFloat_CheckExact(obj):
             col_out.source = col_source_t.col_source_float_pyobj
-        elif PyUnicode_Check(obj):
+        elif PyUnicode_CheckExact(obj):
             col_out.source = col_source_t.col_source_str_pyobj
-        elif isinstance(obj, bytes):
+        elif PyBytes_CheckExact(obj):
             raise ValueError(
                 f'Bad column {entry.name!r}: ' +
                 'Unsupported object column containing bytes.' +
@@ -978,7 +974,7 @@ cdef bint _pandas_series_sniff_pyobj(
         else:
             raise TypeError(
                 f'Bad column {entry.name!r}: ' +
-                f'Unsupported object column containing an {_fqn(type(obj))}')
+                f'Unsupported object column containing an {_fqn(type(<object>obj))}')
         sys.stderr.write('_pandas_series_sniff_pyobj :: (D)\n')
         return True
     sys.stderr.write('_pandas_series_sniff_pyobj :: (E)\n')
@@ -1221,6 +1217,26 @@ cdef bint _pandas_resolve_args(
     return True
 
 
+cdef inline bint _pandas_cell_str_pyobj_to_utf8(
+        qdb_pystr_buf* b,
+        col_t* col,
+        size_t row_index,
+        bint* valid_out,
+        line_sender_utf8* utf8_out) except False: 
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[row_index]
+    if _pandas_is_null_pyobj(cell):
+        valid_out[0] = False
+        return True
+    elif PyUnicode_CheckExact(cell):
+        str_to_utf8(b, cell, utf8_out)
+        valid_out[0] = True
+        return True
+    else:
+        raise ValueError(
+            f'Expected an object of type str, got a {_fqn(type(<object>cell))}')
+
+
 cdef bint _pandas_serialize_cell_table__str_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
@@ -1228,9 +1244,11 @@ cdef bint _pandas_serialize_cell_table__str_pyobj(
         size_t row_index) except False:
     cdef line_sender_error* err = NULL
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
-    cdef object cell = <object>access[row_index]
+    cdef PyObject* cell = access[row_index]
     cdef line_sender_table_name c_table_name
-    # TODO: Check if object is not none and check if string. Then see if there's silly increfs.
+    if _pandas_is_null_pyobj(cell) or not PyUnicode_CheckExact(cell):
+        raise ValueError(f'Expected an object of type str, got a {_fqn(type(<object>cell))}')
+    # TODO: See if there's silly increfs.
     str_to_table_name(b, cell, &c_table_name)
     if not line_sender_buffer_table(impl, c_table_name, &err):
         raise c_err_to_py(err)
@@ -1283,12 +1301,10 @@ cdef bint _pandas_serialize_cell_symbol__str_pyobj(
         col_t* col,
         size_t row_index) except False:
     cdef line_sender_error* err = NULL
-    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
-    cdef object cell = <object>access[row_index]
+    cdef bint valid = False
     cdef line_sender_utf8 utf8
-    # TODO: Null checks, string checks, no incref verifications.
-    str_to_utf8(b, cell, &utf8)
-    if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
+    _pandas_cell_str_pyobj_to_utf8(b, col, row_index, &valid, &utf8)
+    if valid and not line_sender_buffer_symbol(impl, col.name, utf8, &err):
         raise c_err_to_py(err)
     return True
 
@@ -1552,7 +1568,13 @@ cdef bint _pandas_serialize_cell_column_str__str_pyobj(
         qdb_pystr_buf* b,
         col_t* col,
         size_t row_index) except False:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = False
+    cdef line_sender_utf8 utf8
+    _pandas_cell_str_pyobj_to_utf8(b, col, row_index, &valid, &utf8)
+    if valid and not line_sender_buffer_column_str(impl, col.name, utf8, &err):
+        raise c_err_to_py(err)
+    return True
 
 
 cdef bint _pandas_serialize_cell_column_str__str_arrow(
@@ -1643,7 +1665,8 @@ cdef bint _pandas_serialize_cell(
         col_t* col,
         size_t row_index) except False:
     cdef col_dispatch_code_t dc = col.dispatch_code
-    # TODO: Check that this `if/elif` gets compiled into a C switch statement.
+    # Note!: Code below will generate a `switch` statement.
+    # Ensure this happens! Don't break the `dc == ...` pattern.
     if dc == col_dispatch_code_t.col_dispatch_code_skip_nulls:
         pass  # We skip a null column. Nothing to do.
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_pyobj:
@@ -1743,6 +1766,9 @@ cdef bint _pandas_serialize_cell(
         _pandas_serialize_cell_at_dt64ns_tz_numpy(impl, b, col, row_index)
     else:
         raise RuntimeError(f"Unknown column dispatch code: {dc}")
+    # See earlier note about switch statement generation.
+    # Don't add complex conditions above!
+
     return True
 
 

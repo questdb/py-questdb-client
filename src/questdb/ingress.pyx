@@ -36,14 +36,11 @@ from libc.stdlib cimport malloc, calloc, realloc, free, abort
 from libc.string cimport strncmp
 from libc.math cimport isnan
 from cpython.datetime cimport datetime
-from cpython.bool cimport bool, PyBool_Check
+from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
-from cpython.float cimport PyFloat_Check, PyFloat_CheckExact, PyFloat_AS_DOUBLE
-from cpython.long cimport PyLong_Check
-from cpython.unicode cimport PyUnicode_Check
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
-    PyObject_GetBuffer, PyBuffer_Release, PyBUF_STRIDES
+    PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *
@@ -138,16 +135,21 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     return IngressError(tup[0], fmt.format(tup[1]))
 
 
-cdef object _utf8_decode_error(str string, uint32_t bad_codepoint):
+cdef object _utf8_decode_error(PyObject* string, uint32_t bad_codepoint):
+    cdef str s = <str><object>string
     return IngressError(
         IngressErrorCode.InvalidUtf8,
-        f'Invalid codepoint 0x{bad_codepoint:x} in string {string!r}: ' +
+        f'Invalid codepoint 0x{bad_codepoint:x} in string {s!r}: ' +
         'Cannot be encoded as UTF-8.')
+
+
+cdef str _fqn(type obj):
+    return obj.__module__ + '.' + obj.__qualname__
 
 
 cdef bint str_to_utf8(
         qdb_pystr_buf* b,
-        str string,
+        PyObject* string,
         line_sender_utf8* utf8_out) except False:
     """
     Convert a Python string to a UTF-8 borrowed buffer.
@@ -160,8 +162,11 @@ cdef bint str_to_utf8(
     cdef size_t count
     cdef int kind
     cdef uint32_t bad_codepoint = 0
+    if not PyUnicode_CheckExact(string):
+        raise TypeError(
+            f'Expected a str object, not a {_fqn(type(<str><object>string))}')
     PyUnicode_READY(string)
-    count = <size_t>(PyUnicode_GET_LENGTH(string))
+    count = <size_t>(PyUnicode_GET_LENGTH(string))    
 
     # We optimize the common case of ASCII strings.
     # This avoid memory allocations and copies altogether.
@@ -210,7 +215,7 @@ cdef bint str_to_utf8(
 
 cdef bint str_to_table_name(
         qdb_pystr_buf* b,
-        str string,
+        PyObject* string,
         line_sender_table_name* name_out) except False:
     """
     Python string to borrowed C table name.
@@ -234,7 +239,7 @@ cdef bint str_to_column_name(
     """
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    str_to_utf8(b, string, &utf8)
+    str_to_utf8(b, <PyObject*>string, &utf8)
     if not line_sender_column_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
     return True
@@ -542,7 +547,8 @@ cdef class Buffer:
     cdef inline int _table(self, str table_name) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_table_name c_table_name
-        str_to_table_name(self._cleared_b(), table_name, &c_table_name)
+        str_to_table_name(
+            self._cleared_b(), <PyObject*>table_name, &c_table_name)
         if not line_sender_buffer_table(self._impl, c_table_name, &err):
             raise c_err_to_py(err)
         return 0
@@ -556,7 +562,7 @@ cdef class Buffer:
         cdef line_sender_column_name c_name
         cdef line_sender_utf8 c_value
         str_to_column_name(self._cleared_b(), name, &c_name)
-        str_to_utf8(self._b, value, &c_value)
+        str_to_utf8(self._b, <PyObject*>value, &c_value)
         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
         return 0
@@ -586,7 +592,7 @@ cdef class Buffer:
             self, line_sender_column_name c_name, str value) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_value
-        str_to_utf8(self._b, value, &c_value)
+        str_to_utf8(self._b, <PyObject*>value, &c_value)
         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
         return 0
@@ -609,13 +615,13 @@ cdef class Buffer:
     cdef inline int _column(self, str name, object value) except -1:
         cdef line_sender_column_name c_name
         str_to_column_name(self._cleared_b(), name, &c_name)
-        if PyBool_Check(value):
+        if PyBool_Check(<PyObject*>value):
             return self._column_bool(c_name, value)
-        elif PyLong_Check(value):
+        elif PyLong_CheckExact(<PyObject*>value):
             return self._column_i64(c_name, value)
-        elif PyFloat_Check(value):
+        elif PyFloat_CheckExact(<PyObject*>value):
             return self._column_f64(c_name, value)
-        elif PyUnicode_Check(value):
+        elif PyUnicode_CheckExact(<PyObject*>value):
             return self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
             return self._column_ts(c_name, value)
@@ -1197,20 +1203,20 @@ cdef class Sender:
 
         b = self._buffer._b
 
-        if PyLong_Check(port):
+        if PyLong_CheckExact(<PyObject*>port):
             port_str = str(port)
-        elif PyUnicode_Check(port):
+        elif PyUnicode_CheckExact(<PyObject*>port):
             port_str = port
         else:
             raise TypeError(
-                f'port must be an integer or a string, not {type(port)}')
+                f'port must be an int or a str, not {_fqn(type(port))}')
 
-        str_to_utf8(b, host, &host_utf8)
-        str_to_utf8(b, port_str, &port_utf8)
+        str_to_utf8(b, <PyObject*>host, &host_utf8)
+        str_to_utf8(b, <PyObject*>port_str, &port_utf8)
         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
 
         if interface is not None:
-            str_to_utf8(b, interface, &interface_utf8)
+            str_to_utf8(b, <PyObject*>interface, &interface_utf8)
             line_sender_opts_net_interface(self._opts, interface_utf8)
 
         if auth is not None:
@@ -1218,10 +1224,10 @@ cdef class Sender:
              a_priv_key,
              a_pub_key_x,
              a_pub_key_y) = auth
-            str_to_utf8(b, a_key_id, &a_key_id_utf8)
-            str_to_utf8(b, a_priv_key, &a_priv_key_utf8)
-            str_to_utf8(b, a_pub_key_x, &a_pub_key_x_utf8)
-            str_to_utf8(b, a_pub_key_y, &a_pub_key_y_utf8)
+            str_to_utf8(b, <PyObject*>a_key_id, &a_key_id_utf8)
+            str_to_utf8(b, <PyObject*>a_priv_key, &a_priv_key_utf8)
+            str_to_utf8(b, <PyObject*>a_pub_key_x, &a_pub_key_x_utf8)
+            str_to_utf8(b, <PyObject*>a_pub_key_y, &a_pub_key_y_utf8)
             line_sender_opts_auth(
                 self._opts,
                 a_key_id_utf8,
@@ -1236,11 +1242,11 @@ cdef class Sender:
                 if tls == 'insecure_skip_verify':
                     line_sender_opts_tls_insecure_skip_verify(self._opts)
                 else:
-                    str_to_utf8(b, tls, &ca_utf8)
+                    str_to_utf8(b, <PyObject*>tls, &ca_utf8)
                     line_sender_opts_tls_ca(self._opts, ca_utf8)
             elif isinstance(tls, pathlib.Path):
                 tls = str(tls)
-                str_to_utf8(b, tls, &ca_utf8)
+                str_to_utf8(b, <PyObject*>tls, &ca_utf8)
                 line_sender_opts_tls_ca(self._opts, ca_utf8)
             else:
                 raise TypeError(
