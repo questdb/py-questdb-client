@@ -525,9 +525,9 @@ class TestPandas(unittest.TestCase):
             at=-1)
         self.assertEqual(
             buf,
-            't1,A=a1,B=b1 1520640000000000000\n' +
-            't2,A=a2,B=b2 1520726400000000000\n' +
-            't1,A=a3,B=b3 1520812800000000000\n')
+            't1,A=a1,B=b1,C=b1,D=a1 E=1.0,F=1i 1520640000000000000\n' +
+            't2,A=a2,D=a2 E=2.0,F=2i 1520726400000000000\n' +
+            't1,A=a3,B=b3,C=b3,D=a3 E=3.0,F=3i 1520812800000000000\n')
 
 if __name__ == '__main__':
     unittest.main()
