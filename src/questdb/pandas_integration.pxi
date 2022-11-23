@@ -471,9 +471,9 @@ cdef ssize_t _pandas_resolve_table_name(
             'Must specify at least one of `table_name` or `table_name_col`.')
 
 
-cdef bint _bind_col_index(
+cdef void_int _bind_col_index(
         str arg_name, int col_num, size_t col_count,
-        size_t* col_index) except False:
+        size_t* col_index) except -1:
     """
     Validate that `col_index` is in bounds for `col_count`.
     This function also converts negative indicies (e.g. -1 for last column) to
@@ -491,7 +491,6 @@ cdef bint _bind_col_index(
         raise IndexError(
             f'Bad argument `{arg_name}`: {orig_col_num} index out of range')
     col_index[0] = <size_t>col_num
-    return True
 
 
 cdef object _pandas_column_is_str(object data, int col_index):
@@ -565,13 +564,13 @@ cdef class TaggedEntry:
         self.meta_target = meta_target
 
 
-cdef bint _pandas_resolve_symbols(
+cdef void_int _pandas_resolve_symbols(
         object data,
         list tagged_cols,
         ssize_t table_name_col,
         ssize_t at_col,
         object symbols,
-        size_t col_count) except False:
+        size_t col_count) except -1:
     cdef size_t col_index = 0
     cdef object symbol
     cdef TaggedEntry entry
@@ -616,18 +615,16 @@ cdef bint _pandas_resolve_symbols(
                 symbol)
             entry = tagged_cols[col_index]
             entry.meta_target = meta_target_t.meta_target_symbol
-    return True
 
 
-cdef bint _pandas_get_loc(
+cdef void_int _pandas_get_loc(
         object data, str col_name, str arg_name,
-        size_t* col_index_out) except False:
+        size_t* col_index_out) except -1:
     """
     Return the column index for `col_name`.
     """
     try:
         col_index_out[0] = data.columns.get_loc(col_name)
-        return True
     except KeyError:
         raise KeyError(
             f'Bad argument `{arg_name}`: ' +
@@ -688,116 +685,14 @@ cdef object _pandas_is_supported_datetime(object dtype):
         (not dtype.hasobject))
 
 
-# cdef int64_t _pandas_get_timestamp_cell(
-#         dtype_t* dtype,
-#         Py_buffer* col_buffer,
-#         size_t row_index) except -1:
-#     # Note: Type is pre-validated by `_pandas_is_supported_datetime`.
-#     cdef const void* cell = _pandas_get_cell(col_buffer, row_index)
-#     cdef int64_t res = (<int64_t*>cell)[0]
-#     if res < 0:
-#         # TODO [amunra]: Improve error messaging. Add column name.
-#         raise ValueError(  
-#             f'Bad value: Negative timestamp, got {res}')
-#     return res
-
-
-# cdef bint _pandas_row_table_name(
-#         line_sender_buffer* impl,
-#         qdb_pystr_buf* b,
-#         dtype_t* dtypes,
-#         Py_buffer* col_buffers,
-#         ssize_t name_col,
-#         size_t row_index,
-#         line_sender_table_name c_table_name) except False:
-#     cdef line_sender_error* err = NULL
-#     cdef bint is_null = False
-#     cdef line_sender_utf8 utf8
-#     if name_col >= 0:
-#         _pandas_get_str_cell(
-#             b,
-#             &dtypes[<size_t>name_col],
-#             &col_buffers[<size_t>name_col],
-#             row_index,
-#             &is_null,
-#             &utf8)
-#         if is_null:
-#             # TODO [amunra]: Improve error messaging. Add column name.
-#             raise ValueError(
-#                 f'Bad value: `None` table name value at row {row_index}.')
-#         if not line_sender_table_name_init(
-#                 &c_table_name, utf8.len, utf8.buf, &err):
-#             raise c_err_to_py(err)
-#     if not line_sender_buffer_table(impl, c_table_name, &err):
-#         raise c_err_to_py(err)
-#     return True
-
-    
-# cdef bint _pandas_row_symbols(
-#         line_sender_buffer* impl,
-#         qdb_pystr_buf* b,
-#         dtype_t* dtypes,
-#         Py_buffer* col_buffers,
-#         size_t row_index,
-#         const column_name_vec* symbol_names,
-#         const size_t_vec* symbol_indices) except False:
-#     cdef line_sender_error* err = NULL
-#     cdef size_t sym_index
-#     cdef size_t col_index
-#     cdef dtype_t* dtype
-#     cdef Py_buffer* col_buffer
-#     cdef line_sender_column_name col_name
-#     cdef line_sender_utf8 symbol
-#     cdef bint is_null = False
-#     for sym_index in range(symbol_indices.size):
-#         col_name = symbol_names.d[sym_index]
-#         col_index = symbol_indices.d[sym_index]
-#         col_buffer = &col_buffers[col_index]
-#         dtype = &dtypes[col_index]
-#         _pandas_get_str_cell(
-#             b,
-#             dtype,
-#             col_buffer,
-#             row_index,
-#             &is_null,
-#             &symbol)
-#         if not is_null:
-#             if not line_sender_buffer_symbol(impl, col_name, symbol, &err):
-#                 raise c_err_to_py(err)
-#     return True
-
-
-# cdef bint _pandas_row_at(
-#         line_sender_buffer* impl,
-#         dtype_t* dtypes,
-#         Py_buffer* col_buffers,
-#         size_t row_index,
-#         ssize_t at_col,
-#         int64_t at_value) except False:
-#     cdef line_sender_error* err = NULL
-#     cdef Py_buffer* col_buffer
-#     cdef dtype_t* dtype
-#     if at_col >= 0:
-#         col_buffer = &col_buffers[<size_t>at_col]
-#         dtype = &dtypes[<size_t>at_col]
-#         at_value = _pandas_get_timestamp_cell(dtype, col_buffer, row_index)
-#     if at_value > 0:
-#         if not line_sender_buffer_at(impl, at_value, &err):
-#             raise c_err_to_py(err)
-#     else:
-#         if not line_sender_buffer_at_now(impl, &err):
-#             raise c_err_to_py(err)
-#     return True
-
-
-cdef bint _pandas_alloc_chunks(size_t n_chunks, col_t* col_out) except False:
+cdef void_int _pandas_alloc_chunks(
+        size_t n_chunks, col_t* col_out) except -1:
     col_out.chunks.n_chunks = n_chunks
     col_out.chunks.chunks = <ArrowArray*>calloc(
         col_out.chunks.n_chunks + 1,  # See `_pandas_col_advance` on why +1.
         sizeof(ArrowArray))
     if col_out.chunks.chunks == NULL:
         raise MemoryError()
-    return True
 
 
 cdef void _pandas_free_mapped_arrow(ArrowArray* arr):
@@ -806,12 +701,11 @@ cdef void _pandas_free_mapped_arrow(ArrowArray* arr):
     arr.release = NULL
 
 
-cdef bint _pandas_series_as_pybuf(
-        TaggedEntry entry, col_t* col_out) except False:
+cdef void_int _pandas_series_as_pybuf(
+        TaggedEntry entry, col_t* col_out) except -1:
     cdef object nparr = entry.series.to_numpy()
     cdef ArrowArray* mapped
     cdef int get_buf_ret
-    cdef bytes format
     cdef Py_buffer* view
     sys.stderr.write(f'_pandas_series_as_pybuf :: (A) entry.name: {entry.name}\n')
     sys.stderr.write('_pandas_series_as_pybuf :: (C)\n')
@@ -853,13 +747,12 @@ cdef bint _pandas_series_as_pybuf(
     mapped.children = NULL
     mapped.dictionary = NULL
     mapped.release = _pandas_free_mapped_arrow  # to cleanup allocated array.
-    return True
 
 
-cdef bint _pandas_series_as_arrow(
+cdef void_int _pandas_series_as_arrow(
         TaggedEntry entry,
         col_t* col_out,
-        col_source_t np_fallback) except False:
+        col_source_t np_fallback) except -1:
     cdef object array
     cdef list chunks
     cdef size_t n_chunks
@@ -867,7 +760,7 @@ cdef bint _pandas_series_as_arrow(
     if _PYARROW is None:
         col_out.source = np_fallback
         _pandas_series_as_pybuf(entry, col_out)
-        return True
+        return 0
 
     col_out.tag = col_access_tag_t.arrow
     array = _PYARROW.Array.from_pandas(entry.series)
@@ -888,7 +781,6 @@ cdef bint _pandas_series_as_arrow(
         else:
             chunks[chunk_index]._export_to_c(
                 <uintptr_t>&col_out.chunks.chunks[chunk_index])
-    return True
     
 
 cdef const char* _ARROW_FMT_INT8 = "c"
@@ -897,13 +789,13 @@ cdef const char* _ARROW_FMT_INT32 = "i"
 cdef const char* _ARROW_FMT_INT64 = "l"
 
 
-cdef bint _pandas_category_series_as_arrow(
-        TaggedEntry entry, col_t* col_out) except False:
+cdef void_int _pandas_category_series_as_arrow(
+        TaggedEntry entry, col_t* col_out) except -1:
     cdef const char* format
     col_out.source = col_source_t.col_source_nulls  # placeholder value.
     _pandas_series_as_arrow(entry, col_out, col_source_t.col_source_str_pyobj)
     if col_out.source == col_source_t.col_source_str_pyobj:
-        return True  # PyArrow wasn't imported.
+        return 0  # PyArrow wasn't imported.
     format = col_out.arrow_schema.format
     if strncmp(format, _ARROW_FMT_INT8, 1) == 0:
         col_out.source = col_source_t.col_source_str_i8_cat
@@ -917,14 +809,12 @@ cdef bint _pandas_category_series_as_arrow(
         raise TypeError(
             f'Bad column {entry.name!r}: Expected an arrow category index ' +
             f'format, got {(<bytes>format).decode("utf-8")!r}')
-    return True
 
 
 cdef inline bint _pandas_is_float_nan(PyObject* obj):
     return PyFloat_CheckExact(obj) and isnan(PyFloat_AS_DOUBLE(obj))
 
 
-# TODO: Check for pointless incref at callsite or here.
 cdef inline bint _pandas_is_null_pyobj(PyObject* obj):
     return (
         (obj == Py_None) or
@@ -932,8 +822,8 @@ cdef inline bint _pandas_is_null_pyobj(PyObject* obj):
         _pandas_is_float_nan(obj))
 
 
-cdef bint _pandas_series_sniff_pyobj(
-        TaggedEntry entry, col_t* col_out) except False:
+cdef void_int _pandas_series_sniff_pyobj(
+        TaggedEntry entry, col_t* col_out) except -1:
     """
     Deduct the type of the object column.
     Object columns can contain pretty much anything, but they usually don't.
@@ -949,39 +839,38 @@ cdef bint _pandas_series_sniff_pyobj(
     sys.stderr.write('_pandas_series_sniff_pyobj :: (B)\n')
     for el_index in range(n_elements):
         obj = obj_arr[el_index]
-        if _pandas_is_null_pyobj(obj):
-            continue
-        elif PyBool_Check(obj):
-            col_out.source = col_source_t.col_source_bool_pyobj
-        elif PyLong_CheckExact(obj):
-            col_out.source = col_source_t.col_source_int_pyobj
-        elif PyFloat_CheckExact(obj):
-            col_out.source = col_source_t.col_source_float_pyobj
-        elif PyUnicode_CheckExact(obj):
-            col_out.source = col_source_t.col_source_str_pyobj
-        elif PyBytes_CheckExact(obj):
-            raise ValueError(
-                f'Bad column {entry.name!r}: ' +
-                'Unsupported object column containing bytes.' +
-                'If this is a string column, decode it first. ' +
-                'See: https://stackoverflow.com/questions/40389764/')
-        else:
-            raise TypeError(
-                f'Bad column {entry.name!r}: ' +
-                f'Unsupported object column containing an {_fqn(type(<object>obj))}')
-        sys.stderr.write('_pandas_series_sniff_pyobj :: (D)\n')
-        return True
+        if not _pandas_is_null_pyobj(obj):
+            if PyBool_Check(obj):
+                col_out.source = col_source_t.col_source_bool_pyobj
+            elif PyLong_CheckExact(obj):
+                col_out.source = col_source_t.col_source_int_pyobj
+            elif PyFloat_CheckExact(obj):
+                col_out.source = col_source_t.col_source_float_pyobj
+            elif PyUnicode_CheckExact(obj):
+                col_out.source = col_source_t.col_source_str_pyobj
+            elif PyBytes_CheckExact(obj):
+                raise ValueError(
+                    f'Bad column {entry.name!r}: ' +
+                    'Unsupported object column containing bytes.' +
+                    'If this is a string column, decode it first. ' +
+                    'See: https://stackoverflow.com/questions/40389764/')
+            else:
+                raise TypeError(
+                    f'Bad column {entry.name!r}: ' +
+                    f'Unsupported object column containing an {_fqn(type(<object>obj))}')
+            sys.stderr.write('_pandas_series_sniff_pyobj :: (D)\n')
+            return 0
     sys.stderr.write('_pandas_series_sniff_pyobj :: (E)\n')
 
-    # We've hit an object column that exclusively has null values.
-    # We will just skip this column.
+    # TODO: Test all-null columns (this will probably break the API).
+    # We haven't returned yet, so we've hit an object column that
+    # exclusively has null values. We will just skip this column.
     col_out.source = col_source_t.col_source_nulls
     sys.stderr.write('_pandas_series_sniff_pyobj :: (F)\n')
-    return True
     
 
-cdef bint _pandas_resolve_source_and_buffers(
-        TaggedEntry entry, col_t* col_out) except False:
+cdef void_int _pandas_resolve_source_and_buffers(
+        TaggedEntry entry, col_t* col_out) except -1:
     cdef object dtype = entry.dtype
     if isinstance(dtype, _NUMPY_BOOL):
         col_out.source = col_source_t.col_source_bool_numpy
@@ -1091,21 +980,20 @@ cdef bint _pandas_resolve_source_and_buffers(
             f'Unsupported dtype {dtype} for column {entry.name}. ' +
             'Raise an issue if you think it should be supported: ' +
             'https://github.com/questdb/py-questdb-client/issues.')
-    return True
 
 
-cdef bint _pandas_resolve_target(
-        TaggedEntry entry, col_t* col_out) except False:
+cdef void_int _pandas_resolve_target(
+        TaggedEntry entry, col_t* col_out) except -1:
     cdef col_target_t target
     cdef set target_sources
     if entry.meta_target in _DIRECT_META_TARGETS:
         col_out.target = <col_target_t><int>entry.meta_target
-        return True
+        return 0
     for target in _FIELD_TARGETS:
         target_sources = _TARGET_TO_SOURCES[target]
         if col_out.source in target_sources:
             col_out.target = target
-            return True
+            return 0
     raise ValueError(
         f'Could not map column source type (code {col_out.source} for ' +
         f'{entry.dtype!r}) {entry.name}.')
@@ -1117,11 +1005,11 @@ cdef void _pandas_init_cursor(col_t* col_out):
     col_out.cursor.offset = col_out.cursor.chunk.offset
 
 
-cdef bint _pandas_resolve_col(
+cdef void_int _pandas_resolve_col(
         qdb_pystr_buf* b,
         size_t index,
         TaggedEntry entry,
-        col_t* col_out) except False:
+        col_t* col_out) except -1:
     col_out.orig_index = entry.orig_index
 
     # Since we don't need to send the column names for 'table' and 'at' columns,
@@ -1149,20 +1037,17 @@ cdef bint _pandas_resolve_col(
     sys.stderr.write('_pandas_resolve_col :: (I)\n')
     _pandas_init_cursor(col_out)
     sys.stderr.write('_pandas_resolve_col :: (J)\n')
-    return True
 
 
-
-cdef bint _pandas_resolve_cols(
-        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except False:
+cdef void_int _pandas_resolve_cols(
+        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except -1:
     cdef size_t index
     cdef size_t len_tagged_cols = len(tagged_cols)
     for index in range(len_tagged_cols):
         _pandas_resolve_col(b, index, tagged_cols[index], &cols_out.d[index])
-    return True
 
 
-cdef bint _pandas_resolve_args(
+cdef void_int _pandas_resolve_args(
         object data,
         object table_name,
         object table_name_col,
@@ -1172,7 +1057,7 @@ cdef bint _pandas_resolve_args(
         size_t col_count,
         line_sender_table_name* c_table_name_out,
         int64_t* at_value_out,
-        col_t_arr* cols_out) except False:
+        col_t_arr* cols_out) except -1:
     cdef ssize_t name_col
     cdef ssize_t at_col
 
@@ -1208,32 +1093,29 @@ cdef bint _pandas_resolve_args(
     sys.stderr.write('_pandas_resolve_args :: (E)\n')
     _pandas_resolve_cols(b, tagged_cols, cols_out)
     sys.stderr.write('_pandas_resolve_args :: (F)\n')
-    return True
 
 
-cdef inline bint _pandas_cell_str_pyobj_to_utf8(
+cdef inline void_int _pandas_cell_str_pyobj_to_utf8(
         qdb_pystr_buf* b,
         col_t* col,
         bint* valid_out,
-        line_sender_utf8* utf8_out) except False: 
+        line_sender_utf8* utf8_out) except -1: 
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
     if _pandas_is_null_pyobj(cell):
         valid_out[0] = False
-        return True
     elif PyUnicode_CheckExact(cell):
         str_to_utf8(b, cell, utf8_out)
         valid_out[0] = True
-        return True
     else:
         raise ValueError(
             f'Expected an object of type str, got a {_fqn(type(<object>cell))}')
 
 
-cdef bint _pandas_serialize_cell_table__str_pyobj(
+cdef void_int _pandas_serialize_cell_table__str_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
@@ -1244,13 +1126,12 @@ cdef bint _pandas_serialize_cell_table__str_pyobj(
     str_to_table_name(b, cell, &c_table_name)
     if not line_sender_buffer_table(impl, c_table_name, &err):
         raise c_err_to_py(err)
-    return True
 
 
-cdef bint _pandas_serialize_cell_table__str_arrow(
+cdef void_int _pandas_serialize_cell_table__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_table_name c_table_name
     cdef uint8_t* validity_access = <uint8_t*>col.cursor.chunk.buffers[0]
@@ -1258,342 +1139,336 @@ cdef bint _pandas_serialize_cell_table__str_arrow(
     raise ValueError('Not implemented')
 
 
-cdef bint _pandas_serialize_cell_table__str_i8_cat(
+cdef void_int _pandas_serialize_cell_table__str_i8_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_table__str_i16_cat(
+cdef void_int _pandas_serialize_cell_table__str_i16_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_table__str_i32_cat(
+cdef void_int _pandas_serialize_cell_table__str_i32_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_table__str_i64_cat(
+cdef void_int _pandas_serialize_cell_table__str_i64_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_symbol__str_pyobj(
+cdef void_int _pandas_serialize_cell_symbol__str_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = False
     cdef line_sender_utf8 utf8
     _pandas_cell_str_pyobj_to_utf8(b, col, &valid, &utf8)
     if valid and not line_sender_buffer_symbol(impl, col.name, utf8, &err):
         raise c_err_to_py(err)
-    return True
 
 
-cdef bint _pandas_serialize_cell_symbol__str_arrow(
+cdef void_int _pandas_serialize_cell_symbol__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_symbol__str_i8_cat(
+cdef void_int _pandas_serialize_cell_symbol__str_i8_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_symbol__str_i16_cat(
+cdef void_int _pandas_serialize_cell_symbol__str_i16_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_symbol__str_i32_cat(
+cdef void_int _pandas_serialize_cell_symbol__str_i32_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_symbol__str_i64_cat(
+cdef void_int _pandas_serialize_cell_symbol__str_i64_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_bool__bool_pyobj(
+cdef void_int _pandas_serialize_cell_column_bool__bool_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_bool__bool_numpy(
+cdef void_int _pandas_serialize_cell_column_bool__bool_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_bool__bool_arrow(
+cdef void_int _pandas_serialize_cell_column_bool__bool_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__int_pyobj(
+cdef void_int _pandas_serialize_cell_column_i64__int_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__u8_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__u8_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i8_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__i8_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__u16_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__u16_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i16_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__i16_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__u32_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__u32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i32_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__i32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef int32_t* access = <int32_t*>col.cursor.chunk.buffers[1]
     cdef int32_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
         raise c_err_to_py(err)
-    return True
 
 
-cdef bint _pandas_serialize_cell_column_i64__u64_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__u64_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i64_numpy(
+cdef void_int _pandas_serialize_cell_column_i64__i64_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, cell, &err):
         raise c_err_to_py(err)
-    return True
 
 
-cdef bint _pandas_serialize_cell_column_i64__u8_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__u8_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i8_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__i8_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__u16_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__u16_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i16_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__i16_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__u32_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__u32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i32_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__i32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__u64_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__u64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_i64__i64_arrow(
+cdef void_int _pandas_serialize_cell_column_i64__i64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_f64__float_pyobj(
+cdef void_int _pandas_serialize_cell_column_f64__float_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_f64__f32_numpy(
+cdef void_int _pandas_serialize_cell_column_f64__f32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_f64__f64_numpy(
+cdef void_int _pandas_serialize_cell_column_f64__f64_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef double* access = <double*>col.cursor.chunk.buffers[1]
     cdef double cell = access[col.cursor.offset]
     # TODO: Skip if NaN, then test degenerate case where all cells are NaN for a row.
     if isnan(cell):
-        return True
+        return 0
     if not line_sender_buffer_column_f64(impl, col.name, cell, &err):
         raise c_err_to_py(err)
-    return True
 
 
-
-cdef bint _pandas_serialize_cell_column_f64__f32_arrow(
+cdef void_int _pandas_serialize_cell_column_f64__f32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_f64__f64_arrow(
+cdef void_int _pandas_serialize_cell_column_f64__f64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_str__str_pyobj(
+cdef void_int _pandas_serialize_cell_column_str__str_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = False
     cdef line_sender_utf8 utf8
     _pandas_cell_str_pyobj_to_utf8(b, col,  &valid, &utf8)
     if valid and not line_sender_buffer_column_str(impl, col.name, utf8, &err):
         raise c_err_to_py(err)
-    return True
 
 
-cdef bint _pandas_serialize_cell_column_str__str_arrow(
+cdef void_int _pandas_serialize_cell_column_str__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_str__str_i8_cat(
+cdef void_int _pandas_serialize_cell_column_str__str_i8_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_str__str_i16_cat(
+cdef void_int _pandas_serialize_cell_column_str__str_i16_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_str__str_i32_cat(
+cdef void_int _pandas_serialize_cell_column_str__str_i32_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_str__str_i64_cat(
+cdef void_int _pandas_serialize_cell_column_str__str_i64_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_ts__dt64ns_numpy(
+cdef void_int _pandas_serialize_cell_column_ts__dt64ns_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
+cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     raise ValueError('nyi')
 
 
-cdef bint _pandas_serialize_cell_at_dt64ns_numpy(
+cdef void_int _pandas_serialize_cell_at_dt64ns_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
@@ -1604,20 +1479,19 @@ cdef bint _pandas_serialize_cell_at_dt64ns_numpy(
         # Note: impl will validate against negative numbers.
         if not line_sender_buffer_at(impl, cell, &err):
             raise c_err_to_py(err)
-    return True
 
 
-cdef bint _pandas_serialize_cell_at_dt64ns_tz_numpy(
+cdef void_int _pandas_serialize_cell_at_dt64ns_tz_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     _pandas_serialize_cell_at_dt64ns_numpy(impl, b, col)
 
 
-cdef bint _pandas_serialize_cell(
+cdef void_int _pandas_serialize_cell(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except False:
+        col_t* col) except -1:
     cdef col_dispatch_code_t dc = col.dispatch_code
     # Note!: Code below will generate a `switch` statement.
     # Ensure this happens! Don't break the `dc == ...` pattern.
@@ -1722,8 +1596,6 @@ cdef bint _pandas_serialize_cell(
     # See earlier note about switch statement generation.
     # Don't add complex conditions above!
 
-    return True
-
 
 cdef void _pandas_col_advance(col_t* col):
     # Branchless version of:
@@ -1751,7 +1623,7 @@ cdef void _pandas_col_advance(col_t* col):
         ((not new_chunk) * cursor.offset))
 
 
-cdef bint _pandas(
+cdef void_int _pandas(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         object data,
@@ -1759,7 +1631,7 @@ cdef bint _pandas(
         object table_name_col,
         object symbols,
         object at,
-        bint sort) except False:
+        bint sort) except -1:
     cdef size_t col_count
     cdef line_sender_table_name c_table_name
     cdef int64_t at_value = _AT_SET_BY_COLUMN
@@ -1869,4 +1741,3 @@ cdef bint _pandas(
         qdb_pystr_buf_clear(b)
         sys.stderr.write(' :: :: (c)\n')
     sys.stderr.write(' :: :: (d)\n')
-    return True

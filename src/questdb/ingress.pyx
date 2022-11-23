@@ -48,6 +48,11 @@ from .pystr_to_utf8 cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
 
+# An int we use only for error reporting.
+#  0 is success.
+# -1 is failure.
+ctypedef int void_int
+
 import cython
 include "pandas_integration.pxi"
 
@@ -148,10 +153,10 @@ cdef str _fqn(type obj):
     return obj.__module__ + '.' + obj.__qualname__
 
 
-cdef bint str_to_utf8(
+cdef void_int str_to_utf8(
         qdb_pystr_buf* b,
         PyObject* string,
-        line_sender_utf8* utf8_out) except False:
+        line_sender_utf8* utf8_out) except -1:
     """
     Convert a Python string to a UTF-8 borrowed buffer.
     This is done without allocating new Python `bytes` objects.
@@ -175,7 +180,6 @@ cdef bint str_to_utf8(
     if PyUnicode_IS_COMPACT_ASCII(string):
         utf8_out.len = count
         utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
-        return True
 
     kind = PyUnicode_KIND(string)
     if kind == PyUnicode_1BYTE_KIND:
@@ -211,13 +215,12 @@ cdef bint str_to_utf8(
             raise _utf8_decode_error(string, bad_codepoint)
     else:
         raise ValueError(f'Unknown UCS kind: {kind}.')
-    return True
 
 
-cdef bint str_to_table_name(
+cdef void_int str_to_table_name(
         qdb_pystr_buf* b,
         PyObject* string,
-        line_sender_table_name* name_out) except False:
+        line_sender_table_name* name_out) except -1:
     """
     Python string to borrowed C table name.
     Also see `str_to_utf8`.
@@ -227,13 +230,12 @@ cdef bint str_to_table_name(
     str_to_utf8(b, string, &utf8)
     if not line_sender_table_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
-    return True
 
 
-cdef bint str_to_column_name(
+cdef void_int str_to_column_name(
         qdb_pystr_buf* b,
         str string,
-        line_sender_column_name* name_out) except False:
+        line_sender_column_name* name_out) except -1:
     """
     Python string to borrowed C column name.
     Also see `str_to_utf8`.
@@ -243,7 +245,6 @@ cdef bint str_to_column_name(
     str_to_utf8(b, <PyObject*>string, &utf8)
     if not line_sender_column_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
-    return True
 
 
 cdef int64_t datetime_to_micros(datetime dt):
@@ -372,7 +373,7 @@ cdef class Sender
 cdef class Buffer
 
 
-cdef int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
+cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
     if sender._auto_flush_enabled:
         if len(buffer) >= sender._auto_flush_watermark:
             sender.flush(buffer)
@@ -532,12 +533,12 @@ cdef class Buffer:
         cdef const char* utf8 = line_sender_buffer_peek(self._impl, &size)
         return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)
 
-    cdef inline int _set_marker(self) except -1:
+    cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_set_marker(self._impl, &err):
             raise c_err_to_py(err)
 
-    cdef inline int _rewind_to_marker(self) except -1:
+    cdef inline void_int _rewind_to_marker(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_rewind_to_marker(self._impl, &err):
             raise c_err_to_py(err)
@@ -545,20 +546,19 @@ cdef class Buffer:
     cdef inline _clear_marker(self):
         line_sender_buffer_clear_marker(self._impl)
 
-    cdef inline int _table(self, str table_name) except -1:
+    cdef inline void_int _table(self, str table_name) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_table_name c_table_name
         str_to_table_name(
             self._cleared_b(), <PyObject*>table_name, &c_table_name)
         if not line_sender_buffer_table(self._impl, c_table_name, &err):
             raise c_err_to_py(err)
-        return 0
 
     cdef inline qdb_pystr_buf* _cleared_b(self):
         qdb_pystr_buf_clear(self._b)
         return self._b
 
-    cdef inline int _symbol(self, str name, str value) except -1:
+    cdef inline void_int _symbol(self, str name, str value) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_column_name c_name
         cdef line_sender_utf8 c_value
@@ -566,68 +566,62 @@ cdef class Buffer:
         str_to_utf8(self._b, <PyObject*>value, &c_value)
         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_bool(
+    cdef inline void_int _column_bool(
             self, line_sender_column_name c_name, bint value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_i64(
+    cdef inline void_int _column_i64(
             self, line_sender_column_name c_name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
         return 0
 
-    cdef inline int _column_f64(
+    cdef inline void_int _column_f64(
             self, line_sender_column_name c_name, double value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_str(
+    cdef inline void_int _column_str(
             self, line_sender_column_name c_name, str value) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_value
         str_to_utf8(self._b, <PyObject*>value, &c_value)
         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_ts(
+    cdef inline void_int _column_ts(
             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_ts(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_dt(
+    cdef inline void_int _column_dt(
             self, line_sender_column_name c_name, datetime dt) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_ts(
                 self._impl, c_name, datetime_to_micros(dt), &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column(self, str name, object value) except -1:
+    cdef inline void_int _column(self, str name, object value) except -1:
         cdef line_sender_column_name c_name
         str_to_column_name(self._cleared_b(), name, &c_name)
         if PyBool_Check(<PyObject*>value):
-            return self._column_bool(c_name, value)
+            self._column_bool(c_name, value)
         elif PyLong_CheckExact(<PyObject*>value):
-            return self._column_i64(c_name, value)
+            self._column_i64(c_name, value)
         elif PyFloat_CheckExact(<PyObject*>value):
-            return self._column_f64(c_name, value)
+            self._column_f64(c_name, value)
         elif PyUnicode_CheckExact(<PyObject*>value):
-            return self._column_str(c_name, value)
+            self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
-            return self._column_ts(c_name, value)
+            self._column_ts(c_name, value)
         elif isinstance(value, datetime):
-            return self._column_dt(c_name, value)
+            self._column_dt(c_name, value)
         else:
             valid = ', '.join((
                 'bool',
@@ -639,7 +633,7 @@ cdef class Buffer:
             raise TypeError(
                 f'Unsupported type: {type(value)}. Must be one of: {valid}')
 
-    cdef inline int _may_trigger_row_complete(self) except -1:
+    cdef inline void_int _may_trigger_row_complete(self) except -1:
         cdef line_sender_error* err = NULL
         cdef PyObject* sender = NULL
         if self._row_complete_sender != None:
@@ -647,38 +641,35 @@ cdef class Buffer:
             if sender != NULL:
                 may_flush_on_row_complete(self, <Sender><object>sender)
 
-    cdef inline int _at_ts(self, TimestampNanos ts) except -1:
+    cdef inline void_int _at_ts(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at(self._impl, ts._value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _at_dt(self, datetime dt) except -1:
+    cdef inline void_int _at_dt(self, datetime dt) except -1:
         cdef int64_t value = datetime_to_nanos(dt)
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at(self._impl, value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _at_now(self) except -1:
+    cdef inline void_int _at_now(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at_now(self._impl, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _at(self, object ts) except -1:
+    cdef inline void_int _at(self, object ts) except -1:
         if ts is None:
-            return self._at_now()
+            self._at_now()
         elif isinstance(ts, TimestampNanos):
-            return self._at_ts(ts)
+            self._at_ts(ts)
         elif isinstance(ts, datetime):
-            return self._at_dt(ts)
+            self._at_dt(ts)
         else:
             raise TypeError(
                 f'Unsupported type: {type(ts)}. Must be one of: ' +
                 'TimestampNanos, datetime, None')
 
-    cdef int _row(
+    cdef void_int _row(
             self,
             str table_name,
             dict symbols=None,
