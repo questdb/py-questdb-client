@@ -580,9 +580,8 @@ cdef bint _pandas_resolve_symbols(
     elif symbols is True:
         for col_index in range(col_count):
             if _pandas_column_is_str(data, col_index):
-                tagged_cols[col_index].meta_target = \
-                    meta_target_t.meta_target_symbol
-        
+                entry = tagged_cols[col_index]
+                entry.meta_target = meta_target_t.meta_target_symbol
         return True
     else:
         if not isinstance(symbols, (tuple, list)):
