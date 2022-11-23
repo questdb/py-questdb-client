@@ -53,7 +53,8 @@ include "pandas_integration.pxi"
 
 
 from enum import Enum
-from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
+from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
+    Iterable, Literal
 import pathlib
 
 import sys
@@ -979,7 +980,8 @@ cdef class Buffer:
             *,
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
-            symbols: Union[bool, List[int], List[str]] = False,
+            symbols: Union[
+                Literal['auto'], bool, List[int], List[str]] = 'auto',
             at: Union[None, int, str, TimestampNanos, datetime] = None,
             sort: bool = True):
         """

@@ -575,14 +575,18 @@ cdef bint _pandas_resolve_symbols(
     cdef size_t col_index = 0
     cdef object symbol
     cdef TaggedEntry entry
-    if symbols is False:
-        return True
+    if symbols == 'auto':
+        for col_index in range(col_count):
+            entry = tagged_cols[col_index]
+            if isinstance(entry.dtype, _PANDAS.CategoricalDtype):
+                entry.meta_target = meta_target_t.meta_target_symbol
+    elif symbols is False:
+        pass
     elif symbols is True:
         for col_index in range(col_count):
             if _pandas_column_is_str(data, col_index):
                 entry = tagged_cols[col_index]
                 entry.meta_target = meta_target_t.meta_target_symbol
-        return True
     else:
         if not isinstance(symbols, (tuple, list)):
             raise TypeError(
@@ -612,7 +616,7 @@ cdef bint _pandas_resolve_symbols(
                 symbol)
             entry = tagged_cols[col_index]
             entry.meta_target = meta_target_t.meta_target_symbol
-        return True
+    return True
 
 
 cdef bint _pandas_get_loc(
@@ -1397,7 +1401,12 @@ cdef bint _pandas_serialize_cell_column_i64__i32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except False:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef int32_t* access = <int32_t*>col.cursor.chunk.buffers[1]
+    cdef int32_t cell = access[col.cursor.offset]
+    if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        raise c_err_to_py(err)
+    return True
 
 
 cdef bint _pandas_serialize_cell_column_i64__u64_numpy(

@@ -539,9 +539,12 @@ class TestPandas(unittest.TestCase):
         buf = _pandas(df, table_name='tbl1')
         self.assertEqual(
             buf,
-            'tbl1,a=1i 0\n' +
-            'tbl1,a=2i 0\n' +
-            'tbl1,a=3i 0\n')
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=-2147483648i\n' +
+            'tbl1 a=0i\n' +
+            'tbl1 a=2147483647i\n')
 
 
 if __name__ == '__main__':
