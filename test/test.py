@@ -754,6 +754,8 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=1546300804000000t\n' +
             'tbl1 a=1546300805000000t\n')
 
+        # TODO: Test 0-epoch.
+
     def test_datetime64_tz_numpy_col(self):
         # Currently broken, find `TODO: datetime[ns]+tz`.
         # We're just casting `PyObject*`` to `int64_t` at the moment.
@@ -795,6 +797,8 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=4i 1546300803000000000\n' +
             'tbl1 b=5i 1546300804000000000\n' +
             'tbl1 b=6i 1546300805000000000\n')
+
+        # TODO: Test 0-epoch.
 
 
     def test_str_numpy_symbol(self):
