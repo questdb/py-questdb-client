@@ -970,7 +970,7 @@ cdef void_int _pandas_resolve_source_and_buffers(
         col_out.source = col_source_t.col_source_dt64ns_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
-        # TODO: This really ought to be done through Arrow.
+        # TODO: datetime[ns]+tz really ought to be done through Arrow.
         # We currently just encode the pointer values. Yikes!
         # >>> df.a.to_numpy()
         # array([Timestamp('2019-01-01 00:00:00-0500', tz='America/New_York'),
