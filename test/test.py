@@ -734,6 +734,29 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=t\n' +
             'tbl1 a=f\n')
 
+    def test_str_numpy_symbol(self):
+        df = pd.DataFrame({'a': pd.Series([
+                'a',                     # ASCII
+                'q❤️p',                   # Mixed ASCII and UCS-2
+                '❤️' * 1200,              # Over the 1024 buffer prealloc.
+                'Questo è un qualcosa',  # Non-ASCII UCS-1
+                'щось',                  # UCS-2, 2 bytes for UTF-8.
+                '',                      # Empty string
+                '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
+                '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
+            dtype='str')})
+        buf = _pandas(df, table_name='tbl1', symbols=True)
+        self.assertEqual(
+            buf,
+            'tbl1,a=a\n' +
+            'tbl1,a=q❤️p\n' +
+            'tbl1,a=' + ('❤️' * 1200) + '\n' +
+            'tbl1,a=Questo\\ è\\ un\\ qualcosa\n' +
+            'tbl1,a=щось\n' +
+            'tbl1,a=\n' +
+            'tbl1,a=嚜꓂\n' +
+            'tbl1,a=💩🦞\n')
+
     def test_str_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 'a',                     # ASCII

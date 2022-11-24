@@ -153,7 +153,10 @@ cdef object _utf8_decode_error(
 
 
 cdef str _fqn(type obj):
-    return obj.__module__ + '.' + obj.__qualname__
+    if obj.__module__ == 'builtins':
+        return obj.__qualname__
+    else:
+        return f'{obj.__module__}.{obj.__qualname__}'
 
 
 cdef void_int str_to_utf8(
