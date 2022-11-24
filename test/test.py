@@ -8,6 +8,7 @@ import datetime
 import time
 import numpy as np
 import pandas as pd
+import zoneinfo
 
 import patch_path
 from mock_server import Server
@@ -734,6 +735,68 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=t\n' +
             'tbl1 a=f\n')
 
+    def test_datetime64_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                pd.Timestamp('2019-01-01 00:00:00'),
+                pd.Timestamp('2019-01-01 00:00:01'),
+                pd.Timestamp('2019-01-01 00:00:02'),
+                pd.Timestamp('2019-01-01 00:00:03'),
+                pd.Timestamp('2019-01-01 00:00:04'),
+                pd.Timestamp('2019-01-01 00:00:05')],
+            dtype='datetime64[ns]')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1546300800000000t\n' +
+            'tbl1 a=1546300801000000t\n' +
+            'tbl1 a=1546300802000000t\n' +
+            'tbl1 a=1546300803000000t\n' +
+            'tbl1 a=1546300804000000t\n' +
+            'tbl1 a=1546300805000000t\n')
+
+    def test_datetime64_tz_numpy_col(self):
+        # Currently broken, find `TODO: datetime[ns]+tz`.
+        # We're just casting `PyObject*`` to `int64_t` at the moment.
+        tz = zoneinfo.ZoneInfo('America/New_York')
+        df = pd.DataFrame({'a': [
+                pd.Timestamp(
+                    year=2019, month=1, day=1,
+                    hour=0, minute=0, second=0, tz=tz),
+                pd.Timestamp(
+                    year=2019, month=1, day=1,
+                    hour=0, minute=0, second=1, tz=tz),
+                pd.Timestamp(
+                    year=2019, month=1, day=1,
+                    hour=0, minute=0, second=2, tz=tz)]})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1546282800000000t\n' +
+            'tbl1 a=1546282801000000t\n' +
+            'tbl1 a=1546282802000000t\n')
+
+    def test_datetime64_numpy_at(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    pd.Timestamp('2019-01-01 00:00:00'),
+                    pd.Timestamp('2019-01-01 00:00:01'),
+                    pd.Timestamp('2019-01-01 00:00:02'),
+                    pd.Timestamp('2019-01-01 00:00:03'),
+                    pd.Timestamp('2019-01-01 00:00:04'),
+                    pd.Timestamp('2019-01-01 00:00:05')],
+                dtype='datetime64[ns]'),
+            'b': [1, 2, 3, 4, 5, 6]})
+        buf = _pandas(df, table_name='tbl1', at='a')
+        self.assertEqual(
+            buf,
+            'tbl1 b=1i 1546300800000000000\n' +
+            'tbl1 b=2i 1546300801000000000\n' +
+            'tbl1 b=3i 1546300802000000000\n' +
+            'tbl1 b=4i 1546300803000000000\n' +
+            'tbl1 b=5i 1546300804000000000\n' +
+            'tbl1 b=6i 1546300805000000000\n')
+
+
     def test_str_numpy_symbol(self):
         df = pd.DataFrame({'a': pd.Series([
                 'a',                     # ASCII
@@ -779,6 +842,8 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=""\n' +
             'tbl1 a="嚜꓂"\n' +
             'tbl1 a="💩🦞"\n')
+
+
 
 
 if __name__ == '__main__':

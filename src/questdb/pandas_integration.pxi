@@ -702,8 +702,8 @@ cdef void _pandas_free_mapped_arrow(ArrowArray* arr):
 
 
 cdef void_int _pandas_series_as_pybuf(
-        TaggedEntry entry, col_t* col_out) except -1:
-    cdef object nparr = entry.series.to_numpy()
+        TaggedEntry entry, col_t* col_out, str fallback_dtype=None) except -1:
+    cdef object nparr = entry.series.to_numpy(dtype=fallback_dtype)
     cdef ArrowArray* mapped
     cdef int get_buf_ret
     cdef Py_buffer* view
@@ -752,14 +752,15 @@ cdef void_int _pandas_series_as_pybuf(
 cdef void_int _pandas_series_as_arrow(
         TaggedEntry entry,
         col_t* col_out,
-        col_source_t np_fallback) except -1:
+        col_source_t np_fallback,
+        str fallback_dtype=None) except -1:
     cdef object array
     cdef list chunks
     cdef size_t n_chunks
     cdef size_t chunk_index
     if _PYARROW is None:
         col_out.source = np_fallback
-        _pandas_series_as_pybuf(entry, col_out)
+        _pandas_series_as_pybuf(entry, col_out, fallback_dtype)
         return 0
 
     col_out.tag = col_access_tag_t.arrow
@@ -969,6 +970,25 @@ cdef void_int _pandas_resolve_source_and_buffers(
         col_out.source = col_source_t.col_source_dt64ns_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
+        # TODO: This really ought to be done through Arrow.
+        # We currently just encode the pointer values. Yikes!
+        # >>> df.a.to_numpy()
+        # array([Timestamp('2019-01-01 00:00:00-0500', tz='America/New_York'),
+        #        Timestamp('2019-01-01 00:00:01-0500', tz='America/New_York'),
+        #        Timestamp('2019-01-01 00:00:02-0500', tz='America/New_York')],
+        #       dtype=object)
+        # We can fallback to `datetime64[ns]`, but that will involve copying.
+        # >>> df.a.to_numpy(dtype='datetime64[ns]')
+        # array(['2019-01-01T05:00:00.000000000', '2019-01-01T05:00:01.000000000',
+        #        '2019-01-01T05:00:02.000000000'], dtype='datetime64[ns]')
+        # So instead we want arrow access.
+        # >>> pa.Array.from_pandas(df.a)
+        # <pyarrow.lib.TimestampArray object at 0x7fbf1deb25f0>
+        # [
+        #   2019-01-01 05:00:00.000000000,
+        #   2019-01-01 05:00:01.000000000,
+        #   2019-01-01 05:00:02.000000000
+        # ]
         col_out.source = col_source_t.col_source_dt64ns_tz_numpy
         _pandas_series_as_pybuf(entry, col_out)
     elif isinstance(dtype, _NUMPY_OBJECT):

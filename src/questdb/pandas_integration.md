@@ -578,8 +578,8 @@ timezone), so no timezone conversion logic is required here.
 ]
 ```
 
-**Note**: We don't need PyArrow to access the buffer as
-it's only used here to show raw data.
+**Note**: We need PyArrow to access the buffer, or we need to convert to
+`datetime64[ns]`.
 
 
 ## Strided Numpy Arrays
