@@ -30,14 +30,10 @@ cdef extern from "Python.h":
     int PyUnicode_READY(PyObject* o) except -1
 
     # Is UCS1 and ascii (and therefore valid UTF-8).
-    bint PyUnicode_IS_COMPACT(PyObject* o)
+    bint PyUnicode_IS_COMPACT_ASCII(PyObject* o)
 
     # Get length.
     Py_ssize_t PyUnicode_GET_LENGTH(PyObject* o)
-
-    # Get or compute the UTF-8 representation.
-    const char* PyUnicode_AsUTF8AndSize(
-        PyObject* o, Py_ssize_t* size) except NULL
 
     # Zero-copy access to string buffer.
     int PyUnicode_KIND(PyObject* o)

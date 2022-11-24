@@ -143,8 +143,8 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     return IngressError(tup[0], fmt.format(tup[1]))
 
 
-cdef void_int _utf8_decode_error(
-        PyObject* string, uint32_t bad_codepoint) except -1:
+cdef object _utf8_decode_error(
+        PyObject* string, uint32_t bad_codepoint):
     cdef str s = <str><object>string
     return IngressError(
         IngressErrorCode.InvalidUtf8,
@@ -162,15 +162,11 @@ cdef void_int str_to_utf8(
         line_sender_utf8* utf8_out) except -1:
     """
     Convert a Python string to a UTF-8 borrowed buffer.
-    This is done without asking Python to allocate any memory.
-    In case the string is an ASCII string (or a previously encoded UTF-8 buffer)
-    it's also zero-copy.
+    This is done without allocating new Python `bytes` objects.
+    In case the string is an ASCII string, it's also generally zero-copy.
     The `utf8_out` param will point to (borrow from) either the ASCII buffer
     inside the original Python object or a part of memory allocated inside the
     `b` buffer.
-
-    To make sense of it, see: https://peps.python.org/pep-0393/
-    Specifically the sections on UCS-1, UCS-2 and UCS-4 and compact strings.
     """
     cdef size_t count
     cdef int kind
@@ -178,15 +174,17 @@ cdef void_int str_to_utf8(
     if not PyUnicode_CheckExact(string):
         raise TypeError(
             f'Expected a str object, not a {_fqn(type(<str><object>string))}')
-    PyUnicode_READY(string)  # TODO: Can this be moved after the "Compact" check?
+    PyUnicode_READY(string)
+    count = <size_t>(PyUnicode_GET_LENGTH(string))    
 
-    # We optimize the common case of ASCII strings and pre-encoded UTF-8.
+    # We optimize the common case of ASCII strings.
     # This avoid memory allocations and copies altogether.
-    if PyUnicode_IS_COMPACT(string):
-        utf8_out.buf = PyUnicode_AsUTF8AndSize(string, <ssize_t*>&utf8_out.len)
+    # We get away with this because ASCII is a subset of UTF-8.
+    if PyUnicode_IS_COMPACT_ASCII(string):
+        utf8_out.len = count
+        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
         return 0
 
-    count = <size_t>(PyUnicode_GET_LENGTH(string))    
     kind = PyUnicode_KIND(string)
     if kind == PyUnicode_1BYTE_KIND:
         # No error handling for UCS1: All code points translate into valid UTF8.
