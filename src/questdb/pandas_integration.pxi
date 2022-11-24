@@ -1225,7 +1225,12 @@ cdef void_int _pandas_serialize_cell_column_bool__bool_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef uint8_t* access = <uint8_t*>col.cursor.chunk.buffers[1]
+    cdef uint8_t cell = access[col.cursor.offset]
+    cdef bint value = not not cell  # Force to 0 and 1.
+    if not line_sender_buffer_column_bool(impl, col.name, value, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_bool__bool_arrow(
@@ -1246,35 +1251,55 @@ cdef void_int _pandas_serialize_cell_column_i64__u8_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef uint8_t* access = <uint8_t*>col.cursor.chunk.buffers[1]
+    cdef uint8_t cell = access[col.cursor.offset]
+    if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i8_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef int8_t* access = <int8_t*>col.cursor.chunk.buffers[1]
+    cdef int8_t cell = access[col.cursor.offset]
+    if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u16_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef uint16_t* access = <uint16_t*>col.cursor.chunk.buffers[1]
+    cdef uint16_t cell = access[col.cursor.offset]
+    if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i16_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef int16_t* access = <int16_t*>col.cursor.chunk.buffers[1]
+    cdef int16_t cell = access[col.cursor.offset]
+    if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef uint32_t* access = <uint32_t*>col.cursor.chunk.buffers[1]
+    cdef uint32_t cell = access[col.cursor.offset]
+    if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i32_numpy(
@@ -1292,7 +1317,13 @@ cdef void_int _pandas_serialize_cell_column_i64__u64_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef uint64_t* access = <uint64_t*>col.cursor.chunk.buffers[1]
+    cdef uint64_t cell = access[col.cursor.offset]
+    if cell > <uint64_t>INT64_MAX:
+        raise OverflowError('uint64 value too large for int64 column type.')
+    if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i64_numpy(
@@ -1373,7 +1404,12 @@ cdef void_int _pandas_serialize_cell_column_f64__f32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    # Note: This is the C `float` type, not the Python `float` type.
+    cdef float* access = <float*>col.cursor.chunk.buffers[1]
+    cdef float cell = access[col.cursor.offset]
+    if not line_sender_buffer_column_f64(impl, col.name, <double>cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_f64__f64_numpy(
@@ -1383,9 +1419,6 @@ cdef void_int _pandas_serialize_cell_column_f64__f64_numpy(
     cdef line_sender_error* err = NULL
     cdef double* access = <double*>col.cursor.chunk.buffers[1]
     cdef double cell = access[col.cursor.offset]
-    # TODO: Skip if NaN, then test degenerate case where all cells are NaN for a row.
-    if isnan(cell):
-        return 0
     if not line_sender_buffer_column_f64(impl, col.name, cell, &err):
         raise c_err_to_py(err)
 
@@ -1455,14 +1488,19 @@ cdef void_int _pandas_serialize_cell_column_ts__dt64ns_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
+    cdef int64_t cell = access[col.cursor.offset]
+    cell //= 1000  # Convert from nanoseconds to microseconds.
+    if not line_sender_buffer_column_ts(impl, col.name, cell, &err):
+        raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    _pandas_serialize_cell_column_ts__dt64ns_numpy(impl, b, col)
 
 
 cdef void_int _pandas_serialize_cell_at_dt64ns_numpy(
@@ -1639,7 +1677,7 @@ cdef void_int _pandas(
     cdef qdb_pystr_pos str_buf_marker
     cdef size_t row_count
     cdef line_sender_error* err = NULL
-    cdef size_t _row_index
+    cdef size_t row_index
     cdef size_t col_index
     cdef col_t* col
 
@@ -1673,27 +1711,24 @@ cdef void_int _pandas(
         str_buf_marker = qdb_pystr_buf_tell(b)
         sys.stderr.write(' :: :: (G)\n')
 
-        # import sys
-        # sys.stderr.write('_pandas :: (A) ' +
-        #     f'name_col: {name_col}, ' +
-        #     f'symbol_indices: {size_t_vec_str(&symbol_indices)}, ' +
-        #     f'at_col: {at_col}, ' +
-        #     f'at_value: {at_value}, ' +
-        #     f'field_indices: {size_t_vec_str(&field_indices)}' +
-        #     '\n')
         row_count = len(data)
         sys.stderr.write(' :: :: (H)\n')
         line_sender_buffer_clear_marker(impl)
-        sys.stderr.write(' :: :: (I)\n')
-        for _row_index in range(row_count):
-            sys.stderr.write(' :: :: (J)\n')
-            qdb_pystr_buf_truncate(b, str_buf_marker)
-            sys.stderr.write(' :: :: (K)\n')
-            try:
-                sys.stderr.write(' :: :: (L)\n')
-                if not line_sender_buffer_set_marker(impl, &err):
-                    raise c_err_to_py(err)
 
+        # On error, undo all added lines.
+        if not line_sender_buffer_set_marker(impl, &err):
+            raise c_err_to_py(err)
+
+        try:
+            sys.stderr.write(' :: :: (I)\n')
+            for row_index in range(row_count):
+                # TODO: Occasional GIL release logic (e.g. every 5000 rows or so)
+                # TODO: Potentially avoid the GIL altogether if we can get away with it.
+                # This is column-type dependent. Some basic analysis is required.
+                # We need a `GilController` object so that we can raise exceptions.
+                sys.stderr.write(' :: :: (J)\n')
+                qdb_pystr_buf_truncate(b, str_buf_marker)
+                sys.stderr.write(' :: :: (K)\n')
                 sys.stderr.write(' :: :: (M)\n')
                 # Fixed table-name.
                 if c_table_name.buf != NULL:
@@ -1708,7 +1743,16 @@ cdef void_int _pandas(
                     col = &cols.d[col_index]
                     # TODO: Wrap error exceptions messaging with column name
                     # and row index. Ideally, extract value in python too.
-                    _pandas_serialize_cell(impl, b, col)
+                    try:
+                        _pandas_serialize_cell(impl, b, col)
+                    except Exception as e:
+                        raise IngressError(
+                            IngressErrorCode.BadDataFrame,
+                            'Failed to serialize value of column ' +
+                            repr(data.columns[col.orig_index]) +
+                            f' at row index {row_index} (' +
+                            repr(data.iloc[row_index, col.orig_index]) +
+                            f'): {e}') from e
                     sys.stderr.write(' :: :: (P)\n')
                     _pandas_col_advance(col)
                     sys.stderr.write(' :: :: (Q)\n')
@@ -1725,13 +1769,13 @@ cdef void_int _pandas(
                     if not line_sender_buffer_at(impl, at_value, &err):
                         raise c_err_to_py(err)
                     sys.stderr.write(' :: :: (V)\n')
-            except:
-                sys.stderr.write(' :: :: (W)\n')
-                if not line_sender_buffer_rewind_to_marker(impl, &err):
-                    raise c_err_to_py(err)
-                sys.stderr.write(' :: :: (X)\n')
-                raise
-            sys.stderr.write(' :: :: (Y)\n')
+        except:
+            sys.stderr.write(' :: :: (W)\n')
+            if not line_sender_buffer_rewind_to_marker(impl, &err):
+                raise c_err_to_py(err)
+            sys.stderr.write(' :: :: (X)\n')
+            raise
+        sys.stderr.write(' :: :: (Y)\n')
     finally:
         sys.stderr.write(' :: :: (Z)\n')
         line_sender_buffer_clear_marker(impl)

@@ -31,7 +31,8 @@ API for fast data ingestion into QuestDB.
 """
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
-from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t
+from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
+    INT64_MAX
 from libc.stdlib cimport malloc, calloc, realloc, free, abort
 from libc.string cimport strncmp
 from libc.math cimport isnan
@@ -74,6 +75,7 @@ class IngressErrorCode(Enum):
     InvalidTimestamp = line_sender_error_invalid_timestamp
     AuthError = line_sender_error_auth_error
     TlsError = line_sender_error_tls_error
+    BadDataFrame = <int>line_sender_error_tls_error + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -141,7 +143,8 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     return IngressError(tup[0], fmt.format(tup[1]))
 
 
-cdef object _utf8_decode_error(PyObject* string, uint32_t bad_codepoint):
+cdef void_int _utf8_decode_error(
+        PyObject* string, uint32_t bad_codepoint) except -1:
     cdef str s = <str><object>string
     return IngressError(
         IngressErrorCode.InvalidUtf8,
@@ -159,11 +162,15 @@ cdef void_int str_to_utf8(
         line_sender_utf8* utf8_out) except -1:
     """
     Convert a Python string to a UTF-8 borrowed buffer.
-    This is done without allocating new Python `bytes` objects.
-    In case the string is an ASCII string, it's also generally zero-copy.
+    This is done without asking Python to allocate any memory.
+    In case the string is an ASCII string (or a previously encoded UTF-8 buffer)
+    it's also zero-copy.
     The `utf8_out` param will point to (borrow from) either the ASCII buffer
     inside the original Python object or a part of memory allocated inside the
     `b` buffer.
+
+    To make sense of it, see: https://peps.python.org/pep-0393/
+    Specifically the sections on UCS-1, UCS-2 and UCS-4 and compact strings.
     """
     cdef size_t count
     cdef int kind
@@ -171,16 +178,15 @@ cdef void_int str_to_utf8(
     if not PyUnicode_CheckExact(string):
         raise TypeError(
             f'Expected a str object, not a {_fqn(type(<str><object>string))}')
-    PyUnicode_READY(string)
-    count = <size_t>(PyUnicode_GET_LENGTH(string))    
+    PyUnicode_READY(string)  # TODO: Can this be moved after the "Compact" check?
 
-    # We optimize the common case of ASCII strings.
+    # We optimize the common case of ASCII strings and pre-encoded UTF-8.
     # This avoid memory allocations and copies altogether.
-    # We get away with this because ASCII is a subset of UTF-8.
-    if PyUnicode_IS_COMPACT_ASCII(string):
-        utf8_out.len = count
-        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
+    if PyUnicode_IS_COMPACT(string):
+        utf8_out.buf = PyUnicode_AsUTF8AndSize(string, <ssize_t*>&utf8_out.len)
+        return 0
 
+    count = <size_t>(PyUnicode_GET_LENGTH(string))    
     kind = PyUnicode_KIND(string)
     if kind == PyUnicode_1BYTE_KIND:
         # No error handling for UCS1: All code points translate into valid UTF8.

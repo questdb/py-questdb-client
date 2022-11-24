@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import sys
-from typing import Type
 sys.dont_write_bytecode = True
 import os
 import unittest
@@ -528,8 +527,85 @@ class TestPandas(unittest.TestCase):
             't1,A=a1,B=b1,C=b1,D=a1 E=1.0,F=1i 1520640000000000000\n' +
             't2,A=a2,D=a2 E=2.0,F=2i 1520726400000000000\n' +
             't1,A=a3,B=b3,C=b3,D=a3 E=3.0,F=3i 1520812800000000000\n')
-    
-    def test_i32_col(self):
+
+    def test_u8_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                0,
+                255],  # u8 max
+            dtype='uint8')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=0i\n' +
+            'tbl1 a=255i\n')
+
+    def test_i8_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                -128,  # i8 min
+                127,   # i8 max
+                0], dtype='int8')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=-128i\n' +
+            'tbl1 a=127i\n' +
+            'tbl1 a=0i\n')
+
+    def test_u16_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                0,
+                65535],  # u16 max
+            dtype='uint16')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=0i\n' +
+            'tbl1 a=65535i\n')
+
+    def test_i16_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                -32768,  # i16 min
+                32767,   # i16 max
+                0], dtype='int16')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=-32768i\n' +
+            'tbl1 a=32767i\n' +
+            'tbl1 a=0i\n')
+
+    def test_u32_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                0,
+                4294967295],  # u32 max
+            dtype='uint32')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=0i\n' +
+            'tbl1 a=4294967295i\n')
+
+    def test_i32_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 1, 2, 3,
                 -2147483648,  # i32 min
@@ -545,6 +621,141 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=-2147483648i\n' +
             'tbl1 a=0i\n' +
             'tbl1 a=2147483647i\n')
+
+    def test_u64_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                0,
+                9223372036854775807],  # i64 max
+            dtype='uint64')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=0i\n' +
+            'tbl1 a=9223372036854775807i\n')
+
+        buf = qi.Buffer()
+        buf.pandas(pd.DataFrame({'b': [.5, 1.0, 1.5]}), table_name='tbl2')
+        exp1 = (
+            'tbl2 b=0.5\n' +
+            'tbl2 b=1.0\n' +
+            'tbl2 b=1.5\n')
+        self.assertEqual(
+            str(buf),
+            exp1)
+        df2 = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                0,
+                9223372036854775808],  # i64 max + 1
+            dtype='uint64')})
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'serialize .* column .a. .* 4 .9223372036854775808.*int64'):
+            buf.pandas(df2, table_name='tbl1')
+
+        self.assertEqual(
+            str(buf),
+            exp1)  # No partial write of `df2`.
+
+    def test_i64_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                -9223372036854775808,  # i64 min
+                0,
+                9223372036854775807],  # i64 max
+            dtype='int64')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i\n' +
+            'tbl1 a=2i\n' +
+            'tbl1 a=3i\n' +
+            'tbl1 a=-9223372036854775808i\n' +
+            'tbl1 a=0i\n' +
+            'tbl1 a=9223372036854775807i\n')
+    
+    def test_f32_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1.0, 2.0, 3.0,
+                0.0,
+                float('inf'),
+                float('-inf'),
+                float('nan'),
+                3.4028234663852886e38],  # f32 max
+            dtype='float32')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1.0\n' +
+            'tbl1 a=2.0\n' +
+            'tbl1 a=3.0\n' +
+            'tbl1 a=0.0\n' +
+            'tbl1 a=Infinity\n' +
+            'tbl1 a=-Infinity\n' +
+            'tbl1 a=NaN\n' +
+            'tbl1 a=3.4028234663852886e38\n')
+
+    def test_f64_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                1.0, 2.0, 3.0,
+                0.0,
+                float('inf'),
+                float('-inf'),
+                float('nan'),
+                1.7976931348623157e308],  # f64 max
+            dtype='float64')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1.0\n' +
+            'tbl1 a=2.0\n' +
+            'tbl1 a=3.0\n' +
+            'tbl1 a=0.0\n' +
+            'tbl1 a=Infinity\n' +
+            'tbl1 a=-Infinity\n' +
+            'tbl1 a=NaN\n' +
+            'tbl1 a=1.7976931348623157e308\n')
+
+    def test_bool_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                True, False, False,
+                False, True, False],
+            dtype='bool')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=t\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=t\n' +
+            'tbl1 a=f\n')
+
+    def test_str_numpy_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                'a',                     # ASCII
+                'q❤️p',                   # Mixed ASCII and UCS-2
+                '❤️' * 1200,              # Over the 1024 buffer prealloc.
+                'Questo è un qualcosa',  # Non-ASCII UCS-1
+                'щось',                  # UCS-2, 2 bytes for UTF-8.
+                '',                      # Empty string
+                '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
+                '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
+            dtype='str')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a="a"\n' +
+            'tbl1 a="q❤️p"\n' +
+            'tbl1 a="' + ('❤️' * 1200) + '"\n' +
+            'tbl1 a="Questo è un qualcosa"\n' +
+            'tbl1 a="щось"\n' +
+            'tbl1 a=""\n' +
+            'tbl1 a="嚜꓂"\n' +
+            'tbl1 a="💩🦞"\n')
 
 
 if __name__ == '__main__':
