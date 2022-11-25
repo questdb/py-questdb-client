@@ -5,6 +5,7 @@ from cpython.object cimport PyObject
 
 cdef extern from "Python.h":
     cdef PyObject* Py_None
+    cdef PyObject* Py_True
 
     ctypedef uint8_t Py_UCS1  # unicodeobject.h
     ctypedef uint16_t Py_UCS2

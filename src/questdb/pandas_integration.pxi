@@ -1136,7 +1136,6 @@ cdef void_int _pandas_serialize_cell_table__str_pyobj(
     cdef line_sender_table_name c_table_name
     if _pandas_is_null_pyobj(cell) or not PyUnicode_CheckExact(cell):
         raise ValueError(f'Expected an object of type str, got a {_fqn(type(<object>cell))}')
-    # TODO: See if there's silly increfs.
     str_to_table_name(b, cell, &c_table_name)
     if not line_sender_buffer_table(impl, c_table_name, &err):
         raise c_err_to_py(err)
@@ -1232,7 +1231,19 @@ cdef void_int _pandas_serialize_cell_column_bool__bool_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+    if _pandas_is_null_pyobj(cell):
+        raise ValueError('Cannot insert null values into a boolean column.')
+    elif PyBool_Check(cell):
+        if not line_sender_buffer_column_bool(
+                impl, col.name, cell == Py_True, &err):
+            raise c_err_to_py(err)
+    else:
+        raise ValueError(
+            'Expected an object of type bool, got a ' +
+            _fqn(type(<object>cell)) + '.')
 
 
 cdef void_int _pandas_serialize_cell_column_bool__bool_numpy(

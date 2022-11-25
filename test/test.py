@@ -735,6 +735,37 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=t\n' +
             'tbl1 a=f\n')
 
+    def test_bool_obj_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                True, False, False,
+                False, True, False],
+            dtype='object')})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=t\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=t\n' +
+            'tbl1 a=f\n')
+        
+        df2 = pd.DataFrame({'a': pd.Series([
+                True, False, 'false'],
+            dtype='object')})
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'serialize .* column .a. .* 2 .*false.*bool'):
+            _pandas(df2, table_name='tbl1')
+
+        df3 = pd.DataFrame({'a': pd.Series([
+                None, True, False],
+            dtype='object')})
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'serialize.*\\(None\\): Cannot insert null.*boolean column'):
+            _pandas(df3, table_name='tbl1')
+
     def test_datetime64_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 pd.Timestamp('2019-01-01 00:00:00'),
