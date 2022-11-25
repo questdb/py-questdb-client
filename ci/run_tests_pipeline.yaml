@@ -39,3 +39,7 @@ stages:
             displayName: "Test"
             env:
               JAVA_HOME: $(JAVA_HOME_11_X64)
+
+# TODO: Add tests with and tests without installing `pyarrow` as it's
+# an optional dependency (that can't always be installed).
+# The tests without to test the fallback logic.

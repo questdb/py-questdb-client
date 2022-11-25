@@ -756,26 +756,43 @@ class TestPandas(unittest.TestCase):
 
         # TODO: Test 0-epoch.
 
-    def test_datetime64_tz_numpy_col(self):
+    def test_datetime64_tz_arrow_col(self):
         # Currently broken, find `TODO: datetime[ns]+tz`.
         # We're just casting `PyObject*`` to `int64_t` at the moment.
         tz = zoneinfo.ZoneInfo('America/New_York')
-        df = pd.DataFrame({'a': [
+        df = pd.DataFrame({
+            'a': [
                 pd.Timestamp(
                     year=2019, month=1, day=1,
                     hour=0, minute=0, second=0, tz=tz),
                 pd.Timestamp(
                     year=2019, month=1, day=1,
                     hour=0, minute=0, second=1, tz=tz),
+                None,
                 pd.Timestamp(
                     year=2019, month=1, day=1,
-                    hour=0, minute=0, second=2, tz=tz)]})
-        buf = _pandas(df, table_name='tbl1')
+                    hour=0, minute=0, second=3, tz=tz)],
+            'b': ['sym1', 'sym2', 'sym3', 'sym4']})
+        buf = _pandas(df, table_name='tbl1', symbols=['b'])
         self.assertEqual(
             buf,
-            'tbl1 a=1546282800000000t\n' +
-            'tbl1 a=1546282801000000t\n' +
-            'tbl1 a=1546282802000000t\n')
+            # Note how these are 5hr offset from `test_datetime64_numpy_col`.
+            'tbl1,b=sym1 a=1546318800000000t\n' +
+            'tbl1,b=sym2 a=1546318801000000t\n' +
+            'tbl1,b=sym3\n' +
+            'tbl1,b=sym4 a=1546318803000000t\n')
+
+        # TODO: Test 0-epoch.
+
+        df2 = pd.DataFrame({
+            'a': [
+                pd.Timestamp(
+                    year=1900, month=1, day=1,
+                    hour=0, minute=0, second=0, tz=tz)],
+            'b': ['sym1']})
+        with self.assertRaisesRegex(
+                qi.IngressError, "Failed.*'a'.*-2208970800000000 is negative."):
+            _pandas(df2, table_name='tbl1', symbols=['b'])
 
     def test_datetime64_numpy_at(self):
         df = pd.DataFrame({
@@ -799,6 +816,42 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=6i 1546300805000000000\n')
 
         # TODO: Test 0-epoch.
+
+    def test_datetime64_tz_arrow_at(self):
+        # Currently broken, find `TODO: datetime[ns]+tz`.
+        # We're just casting `PyObject*`` to `int64_t` at the moment.
+        tz = zoneinfo.ZoneInfo('America/New_York')
+        df = pd.DataFrame({
+            'a': [
+                pd.Timestamp(
+                    year=2019, month=1, day=1,
+                    hour=0, minute=0, second=0, tz=tz),
+                pd.Timestamp(
+                    year=2019, month=1, day=1,
+                    hour=0, minute=0, second=1, tz=tz),
+                None,
+                pd.Timestamp(
+                    year=2019, month=1, day=1,
+                    hour=0, minute=0, second=3, tz=tz)],
+            'b': ['sym1', 'sym2', 'sym3', 'sym4']})
+        buf = _pandas(df, table_name='tbl1', symbols=['b'], at='a')
+        self.assertEqual(
+            buf,
+            # Note how these are 5hr offset from `test_datetime64_numpy_col`.
+            'tbl1,b=sym1 1546318800000000000\n' +
+            'tbl1,b=sym2 1546318801000000000\n' +
+            'tbl1,b=sym3\n' +
+            'tbl1,b=sym4 1546318803000000000\n')
+
+        df2 = pd.DataFrame({
+            'a': [
+                pd.Timestamp(
+                    year=1900, month=1, day=1,
+                    hour=0, minute=0, second=0, tz=tz)],
+            'b': ['sym1']})
+        with self.assertRaisesRegex(
+                qi.IngressError, "Failed.*'a'.*-2208970800000000000 is neg"):
+            _pandas(df2, table_name='tbl1', symbols=['b'], at='a')
 
 
     def test_str_numpy_symbol(self):

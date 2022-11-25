@@ -77,7 +77,7 @@ cdef enum col_source_t:
     col_source_str_i32_cat =     405000
     col_source_str_i64_cat =     406000
     col_source_dt64ns_numpy =    501000
-    col_source_dt64ns_tz_numpy = 502000
+    col_source_dt64ns_tz_arrow = 502000
 
 
 cdef dict _TARGET_TO_SOURCES = {
@@ -141,11 +141,11 @@ cdef dict _TARGET_TO_SOURCES = {
     },
     col_target_t.col_target_column_ts: {
         col_source_t.col_source_dt64ns_numpy,
-        col_source_t.col_source_dt64ns_tz_numpy,
+        col_source_t.col_source_dt64ns_tz_arrow,
     },
     col_target_t.col_target_at: {
         col_source_t.col_source_dt64ns_numpy,
-        col_source_t.col_source_dt64ns_tz_numpy,
+        col_source_t.col_source_dt64ns_tz_arrow,
     },
 }
 
@@ -270,14 +270,14 @@ cdef enum col_dispatch_code_t:
 
     col_dispatch_code_column_ts__dt64ns_numpy = \
         col_target_t.col_target_column_ts + col_source_t.col_source_dt64ns_numpy
-    col_dispatch_code_column_ts__dt64ns_tz_numpy = \
+    col_dispatch_code_column_ts__dt64ns_tz_arrow = \
         col_target_t.col_target_column_ts + \
-        col_source_t.col_source_dt64ns_tz_numpy
+        col_source_t.col_source_dt64ns_tz_arrow
 
     col_dispatch_code_at__dt64ns_numpy = \
         col_target_t.col_target_at + col_source_t.col_source_dt64ns_numpy
-    col_dispatch_code_at__dt64ns_tz_numpy = \
-        col_target_t.col_target_at + col_source_t.col_source_dt64ns_tz_numpy
+    col_dispatch_code_at__dt64ns_tz_arrow = \
+        col_target_t.col_target_at + col_source_t.col_source_dt64ns_tz_arrow
 
 
 cdef struct col_t:
@@ -676,13 +676,12 @@ cdef ssize_t _pandas_resolve_at(
 
 
 cdef object _pandas_is_supported_datetime(object dtype):
-    # We currently only accept datetime64[ns] columns.
-    return (
-        (dtype.kind == 'M') and
-        (dtype.itemsize == 8) and
-        (dtype.byteorder == '=') and
-        (dtype.alignment == 8) and
-        (not dtype.hasobject))
+    if (isinstance(dtype, _NUMPY_DATETIME64_NS) and
+            (str(dtype) == 'datetime64[ns]')):
+        return True
+    if isinstance(dtype, _PANDAS.DatetimeTZDtype):
+        return dtype.unit == 'ns'
+    return False
 
 
 cdef void_int _pandas_alloc_chunks(
@@ -966,31 +965,18 @@ cdef void_int _pandas_resolve_source_and_buffers(
                 f'for column {entry.name} of dtype {dtype}.')
     elif isinstance(dtype, _PANDAS.CategoricalDtype):
         _pandas_category_series_as_arrow(entry, col_out)
-    elif isinstance(dtype, _NUMPY_DATETIME64_NS):
+    elif (isinstance(dtype, _NUMPY_DATETIME64_NS) and
+            _pandas_is_supported_datetime(dtype)):
         col_out.source = col_source_t.col_source_dt64ns_numpy
         _pandas_series_as_pybuf(entry, col_out)
-    elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
-        # TODO: datetime[ns]+tz really ought to be done through Arrow.
-        # We currently just encode the pointer values. Yikes!
-        # >>> df.a.to_numpy()
-        # array([Timestamp('2019-01-01 00:00:00-0500', tz='America/New_York'),
-        #        Timestamp('2019-01-01 00:00:01-0500', tz='America/New_York'),
-        #        Timestamp('2019-01-01 00:00:02-0500', tz='America/New_York')],
-        #       dtype=object)
-        # We can fallback to `datetime64[ns]`, but that will involve copying.
-        # >>> df.a.to_numpy(dtype='datetime64[ns]')
-        # array(['2019-01-01T05:00:00.000000000', '2019-01-01T05:00:01.000000000',
-        #        '2019-01-01T05:00:02.000000000'], dtype='datetime64[ns]')
-        # So instead we want arrow access.
-        # >>> pa.Array.from_pandas(df.a)
-        # <pyarrow.lib.TimestampArray object at 0x7fbf1deb25f0>
-        # [
-        #   2019-01-01 05:00:00.000000000,
-        #   2019-01-01 05:00:01.000000000,
-        #   2019-01-01 05:00:02.000000000
-        # ]
-        col_out.source = col_source_t.col_source_dt64ns_tz_numpy
-        _pandas_series_as_pybuf(entry, col_out)
+    elif (isinstance(dtype, _PANDAS.DatetimeTZDtype) and
+            _pandas_is_supported_datetime(dtype)):
+        col_out.source = col_source_t.col_source_dt64ns_tz_arrow
+        _pandas_series_as_arrow(
+            entry,
+            col_out,
+            col_source_t.col_source_dt64ns_numpy,
+            'datetime64[ns]')
     elif isinstance(dtype, _NUMPY_OBJECT):
         sys.stderr.write(f'_pandas_resolve_source_and_buffers :: (A)\n')
         _pandas_series_sniff_pyobj(entry, col_out)
@@ -1113,6 +1099,14 @@ cdef void_int _pandas_resolve_args(
     sys.stderr.write('_pandas_resolve_args :: (E)\n')
     _pandas_resolve_cols(b, tagged_cols, cols_out)
     sys.stderr.write('_pandas_resolve_args :: (F)\n')
+
+
+cdef inline bint _pandas_arrow_is_valid(col_cursor_t* cursor):
+    return (
+        cursor.chunk.null_count == 0 or
+        (
+            (<uint8_t*>cursor.chunk.buffers[0])[cursor.offset // 8] &
+            (1 << (cursor.offset % 8))))
 
 
 cdef inline void_int _pandas_cell_str_pyobj_to_utf8(
@@ -1516,11 +1510,20 @@ cdef void_int _pandas_serialize_cell_column_ts__dt64ns_numpy(
         raise c_err_to_py(err)
 
 
-cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(
+cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    _pandas_serialize_cell_column_ts__dt64ns_numpy(impl, b, col)
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef int64_t cell
+    cdef int64_t* access
+    if valid:
+        access = <int64_t*>col.cursor.chunk.buffers[1]
+        cell = access[col.cursor.offset]
+        cell //= 1000  # Convert from nanoseconds to microseconds.
+        if not line_sender_buffer_column_ts(impl, col.name, cell, &err):
+            raise c_err_to_py(err)   
 
 
 cdef void_int _pandas_serialize_cell_at_dt64ns_numpy(
@@ -1539,11 +1542,27 @@ cdef void_int _pandas_serialize_cell_at_dt64ns_numpy(
             raise c_err_to_py(err)
 
 
-cdef void_int _pandas_serialize_cell_at_dt64ns_tz_numpy(
+cdef void_int _pandas_serialize_cell_at_dt64ns_tz_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    _pandas_serialize_cell_at_dt64ns_numpy(impl, b, col)
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef int64_t* access
+    cdef int64_t cell
+    if valid:
+        access = <int64_t*>col.cursor.chunk.buffers[1]
+        cell = access[col.cursor.offset]
+    else:
+        cell = 0
+
+    if cell == 0:
+        if not line_sender_buffer_at_now(impl, &err):
+            raise c_err_to_py(err)
+    else:
+        # Note: impl will validate against negative numbers.
+        if not line_sender_buffer_at(impl, cell, &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell(
@@ -1643,12 +1662,12 @@ cdef void_int _pandas_serialize_cell(
         _pandas_serialize_cell_column_str__str_i64_cat(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
         _pandas_serialize_cell_column_ts__dt64ns_numpy(impl, b, col)
-    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_numpy:
-        _pandas_serialize_cell_column_ts__dt64ns_tz_numpy(impl, b, col)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
+        _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:
         _pandas_serialize_cell_at_dt64ns_numpy(impl, b, col)
-    elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_tz_numpy:
-        _pandas_serialize_cell_at_dt64ns_tz_numpy(impl, b, col)
+    elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_tz_arrow:
+        _pandas_serialize_cell_at_dt64ns_tz_arrow(impl, b, col)
     else:
         raise RuntimeError(f"Unknown column dispatch code: {dc}")
     # See earlier note about switch statement generation.
@@ -1742,7 +1761,8 @@ cdef void_int _pandas(
         try:
             sys.stderr.write(' :: :: (I)\n')
             for row_index in range(row_count):
-                # TODO: Occasional GIL release logic (e.g. every 5000 rows or so)
+                # TODO: Occasional GIL release logic. This should be twice as
+                # often as `sys.getswitchinterval()`.
                 # TODO: Potentially avoid the GIL altogether if we can get away with it.
                 # This is column-type dependent. Some basic analysis is required.
                 # We need a `GilController` object so that we can raise exceptions.
@@ -1772,7 +1792,7 @@ cdef void_int _pandas(
                             repr(data.columns[col.orig_index]) +
                             f' at row index {row_index} (' +
                             repr(data.iloc[row_index, col.orig_index]) +
-                            f'): {e}') from e
+                            f'): {e}  [dc={<int>col.dispatch_code}]') from e
                     sys.stderr.write(' :: :: (P)\n')
                     _pandas_col_advance(col)
                     sys.stderr.write(' :: :: (Q)\n')
