@@ -1101,6 +1101,12 @@ cdef void_int _pandas_resolve_args(
     sys.stderr.write('_pandas_resolve_args :: (F)\n')
 
 
+cdef inline bint _pandas_arrow_get_bool(col_cursor_t* cursor):
+    return (
+        (<uint8_t*>cursor.chunk.buffers[1])[cursor.offset // 8] &
+        (1 << (cursor.offset % 8)))
+
+
 cdef inline bint _pandas_arrow_is_valid(col_cursor_t* cursor):
     return (
         cursor.chunk.null_count == 0 or
@@ -1253,8 +1259,7 @@ cdef void_int _pandas_serialize_cell_column_bool__bool_numpy(
     cdef line_sender_error* err = NULL
     cdef uint8_t* access = <uint8_t*>col.cursor.chunk.buffers[1]
     cdef uint8_t cell = access[col.cursor.offset]
-    cdef bint value = not not cell  # Force to 0 and 1.
-    if not line_sender_buffer_column_bool(impl, col.name, value, &err):
+    if not line_sender_buffer_column_bool(impl, col.name, not not cell, &err):
         raise c_err_to_py(err)
 
 
@@ -1262,7 +1267,15 @@ cdef void_int _pandas_serialize_cell_column_bool__bool_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef bint value
+    if valid:
+        value = _pandas_arrow_get_bool(&col.cursor)
+        if not line_sender_buffer_column_bool(impl, col.name, value, &err):
+            raise c_err_to_py(err)
+    else:
+        raise ValueError('Cannot insert null values into a boolean column.')
 
 
 cdef void_int _pandas_serialize_cell_column_i64__int_pyobj(

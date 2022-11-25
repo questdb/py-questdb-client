@@ -735,6 +735,38 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=t\n' +
             'tbl1 a=f\n')
 
+    def test_bool_arrow_col(self):
+        df = pd.DataFrame({'a': pd.Series([
+                True, False, False,
+                False, True, False,
+                True, True, True,
+                False, False, False],
+            dtype='boolean')})  # Note `boolean` != `bool`.
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=t\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=t\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=t\n' +
+            'tbl1 a=t\n' +
+            'tbl1 a=t\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n' +
+            'tbl1 a=f\n')
+        
+        df2 = pd.DataFrame({'a': pd.Series([
+                True, False, False,
+                None, True, False],
+            dtype='boolean')})
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'Failed.*at row index 3 .*<NA>.: .*insert null .*boolean col'):
+            _pandas(df2, table_name='tbl1')
+
     def test_bool_obj_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 True, False, False,
