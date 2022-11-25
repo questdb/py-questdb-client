@@ -720,6 +720,176 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=NaN\n' +
             'tbl1 a=1.7976931348623157e308\n')
 
+    def test_u8_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    0,
+                    None,
+                    255],  # u8 max
+                dtype=pd.UInt8Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=0i,b="d"\n' +
+            'tbl1 b="e"\n' +
+            'tbl1 a=255i,b="f"\n')
+    
+    def test_i8_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    -128,  # i8 min
+                    0,
+                    None,
+                    127],  # i8 max
+                dtype=pd.Int8Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=-128i,b="d"\n' +
+            'tbl1 a=0i,b="e"\n' +
+            'tbl1 b="f"\n' +
+            'tbl1 a=127i,b="g"\n')
+
+    def test_u16_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    0,
+                    None,
+                    65535],  # u16 max
+                dtype=pd.UInt16Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=0i,b="d"\n' +
+            'tbl1 b="e"\n' +
+            'tbl1 a=65535i,b="f"\n')
+
+    def test_i16_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    -32768,  # i16 min
+                    0,
+                    None,
+                    32767],  # i16 max
+                dtype=pd.Int16Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=-32768i,b="d"\n' +
+            'tbl1 a=0i,b="e"\n' +
+            'tbl1 b="f"\n' +
+            'tbl1 a=32767i,b="g"\n')
+
+    def test_u32_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    0,
+                    None,
+                    4294967295],  # u32 max
+                dtype=pd.UInt32Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=0i,b="d"\n' +
+            'tbl1 b="e"\n' +
+            'tbl1 a=4294967295i,b="f"\n')
+
+    def test_i32_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    -2147483648,  # i32 min
+                    0,
+                    None,
+                    2147483647],  # i32 max
+                dtype=pd.Int32Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=-2147483648i,b="d"\n' +
+            'tbl1 a=0i,b="e"\n' +
+            'tbl1 b="f"\n' +
+            'tbl1 a=2147483647i,b="g"\n')
+
+    def test_u64_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    0,
+                    None,
+                    9223372036854775807],  # i64 max
+                dtype=pd.UInt64Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=0i,b="d"\n' +
+            'tbl1 b="e"\n' +
+            'tbl1 a=9223372036854775807i,b="f"\n')
+
+        df2 = pd.DataFrame({'a': pd.Series([
+                1, 2, 3,
+                0,
+                9223372036854775808],  # i64 max + 1
+            dtype=pd.UInt64Dtype())})
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'serialize .* column .a. .* 4 .9223372036854775808.*int64'):
+            _pandas(df2, table_name='tbl1')
+
+    def test_i64_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1, 2, 3,
+                    -9223372036854775808,  # i64 min
+                    0,
+                    None,
+                    9223372036854775807],  # i64 max
+                dtype=pd.Int64Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n' +
+            'tbl1 a=-9223372036854775808i,b="d"\n' +
+            'tbl1 a=0i,b="e"\n' +
+            'tbl1 b="f"\n' +
+            'tbl1 a=9223372036854775807i,b="g"\n')
+
     def test_bool_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 True, False, False,

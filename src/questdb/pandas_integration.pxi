@@ -1379,56 +1379,140 @@ cdef void_int _pandas_serialize_cell_column_i64__u8_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef uint8_t* access
+    if valid:
+        access = <uint8_t*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                <int64_t>access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i8_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef int8_t* access
+    if valid:
+        access = <int8_t*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                <int64_t>access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u16_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef uint16_t* access
+    if valid:
+        access = <uint16_t*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                <int64_t>access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i16_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef int16_t* access
+    if valid:
+        access = <int16_t*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                <int64_t>access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef uint32_t* access
+    if valid:
+        access = <uint32_t*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                <int64_t>access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef int32_t* access
+    if valid:
+        access = <int32_t*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                <int64_t>access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef uint64_t* access
+    cdef uint64_t cell
+    if valid:
+        access = <uint64_t*>col.cursor.chunk.buffers[1]
+        cell = access[col.cursor.offset]
+        if cell > <uint64_t>INT64_MAX:
+            raise OverflowError('uint64 value too large for int64 column type.')
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                <int64_t>cell,
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef int64_t* access
+    if valid:
+        access = <int64_t*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_i64(
+                impl,
+                col.name,
+                access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_f64__float_pyobj(
