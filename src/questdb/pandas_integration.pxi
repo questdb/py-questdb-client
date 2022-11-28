@@ -1115,6 +1115,23 @@ cdef inline bint _pandas_arrow_is_valid(col_cursor_t* cursor):
             (1 << (cursor.offset % 8))))
 
 
+cdef inline bint _pandas_arrow_str(
+        col_cursor_t* cursor,
+        size_t* len_out,
+        const char** buf_out):
+    cdef int32_t* index_access
+    cdef uint8_t* char_access
+    cdef int32_t begin
+    cdef bint valid = _pandas_arrow_is_valid(cursor)
+    if valid:
+        index_access = <int32_t*>cursor.chunk.buffers[1]
+        char_access = <uint8_t*>cursor.chunk.buffers[2]
+        begin = index_access[cursor.offset]
+        len_out[0] = index_access[cursor.offset + 1] - begin
+        buf_out[0] = <const char*>&char_access[begin]
+    return valid
+
+
 cdef inline void_int _pandas_cell_str_pyobj_to_utf8(
         qdb_pystr_buf* b,
         col_t* col,
@@ -1122,14 +1139,15 @@ cdef inline void_int _pandas_cell_str_pyobj_to_utf8(
         line_sender_utf8* utf8_out) except -1: 
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
-    if _pandas_is_null_pyobj(cell):
-        valid_out[0] = False
-    elif PyUnicode_CheckExact(cell):
+    if PyUnicode_CheckExact(cell):
         str_to_utf8(b, cell, utf8_out)
         valid_out[0] = True
+    elif _pandas_is_null_pyobj(cell):
+        valid_out[0] = False
     else:
         raise ValueError(
-            f'Expected an object of type str, got a {_fqn(type(<object>cell))}')
+            'Expected a string, ' +
+            f'got an object of type {_fqn(type(<object>cell))}.')
 
 
 cdef void_int _pandas_serialize_cell_table__str_pyobj(
@@ -1140,8 +1158,13 @@ cdef void_int _pandas_serialize_cell_table__str_pyobj(
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
     cdef line_sender_table_name c_table_name
-    if _pandas_is_null_pyobj(cell) or not PyUnicode_CheckExact(cell):
-        raise ValueError(f'Expected an object of type str, got a {_fqn(type(<object>cell))}')
+    if not PyUnicode_CheckExact(cell):
+        if _pandas_is_null_pyobj(cell):
+            raise ValueError('Expected a table name, got a null value')
+        else:
+            raise ValueError(
+                'Expected a table name (str object), ' +
+                f'got an object of type {_fqn(type(<object>cell))}.')
     str_to_table_name(b, cell, &c_table_name)
     if not line_sender_buffer_table(impl, c_table_name, &err):
         raise c_err_to_py(err)
@@ -1152,10 +1175,16 @@ cdef void_int _pandas_serialize_cell_table__str_arrow(
         qdb_pystr_buf* b,
         col_t* col) except -1:
     cdef line_sender_error* err = NULL
+    cdef size_t len
+    cdef const char* buf
     cdef line_sender_table_name c_table_name
-    cdef uint8_t* validity_access = <uint8_t*>col.cursor.chunk.buffers[0]
-    cdef int32_t* index_access = <int32_t*>col.cursor.chunk.buffers[1]
-    raise ValueError('Not implemented')
+    if _pandas_arrow_str(&col.cursor, &len, &buf):
+        if not line_sender_table_name_init(&c_table_name, len, buf, &err):
+            raise c_err_to_py(err)
+        if not line_sender_buffer_table(impl, c_table_name, &err):
+            raise c_err_to_py(err)
+    else:
+        raise ValueError('Table name cannot be null')
 
 
 cdef void_int _pandas_serialize_cell_table__str_i8_cat(
@@ -1202,7 +1231,12 @@ cdef void_int _pandas_serialize_cell_symbol__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef line_sender_utf8 utf8
+    cdef line_sender_table_name c_table_name
+    if _pandas_arrow_str(&col.cursor, &utf8.len, &utf8.buf):
+        if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_symbol__str_i8_cat(
@@ -1631,7 +1665,7 @@ cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(
         cell = access[col.cursor.offset]
         cell //= 1000  # Convert from nanoseconds to microseconds.
         if not line_sender_buffer_column_ts(impl, col.name, cell, &err):
-            raise c_err_to_py(err)   
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_at_dt64ns_numpy(

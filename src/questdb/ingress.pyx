@@ -36,6 +36,7 @@ from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
 from libc.stdlib cimport malloc, calloc, realloc, free, abort
 from libc.string cimport strncmp
 from libc.math cimport isnan
+from libc.stdio cimport fprintf, stderr  # TODO: Remove me one no longer needed
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject

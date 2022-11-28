@@ -6,8 +6,6 @@ TODO
 Build Tooling
 =============
 
-* **[HIGH]** Transition to Azure, move Linux arm to ARM pipeline without QEMU.
-
 * **[MEDIUM]** Automate Apple Silicon as part of CI.
 
 * **[LOW]** Release to PyPI from CI.
@@ -19,8 +17,6 @@ Docs
 * **[MEDIUM]** Examples should be tested as part of the unit tests (as they
   are in the C client). This is to ensure they don't "bit rot" as the code
   changes.
-
-* **[MEDIUM]** Document on a per-version basis.
 
 Development
 ===========

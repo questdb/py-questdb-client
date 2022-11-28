@@ -529,6 +529,12 @@ class TestPandas(unittest.TestCase):
             't2,A=a2,D=a2 E=2.0,F=2i 1520726400000000000\n' +
             't1,A=a3,B=b3,C=b3,D=a3 E=3.0,F=3i 1520812800000000000\n')
 
+    def test_row_of_nulls(self):
+        df = pd.DataFrame({'a': ['a1', None, 'a3']})
+        with self.assertRaisesRegex(
+                qi.IngressError, 'State error: Bad call to `at`'):
+            _pandas(df, table_name='tbl1', symbols=['a'])
+
     def test_u8_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 1, 2, 3,
@@ -1086,8 +1092,96 @@ class TestPandas(unittest.TestCase):
                 qi.IngressError, "Failed.*'a'.*-2208970800000000000 is neg"):
             _pandas(df2, table_name='tbl1', symbols=['b'], at='a')
 
+    def _test_pyobjstr_table(self, dtype):
+        df = pd.DataFrame({
+            '../bad col name/../it does not matter...':
+                pd.Series([
+                    'a',                     # ASCII
+                    'b' * 127,               # Max table name length.
+                    'q❤️p',                   # Mixed ASCII and UCS-2
+                    '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
+                    '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
+                dtype=dtype),
+            'b': [1, 2, 3, 4, 5]})
+        buf = _pandas(df, table_name_col=0)
+        self.assertEqual(
+            buf,
+            'a b=1i\n' +
+            ('b' * 127) + ' b=2i\n' +
+            'q❤️p b=3i\n' +
+            '嚜꓂ b=4i\n' +
+            '💩🦞 b=5i\n')
 
-    def test_str_numpy_symbol(self):
+        with self.assertRaisesRegex(
+                qi.IngressError, "Too long"):
+            _pandas(
+                pd.DataFrame({'a': pd.Series(['b' * 128], dtype=dtype)}),
+                table_name_col='a')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
+            _pandas(
+                pd.DataFrame({
+                    '.': pd.Series(['x', None], dtype=dtype),
+                    'b': [1, 2]}),
+                table_name_col='.')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
+            _pandas(
+                pd.DataFrame({
+                    '.': pd.Series(['x', float('nan')], dtype=dtype),
+                    'b': [1, 2]}),
+                table_name_col='.')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
+            _pandas(
+                pd.DataFrame({
+                    '.': pd.Series(['x', pd.NA], dtype=dtype),
+                    'b': [1, 2]}),
+                table_name_col='.')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, "''.*must have a non-zero length"):
+            _pandas(
+                pd.DataFrame({
+                    '/': pd.Series([''], dtype=dtype),
+                    'b': [1]}),
+                table_name_col='/')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, "'tab..1'.*invalid dot `\.` at position 4"):
+            _pandas(
+                pd.DataFrame({
+                    '/': pd.Series(['tab..1'], dtype=dtype),
+                    'b': [1]}),
+                table_name_col='/')
+
+    def test_obj_str_table(self):
+        self._test_pyobjstr_table('object')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, 'table name .*got an object of type int'):
+            _pandas(
+                pd.DataFrame({
+                    '.': pd.Series(['x', 42], dtype='object'),
+                    'z': [1, 2]}),
+                table_name_col='.')
+
+    def test_obj_string_table(self):
+        self._test_pyobjstr_table('string')
+
+        self.assertEqual(
+            _pandas(
+                pd.DataFrame({
+                    '.': pd.Series(['x', 42], dtype='string'),
+                    'z': [1, 2]}),
+                table_name_col='.'),
+            'x z=1i\n' +
+            '42 z=2i\n')
+
+    def _test_pyobjstr_numpy_symbol(self, dtype):
         df = pd.DataFrame({'a': pd.Series([
                 'a',                     # ASCII
                 'q❤️p',                   # Mixed ASCII and UCS-2
@@ -1097,7 +1191,7 @@ class TestPandas(unittest.TestCase):
                 '',                      # Empty string
                 '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
                 '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
-            dtype='str')})
+            dtype=dtype)})
         buf = _pandas(df, table_name='tbl1', symbols=True)
         self.assertEqual(
             buf,
@@ -1109,6 +1203,39 @@ class TestPandas(unittest.TestCase):
             'tbl1,a=\n' +
             'tbl1,a=嚜꓂\n' +
             'tbl1,a=💩🦞\n')
+
+        for null_obj in (None, float('nan'), pd.NA):
+            self.assertEqual(
+                _pandas(
+                    pd.DataFrame({
+                        'x': pd.Series(['a', null_obj], dtype=dtype),
+                        'y': [1, 2]}),
+                    table_name='tbl1', symbols=[0]),
+                'tbl1,x=a y=1i\n' +
+                'tbl1 y=2i\n')
+
+    def test_obj_str_numpy_symbol(self):
+        self._test_pyobjstr_numpy_symbol('object')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, 'Expected a string, got an .* type int'):
+            _pandas(
+                pd.DataFrame({
+                    'x': pd.Series(['x', 42], dtype='object'),
+                    'y': [1, 2]}),
+                table_name='tbl1', symbols=[0])
+
+    def test_obj_string_numpy_symbol(self):
+        self._test_pyobjstr_numpy_symbol('string')
+
+        self.assertEqual(
+            _pandas(
+                pd.DataFrame({
+                    'x': pd.Series(['x', 42], dtype='string'),
+                    'y': [1, 2]}),
+                table_name='tbl1', symbols=[0]),
+            'tbl1,x=x y=1i\n' +
+            'tbl1,x=42 y=2i\n')
 
     def test_str_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -1133,7 +1260,80 @@ class TestPandas(unittest.TestCase):
             'tbl1 a="嚜꓂"\n' +
             'tbl1 a="💩🦞"\n')
 
+    def test_str_arrow_symbol(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                'a',                     # ASCII
+                'q❤️p',                   # Mixed ASCII and UCS-2
+                '❤️' * 1200,              # Over the 1024 buffer prealloc.
+                'Questo è un qualcosa',  # Non-ASCII UCS-1
+                'щось',                  # UCS-2, 2 bytes for UTF-8.
+                '',                      # Empty string
+                None,
+                '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
+                '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
+                dtype='string[pyarrow]'),
+            'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
+        buf = _pandas(df, table_name='tbl1', symbols=True)
+        self.assertEqual(
+            buf,
+            'tbl1,a=a b=1i\n' +
+            'tbl1,a=q❤️p b=2i\n' +
+            'tbl1,a=' + ('❤️' * 1200) + ' b=3i\n' +
+            'tbl1,a=Questo\\ è\\ un\\ qualcosa b=4i\n' +
+            'tbl1,a=щось b=5i\n' +
+            'tbl1,a= b=6i\n' +
+            'tbl1 b=7i\n' +
+            'tbl1,a=嚜꓂ b=8i\n' +
+            'tbl1,a=💩🦞 b=9i\n')
 
+    def test_str_arrow_table(self):
+        df = pd.DataFrame({
+            '../bad col name/../it does not matter...': pd.Series([
+                'a',                     # ASCII
+                'b' * 127,               # Max table name length.
+                'q❤️p',                   # Mixed ASCII and UCS-2
+                '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
+                '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
+                dtype='string[pyarrow]'),
+            'b': [1, 2, 3, 4, 5]})
+        buf = _pandas(df, table_name_col=0)
+        self.assertEqual(
+            buf,
+            'a b=1i\n' +
+            ('b' * 127) + ' b=2i\n' +
+            'q❤️p b=3i\n' +
+            '嚜꓂ b=4i\n' +
+            '💩🦞 b=5i\n')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, "Too long"):
+            _pandas(
+                pd.DataFrame({
+                    'a': pd.Series(['b' * 128], dtype='string[pyarrow]')}),
+                table_name_col='a')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, "Failed .*<NA>.*Table name cannot be null"):
+            _pandas(
+                pd.DataFrame({
+                    '.': pd.Series(['x', None], dtype='string[pyarrow]'),
+                    'b': [1, 2]}),
+                table_name_col='.')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, "''.*must have a non-zero length"):
+            _pandas(
+                pd.DataFrame({
+                    '/': pd.Series([''], dtype='string[pyarrow]')}),
+                table_name_col='/')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, "'tab..1'.*invalid dot `\.` at position 4"):
+            _pandas(
+                pd.DataFrame({
+                    '/': pd.Series(['tab..1'], dtype='string[pyarrow]')}),
+                table_name_col='/')
 
 
 if __name__ == '__main__':
