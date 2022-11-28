@@ -1339,19 +1339,45 @@ class TestPandas(unittest.TestCase):
         self.assertEqual(
             _pandas(
                 pd.DataFrame({
-                    'a': pd.Series([1, 2, 3, None], dtype='object'),
-                    'b': [1, 2, 3, 4]}),
+                    'a': pd.Series([1, 2, 3, None, float('nan'), pd.NA, 7], dtype='object'),
+                    'b': [1, 2, 3, 4, 5, 6, 7]}),
                 table_name='tbl1'),
             'tbl1 a=1i,b=1i\n' +
             'tbl1 a=2i,b=2i\n' +
             'tbl1 a=3i,b=3i\n' +
-            'tbl1 b=4i\n')
+            'tbl1 b=4i\n' +
+            'tbl1 b=5i\n' +
+            'tbl1 b=6i\n' +
+            'tbl1 a=7i,b=7i\n')
         
         with self.assertRaisesRegex(
                 qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\."):
             _pandas(
                 pd.DataFrame({
                     'a': pd.Series([1, 'STRING'], dtype='object'),
+                    'b': [1, 2]}),
+                table_name='tbl1')
+
+    def test_pyobj_float_col(self):
+        self.assertEqual(
+            _pandas(
+                pd.DataFrame({
+                    'a': pd.Series([1.0, 2.0, 3.0, None, float('nan'), pd.NA, 7.0], dtype='object'),
+                    'b': [1, 2, 3, 4, 5, 6, 7]}),
+                table_name='tbl1'),
+            'tbl1 a=1.0,b=1i\n' +
+            'tbl1 a=2.0,b=2i\n' +
+            'tbl1 a=3.0,b=3i\n' +
+            'tbl1 b=4i\n' +
+            'tbl1 a=NaN,b=5i\n' +
+            'tbl1 b=6i\n' +
+            'tbl1 a=7.0,b=7i\n')
+
+        with self.assertRaisesRegex(
+                qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\."):
+            _pandas(
+                pd.DataFrame({
+                    'a': pd.Series([1.0, 'STRING'], dtype='object'),
                     'b': [1, 2]}),
                 table_name='tbl1')
 

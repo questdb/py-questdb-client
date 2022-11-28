@@ -1566,7 +1566,20 @@ cdef void_int _pandas_serialize_cell_column_f64__float_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+    cdef double value
+    if PyFloat_CheckExact(cell):
+        value = PyFloat_AS_DOUBLE(cell)
+        if not line_sender_buffer_column_f64(impl, col.name, value, &err):
+            raise c_err_to_py(err)
+    elif _pandas_is_null_pyobj(cell):
+        pass
+    else:
+        raise ValueError(
+            'Expected an object of type float, got an object of type ' +
+            _fqn(type(<object>cell)) + '.')
 
 
 cdef void_int _pandas_serialize_cell_column_f64__f32_numpy(
