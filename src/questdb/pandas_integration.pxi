@@ -1609,14 +1609,34 @@ cdef void_int _pandas_serialize_cell_column_f64__f32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef float* access
+    if valid:
+        access = <float*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_f64(
+                impl,
+                col.name,
+                <double>access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_f64__f64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
+    cdef double* access
+    if valid:
+        access = <double*>col.cursor.chunk.buffers[1]
+        if not line_sender_buffer_column_f64(
+                impl,
+                col.name,
+                access[col.cursor.offset],
+                &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_str__str_pyobj(

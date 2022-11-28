@@ -896,6 +896,56 @@ class TestPandas(unittest.TestCase):
             'tbl1 b="f"\n' +
             'tbl1 a=9223372036854775807i,b="g"\n')
 
+    def test_f32_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1.0, 2.0, 3.0,
+                    0.0,
+                    float('inf'),
+                    float('-inf'),
+                    float('nan'),
+                    3.4028234663852886e38,  # f32 max
+                    None],
+                dtype=pd.Float32Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1.0,b="a"\n' +
+            'tbl1 a=2.0,b="b"\n' +
+            'tbl1 a=3.0,b="c"\n' +
+            'tbl1 a=0.0,b="d"\n' +
+            'tbl1 a=Infinity,b="e"\n' +
+            'tbl1 a=-Infinity,b="f"\n' +
+            'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
+            'tbl1 a=3.4028234663852886e38,b="h"\n' +
+            'tbl1 b="i"\n')
+
+    def test_f64_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    1.0, 2.0, 3.0,
+                    0.0,
+                    float('inf'),
+                    float('-inf'),
+                    float('nan'),
+                    1.7976931348623157e308,  # f64 max
+                    None],
+                dtype=pd.Float64Dtype()),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1.0,b="a"\n' +
+            'tbl1 a=2.0,b="b"\n' +
+            'tbl1 a=3.0,b="c"\n' +
+            'tbl1 a=0.0,b="d"\n' +
+            'tbl1 a=Infinity,b="e"\n' +
+            'tbl1 a=-Infinity,b="f"\n' +
+            'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
+            'tbl1 a=1.7976931348623157e308,b="h"\n' +
+            'tbl1 b="i"\n')
+
     def test_bool_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 True, False, False,
