@@ -1233,7 +1233,6 @@ cdef void_int _pandas_serialize_cell_symbol__str_arrow(
         col_t* col) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    cdef line_sender_table_name c_table_name
     if _pandas_arrow_str(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
             raise c_err_to_py(err)
@@ -1655,7 +1654,11 @@ cdef void_int _pandas_serialize_cell_column_str__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef line_sender_utf8 utf8
+    if _pandas_arrow_str(&col.cursor, &utf8.len, &utf8.buf):
+        if not line_sender_buffer_column_str(impl, col.name, utf8, &err):
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_str__str_i8_cat(

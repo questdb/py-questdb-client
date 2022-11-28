@@ -1310,33 +1310,6 @@ class TestPandas(unittest.TestCase):
             'tbl1 a="嚜꓂"\n' +
             'tbl1 a="💩🦞"\n')
 
-    def test_str_arrow_symbol(self):
-        df = pd.DataFrame({
-            'a': pd.Series([
-                'a',                     # ASCII
-                'q❤️p',                   # Mixed ASCII and UCS-2
-                '❤️' * 1200,              # Over the 1024 buffer prealloc.
-                'Questo è un qualcosa',  # Non-ASCII UCS-1
-                'щось',                  # UCS-2, 2 bytes for UTF-8.
-                '',                      # Empty string
-                None,
-                '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
-                '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
-                dtype='string[pyarrow]'),
-            'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
-        buf = _pandas(df, table_name='tbl1', symbols=True)
-        self.assertEqual(
-            buf,
-            'tbl1,a=a b=1i\n' +
-            'tbl1,a=q❤️p b=2i\n' +
-            'tbl1,a=' + ('❤️' * 1200) + ' b=3i\n' +
-            'tbl1,a=Questo\\ è\\ un\\ qualcosa b=4i\n' +
-            'tbl1,a=щось b=5i\n' +
-            'tbl1,a= b=6i\n' +
-            'tbl1 b=7i\n' +
-            'tbl1,a=嚜꓂ b=8i\n' +
-            'tbl1,a=💩🦞 b=9i\n')
-
     def test_str_arrow_table(self):
         df = pd.DataFrame({
             '../bad col name/../it does not matter...': pd.Series([
@@ -1384,6 +1357,60 @@ class TestPandas(unittest.TestCase):
                 pd.DataFrame({
                     '/': pd.Series(['tab..1'], dtype='string[pyarrow]')}),
                 table_name_col='/')
+
+    def test_str_arrow_symbol(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                'a',                     # ASCII
+                'q❤️p',                   # Mixed ASCII and UCS-2
+                '❤️' * 1200,              # Over the 1024 buffer prealloc.
+                'Questo è un qualcosa',  # Non-ASCII UCS-1
+                'щось',                  # UCS-2, 2 bytes for UTF-8.
+                '',                      # Empty string
+                None,
+                '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
+                '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
+                dtype='string[pyarrow]'),
+            'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
+        buf = _pandas(df, table_name='tbl1', symbols=True)
+        self.assertEqual(
+            buf,
+            'tbl1,a=a b=1i\n' +
+            'tbl1,a=q❤️p b=2i\n' +
+            'tbl1,a=' + ('❤️' * 1200) + ' b=3i\n' +
+            'tbl1,a=Questo\\ è\\ un\\ qualcosa b=4i\n' +
+            'tbl1,a=щось b=5i\n' +
+            'tbl1,a= b=6i\n' +
+            'tbl1 b=7i\n' +
+            'tbl1,a=嚜꓂ b=8i\n' +
+            'tbl1,a=💩🦞 b=9i\n')
+
+    def test_str_arrow_col(self):
+        df = pd.DataFrame({
+            'a': pd.Series([
+                'a',                     # ASCII
+                'q❤️p',                   # Mixed ASCII and UCS-2
+                '❤️' * 1200,              # Over the 1024 buffer prealloc.
+                'Questo è un qualcosa',  # Non-ASCII UCS-1
+                'щось',                  # UCS-2, 2 bytes for UTF-8.
+                '',                      # Empty string
+                None,
+                '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
+                '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
+                dtype='string[pyarrow]'),
+            'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
+        buf = _pandas(df, table_name='tbl1', symbols=False)
+        self.assertEqual(
+            buf,
+            'tbl1 a="a",b=1i\n' +
+            'tbl1 a="q❤️p",b=2i\n' +
+            'tbl1 a="' + ('❤️' * 1200) + '",b=3i\n' +
+            'tbl1 a="Questo è un qualcosa",b=4i\n' +
+            'tbl1 a="щось",b=5i\n' +
+            'tbl1 a="",b=6i\n' +
+            'tbl1 b=7i\n' +
+            'tbl1 a="嚜꓂",b=8i\n' +
+            'tbl1 a="💩🦞",b=9i\n')
 
     def test_pyobj_int_col(self):
         self.assertEqual(
