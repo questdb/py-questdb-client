@@ -57,3 +57,7 @@ cdef extern from "Python.h":
     bint PyFloat_CheckExact(PyObject* o)
 
     double PyFloat_AS_DOUBLE(PyObject* o)
+
+    long long PyLong_AsLongLong(PyObject* o) except? -1
+
+    PyObject* PyErr_Occurred()

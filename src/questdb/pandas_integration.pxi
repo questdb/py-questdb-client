@@ -1274,12 +1274,12 @@ cdef void_int _pandas_serialize_cell_column_bool__bool_pyobj(
     cdef line_sender_error* err = NULL
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
-    if _pandas_is_null_pyobj(cell):
-        raise ValueError('Cannot insert null values into a boolean column.')
-    elif PyBool_Check(cell):
+    if PyBool_Check(cell):
         if not line_sender_buffer_column_bool(
                 impl, col.name, cell == Py_True, &err):
             raise c_err_to_py(err)
+    elif _pandas_is_null_pyobj(cell):
+        raise ValueError('Cannot insert null values into a boolean column.')
     else:
         raise ValueError(
             'Expected an object of type bool, got a ' +
@@ -1316,7 +1316,20 @@ cdef void_int _pandas_serialize_cell_column_i64__int_pyobj(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
         col_t* col) except -1:
-    raise ValueError('nyi')
+    cdef line_sender_error* err = NULL
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+    cdef int64_t value
+    if PyLong_CheckExact(cell):
+        value = PyLong_AsLongLong(cell)
+        if not line_sender_buffer_column_i64(impl, col.name, value, &err):
+            raise c_err_to_py(err)
+    elif _pandas_is_null_pyobj(cell):
+        pass
+    else:
+        raise ValueError(
+            'Expected an object of type int, got an object of type ' +
+            _fqn(type(<object>cell)) + '.')
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u8_numpy(

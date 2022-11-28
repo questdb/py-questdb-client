@@ -1335,6 +1335,26 @@ class TestPandas(unittest.TestCase):
                     '/': pd.Series(['tab..1'], dtype='string[pyarrow]')}),
                 table_name_col='/')
 
+    def test_pyobj_int_col(self):
+        self.assertEqual(
+            _pandas(
+                pd.DataFrame({
+                    'a': pd.Series([1, 2, 3, None], dtype='object'),
+                    'b': [1, 2, 3, 4]}),
+                table_name='tbl1'),
+            'tbl1 a=1i,b=1i\n' +
+            'tbl1 a=2i,b=2i\n' +
+            'tbl1 a=3i,b=3i\n' +
+            'tbl1 b=4i\n')
+        
+        with self.assertRaisesRegex(
+                qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\."):
+            _pandas(
+                pd.DataFrame({
+                    'a': pd.Series([1, 'STRING'], dtype='object'),
+                    'b': [1, 2]}),
+                table_name='tbl1')
+
 
 if __name__ == '__main__':
     unittest.main()
