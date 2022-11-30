@@ -9,6 +9,7 @@ import time
 import numpy as np
 import pandas as pd
 import zoneinfo
+import itertools
 
 import patch_path
 from mock_server import Server
@@ -474,7 +475,8 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name=1.5)
 
     def test_invalid_table_name(self):
-        with self.assertRaisesRegex(ValueError, '`table_name`: Bad string "."'):
+        with self.assertRaisesRegex(
+                qi.IngressError, '`table_name`: Bad string "."'):
             _pandas(DF1, table_name='.')
 
     def test_invalid_column_dtype(self):
@@ -1201,7 +1203,7 @@ class TestPandas(unittest.TestCase):
                 table_name_col='/')
 
         with self.assertRaisesRegex(
-                qi.IngressError, "'tab..1'.*invalid dot `\.` at position 4"):
+                qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
             _pandas(
                 pd.DataFrame({
                     '/': pd.Series(['tab..1'], dtype=dtype),
@@ -1352,7 +1354,7 @@ class TestPandas(unittest.TestCase):
                 table_name_col='/')
 
         with self.assertRaisesRegex(
-                qi.IngressError, "'tab..1'.*invalid dot `\.` at position 4"):
+                qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
             _pandas(
                 pd.DataFrame({
                     '/': pd.Series(['tab..1'], dtype='string[pyarrow]')}),
@@ -1428,7 +1430,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=7i,b=7i\n')
         
         with self.assertRaisesRegex(
-                qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\."):
+                qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\\."):
             _pandas(
                 pd.DataFrame({
                     'a': pd.Series([1, 'STRING'], dtype='object'),
@@ -1451,13 +1453,163 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=7.0,b=7i\n')
 
         with self.assertRaisesRegex(
-                qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\."):
+                qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\\."):
             _pandas(
                 pd.DataFrame({
                     'a': pd.Series([1.0, 'STRING'], dtype='object'),
                     'b': [1, 2]}),
                 table_name='tbl1')
 
+    def test_bad_category(self):
+        # We only support string categories
+        # (unless anyone asks for additional ones).
+        # We want to test others are rejected.
+        with self.assertRaisesRegex(
+                qi.IngressError, "Bad column 'a'.*got a category of .*int64"):
+            _pandas(
+                pd.DataFrame({'a': pd.Series([1, 2, 3, 2], dtype='category')}),
+                table_name='tbl1')
+
+    def _test_cat_table(self, count):
+        slist = [f's{i}' for i in range(count)]
+
+        df = pd.DataFrame({
+            'a': pd.Series(slist, dtype='category'),
+            'b': list(range(len(slist)))})
+        
+        buf = _pandas(df, table_name_col=0)
+        exp = ''.join(
+            f'{s} b={i}i\n'
+            for i, s in enumerate(slist))
+        self.assertEqual(buf, exp)
+        
+        slist[2] = None
+        df2 = pd.DataFrame({
+            'a': pd.Series(slist, dtype='category'),
+            'b': list(range(len(slist)))})
+        with self.assertRaisesRegex(
+                qi.IngressError, 'Table name cannot be null'):
+            _pandas(df2, table_name_col=0)
+
+    def test_cat_i8_table(self):
+        self._test_cat_table(30)
+        self._test_cat_table(127)
+
+    def test_cat_i8_symbol(self):
+        df = pd.DataFrame({
+            'a': pd.Series(['a', 'b', 'c', 'a', None, 'c'], dtype='category'),
+            'b': [1, 2, 3, 4, 5, 6]})
+
+        # Note that since `symbols='auto'`` is the default, categories are
+        # automatically sent as symbols.
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1,a=a b=1i\n' +
+            'tbl1,a=b b=2i\n' +
+            'tbl1,a=c b=3i\n' +
+            'tbl1,a=a b=4i\n' +
+            'tbl1 b=5i\n' +
+            'tbl1,a=c b=6i\n')
+
+    def test_cat_i8_str(self):
+        df = pd.DataFrame({
+            'a': pd.Series(['a', 'b', 'c', 'a', None, 'c'], dtype='category'),
+            'b': [1, 2, 3, 4, 5, 6]})
+
+        buf = _pandas(df, table_name='tbl1', symbols=False)
+        self.assertEqual(
+            buf,
+            'tbl1 a="a",b=1i\n' +
+            'tbl1 a="b",b=2i\n' +
+            'tbl1 a="c",b=3i\n' +
+            'tbl1 a="a",b=4i\n' +
+            'tbl1 b=5i\n' +
+            'tbl1 a="c",b=6i\n')
+
+    def test_cat_i16_table(self):
+        self._test_cat_table(128)
+        self._test_cat_table(4000)
+        self._test_cat_table(32767)
+
+    def test_cat_i32_table(self):
+        self._test_cat_table(32768)
+        self._test_cat_table(100000)
+
+    # TODO: Test cat 16 and 32 symbols and strings.
+
+if False:
+    class TestBencharkPandas(unittest.TestCase):
+        def test_pystr_i64_10m(self):
+            # This is a benchmark, not a test.
+            # It is useful to run it manually to check performance.
+            slist = [f's{i:09}' for i in range(10_000_000)]
+            df = pd.DataFrame({
+                'a': slist,
+                'b': list(range(len(slist)))})
+
+            # Warm up
+            _pandas(df, table_name='tbl1', symbols=True)
+
+            # Run
+            t0 = time.monotonic()
+            _pandas(df, table_name='tbl1', symbols=True)
+            t1 = time.monotonic()
+            print('Time:', t1 - t0)
+
+        def test_mixed_10m(self):
+            # This is a benchmark, not a test.
+            # It is useful to run it manually to check performance.
+            count = 10_000_000
+            slist = [f's{i:09}' for i in range(count)]
+            df = pd.DataFrame({
+                'col1': pd.Series(slist, dtype='string[pyarrow]'),
+                'col2': list(range(len(slist))),
+                'col2': [float(i / 2) for i in range(len(slist))],
+                'col3': [float(i / 2) + 1.0 for i in range(len(slist))],
+                'col4': pd.Categorical(
+                    ['a', 'b', 'c', 'a', None, 'c', 'a', float('nan')] *
+                    (count // 8))})
+
+            # Warm up
+            _pandas(df, table_name='tbl1', symbols=True)
+
+            # Run
+            t0 = time.monotonic()
+            buf = _pandas(df, table_name='tbl1', symbols=True)
+            t1 = time.monotonic()
+            print(f'Time: {t1 - t0}, size: {len(buf)}')
+
+        def test_string_escaping_10m(self):
+            count = 10_000_000
+            slist = [f's={i:09}==abc \\' for i in range(count)]
+            series = pd.Series(slist, dtype='string[pyarrow]')
+            df = pd.DataFrame({
+                'col1': series,
+                'col2': series,
+                'col3': series,
+                'col4': series,
+                'col5': series,
+                'col6': series})
+            
+            # Warm up
+            _pandas(df, table_name='tbl1', symbols=True)
+
+            # Run
+            t0 = time.monotonic()
+            buf = _pandas(df, table_name='tbl1', symbols=True)
+            t1 = time.monotonic()
+            print(f'Time: {t1 - t0}, size: {len(buf)}')
+
+        
+# TODO: Test all datatypes, but no rows.
+# TODO: Test all datatypes, but one, two, 10 and 1000 rows. Include None, NA and NaN.
+# TODO: Test all datatypes, but multiple row chunks.
+
 
 if __name__ == '__main__':
-    unittest.main()
+    if os.environ['TEST_QUESTDB_PROFILE'] == '1':
+        import cProfile
+        cProfile.run('unittest.main()', sort='cumtime')
+    else:
+        unittest.main()

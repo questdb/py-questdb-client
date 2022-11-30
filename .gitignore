@@ -2,6 +2,10 @@ src/questdb/ingress.c
 src/questdb/*.html
 rustup-init.exe
 
+# Linux Perf profiles
+perf.data*
+perf/*.svg
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -988,22 +988,7 @@ cdef class Buffer:
         """
         # See https://cython.readthedocs.io/en/latest/src/userguide/
         #     numpy_tutorial.html#numpy-tutorial
-        import sys
-        sys.stderr.write('pandas :: (A) ' +
-            f'table_name: {table_name}, ' +
-            f'table_name_col: {table_name_col}, ' +
-            f'symbols: {symbols}, ' +
-            f'at: {at}, ' +
-            f'sort: {sort}' +
-            '\n')
         _pandas(self._impl, self._b, data, table_name, table_name_col, symbols, at, sort)
-        sys.stderr.write('pandas :: (B) ' +
-            f'table_name: {table_name}, ' +
-            f'table_name_col: {table_name_col}, ' +
-            f'symbols: {symbols}, ' +
-            f'at: {at}, ' +
-            f'sort: {sort}' +
-            '\n')
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
