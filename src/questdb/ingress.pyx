@@ -160,36 +160,13 @@ cdef str _fqn(type obj):
         return f'{obj.__module__}.{obj.__qualname__}'
 
 
-cdef void_int str_to_utf8(
+cdef inline void_int _encode_utf8(
         qdb_pystr_buf* b,
         PyObject* string,
         line_sender_utf8* utf8_out) except -1:
-    """
-    Convert a Python string to a UTF-8 borrowed buffer.
-    This is done without allocating new Python `bytes` objects.
-    In case the string is an ASCII string, it's also generally zero-copy.
-    The `utf8_out` param will point to (borrow from) either the ASCII buffer
-    inside the original Python object or a part of memory allocated inside the
-    `b` buffer.
-    """
-    cdef size_t count
-    cdef int kind
     cdef uint32_t bad_codepoint = 0
-    if not PyUnicode_CheckExact(string):
-        raise TypeError(
-            f'Expected a str object, not a {_fqn(type(<str><object>string))}')
-    PyUnicode_READY(string)
-    count = <size_t>(PyUnicode_GET_LENGTH(string))    
-
-    # We optimize the common case of ASCII strings.
-    # This avoid memory allocations and copies altogether.
-    # We get away with this because ASCII is a subset of UTF-8.
-    if PyUnicode_IS_COMPACT_ASCII(string):
-        utf8_out.len = count
-        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
-        return 0
-
-    kind = PyUnicode_KIND(string)
+    cdef size_t count = <size_t>(PyUnicode_GET_LENGTH(string))
+    cdef int kind = PyUnicode_KIND(string)
     if kind == PyUnicode_1BYTE_KIND:
         # No error handling for UCS1: All code points translate into valid UTF8.
         qdb_ucs1_to_utf8(
@@ -225,6 +202,57 @@ cdef void_int str_to_utf8(
         raise ValueError(f'Unknown UCS kind: {kind}.')
 
 
+cdef void_int str_to_utf8(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_utf8* utf8_out) except -1:
+    """
+    Convert a Python string to a UTF-8 borrowed buffer.
+    This is done without allocating new Python `bytes` objects.
+    In case the string is an ASCII string, it's also generally zero-copy.
+    The `utf8_out` param will point to (borrow from) either the ASCII buffer
+    inside the original Python object or a part of memory allocated inside the
+    `b` buffer.
+
+    If you need to use `utf8_out` without the GIL, call `qdb_pystr_buf_copy`.
+    """
+    if not PyUnicode_CheckExact(string):
+        raise TypeError(
+            'Expected a str object, not an object of type ' +
+            _fqn(type(<str><object>string)))
+    PyUnicode_READY(string)
+
+    # We optimize the common case of ASCII strings.
+    # This avoid memory allocations and copies altogether.
+    # We get away with this because ASCII is a subset of UTF-8.
+    if PyUnicode_IS_COMPACT_ASCII(string):
+        utf8_out.len = <size_t>(PyUnicode_GET_LENGTH(string))
+        utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
+        return 0
+
+    _encode_utf8(b, string, utf8_out)
+
+
+
+cdef void_int str_to_utf8_copy(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_utf8* utf8_out) except -1:
+    """
+    Variant of `str_to_utf8` that always copies the string to a new buffer.
+
+    The resulting `utf8_out` can be used when not holding the GIL:
+    The pointed-to memory is owned by `b`.
+    """
+    if not PyUnicode_CheckExact(string):
+        raise TypeError(
+            'Expected a str object, not an object of type ' +
+            _fqn(type(<str><object>string)))
+
+    PyUnicode_READY(string)
+    _encode_utf8(b, string, utf8_out)
+
+
 cdef void_int str_to_table_name(
         qdb_pystr_buf* b,
         PyObject* string,
@@ -240,6 +268,21 @@ cdef void_int str_to_table_name(
         raise c_err_to_py(err)
 
 
+cdef void_int str_to_table_name_copy(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_table_name* name_out) except -1:
+    """
+    Python string to copied C table name.
+    Also see `str_to_utf8_copy`.
+    """
+    cdef line_sender_error* err = NULL
+    cdef line_sender_utf8 utf8
+    str_to_utf8_copy(b, string, &utf8)
+    if not line_sender_table_name_init(name_out, utf8.len, utf8.buf, &err):
+        raise c_err_to_py(err)
+
+
 cdef void_int str_to_column_name(
         qdb_pystr_buf* b,
         str string,
@@ -251,6 +294,21 @@ cdef void_int str_to_column_name(
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     str_to_utf8(b, <PyObject*>string, &utf8)
+    if not line_sender_column_name_init(name_out, utf8.len, utf8.buf, &err):
+        raise c_err_to_py(err)
+
+
+cdef void_int str_to_column_name_copy(
+        qdb_pystr_buf* b,
+        str string,
+        line_sender_column_name* name_out) except -1:
+    """
+    Python string to copied C column name.
+    Also see `str_to_utf8_copy`.
+    """
+    cdef line_sender_error* err = NULL
+    cdef line_sender_utf8 utf8
+    str_to_utf8_copy(b, <PyObject*>string, &utf8)
     if not line_sender_column_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
 

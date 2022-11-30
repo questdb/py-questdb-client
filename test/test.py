@@ -1574,6 +1574,8 @@ class TestPandas(unittest.TestCase):
         self._test_cat_str(32768)
         self._test_cat_str(40000)
 
+# TODO: Test datetime64[ns] and datetime64[ns, tz] columns fully, including None values for `at` and `column_ts`.
+
 
 if False:
     class TestBencharkPandas(unittest.TestCase):

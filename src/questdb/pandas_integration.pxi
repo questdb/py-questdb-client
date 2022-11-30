@@ -78,9 +78,9 @@ cdef enum col_source_t:
     col_source_dt64ns_tz_arrow = 502000
 
 
-# cdef bint col_source_needs_gil(col_source_t source):
-#     # Check if hundreds digit is 1.
-#     return <int>source // 100 % 10 == 1
+cdef bint col_source_needs_gil(col_source_t source):
+    # Check if hundreds digit is 1.
+    return <int>source // 100 % 10 == 1
 
 
 cdef dict _TARGET_TO_SOURCES = {
@@ -434,7 +434,7 @@ cdef ssize_t _pandas_resolve_table_name(
                 'Can specify only one of `table_name` or `table_name_col`.')
         if isinstance(table_name, str):
             try:
-                str_to_table_name(b, <PyObject*>table_name, name_out)
+                str_to_table_name_copy(b, <PyObject*>table_name, name_out)
                 return -1  # Magic value for "no column index".
             except IngressError as ie:
                 raise IngressError(
@@ -1015,7 +1015,7 @@ cdef void_int _pandas_resolve_col(
     # we don't need to validate and encode them as column names.
     if ((entry.meta_target != meta_target_t.meta_target_table) and
             (entry.meta_target != meta_target_t.meta_target_at)):
-        str_to_column_name(b, entry.name, &col_out.name)
+        str_to_column_name_copy(b, entry.name, &col_out.name)
 
     _pandas_resolve_source_and_buffers(entry, col_out)
     _pandas_resolve_target(entry, col_out)
@@ -1029,11 +1029,19 @@ cdef void_int _pandas_resolve_col(
 
 
 cdef void_int _pandas_resolve_cols(
-        qdb_pystr_buf*b, list tagged_cols, col_t_arr* cols_out) except -1:
+        qdb_pystr_buf*b,
+        list tagged_cols,
+        col_t_arr* cols_out,
+        bint* any_cols_need_gil_out) except -1:
     cdef size_t index
     cdef size_t len_tagged_cols = len(tagged_cols)
+    cdef col_t* col
+    any_cols_need_gil_out[0] = False
     for index in range(len_tagged_cols):
-        _pandas_resolve_col(b, index, tagged_cols[index], &cols_out.d[index])
+        col = &cols_out.d[index]
+        _pandas_resolve_col(b, index, tagged_cols[index], col)
+        if col_source_needs_gil(col.source):
+            any_cols_need_gil_out[0] = True
 
 
 cdef void_int _pandas_resolve_args(
@@ -1046,7 +1054,8 @@ cdef void_int _pandas_resolve_args(
         size_t col_count,
         line_sender_table_name* c_table_name_out,
         int64_t* at_value_out,
-        col_t_arr* cols_out) except -1:
+        col_t_arr* cols_out,
+        bint* any_cols_need_gil_out) except -1:
     cdef ssize_t name_col
     cdef ssize_t at_col
 
@@ -1074,7 +1083,13 @@ cdef void_int _pandas_resolve_args(
     # Sort with table name is first, then the symbols, then fields, then at.
     # Note: Python 3.6+ guarantees stable sort.
     tagged_cols.sort(key=lambda x: (<TaggedEntry>x).meta_target)
-    _pandas_resolve_cols(b, tagged_cols, cols_out)
+    _pandas_resolve_cols(b, tagged_cols, cols_out, any_cols_need_gil_out)
+
+
+cdef void _ensure_has_gil(PyThreadState** gs):
+    if gs[0] != NULL:
+        PyEval_RestoreThread(gs[0])
+        gs[0] = NULL
 
 
 cdef inline bint _pandas_arrow_get_bool(col_cursor_t* cursor):
@@ -1200,68 +1215,84 @@ cdef void_int _pandas_serialize_cell_table__str_pyobj(
 cdef void_int _pandas_serialize_cell_table__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef size_t c_len
     cdef const char* buf
     cdef line_sender_table_name c_table_name
     if _pandas_arrow_str(&col.cursor, &c_len, &buf):
         if not line_sender_table_name_init(&c_table_name, c_len, buf, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
         if not line_sender_buffer_table(impl, c_table_name, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
+        _ensure_has_gil(gs)
         raise ValueError('Table name cannot be null')
 
 
 cdef void_int _pandas_serialize_cell_table__str_i8_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef size_t c_len
     cdef const char* c_buf
     cdef line_sender_table_name c_table_name
     if _pandas_arrow_get_cat_i8(&col.cursor, &c_len, &c_buf):
         if not line_sender_table_name_init(&c_table_name, c_len, c_buf, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
         if not line_sender_buffer_table(impl, c_table_name, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
+        _ensure_has_gil(gs)
         raise ValueError('Table name cannot be null')
 
 
 cdef void_int _pandas_serialize_cell_table__str_i16_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef size_t c_len
     cdef const char* c_buf
     cdef line_sender_table_name c_table_name
     if _pandas_arrow_get_cat_i16(&col.cursor, &c_len, &c_buf):
         if not line_sender_table_name_init(&c_table_name, c_len, c_buf, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
         if not line_sender_buffer_table(impl, c_table_name, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
+        _ensure_has_gil(gs)
         raise ValueError('Table name cannot be null')
 
 
 cdef void_int _pandas_serialize_cell_table__str_i32_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef size_t c_len
     cdef const char* c_buf
     cdef line_sender_table_name c_table_name
     if _pandas_arrow_get_cat_i32(&col.cursor, &c_len, &c_buf):
         if not line_sender_table_name_init(&c_table_name, c_len, c_buf, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
         if not line_sender_buffer_table(impl, c_table_name, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
+        _ensure_has_gil(gs)
         raise ValueError('Table name cannot be null')
 
 
@@ -1280,44 +1311,52 @@ cdef void_int _pandas_serialize_cell_symbol__str_pyobj(
 cdef void_int _pandas_serialize_cell_symbol__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_str(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_symbol__str_i8_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_get_cat_i8(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_symbol__str_i16_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_get_cat_i16(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_symbol__str_i32_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_get_cat_i32(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_symbol(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
@@ -1343,26 +1382,31 @@ cdef void_int _pandas_serialize_cell_column_bool__bool_pyobj(
 cdef void_int _pandas_serialize_cell_column_bool__bool_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef uint8_t* access = <uint8_t*>col.cursor.chunk.buffers[1]
     cdef uint8_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_bool(impl, col.name, not not cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_bool__bool_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef bint value
     if valid:
         value = _pandas_arrow_get_bool(&col.cursor)
         if not line_sender_buffer_column_bool(impl, col.name, value, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
+        _ensure_has_gil(gs)
         raise ValueError('Cannot insert null values into a boolean column.')
 
 
@@ -1389,97 +1433,115 @@ cdef void_int _pandas_serialize_cell_column_i64__int_pyobj(
 cdef void_int _pandas_serialize_cell_column_i64__u8_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef uint8_t* access = <uint8_t*>col.cursor.chunk.buffers[1]
     cdef uint8_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i8_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef int8_t* access = <int8_t*>col.cursor.chunk.buffers[1]
     cdef int8_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u16_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef uint16_t* access = <uint16_t*>col.cursor.chunk.buffers[1]
     cdef uint16_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i16_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef int16_t* access = <int16_t*>col.cursor.chunk.buffers[1]
     cdef int16_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef uint32_t* access = <uint32_t*>col.cursor.chunk.buffers[1]
     cdef uint32_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef int32_t* access = <int32_t*>col.cursor.chunk.buffers[1]
     cdef int32_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u64_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef uint64_t* access = <uint64_t*>col.cursor.chunk.buffers[1]
     cdef uint64_t cell = access[col.cursor.offset]
     if cell > <uint64_t>INT64_MAX:
+        _ensure_has_gil(gs)
         raise OverflowError('uint64 value too large for int64 column type.')
     if not line_sender_buffer_column_i64(impl, col.name, <int64_t>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i64_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
     if not line_sender_buffer_column_i64(impl, col.name, cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u8_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef uint8_t* access
@@ -1490,13 +1552,15 @@ cdef void_int _pandas_serialize_cell_column_i64__u8_arrow(
                 col.name,
                 <int64_t>access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i8_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef int8_t* access
@@ -1507,13 +1571,15 @@ cdef void_int _pandas_serialize_cell_column_i64__i8_arrow(
                 col.name,
                 <int64_t>access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u16_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef uint16_t* access
@@ -1524,13 +1590,15 @@ cdef void_int _pandas_serialize_cell_column_i64__u16_arrow(
                 col.name,
                 <int64_t>access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i16_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef int16_t* access
@@ -1541,13 +1609,15 @@ cdef void_int _pandas_serialize_cell_column_i64__i16_arrow(
                 col.name,
                 <int64_t>access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef uint32_t* access
@@ -1558,13 +1628,15 @@ cdef void_int _pandas_serialize_cell_column_i64__u32_arrow(
                 col.name,
                 <int64_t>access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef int32_t* access
@@ -1575,13 +1647,15 @@ cdef void_int _pandas_serialize_cell_column_i64__i32_arrow(
                 col.name,
                 <int64_t>access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__u64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef uint64_t* access
@@ -1590,19 +1664,22 @@ cdef void_int _pandas_serialize_cell_column_i64__u64_arrow(
         access = <uint64_t*>col.cursor.chunk.buffers[1]
         cell = access[col.cursor.offset]
         if cell > <uint64_t>INT64_MAX:
+            _ensure_has_gil(gs)
             raise OverflowError('uint64 value too large for int64 column type.')
         if not line_sender_buffer_column_i64(
                 impl,
                 col.name,
                 <int64_t>cell,
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_i64__i64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef int64_t* access
@@ -1613,6 +1690,7 @@ cdef void_int _pandas_serialize_cell_column_i64__i64_arrow(
                 col.name,
                 access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
@@ -1639,30 +1717,35 @@ cdef void_int _pandas_serialize_cell_column_f64__float_pyobj(
 cdef void_int _pandas_serialize_cell_column_f64__f32_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     # Note: This is the C `float` type, not the Python `float` type.
     cdef float* access = <float*>col.cursor.chunk.buffers[1]
     cdef float cell = access[col.cursor.offset]
     if not line_sender_buffer_column_f64(impl, col.name, <double>cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_f64__f64_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef double* access = <double*>col.cursor.chunk.buffers[1]
     cdef double cell = access[col.cursor.offset]
     if not line_sender_buffer_column_f64(impl, col.name, cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_f64__f32_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef float* access
@@ -1673,13 +1756,15 @@ cdef void_int _pandas_serialize_cell_column_f64__f32_arrow(
                 col.name,
                 <double>access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_f64__f64_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef double* access
@@ -1690,6 +1775,7 @@ cdef void_int _pandas_serialize_cell_column_f64__f64_arrow(
                 col.name,
                 access[col.cursor.offset],
                 &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
@@ -1708,63 +1794,74 @@ cdef void_int _pandas_serialize_cell_column_str__str_pyobj(
 cdef void_int _pandas_serialize_cell_column_str__str_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_str(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_column_str(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_str__str_i8_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_get_cat_i8(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_column_str(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_str__str_i16_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_get_cat_i16(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_column_str(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_str__str_i32_cat(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
     if _pandas_arrow_get_cat_i32(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_column_str(impl, col.name, utf8, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_ts__dt64ns_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
     cell //= 1000  # Convert from nanoseconds to microseconds.
     if not line_sender_buffer_column_ts(impl, col.name, cell, &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef int64_t cell
@@ -1774,29 +1871,34 @@ cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(
         cell = access[col.cursor.offset]
         cell //= 1000  # Convert from nanoseconds to microseconds.
         if not line_sender_buffer_column_ts(impl, col.name, cell, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_at_dt64ns_numpy(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
     if cell == 0:
         if not line_sender_buffer_at_now(impl, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
         # Note: impl will validate against negative numbers.
         if not line_sender_buffer_at(impl, cell, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_at_dt64ns_tz_arrow(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef bint valid = _pandas_arrow_is_valid(&col.cursor)
     cdef int64_t* access
@@ -1809,17 +1911,20 @@ cdef void_int _pandas_serialize_cell_at_dt64ns_tz_arrow(
 
     if cell == 0:
         if not line_sender_buffer_at_now(impl, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
         # Note: impl will validate against negative numbers.
         if not line_sender_buffer_at(impl, cell, &err):
+            _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        col_t* col) except -1:
+        col_t* col,
+        PyThreadState** gs) except -1:
     cdef col_dispatch_code_t dc = col.dispatch_code
     # Note!: Code below will generate a `switch` statement.
     # Ensure this happens! Don't break the `dc == ...` pattern.
@@ -1828,92 +1933,93 @@ cdef void_int _pandas_serialize_cell(
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_pyobj:
         _pandas_serialize_cell_table__str_pyobj(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_arrow:
-        _pandas_serialize_cell_table__str_arrow(impl, b, col)
+        _pandas_serialize_cell_table__str_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i8_cat:
-        _pandas_serialize_cell_table__str_i8_cat(impl, b, col)
+        _pandas_serialize_cell_table__str_i8_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i16_cat:
-        _pandas_serialize_cell_table__str_i16_cat(impl, b, col)
+        _pandas_serialize_cell_table__str_i16_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i32_cat:
-        _pandas_serialize_cell_table__str_i32_cat(impl, b, col)
+        _pandas_serialize_cell_table__str_i32_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_pyobj:
         _pandas_serialize_cell_symbol__str_pyobj(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_arrow:
-        _pandas_serialize_cell_symbol__str_arrow(impl, b, col)
+        _pandas_serialize_cell_symbol__str_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i8_cat:
-        _pandas_serialize_cell_symbol__str_i8_cat(impl, b, col)
+        _pandas_serialize_cell_symbol__str_i8_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i16_cat:
-        _pandas_serialize_cell_symbol__str_i16_cat(impl, b, col)
+        _pandas_serialize_cell_symbol__str_i16_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i32_cat:
-        _pandas_serialize_cell_symbol__str_i32_cat(impl, b, col)
+        _pandas_serialize_cell_symbol__str_i32_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_bool__bool_pyobj:
         _pandas_serialize_cell_column_bool__bool_pyobj(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_bool__bool_numpy:
-        _pandas_serialize_cell_column_bool__bool_numpy(impl, b, col)
+        _pandas_serialize_cell_column_bool__bool_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_bool__bool_arrow:
-        _pandas_serialize_cell_column_bool__bool_arrow(impl, b, col)
+        _pandas_serialize_cell_column_bool__bool_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__int_pyobj:
         _pandas_serialize_cell_column_i64__int_pyobj(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u8_numpy:
-        _pandas_serialize_cell_column_i64__u8_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__u8_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i8_numpy:
-        _pandas_serialize_cell_column_i64__i8_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__i8_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u16_numpy:
-        _pandas_serialize_cell_column_i64__u16_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__u16_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i16_numpy:
-        _pandas_serialize_cell_column_i64__i16_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__i16_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u32_numpy:
-        _pandas_serialize_cell_column_i64__u32_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__u32_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i32_numpy:
-        _pandas_serialize_cell_column_i64__i32_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__i32_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u64_numpy:
-        _pandas_serialize_cell_column_i64__u64_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__u64_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i64_numpy:
-        _pandas_serialize_cell_column_i64__i64_numpy(impl, b, col)
+        _pandas_serialize_cell_column_i64__i64_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u8_arrow:
-        _pandas_serialize_cell_column_i64__u8_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__u8_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i8_arrow:
-        _pandas_serialize_cell_column_i64__i8_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__i8_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u16_arrow:
-        _pandas_serialize_cell_column_i64__u16_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__u16_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i16_arrow:
-        _pandas_serialize_cell_column_i64__i16_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__i16_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u32_arrow:
-        _pandas_serialize_cell_column_i64__u32_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__u32_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i32_arrow:
-        _pandas_serialize_cell_column_i64__i32_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__i32_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__u64_arrow:
-        _pandas_serialize_cell_column_i64__u64_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__u64_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_i64__i64_arrow:
-        _pandas_serialize_cell_column_i64__i64_arrow(impl, b, col)
+        _pandas_serialize_cell_column_i64__i64_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__float_pyobj:
         _pandas_serialize_cell_column_f64__float_pyobj(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f32_numpy:
-        _pandas_serialize_cell_column_f64__f32_numpy(impl, b, col)
+        _pandas_serialize_cell_column_f64__f32_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f64_numpy:
-        _pandas_serialize_cell_column_f64__f64_numpy(impl, b, col)
+        _pandas_serialize_cell_column_f64__f64_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f32_arrow:
-        _pandas_serialize_cell_column_f64__f32_arrow(impl, b, col)
+        _pandas_serialize_cell_column_f64__f32_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_f64__f64_arrow:
-        _pandas_serialize_cell_column_f64__f64_arrow(impl, b, col)
+        _pandas_serialize_cell_column_f64__f64_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_pyobj:
         _pandas_serialize_cell_column_str__str_pyobj(impl, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_arrow:
-        _pandas_serialize_cell_column_str__str_arrow(impl, b, col)
+        _pandas_serialize_cell_column_str__str_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i8_cat:
-        _pandas_serialize_cell_column_str__str_i8_cat(impl, b, col)
+        _pandas_serialize_cell_column_str__str_i8_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i16_cat:
-        _pandas_serialize_cell_column_str__str_i16_cat(impl, b, col)
+        _pandas_serialize_cell_column_str__str_i16_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i32_cat:
-        _pandas_serialize_cell_column_str__str_i32_cat(impl, b, col)
+        _pandas_serialize_cell_column_str__str_i32_cat(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
-        _pandas_serialize_cell_column_ts__dt64ns_numpy(impl, b, col)
+        _pandas_serialize_cell_column_ts__dt64ns_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
-        _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(impl, b, col)
+        _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:
-        _pandas_serialize_cell_at_dt64ns_numpy(impl, b, col)
+        _pandas_serialize_cell_at_dt64ns_numpy(impl, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_tz_arrow:
-        _pandas_serialize_cell_at_dt64ns_tz_arrow(impl, b, col)
+        _pandas_serialize_cell_at_dt64ns_tz_arrow(impl, b, col, gs)
     else:
+        _ensure_has_gil(gs)
         raise RuntimeError(f"Unknown column dispatch code: {dc}")
     # See earlier note about switch statement generation.
     # Don't add complex conditions above!
@@ -1951,8 +2057,8 @@ cdef void _pandas_col_advance(col_t* col):
 # On a modern CPU we're doing over 8 million pandas cells per second.
 # By default, `sys.getswitchinterval()` is 0.005 seconds.
 # To accomodate this, we'd need to release the GIL every 40,000 cells.
-# This will be divided by the column count to get the row gil blip count.
-cdef size_t _CELL_GIL_BLIP_COUNT = 40000
+# This will be divided by the column count to get the row gil blip interval.
+cdef size_t _CELL_GIL_BLIP_INTERVAL = 40000
 
 
 cdef void_int _pandas(
@@ -1968,14 +2074,16 @@ cdef void_int _pandas(
     cdef line_sender_table_name c_table_name
     cdef int64_t at_value = _AT_SET_BY_COLUMN
     cdef col_t_arr cols = col_t_arr_blank()
+    cdef bint any_cols_need_gil = False
     cdef qdb_pystr_pos str_buf_marker
     cdef size_t row_count
     cdef line_sender_error* err = NULL
     cdef size_t row_index
     cdef size_t col_index
     cdef col_t* col
-    cdef size_t row_gil_blip_count
-    cdef PyThreadState* gil_state
+    cdef size_t row_gil_blip_interval
+    cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
+    cdef bint was_serializing_cell = False
 
     _pandas_may_import_deps()
     try:
@@ -1993,7 +2101,8 @@ cdef void_int _pandas(
             col_count,
             &c_table_name,
             &at_value,
-            &cols)
+            &cols,
+            &any_cols_need_gil)
 
         # We've used the str buffer up to a point for the headers.
         # Instead of clearing it (which would clear the headers' memory)
@@ -2007,56 +2116,68 @@ cdef void_int _pandas(
         if not line_sender_buffer_set_marker(impl, &err):
             raise c_err_to_py(err)
 
-        row_gil_blip_count = _CELL_GIL_BLIP_COUNT // col_count
-
+        row_gil_blip_interval = _CELL_GIL_BLIP_INTERVAL // col_count
+        if row_gil_blip_interval < 400:  # ceiling reached at 100 columns
+            row_gil_blip_interval = 400
         try:
+            # Don't move this logic up! We need the GIL to execute a `try`.
+            # Also we can't have any other `try` blocks between here and the
+            # `finally` block.
+            if not any_cols_need_gil:
+                gs = PyEval_SaveThread()
+
             for row_index in range(row_count):
-                if row_index % row_gil_blip_count == 0:
+                if (gs == NULL) and (row_index % row_gil_blip_interval == 0):
                     # Release and re-acquire the GIL every so often.
                     # This is to allow other python threads to run.
                     # If we hold the GIL for too long, we can starve other
-                    # threads and potentially time out ongoing network activity.
-                    gil_state = PyEval_SaveThread()
-                    PyEval_RestoreThread(gil_state)
-                    gil_state = NULL
+                    # threads, for example timing out network activity.
+                    gs = PyEval_SaveThread()
+                    _ensure_has_gil(&gs)
 
-                # TODO: Potentially avoid the GIL altogether if we can get away with it.
-                # This is column-type dependent. Some basic analysis is required.
-                # We need a `GilController` object so that we can raise exceptions.
                 qdb_pystr_buf_truncate(b, str_buf_marker)
-                # Fixed table-name.
+
+                # Table-name from `table_name` arg in Python.
                 if c_table_name.buf != NULL:
                     if not line_sender_buffer_table(impl, c_table_name, &err):
+                        _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 
                 # Serialize columns cells.
                 # Note: Columns are sorted: table name, symbols, fields, at.
+                was_serializing_cell = True
                 for col_index in range(col_count):
                     col = &cols.d[col_index]
-                    try:
-                        _pandas_serialize_cell(impl, b, col)
-                    except Exception as e:
-                        raise IngressError(
-                            IngressErrorCode.BadDataFrame,
-                            'Failed to serialize value of column ' +
-                            repr(data.columns[col.orig_index]) +
-                            f' at row index {row_index} (' +
-                            repr(data.iloc[row_index, col.orig_index]) +
-                            f'): {e}  [dc={<int>col.dispatch_code}]') from e
+                    _pandas_serialize_cell(impl, b, col, &gs)  # may raise
                     _pandas_col_advance(col)
+                was_serializing_cell = False
 
                 # Fixed "at" value (not from a column).
                 if at_value == 0:
                     if not line_sender_buffer_at_now(impl, &err):
+                        _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
                 elif at_value > 0:
                     if not line_sender_buffer_at(impl, at_value, &err):
+                        _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
-        except:
+        except Exception as e:
+            # It would be an internal bug for this to raise.
             if not line_sender_buffer_rewind_to_marker(impl, &err):
                 raise c_err_to_py(err)
-            raise
+
+            if was_serializing_cell:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    'Failed to serialize value of column ' +
+                    repr(data.columns[col.orig_index]) +
+                    f' at row index {row_index} (' +
+                    repr(data.iloc[row_index, col.orig_index]) +
+                    f'): {e}  [dc={<int>col.dispatch_code}]') from e
+            else:
+                raise
     finally:
+        _ensure_has_gil(&gs)
         line_sender_buffer_clear_marker(impl)
         col_t_arr_release(&cols)
         qdb_pystr_buf_clear(b)
