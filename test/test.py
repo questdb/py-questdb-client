@@ -1495,38 +1495,6 @@ class TestPandas(unittest.TestCase):
         self._test_cat_table(30)
         self._test_cat_table(127)
 
-    def test_cat_i8_symbol(self):
-        df = pd.DataFrame({
-            'a': pd.Series(['a', 'b', 'c', 'a', None, 'c'], dtype='category'),
-            'b': [1, 2, 3, 4, 5, 6]})
-
-        # Note that since `symbols='auto'`` is the default, categories are
-        # automatically sent as symbols.
-        buf = _pandas(df, table_name='tbl1')
-        self.assertEqual(
-            buf,
-            'tbl1,a=a b=1i\n' +
-            'tbl1,a=b b=2i\n' +
-            'tbl1,a=c b=3i\n' +
-            'tbl1,a=a b=4i\n' +
-            'tbl1 b=5i\n' +
-            'tbl1,a=c b=6i\n')
-
-    def test_cat_i8_str(self):
-        df = pd.DataFrame({
-            'a': pd.Series(['a', 'b', 'c', 'a', None, 'c'], dtype='category'),
-            'b': [1, 2, 3, 4, 5, 6]})
-
-        buf = _pandas(df, table_name='tbl1', symbols=False)
-        self.assertEqual(
-            buf,
-            'tbl1 a="a",b=1i\n' +
-            'tbl1 a="b",b=2i\n' +
-            'tbl1 a="c",b=3i\n' +
-            'tbl1 a="a",b=4i\n' +
-            'tbl1 b=5i\n' +
-            'tbl1 a="c",b=6i\n')
-
     def test_cat_i16_table(self):
         self._test_cat_table(128)
         self._test_cat_table(4000)
@@ -1534,9 +1502,78 @@ class TestPandas(unittest.TestCase):
 
     def test_cat_i32_table(self):
         self._test_cat_table(32768)
-        self._test_cat_table(100000)
+        self._test_cat_table(40000)
 
-    # TODO: Test cat 16 and 32 symbols and strings.
+    def _test_cat_symbol(self, count):
+        slist = [f's{i}' for i in range(count)]
+
+        df = pd.DataFrame({
+            'a': pd.Series(slist, dtype='category'),
+            'b': list(range(len(slist)))})
+        
+        buf = _pandas(df, table_name='tbl1', symbols=True)
+        exp = ''.join(
+            f'tbl1,a={s} b={i}i\n'
+            for i, s in enumerate(slist))
+        self.assertEqual(buf, exp)
+        
+        slist[2] = None
+        df2 = pd.DataFrame({
+            'a': pd.Series(slist, dtype='category'),
+            'b': list(range(len(slist)))})
+
+        exp2 = exp.replace('tbl1,a=s2 b=2i\n', 'tbl1 b=2i\n')
+        buf2 = _pandas(df2, table_name='tbl1', symbols=True)
+        self.assertEqual(buf2, exp2)
+
+    def test_cat_i8_symbol(self):
+        self._test_cat_symbol(30)
+        self._test_cat_symbol(127)
+
+    def test_cat_i16_symbol(self):
+        self._test_cat_symbol(128)
+        self._test_cat_symbol(4000)
+        self._test_cat_symbol(32767)
+
+    def test_cat_i32_symbol(self):
+        self._test_cat_symbol(32768)
+        self._test_cat_symbol(40000)
+
+    def _test_cat_str(self, count):
+        slist = [f's{i}' for i in range(count)]
+
+        df = pd.DataFrame({
+            'a': pd.Series(slist, dtype='category'),
+            'b': list(range(len(slist)))})
+        
+        buf = _pandas(df, table_name='tbl1', symbols=False)
+        exp = ''.join(
+            f'tbl1 a="{s}",b={i}i\n'
+            for i, s in enumerate(slist))
+        self.assertEqual(buf, exp)
+        
+        slist[2] = None
+        df2 = pd.DataFrame({
+            'a': pd.Series(slist, dtype='category'),
+            'b': list(range(len(slist)))})
+
+        exp2 = exp.replace('tbl1 a="s2",b=2i\n', 'tbl1 b=2i\n')
+        buf2 = _pandas(df2, table_name='tbl1', symbols=False)
+        self.assertEqual(buf2, exp2)
+
+    def test_cat_i8_str(self):
+        self._test_cat_str(30)
+        self._test_cat_str(127)
+
+    def test_cat_i16_str(self):
+        self._test_cat_str(128)
+        self._test_cat_str(4000)
+        self._test_cat_str(32767)
+
+    def test_cat_i32_str(self):
+        self._test_cat_str(32768)
+        self._test_cat_str(40000)
+
 
 if False:
     class TestBencharkPandas(unittest.TestCase):
