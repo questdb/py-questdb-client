@@ -43,7 +43,7 @@ one-dimensional arrays that support our basic ILP supported types _only_.
 
 We can also further simplify iteration via the introduction of a cursor:
 a struct that is a mishmash of the simplified subsets of arrow and py buffers
-that we we actually care about.
+that we actually care about.
 
 ## Cherry-picking `Py_buffer` and `ArrowArray` features
 
@@ -268,7 +268,7 @@ Name: c, dtype: float64
 #### Arrow floats
 
 Pandas also has arrow-compatible floats.
-These have an additiona bitvector to represent nulls.
+These have an additional bitvector to represent nulls.
 
 
 
@@ -416,7 +416,7 @@ string[python]
 ```
 
 Note that by default the storage is still Python objects (sigh),
-so our Rust-based conversion will will come handy here as well.
+so our Rust-based conversion will come handy here as well.
 
 Note however that we need to handle nulls not as `None` objects,
 but as `pandas.NA` objects.
@@ -453,7 +453,7 @@ string[pyarrow]
 [<class 'pandas.core.arrays.string_.StringDtype'>, <class 'pandas.core.dtypes.base.StorageExtensionDtype'>, <class 'pandas.core.dtypes.base.ExtensionDtype'>, <class 'object'>]
 ```
 
-Note that these strings will always have indicies based on `int32_t`.
+Note that these strings will always have indices based on `int32_t`.
 
 Arrow also has a `pyarrow.large_string()` type, but
 pandas doesn't support it.

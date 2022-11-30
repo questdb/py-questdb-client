@@ -61,3 +61,10 @@ cdef extern from "Python.h":
     long long PyLong_AsLongLong(PyObject* o) except? -1
 
     PyObject* PyErr_Occurred()
+
+    ctypedef struct PyThreadState:
+        pass
+
+    PyThreadState* PyEval_SaveThread()
+
+    void PyEval_RestoreThread(PyThreadState* tstate)

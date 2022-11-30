@@ -42,11 +42,12 @@ cdef dict _TARGET_NAMES = {
 
 
 cdef enum col_source_t:
+    # Note: Hundreds digit set to 1 if GIL is required.
     col_source_nulls =                0
-    col_source_bool_pyobj =      101000
+    col_source_bool_pyobj =      101100
     col_source_bool_numpy =      102000
     col_source_bool_arrow =      103000
-    col_source_int_pyobj =       201000
+    col_source_int_pyobj =       201100
     col_source_u8_numpy =        202000
     col_source_i8_numpy =        203000
     col_source_u16_numpy =       204000
@@ -63,18 +64,23 @@ cdef enum col_source_t:
     col_source_i32_arrow =       215000
     col_source_u64_arrow =       216000
     col_source_i64_arrow =       217000
-    col_source_float_pyobj =     301000
+    col_source_float_pyobj =     301100
     col_source_f32_numpy =       302000
     col_source_f64_numpy =       303000
     col_source_f32_arrow =       304000
     col_source_f64_arrow =       305000
-    col_source_str_pyobj =       401000
+    col_source_str_pyobj =       401100
     col_source_str_arrow =       402000
     col_source_str_i8_cat =      403000
     col_source_str_i16_cat =     404000
     col_source_str_i32_cat =     405000
     col_source_dt64ns_numpy =    501000
     col_source_dt64ns_tz_arrow = 502000
+
+
+# cdef bint col_source_needs_gil(col_source_t source):
+#     # Check if hundreds digit is 1.
+#     return <int>source // 100 % 10 == 1
 
 
 cdef dict _TARGET_TO_SOURCES = {
@@ -1939,6 +1945,16 @@ cdef void _pandas_col_advance(col_t* col):
         ((not new_chunk) * cursor.offset))
 
 
+# Every how many cells to release and re-acquire the Python GIL.
+#
+# We've done some perf testing with some mixed column dtypes.
+# On a modern CPU we're doing over 8 million pandas cells per second.
+# By default, `sys.getswitchinterval()` is 0.005 seconds.
+# To accomodate this, we'd need to release the GIL every 40,000 cells.
+# This will be divided by the column count to get the row gil blip count.
+cdef size_t _CELL_GIL_BLIP_COUNT = 40000
+
+
 cdef void_int _pandas(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
@@ -1958,6 +1974,8 @@ cdef void_int _pandas(
     cdef size_t row_index
     cdef size_t col_index
     cdef col_t* col
+    cdef size_t row_gil_blip_count
+    cdef PyThreadState* gil_state
 
     _pandas_may_import_deps()
     try:
@@ -1989,10 +2007,19 @@ cdef void_int _pandas(
         if not line_sender_buffer_set_marker(impl, &err):
             raise c_err_to_py(err)
 
+        row_gil_blip_count = _CELL_GIL_BLIP_COUNT // col_count
+
         try:
             for row_index in range(row_count):
-                # TODO: Occasional GIL release logic. This should be twice as
-                # often as `sys.getswitchinterval()`.
+                if row_index % row_gil_blip_count == 0:
+                    # Release and re-acquire the GIL every so often.
+                    # This is to allow other python threads to run.
+                    # If we hold the GIL for too long, we can starve other
+                    # threads and potentially time out ongoing network activity.
+                    gil_state = PyEval_SaveThread()
+                    PyEval_RestoreThread(gil_state)
+                    gil_state = NULL
+
                 # TODO: Potentially avoid the GIL altogether if we can get away with it.
                 # This is column-type dependent. Some basic analysis is required.
                 # We need a `GilController` object so that we can raise exceptions.

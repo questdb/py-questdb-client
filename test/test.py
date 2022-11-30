@@ -1602,9 +1602,9 @@ if False:
             df = pd.DataFrame({
                 'col1': pd.Series(slist, dtype='string[pyarrow]'),
                 'col2': list(range(len(slist))),
-                'col2': [float(i / 2) for i in range(len(slist))],
-                'col3': [float(i / 2) + 1.0 for i in range(len(slist))],
-                'col4': pd.Categorical(
+                'col3': [float(i / 2) for i in range(len(slist))],
+                'col4': [float(i / 2) + 1.0 for i in range(len(slist))],
+                'col5': pd.Categorical(
                     ['a', 'b', 'c', 'a', None, 'c', 'a', float('nan')] *
                     (count // 8))})
 
@@ -1645,7 +1645,7 @@ if False:
 
 
 if __name__ == '__main__':
-    if os.environ['TEST_QUESTDB_PROFILE'] == '1':
+    if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile
         cProfile.run('unittest.main()', sort='cumtime')
     else:

@@ -92,7 +92,7 @@ const MIN_BUF_LEN: usize = 1024;
 /// This is necessary to return "stable" addresses and avoid segfaults.
 /// Rust is unaware we are borrowing its memory and could try to free it as
 /// part of a reallocation if we were to use a `String` directly.
-fn get_dest<'a>(chain: &'a mut Vec<String>, len: usize) -> &'a mut String {
+fn get_dest(chain: &mut Vec<String>, len: usize) -> &mut String {
     if !chain.is_empty() {
         let last = chain.last_mut().unwrap();
         if last.capacity() - last.len() >= len {
