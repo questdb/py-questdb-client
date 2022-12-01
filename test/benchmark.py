@@ -5,7 +5,9 @@ import os
 sys.dont_write_bytecode = True
 import unittest
 import time
+import numpy as np
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
 
 import patch_path
 import questdb.ingress as qi
@@ -113,6 +115,71 @@ class TestBencharkPandas(unittest.TestCase):
         buf.pandas(df, table_name='tbl1', symbols=False)
         t1 = time.monotonic()
         print(f'Time: {t1 - t0}, size: {len(buf)}')
+
+    def _test_gil_release_10m(self, threads):
+        count = 10_000_000
+        series = pd.Series(np.arange(count), dtype='int64')
+        df = pd.DataFrame({
+            'col1': series,
+            'col2': series,
+            'col3': series,
+            'col4': series,
+            'col5': series,
+            'col6': series})
+
+        tpe = ThreadPoolExecutor(max_workers=threads)
+        bufs = [qi.Buffer() for _ in range(threads)]
+
+        def benchmark_run(buf):
+            t0 = time.monotonic()
+            buf.pandas(df, table_name='tbl1', symbols=True)
+            t1 = time.monotonic()
+            return buf, (t0, t1)
+
+        # Warm up and pre-size buffer
+        futs = [
+            tpe.submit(benchmark_run, buf)
+            for buf in bufs]
+        for fut in futs:
+            fut.result()  # Wait for completion
+        for buf in bufs:
+            buf.clear()
+
+        # Run
+        futs = [
+            tpe.submit(benchmark_run, buf)
+            for buf in bufs]
+        results = [
+            fut.result()
+            for fut in futs]
+        print(f'\nSize: {len(bufs[0])}')
+        total_time = 0
+        min_time = 2 ** 64 -1  # Bigger than any `time.monotonic()` value
+        max_time = 0
+        print('Per-thread times:')
+        for index, (_, (t0, t1)) in enumerate(results):
+            if t0 < min_time:
+                min_time = t0
+            if t1 > max_time:
+                max_time = t1
+            elapsed = t1 - t0
+            print(f'  [{index:02}]: Time: {elapsed}')
+            total_time += elapsed
+        avg_time = total_time / len(results)
+        print(f'Avg time: {avg_time}')
+        print(f'Wall time: {max_time - min_time}')
+
+    def test_gil_release_10m_1t(self):
+        self._test_gil_release_10m(1)
+
+    def test_gil_release_10m_10t(self):
+        self._test_gil_release_10m(10)
+
+    def test_gil_release_10m_16t(self):
+        self._test_gil_release_10m(16)
+
+    def test_gil_release_10m_32t(self):
+        self._test_gil_release_10m(32)
 
 
 if __name__ == '__main__':
