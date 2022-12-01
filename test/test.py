@@ -9,7 +9,6 @@ import time
 import numpy as np
 import pandas as pd
 import zoneinfo
-import itertools
 
 import patch_path
 from mock_server import Server
@@ -1574,73 +1573,8 @@ class TestPandas(unittest.TestCase):
         self._test_cat_str(32768)
         self._test_cat_str(40000)
 
+
 # TODO: Test datetime64[ns] and datetime64[ns, tz] columns fully, including None values for `at` and `column_ts`.
-
-
-if False:
-    class TestBencharkPandas(unittest.TestCase):
-        def test_pystr_i64_10m(self):
-            # This is a benchmark, not a test.
-            # It is useful to run it manually to check performance.
-            slist = [f's{i:09}' for i in range(10_000_000)]
-            df = pd.DataFrame({
-                'a': slist,
-                'b': list(range(len(slist)))})
-
-            # Warm up
-            _pandas(df, table_name='tbl1', symbols=True)
-
-            # Run
-            t0 = time.monotonic()
-            _pandas(df, table_name='tbl1', symbols=True)
-            t1 = time.monotonic()
-            print('Time:', t1 - t0)
-
-        def test_mixed_10m(self):
-            # This is a benchmark, not a test.
-            # It is useful to run it manually to check performance.
-            count = 10_000_000
-            slist = [f's{i:09}' for i in range(count)]
-            df = pd.DataFrame({
-                'col1': pd.Series(slist, dtype='string[pyarrow]'),
-                'col2': list(range(len(slist))),
-                'col3': [float(i / 2) for i in range(len(slist))],
-                'col4': [float(i / 2) + 1.0 for i in range(len(slist))],
-                'col5': pd.Categorical(
-                    ['a', 'b', 'c', 'a', None, 'c', 'a', float('nan')] *
-                    (count // 8))})
-
-            # Warm up
-            _pandas(df, table_name='tbl1', symbols=True)
-
-            # Run
-            t0 = time.monotonic()
-            buf = _pandas(df, table_name='tbl1', symbols=True)
-            t1 = time.monotonic()
-            print(f'Time: {t1 - t0}, size: {len(buf)}')
-
-        def test_string_escaping_10m(self):
-            count = 10_000_000
-            slist = [f's={i:09}==abc \\' for i in range(count)]
-            series = pd.Series(slist, dtype='string[pyarrow]')
-            df = pd.DataFrame({
-                'col1': series,
-                'col2': series,
-                'col3': series,
-                'col4': series,
-                'col5': series,
-                'col6': series})
-            
-            # Warm up
-            _pandas(df, table_name='tbl1', symbols=True)
-
-            # Run
-            t0 = time.monotonic()
-            buf = _pandas(df, table_name='tbl1', symbols=True)
-            t1 = time.monotonic()
-            print(f'Time: {t1 - t0}, size: {len(buf)}')
-
-        
 # TODO: Test all datatypes, but no rows.
 # TODO: Test all datatypes, but one, two, 10 and 1000 rows. Include None, NA and NaN.
 # TODO: Test all datatypes, but multiple row chunks.

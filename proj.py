@@ -77,6 +77,12 @@ def test(all=False, patch_path='1', *args):
 
 
 @command
+def benchmark(*args):
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    _run('python3', 'test/benchmark.py', '-v', *args, env=env)
+
+
+@command
 def gdb_test(*args):
     env = {'TEST_QUESTDB_PATCH_PATH': '1'}
     _run('gdb', '-ex', 'r', '--args', 'python3', 'test/test.py', '-v', *args,

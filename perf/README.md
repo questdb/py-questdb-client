@@ -3,21 +3,21 @@
 https://juanjose.garciaripoll.com/blog/profiling-code-with-linux-perf/index.html
 
 ```bash
-$ TEST_QUESTDB_PATCH_PATH=1 TEST_QUESTDB_PROFILE=0 perf record -g --call-graph dwarf python3 test/test.py -v TestBencharkPandas.test_mixed_10m
-test_mixed_10m (__main__.TestBencharkPandas.test_mixed_10m) ... Time: 2.128126113999315, size: 558055572
+$ TEST_QUESTDB_PATCH_PATH=1 perf record -g --call-graph dwarf python3 test/benchmark.py -v TestBencharkPandas.test_string_encoding_1m
+test_string_encoding_1m (__main__.TestBencharkPandas.test_string_encoding_1m) ... Time: 4.682273147998785, size: 4593750000
 ok
 
 ----------------------------------------------------------------------
-Ran 1 test in 10.188s
+Ran 1 test in 10.166s
 
 OK
-[ perf record: Woken up 1337 times to write data ]
+[ perf record: Woken up 1341 times to write data ]
 Warning:
-Processed 55721 events and lost 107 chunks!
+Processed 54445 events and lost 91 chunks!
 
 Check IO/CPU overload!
 
-[ perf record: Captured and wrote 402.922 MB perf.data (50252 samples) ]
+[ perf record: Captured and wrote 405.575 MB perf.data (50622 samples) ]
 ```
 
 # Rendering results
