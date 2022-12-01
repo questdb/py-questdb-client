@@ -1573,6 +1573,17 @@ class TestPandas(unittest.TestCase):
         self._test_cat_str(32768)
         self._test_cat_str(40000)
 
+    def test_all_nulls_pyobj_col(self):
+        df = pd.DataFrame({
+            'a': [None, pd.NA, float('nan')],
+            'b': [1, 2, 3]})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 b=1i\n' +
+            'tbl1 b=2i\n' +
+            'tbl1 b=3i\n')
+
 
 # TODO: Test datetime64[ns] and datetime64[ns, tz] columns fully, including None values for `at` and `column_ts`.
 # TODO: Test all datatypes, but no rows.

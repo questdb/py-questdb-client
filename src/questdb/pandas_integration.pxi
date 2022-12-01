@@ -860,7 +860,6 @@ cdef void_int _pandas_series_sniff_pyobj(
                     f'Unsupported object column containing an {_fqn(type(<object>obj))}')
             return 0
 
-    # TODO: Test all-nulls column.
     # We haven't returned yet, so we've hit an object column that
     # exclusively has null values. We will just skip this column.
     col_out.source = col_source_t.col_source_nulls
