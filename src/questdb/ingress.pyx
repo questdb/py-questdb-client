@@ -34,7 +34,7 @@ API for fast data ingestion into QuestDB.
 from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
     INT64_MAX
 from libc.stdlib cimport malloc, calloc, realloc, free, abort
-from libc.string cimport strncmp
+from libc.string cimport strncmp, memset
 from libc.math cimport isnan
 from libc.stdio cimport fprintf, stderr  # TODO: Remove me one no longer needed
 from cpython.datetime cimport datetime
@@ -49,6 +49,7 @@ from .line_sender cimport *
 from .pystr_to_utf8 cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
+from .ingress_helper cimport *
 
 # An int we use only for error reporting.
 #  0 is success.

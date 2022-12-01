@@ -1,10 +1,5 @@
 # See: pandas_integration.md for technical overview.
 
-cdef enum col_access_tag_t:
-    numpy
-    arrow
-
-
 cdef struct col_chunks_t:
     size_t n_chunks
     ArrowArray* chunks  # We calloc `n_chunks + 1` of these.
@@ -277,7 +272,6 @@ cdef enum col_dispatch_code_t:
 cdef struct col_t:
     size_t orig_index
     line_sender_column_name name
-    col_access_tag_t tag
     Py_buffer pybuf
     ArrowSchema arrow_schema  # Schema of first chunk.
     col_chunks_t chunks
@@ -288,11 +282,26 @@ cdef struct col_t:
 
 
 cdef void col_t_release(col_t* col):
-    # We can use `col.tag` to determine what to release.
-    # Arrow chunks might be "synthetic" borrowing from `col.pybuf`.
-    # TODO: Implement cleanup, PyBuffer_Release, etc.
-    # TODO: Do we need to call Arrow's cleanup functions when done?
-    pass
+    """
+    Release a (possibly) initialized column.
+
+    col_t objects are `calloc`ed, so uninitialized (or partially) initialized
+    objects will have their pointers and other values set to 0.
+    """
+    cdef size_t chunk_index
+    cdef ArrowArray* chunk
+
+    if Py_buffer_obj_is_set(&col.pybuf):
+        PyBuffer_Release(&col.pybuf)  # Note: Sets `col.pybuf.obj` to NULL.
+
+    for chunk_index in range(col.chunks.n_chunks):
+        chunk = &col.chunks.chunks[chunk_index]
+        if chunk.release != NULL:
+            chunk.release(chunk)
+        memset(chunk, 0, sizeof(ArrowArray))
+
+    if col.arrow_schema.release != NULL:
+        col.arrow_schema.release(&col.arrow_schema)
 
 
 # Calloc'd array of col_t.
@@ -703,17 +712,14 @@ cdef void_int _pandas_series_as_pybuf(
     cdef object nparr = entry.series.to_numpy(dtype=fallback_dtype)
     cdef ArrowArray* mapped
     cdef int get_buf_ret
-    cdef Py_buffer* view
     if not PyObject_CheckBuffer(nparr):
         raise TypeError(
             f'Bad column {entry.name!r}: Expected a buffer, got ' +
             f'{entry.series!r} ({_fqn(type(entry.series))})')
-    col_out.tag = col_access_tag_t.numpy
     try:
         # Note! We don't need to support numpy strides since Pandas doesn't.
         # Also note that this guarantees a 1D buffer.
-        view = &col_out.pybuf
-        get_buf_ret = PyObject_GetBuffer(nparr, view, PyBUF_SIMPLE)
+        get_buf_ret = PyObject_GetBuffer(nparr, &col_out.pybuf, PyBUF_SIMPLE)
 
     except BufferError as be:
         raise TypeError(
@@ -751,7 +757,6 @@ cdef void_int _pandas_series_as_arrow(
         _pandas_series_as_pybuf(entry, col_out, fallback_dtype)
         return 0
 
-    col_out.tag = col_access_tag_t.arrow
     array = _PYARROW.Array.from_pandas(entry.series)
     if isinstance(array, _PYARROW.ChunkedArray):
         chunks = array.chunks
@@ -1176,11 +1181,11 @@ cdef inline bint _pandas_arrow_str(
 
 cdef inline void_int _pandas_cell_str_pyobj_to_utf8(
         qdb_pystr_buf* b,
-        col_t* col,
+        col_cursor_t* cursor,
         bint* valid_out,
         line_sender_utf8* utf8_out) except -1: 
-    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
-    cdef PyObject* cell = access[col.cursor.offset]
+    cdef PyObject** access = <PyObject**>cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[cursor.offset]
     if PyUnicode_CheckExact(cell):
         str_to_utf8(b, cell, utf8_out)
         valid_out[0] = True
@@ -1303,7 +1308,7 @@ cdef void_int _pandas_serialize_cell_symbol__str_pyobj(
     cdef line_sender_error* err = NULL
     cdef bint valid = False
     cdef line_sender_utf8 utf8
-    _pandas_cell_str_pyobj_to_utf8(b, col, &valid, &utf8)
+    _pandas_cell_str_pyobj_to_utf8(b, &col.cursor, &valid, &utf8)
     if valid and not line_sender_buffer_symbol(impl, col.name, utf8, &err):
         raise c_err_to_py(err)
 
@@ -1786,7 +1791,7 @@ cdef void_int _pandas_serialize_cell_column_str__str_pyobj(
     cdef line_sender_error* err = NULL
     cdef bint valid = False
     cdef line_sender_utf8 utf8
-    _pandas_cell_str_pyobj_to_utf8(b, col,  &valid, &utf8)
+    _pandas_cell_str_pyobj_to_utf8(b, &col.cursor,  &valid, &utf8)
     if valid and not line_sender_buffer_column_str(impl, col.name, utf8, &err):
         raise c_err_to_py(err)
 
@@ -2177,7 +2182,7 @@ cdef void_int _pandas(
             else:
                 raise
     finally:
-        _ensure_has_gil(&gs)
+        _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
         line_sender_buffer_clear_marker(impl)
         col_t_arr_release(&cols)
         qdb_pystr_buf_clear(b)
