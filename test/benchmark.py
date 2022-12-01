@@ -82,11 +82,11 @@ class TestBencharkPandas(unittest.TestCase):
         t1 = time.monotonic()
         print(f'Time: {t1 - t0}, size: {len(buf)}')
 
-    def test_string_encoding_1m(self):
-        count = 1_000_000
+    def test_string_encoding_10m(self):
+        count = 10_000_000
         strs = ['a',                     # ASCII
                 'q❤️p',                   # Mixed ASCII and UCS-2
-                '❤️' * 1200,              # Over the 1024 buffer prealloc.
+                '❤️' * 12  ,              # UCS-2
                 'Questo è un qualcosa',  # Non-ASCII UCS-1
                 'щось',                  # UCS-2, 2 bytes for UTF-8.
                 '',                      # Empty string

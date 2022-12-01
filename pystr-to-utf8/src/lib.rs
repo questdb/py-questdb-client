@@ -115,19 +115,77 @@ fn encode_loop<'a, 'b, T, F>(
 {
     let dest = get_dest(chain, utf8_mult * buf.len());
     let last = dest.len();
-    for &b in buf.iter() {
-        // Checking for validity is not optional:
-        // >>> for n in range(2 ** 16):
-        // >>>     chr(n).encode('utf-8')
-        // UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800'
-        //   in position 0: surrogates not allowed
-        match get_char(b) {
-            Some(c) => dest.push(c),
-            None => {
-                dest.truncate(last);
-                return Err(b.into());
+    // for &b in buf.iter() {
+    //     // Checking for validity is not optional:
+    //     // >>> for n in range(2 ** 16):
+    //     // >>>     chr(n).encode('utf-8')
+    //     // UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800'
+    //     //   in position 0: surrogates not allowed
+    //     match get_char(b) {
+    //         Some(c) => dest.push(c),
+    //         None => {
+    //             dest.truncate(last);
+    //             return Err(b.into());
+    //         }
+    //     }
+    // }
+    // Ok(&dest[last..])
+    unsafe {
+        let v = dest.as_mut_vec();
+        v.set_len(v.capacity());
+        let mut index = last;
+        
+        for &b in buf.iter() {
+            let c = match get_char(b) {
+                Some(c) => c,
+                None => {
+                    v.set_len(last);
+                    return Err(b.into())
+                }
+            };
+            let utf_c_len = c.len_utf8();
+            match utf_c_len {
+                1 => {
+                    v[index] = c as u8;
+                },
+                2 => {
+                    let mut codepoint_buf = [0; 4];
+                    let bytes = c
+                        .encode_utf8(&mut codepoint_buf).as_bytes();
+                    *v.get_unchecked_mut(index) =
+                        *bytes.get_unchecked(0);
+                    *v.get_unchecked_mut(index + 1) =
+                        *bytes.get_unchecked(1);
+                },
+                3 => {
+                    let mut codepoint_buf = [0; 4];
+                    let bytes = c
+                        .encode_utf8(&mut codepoint_buf).as_bytes();
+                    *v.get_unchecked_mut(index) =
+                        *bytes.get_unchecked(0);
+                    *v.get_unchecked_mut(index + 1) =
+                        *bytes.get_unchecked(1);
+                    *v.get_unchecked_mut(index + 2) =
+                        *bytes.get_unchecked(2);
+                },
+                4 => {
+                    let mut codepoint_buf = [0; 4];
+                    let bytes = c
+                        .encode_utf8(&mut codepoint_buf).as_bytes();
+                    *v.get_unchecked_mut(index) =
+                        *bytes.get_unchecked(0);
+                    *v.get_unchecked_mut(index + 1) =
+                        *bytes.get_unchecked(1);
+                    *v.get_unchecked_mut(index + 2) =
+                        *bytes.get_unchecked(2);
+                    *v.get_unchecked_mut(index + 3) =
+                        *bytes.get_unchecked(3);
+                },
+                _ => unreachable!()
             }
+            index += utf_c_len;
         }
+        v.set_len(index);
     }
     Ok(&dest[last..])
 }
