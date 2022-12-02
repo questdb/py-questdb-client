@@ -555,7 +555,7 @@ class TestPandas(unittest.TestCase):
     def test_row_of_nulls(self):
         df = pd.DataFrame({'a': ['a1', None, 'a3']})
         with self.assertRaisesRegex(
-                qi.IngressError, 'State error: Bad call to `at`'):
+                qi.IngressError, 'Bad pandas row .*1: All values are nulls.'):
             _pandas(df, table_name='tbl1', symbols=['a'])
 
     def test_u8_numpy_col(self):

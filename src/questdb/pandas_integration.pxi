@@ -2202,6 +2202,15 @@ cdef void_int _pandas(
                     f' at row index {row_index} (' +
                     repr(data.iloc[row_index, col.orig_index]) +
                     f'): {e}  [dc={<int>col.dispatch_code}]') from e
+            elif (isinstance(e, IngressError) and
+                    (e.code == IngressErrorCode.InvalidApiCall)):
+                # TODO: This should be allowed by the database.
+                # It currently isn't so we have to raise an error.
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad pandas row at index {row_index}: ' +
+                    'All values are nulls. '+
+                    'Ensure at least one column is not null.') from e
             else:
                 raise
     finally:
