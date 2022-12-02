@@ -378,6 +378,8 @@ cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
 cdef object _PYARROW = None  # module object, if available or None
 
+cdef int64_t _NAT = INT64_MIN  # pandas NaT
+
 
 cdef object _pandas_may_import_deps():
     """"
@@ -1125,6 +1127,7 @@ cdef inline bint _pandas_arrow_get_bool(col_cursor_t* cursor):
 
 
 cdef inline bint _pandas_arrow_is_valid(col_cursor_t* cursor):
+    """Check if the value is set according to the validity bitmap."""
     return (
         cursor.chunk.null_count == 0 or
         (
@@ -1877,10 +1880,11 @@ cdef void_int _pandas_serialize_cell_column_ts__dt64ns_numpy(
     cdef line_sender_error* err = NULL
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
-    cell //= 1000  # Convert from nanoseconds to microseconds.
-    if not line_sender_buffer_column_ts(impl, col.name, cell, &err):
-        _ensure_has_gil(gs)
-        raise c_err_to_py(err)
+    if cell != _NAT:
+        cell //= 1000  # Convert from nanoseconds to microseconds.
+        if not line_sender_buffer_column_ts(impl, col.name, cell, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
 
 
 cdef void_int _pandas_serialize_cell_column_ts__dt64ns_tz_arrow(
@@ -1909,7 +1913,7 @@ cdef void_int _pandas_serialize_cell_at_dt64ns_numpy(
     cdef line_sender_error* err = NULL
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
-    if cell == 0:
+    if cell == _NAT:
         if not line_sender_buffer_at_now(impl, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
@@ -1932,16 +1936,12 @@ cdef void_int _pandas_serialize_cell_at_dt64ns_tz_arrow(
     if valid:
         access = <int64_t*>col.cursor.chunk.buffers[1]
         cell = access[col.cursor.offset]
-    else:
-        cell = 0
-
-    if cell == 0:
-        if not line_sender_buffer_at_now(impl, &err):
+        # Note: impl will validate against negative numbers.
+        if not line_sender_buffer_at(impl, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
-        # Note: impl will validate against negative numbers.
-        if not line_sender_buffer_at(impl, cell, &err):
+        if not line_sender_buffer_at_now(impl, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 

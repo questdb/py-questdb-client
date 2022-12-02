@@ -1034,23 +1034,31 @@ class TestPandas(unittest.TestCase):
             _pandas(df3, table_name='tbl1')
 
     def test_datetime64_numpy_col(self):
-        df = pd.DataFrame({'a': pd.Series([
-                pd.Timestamp('2019-01-01 00:00:00'),
-                pd.Timestamp('2019-01-01 00:00:01'),
-                pd.Timestamp('2019-01-01 00:00:02'),
-                pd.Timestamp('2019-01-01 00:00:03'),
-                pd.Timestamp('2019-01-01 00:00:04'),
-                pd.Timestamp('2019-01-01 00:00:05')],
-            dtype='datetime64[ns]')})
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    pd.Timestamp('2019-01-01 00:00:00'),
+                    pd.Timestamp('2019-01-01 00:00:01'),
+                    pd.Timestamp('2019-01-01 00:00:02'),
+                    pd.Timestamp('2019-01-01 00:00:03'),
+                    pd.Timestamp('2019-01-01 00:00:04'),
+                    pd.Timestamp('2019-01-01 00:00:05'),
+                    None,
+                    float('nan'),
+                    pd.NA],
+                dtype='datetime64[ns]'),
+            'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']})
         buf = _pandas(df, table_name='tbl1')
         self.assertEqual(
             buf,
-            'tbl1 a=1546300800000000t\n' +
-            'tbl1 a=1546300801000000t\n' +
-            'tbl1 a=1546300802000000t\n' +
-            'tbl1 a=1546300803000000t\n' +
-            'tbl1 a=1546300804000000t\n' +
-            'tbl1 a=1546300805000000t\n')
+            'tbl1 a=1546300800000000t,b="a"\n' +
+            'tbl1 a=1546300801000000t,b="b"\n' +
+            'tbl1 a=1546300802000000t,b="c"\n' +
+            'tbl1 a=1546300803000000t,b="d"\n' +
+            'tbl1 a=1546300804000000t,b="e"\n' +
+            'tbl1 a=1546300805000000t,b="f"\n' +
+            'tbl1 b="g"\n' +
+            'tbl1 b="h"\n' +
+            'tbl1 b="i"\n')
 
         df = pd.DataFrame({'a': pd.Series([
                 pd.Timestamp('1970-01-01 00:00:00'),
@@ -1146,9 +1154,12 @@ class TestPandas(unittest.TestCase):
                     pd.Timestamp('2019-01-01 00:00:02'),
                     pd.Timestamp('2019-01-01 00:00:03'),
                     pd.Timestamp('2019-01-01 00:00:04'),
-                    pd.Timestamp('2019-01-01 00:00:05')],
+                    pd.Timestamp('2019-01-01 00:00:05'),
+                    float('nan'),
+                    None,
+                    pd.NaT],
                 dtype='datetime64[ns]'),
-            'b': [1, 2, 3, 4, 5, 6]})
+            'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
         buf = _pandas(df, table_name='tbl1', at='a')
         self.assertEqual(
             buf,
@@ -1157,7 +1168,10 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=3i 1546300802000000000\n' +
             'tbl1 b=4i 1546300803000000000\n' +
             'tbl1 b=5i 1546300804000000000\n' +
-            'tbl1 b=6i 1546300805000000000\n')
+            'tbl1 b=6i 1546300805000000000\n' +
+            'tbl1 b=7i\n' +
+            'tbl1 b=8i\n' +
+            'tbl1 b=9i\n')
 
         df = pd.DataFrame({
             'a': pd.Series([
@@ -1169,7 +1183,7 @@ class TestPandas(unittest.TestCase):
         buf = _pandas(df, table_name='tbl1', at='a')
         self.assertEqual(
             buf,
-            'tbl1 b=1i\n' +             # Special case for "at_now".
+            'tbl1 b=1i 0\n' +
             'tbl1 b=2i 1000000000\n' +
             'tbl1 b=3i 2000000000\n')
 
@@ -1481,7 +1495,8 @@ class TestPandas(unittest.TestCase):
         self.assertEqual(
             _pandas(
                 pd.DataFrame({
-                    'a': pd.Series([1, 2, 3, None, float('nan'), pd.NA, 7], dtype='object'),
+                    'a': pd.Series([
+                        1, 2, 3, None, float('nan'), pd.NA, 7], dtype='object'),
                     'b': [1, 2, 3, 4, 5, 6, 7]}),
                 table_name='tbl1'),
             'tbl1 a=1i,b=1i\n' +
@@ -1504,7 +1519,9 @@ class TestPandas(unittest.TestCase):
         self.assertEqual(
             _pandas(
                 pd.DataFrame({
-                    'a': pd.Series([1.0, 2.0, 3.0, None, float('nan'), pd.NA, 7.0], dtype='object'),
+                    'a': pd.Series(
+                        [1.0, 2.0, 3.0, None, float('nan'), pd.NA, 7.0],
+                        dtype='object'),
                     'b': [1, 2, 3, 4, 5, 6, 7]}),
                 table_name='tbl1'),
             'tbl1 a=1.0,b=1i\n' +
@@ -1649,7 +1666,6 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=3i\n')
 
 
-# TODO: Test datetime64[ns] and datetime64[ns, tz] columns fully, including None values for `at` and `column_ts`.
 # TODO: Test all datatypes, but no rows.
 # TODO: Test all datatypes, but one, two, 10 and 1000 rows. Include None, NA and NaN.
 # TODO: Test all datatypes, but multiple row chunks.
