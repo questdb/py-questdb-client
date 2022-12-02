@@ -1052,11 +1052,18 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=1546300804000000t\n' +
             'tbl1 a=1546300805000000t\n')
 
-        # TODO: Test 0-epoch.
+        df = pd.DataFrame({'a': pd.Series([
+                pd.Timestamp('1970-01-01 00:00:00'),
+                pd.Timestamp('1970-01-01 00:00:01'),
+                pd.Timestamp('1970-01-01 00:00:02')])})
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=0t\n' +
+            'tbl1 a=1000000t\n' +
+            'tbl1 a=2000000t\n')
 
     def test_datetime64_tz_arrow_col(self):
-        # Currently broken, find `TODO: datetime[ns]+tz`.
-        # We're just casting `PyObject*`` to `int64_t` at the moment.
         tz = zoneinfo.ZoneInfo('America/New_York')
         df = pd.DataFrame({
             'a': [
@@ -1080,7 +1087,46 @@ class TestPandas(unittest.TestCase):
             'tbl1,b=sym3\n' +
             'tbl1,b=sym4 a=1546318803000000t\n')
 
-        # TODO: Test 0-epoch.
+        # Not epoch 0.
+        df = pd.DataFrame({
+            'a': [
+                pd.Timestamp(
+                    year=1970, month=1, day=1,
+                    hour=0, minute=0, second=0, tz=tz),
+                pd.Timestamp(
+                    year=1970, month=1, day=1,
+                    hour=0, minute=0, second=1, tz=tz),
+                pd.Timestamp(
+                    year=1970, month=1, day=1,
+                    hour=0, minute=0, second=2, tz=tz)],
+            'b': ['sym1', 'sym2', 'sym3']})
+        buf = _pandas(df, table_name='tbl1', symbols=['b'])
+        self.assertEqual(
+            buf,
+            # Note how these are 5hr offset from `test_datetime64_numpy_col`.
+            'tbl1,b=sym1 a=18000000000t\n' +
+            'tbl1,b=sym2 a=18001000000t\n' +
+            'tbl1,b=sym3 a=18002000000t\n')
+
+        # Actual epoch 0.
+        df = pd.DataFrame({
+            'a': [
+                pd.Timestamp(
+                    year=1969, month=12, day=31,
+                    hour=19, minute=0, second=0, tz=tz),
+                pd.Timestamp(
+                    year=1969, month=12, day=31,
+                    hour=19, minute=0, second=1, tz=tz),
+                pd.Timestamp(
+                    year=1969, month=12, day=31,
+                    hour=19, minute=0, second=2, tz=tz)],
+            'b': ['sym1', 'sym2', 'sym3']})
+        buf = _pandas(df, table_name='tbl1', symbols=['b'])
+        self.assertEqual(
+            buf,
+            'tbl1,b=sym1 a=0t\n' +
+            'tbl1,b=sym2 a=1000000t\n' +
+            'tbl1,b=sym3 a=2000000t\n')
 
         df2 = pd.DataFrame({
             'a': [
@@ -1113,11 +1159,21 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=5i 1546300804000000000\n' +
             'tbl1 b=6i 1546300805000000000\n')
 
-        # TODO: Test 0-epoch.
+        df = pd.DataFrame({
+            'a': pd.Series([
+                    pd.Timestamp('1970-01-01 00:00:00'),
+                    pd.Timestamp('1970-01-01 00:00:01'),
+                    pd.Timestamp('1970-01-01 00:00:02')],
+                dtype='datetime64[ns]'),
+            'b': [1, 2, 3]})
+        buf = _pandas(df, table_name='tbl1', at='a')
+        self.assertEqual(
+            buf,
+            'tbl1 b=1i\n' +             # Special case for "at_now".
+            'tbl1 b=2i 1000000000\n' +
+            'tbl1 b=3i 2000000000\n')
 
     def test_datetime64_tz_arrow_at(self):
-        # Currently broken, find `TODO: datetime[ns]+tz`.
-        # We're just casting `PyObject*`` to `int64_t` at the moment.
         tz = zoneinfo.ZoneInfo('America/New_York')
         df = pd.DataFrame({
             'a': [
