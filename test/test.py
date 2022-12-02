@@ -479,23 +479,26 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name='.')
 
     def test_invalid_column_dtype(self):
-        with self.assertRaisesRegex(TypeError, '`table_name_col`: Bad dtype'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`table_name_col`: Bad dtype'):
             _pandas(DF1, table_name_col='B')
-        with self.assertRaisesRegex(TypeError, '`table_name_col`: Bad dtype'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`table_name_col`: Bad dtype'):
             _pandas(DF1, table_name_col=1)
-        with self.assertRaisesRegex(TypeError, '`table_name_col`: Bad dtype'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`table_name_col`: Bad dtype'):
             _pandas(DF1, table_name_col=-3)
         with self.assertRaisesRegex(IndexError, '`table_name_col`: -5 index'):
             _pandas(DF1, table_name_col=-5)
 
     def test_bad_str_obj_col(self):
-        with self.assertRaisesRegex(TypeError,
+        with self.assertRaisesRegex(qi.IngressError,
                 "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
             _pandas(DF1, table_name_col='D')
-        with self.assertRaisesRegex(TypeError,
+        with self.assertRaisesRegex(qi.IngressError,
                 "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
             _pandas(DF1, table_name_col=3)
-        with self.assertRaisesRegex(TypeError,
+        with self.assertRaisesRegex(qi.IngressError,
                 "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
             _pandas(DF1, table_name_col=-1)
 
@@ -506,10 +509,10 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name='tbl1', symbols={})
         with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
             _pandas(DF1, table_name='tbl1', symbols=None)
-        with self.assertRaisesRegex(TypeError,
+        with self.assertRaisesRegex(qi.IngressError,
                 "`symbols`: Bad dtype `float64`.*'A'.*Must.*strings col"):
             _pandas(DF1, table_name='tbl1', symbols=(0,))
-        with self.assertRaisesRegex(TypeError,
+        with self.assertRaisesRegex(qi.IngressError,
                 "`symbols`: Bad dtype `int64`.*'B'.*Must be a strings column."):
             _pandas(DF1, table_name='tbl1', symbols=[1])
 

@@ -13,7 +13,7 @@ import patch_path
 import questdb.ingress as qi
 
 
-class TestBencharkPandas(unittest.TestCase):
+class TestBenchmarkPandas(unittest.TestCase):
     def test_pystr_i64_10m(self):
         # This is a benchmark, not a test.
         # It is useful to run it manually to check performance.
