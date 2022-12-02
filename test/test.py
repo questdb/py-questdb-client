@@ -489,11 +489,14 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name_col=-5)
 
     def test_bad_str_obj_col(self):
-        with self.assertRaisesRegex(TypeError, 'Found non-string value'):
+        with self.assertRaisesRegex(TypeError,
+                "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
             _pandas(DF1, table_name_col='D')
-        with self.assertRaisesRegex(TypeError, 'Found non-string value'):
+        with self.assertRaisesRegex(TypeError,
+                "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
             _pandas(DF1, table_name_col=3)
-        with self.assertRaisesRegex(TypeError, 'Found non-string value'):
+        with self.assertRaisesRegex(TypeError,
+                "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
             _pandas(DF1, table_name_col=-1)
 
     def test_bad_symbol(self):
@@ -503,9 +506,11 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name='tbl1', symbols={})
         with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
             _pandas(DF1, table_name='tbl1', symbols=None)
-        with self.assertRaisesRegex(TypeError, '.*element.*symbols.*float.*0'):
+        with self.assertRaisesRegex(TypeError,
+                "`symbols`: Bad dtype `float64`.*'A'.*Must.*strings col"):
             _pandas(DF1, table_name='tbl1', symbols=(0,))
-        with self.assertRaisesRegex(TypeError, '.*element.*symbols.*int.*1'):
+        with self.assertRaisesRegex(TypeError,
+                "`symbols`: Bad dtype `int64`.*'B'.*Must be a strings column."):
             _pandas(DF1, table_name='tbl1', symbols=[1])
 
     def test_bad_at(self):

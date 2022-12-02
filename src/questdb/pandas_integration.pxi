@@ -78,6 +78,23 @@ cdef bint col_source_needs_gil(col_source_t source):
     return <int>source // 100 % 10 == 1
 
 
+cdef set _STR_SOURCES = {
+    col_source_t.col_source_str_pyobj,
+    col_source_t.col_source_str_arrow,
+    col_source_t.col_source_str_i8_cat,
+    col_source_t.col_source_str_i16_cat,
+    col_source_t.col_source_str_i32_cat,
+}
+
+
+cdef dict _PYOBJ_SOURCE_DESCR = {
+    col_source_t.col_source_bool_pyobj: "bool",
+    col_source_t.col_source_int_pyobj: "int",
+    col_source_t.col_source_float_pyobj: "float",
+    col_source_t.col_source_str_pyobj: "str",
+}
+
+
 cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_skip: {
         col_source_t.col_source_nulls,
@@ -425,6 +442,7 @@ cdef object _check_is_pandas_dataframe(object data):
 cdef ssize_t _pandas_resolve_table_name(
         qdb_pystr_buf* b,
         object data,
+        list pandas_cols,
         col_t_arr* cols,
         object table_name,
         object table_name_col,
@@ -445,6 +463,7 @@ cdef ssize_t _pandas_resolve_table_name(
     This method validates input and may raise.
     """
     cdef size_t col_index = 0
+    cdef PandasCol pandas_col
     cdef col_t* col
     if table_name is not None:
         if table_name_col is not None:
@@ -470,12 +489,12 @@ cdef ssize_t _pandas_resolve_table_name(
             raise TypeError(
                 'Bad argument `table_name_col`: ' +
                 'must be a column name (str) or index (int).')
-        _pandas_check_column_is_str(
-            data,
-            col_index,
-            'Bad argument `table_name_col`: ',
-            table_name_col)
+        pandas_col = pandas_cols[col_index]
         col = &cols.d[col_index]
+        _pandas_check_column_is_str(
+            'Bad argument `table_name_col`: ',
+            pandas_col,
+            col.source)
         col.meta_target = meta_target_t.meta_target_table
         name_out.len = 0
         name_out.buf = NULL
@@ -507,43 +526,19 @@ cdef void_int _bind_col_index(
     col_index[0] = <size_t>col_num
 
 
-cdef object _pandas_column_is_str(object data, int col_index):
-    """
-    Return True if the column at `col_index` is a string column.
-    """
-    # NB: Returning `object` rather than `bint` to allow for exceptions.
-    cdef str col_kind
-    cdef object col
-    col_kind = data.dtypes[col_index].kind
-    if col_kind == 'S':  # string, string[pyarrow]
-        return True
-    elif col_kind == 'O':  # object
-        if len(data.index) == 0:
-            return True
-        else:
-            # We only check the first element and hope for the rest.
-            # We also accept None as a null value.
-            col = data.iloc[0, col_index]
-            return (col is None) or isinstance(col, str)
-    else:
-        return False
-
-
-cdef object _pandas_check_column_is_str(
-        object data, size_t col_index, str err_msg_prefix, object col_name):
-    cdef str col_kind
-    col_kind = data.dtypes[col_index].kind
-    if col_kind in 'SO':
-        if not _pandas_column_is_str(data, col_index):
-            raise TypeError(
-                err_msg_prefix +
-                'Found non-string value ' +
-                f'in column {col_name!r}.')
-    else:
-        raise TypeError(
+cdef void_int _pandas_check_column_is_str(
+        str err_msg_prefix,
+        PandasCol pandas_col,
+        col_source_t source) except -1:
+    cdef str inferred_descr = ""
+    if not source in _STR_SOURCES:
+        if isinstance(pandas_col.dtype, _NUMPY_OBJECT):
+            inferred_descr = f' (inferred type: {_PYOBJ_SOURCE_DESCR[source]})'
+        raise IngressError(
+            IngressErrorCode.BadDataFrame,
             err_msg_prefix + 
-            f'Bad dtype `{data.dtypes[col_index]}` for the ' +
-            f'{col_name!r} column: Must be a strings column.')
+            f'Bad dtype `{pandas_col.dtype}`{inferred_descr} for the ' +
+            f'{pandas_col.name!r} column: Must be a strings column.')
 
 
 @cython.internal
@@ -585,9 +580,9 @@ cdef void_int _pandas_resolve_symbols(
         pass
     elif symbols is True:
         for col_index in range(cols.size):
-            if _pandas_column_is_str(data, col_index):
+            col = &cols.d[col_index]
+            if col.source in _STR_SOURCES:
                 pandas_col = pandas_cols[col_index]
-                col = &cols.d[col_index]
                 if col.meta_target == meta_target_t.meta_target_field:
                     col.meta_target = meta_target_t.meta_target_symbol
     else:
@@ -612,12 +607,12 @@ cdef void_int _pandas_resolve_symbols(
                 raise ValueError(
                     f'Bad argument `symbols`: Cannot use the `at` column ' +
                     f'({data.columns[at_col]!r}) as a symbol column.')
-            _pandas_check_column_is_str(
-                data,
-                col_index,
-                'Bad element in argument `symbols`: ',
-                symbol)
+            pandas_col = pandas_cols[col_index]
             col = &cols.d[col_index]
+            _pandas_check_column_is_str(
+                'Bad argument `symbols`: ',
+                pandas_col,
+                col.source)
             col.meta_target = meta_target_t.meta_target_symbol
 
 
@@ -637,7 +632,19 @@ cdef void_int _pandas_get_loc(
 
 # The -1 value is safe to use as a sentinel because the TimestampNanos type
 # already validates that the value is >= 0.
-cdef int64_t _AT_SET_BY_COLUMN = -1
+cdef int64_t _AT_IS_SET_BY_COLUMN = -1
+
+
+cdef str _SUPPORTED_DATETIMES = 'datetime64[ns] or datetime64[ns, tz]'
+
+
+cdef object _pandas_is_supported_datetime(object dtype):
+    if (isinstance(dtype, _NUMPY_DATETIME64_NS) and
+            (str(dtype) == 'datetime64[ns]')):
+        return True
+    if isinstance(dtype, _PANDAS.DatetimeTZDtype):
+        return dtype.unit == 'ns'
+    return False
 
 
 cdef ssize_t _pandas_resolve_at(
@@ -669,23 +676,14 @@ cdef ssize_t _pandas_resolve_at(
             'int (column index), str (colum name)')
     dtype = data.dtypes[col_index]
     if _pandas_is_supported_datetime(dtype):
-        at_value_out[0] = _AT_SET_BY_COLUMN
+        at_value_out[0] = _AT_IS_SET_BY_COLUMN
         col = &cols.d[col_index]
         col.meta_target = meta_target_t.meta_target_at
         return col_index
     else:
         raise TypeError(
             f'Bad argument `at`: Bad dtype `{dtype}` ' +
-            f'for the {at!r} column: Must be a datetime64[ns] column.')
-
-
-cdef object _pandas_is_supported_datetime(object dtype):
-    if (isinstance(dtype, _NUMPY_DATETIME64_NS) and
-            (str(dtype) == 'datetime64[ns]')):
-        return True
-    if isinstance(dtype, _PANDAS.DatetimeTZDtype):
-        return dtype.unit == 'ns'
-    return False
+            f'for the {at!r} column: Must be a {_SUPPORTED_DATETIMES} column.')
 
 
 cdef void_int _pandas_alloc_chunks(
@@ -797,15 +795,17 @@ cdef void_int _pandas_category_series_as_arrow(
     else:
         raise IngressError(
             IngressErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: Expected an arrow category index ' +
+            f'Bad column {pandas_col.name!r}: ' +
+            'Expected an arrow category index ' +
             f'format, got {(<bytes>format).decode("utf-8")!r}.')
     
     format = col.arrow_schema.dictionary.format
     if strncmp(format, _ARROW_FMT_SML_STR, 1) != 0:
         raise IngressError(
             IngressErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: Expected a category of strings, ' +
-            f'got a category of {pandas_col.series.dtype.categories.dtype!r}.')
+            f'Bad column {pandas_col.name!r}: ' +
+            'Expected a category of strings, ' +
+            f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
 
 cdef inline bint _pandas_is_float_nan(PyObject* obj):
@@ -854,7 +854,8 @@ cdef void_int _pandas_series_sniff_pyobj(
                 raise IngressError(
                     IngressErrorCode.BadDataFrame,
                     f'Bad column {pandas_col.name!r}: ' +
-                    f'Unsupported object column containing an {_fqn(type(<object>obj))}')
+                    f'Unsupported object column containing an object of type ' +
+                    _fqn(type(<object>obj)) + '.')
             return 0
 
     # We haven't returned yet, so we've hit an object column that
@@ -997,7 +998,7 @@ cdef void_int _pandas_resolve_target(
         IngressErrorCode.BadDataFrame,
         f'Could not map column source type (code {col.source} for ' +
         f'column {pandas_col.name!r} ' +
-        f' ({pandas_col.dtype!r}) to any ILP type.')
+        f' ({pandas_col.dtype}) to any ILP type.')
 
 
 cdef void _pandas_init_cursor(col_t* col):
@@ -1054,7 +1055,7 @@ cdef void_int _pandas_resolve_cols_target_name_and_dc(
         if col.source not in _TARGET_TO_SOURCES[col.target]:
             raise ValueError(
                 f'Bad value: Column {pandas_col.name!r} ' +
-                f'({pandas_col.dtype!r}) is not ' +
+                f'({pandas_col.dtype}) is not ' +
                 f'supported as a {_TARGET_NAMES[col.target]} column.')
         col.dispatch_code = <col_dispatch_code_t>(
             <int>col.source + <int>col.target)
@@ -1098,6 +1099,7 @@ cdef void_int _pandas_resolve_args(
     name_col = _pandas_resolve_table_name(
         b,
         data,
+        pandas_cols,
         cols,
         table_name,
         table_name_col,
@@ -2096,7 +2098,7 @@ cdef void_int _pandas(
         bint sort) except -1:
     cdef size_t col_count
     cdef line_sender_table_name c_table_name
-    cdef int64_t at_value = _AT_SET_BY_COLUMN
+    cdef int64_t at_value = _AT_IS_SET_BY_COLUMN
     cdef col_t_arr cols = col_t_arr_blank()
     cdef bint any_cols_need_gil = False
     cdef qdb_pystr_pos str_buf_marker
