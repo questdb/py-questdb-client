@@ -434,7 +434,7 @@ cdef object _pandas_may_import_deps():
         _PYARROW = None
 
 
-cdef object _check_is_pandas_dataframe(object data):
+cdef object _pandas_check_is_dataframe(object data):
     if not isinstance(data, _PANDAS.DataFrame):
         raise TypeError(
             f'Bad argument `data`: Expected {_fqn(_PANDAS.DataFrame)}, ' +
@@ -2112,10 +2112,14 @@ cdef void_int _pandas(
     cdef bint was_serializing_cell = False
 
     _pandas_may_import_deps()
+    _pandas_check_is_dataframe(data)
+    row_count = len(data)
+    col_count = len(data.columns)
+    if (col_count == 0) or (row_count == 0):
+        return 0  # Nothing to do.
+
     try:
         qdb_pystr_buf_clear(b)
-        _check_is_pandas_dataframe(data)
-        col_count = len(data.columns)
         cols = col_t_arr_new(col_count)
         _pandas_resolve_args(
             data,
@@ -2134,8 +2138,6 @@ cdef void_int _pandas(
         # Instead of clearing it (which would clear the headers' memory)
         # we will truncate (rewind) back to this position.
         str_buf_marker = qdb_pystr_buf_tell(b)
-
-        row_count = len(data)
         line_sender_buffer_clear_marker(impl)
 
         # On error, undo all added lines.

@@ -525,6 +525,20 @@ class TestPandas(unittest.TestCase):
             _pandas(DF1, table_name='tbl1', at=1)
         with self.assertRaisesRegex(TypeError, '`at`.*object.*be a datetime'):
             _pandas(DF1, table_name='tbl1', at=-1)
+
+    def test_empty_dataframe(self):
+        buf = _pandas(pd.DataFrame(), table_name='tbl1')
+        self.assertEqual(buf, '')
+
+    def test_zero_row_dataframe(self):
+        buf = _pandas(pd.DataFrame(columns=['A', 'B']), table_name='tbl1')
+        self.assertEqual(buf, '')
+
+    def test_zero_column_dataframe(self):
+        df = pd.DataFrame(index=[0, 1, 2])
+        self.assertEqual(len(df), 3)
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(buf, '')
     
     def test_basic(self):
         buf = _pandas(
@@ -1666,7 +1680,6 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=3i\n')
 
 
-# TODO: Test all datatypes, but no rows.
 # TODO: Test all datatypes, but one, two, 10 and 1000 rows. Include None, NA and NaN.
 # TODO: Test all datatypes, but multiple row chunks.
 
