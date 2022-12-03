@@ -71,6 +71,7 @@ stages:
               python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -88,6 +89,7 @@ stages:
               python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -107,6 +109,7 @@ stages:
               python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -126,6 +129,7 @@ stages:
               python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -145,6 +149,7 @@ stages:
               python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -164,6 +169,7 @@ stages:
               python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
@@ -181,6 +187,7 @@ stages:
               python3 -m pip install cibuildwheel==2.11.2
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels

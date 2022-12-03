@@ -409,7 +409,15 @@ cdef object _pandas_may_import_deps():
     global _NUMPY_OBJECT
     if _NUMPY is not None:
         return
-    import numpy
+    try:
+        import pandas
+        import numpy
+        import pyarrow
+    except ImportError as ie:
+        raise ImportError(
+            'Missing dependencies: pandas, numpy and pyarrow must all be '+
+            'installed to use the `.pandas()` method. ' +
+            'Run: `python3 -m pip install -U pandas numpy pyarrow`.') from ie
     _NUMPY = numpy
     _NUMPY_BOOL = type(_NUMPY.dtype('bool'))
     _NUMPY_UINT8 = type(_NUMPY.dtype('uint8'))
@@ -424,14 +432,9 @@ cdef object _pandas_may_import_deps():
     _NUMPY_FLOAT64 = type(_NUMPY.dtype('float64'))
     _NUMPY_DATETIME64_NS = type(_NUMPY.dtype('datetime64[ns]'))
     _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
-    import pandas
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
-    try:
-        import pyarrow
-        _PYARROW = pyarrow
-    except ImportError:
-        _PYARROW = None
+    _PYARROW = pyarrow
 
 
 cdef object _pandas_check_is_dataframe(object data):
@@ -742,18 +745,11 @@ cdef void_int _pandas_series_as_pybuf(
 
 cdef void_int _pandas_series_as_arrow(
         PandasCol pandas_col,
-        col_t* col,
-        col_source_t np_fallback,
-        str fallback_dtype=None) except -1:
+        col_t* col) except -1:
     cdef object array
     cdef list chunks
     cdef size_t n_chunks
     cdef size_t chunk_index
-    if _PYARROW is None:
-        col.source = np_fallback
-        _pandas_series_as_pybuf(pandas_col, col, fallback_dtype)
-        return 0
-
     array = _PYARROW.Array.from_pandas(pandas_col.series)
     if isinstance(array, _PYARROW.ChunkedArray):
         chunks = array.chunks
@@ -783,10 +779,7 @@ cdef const char* _ARROW_FMT_SML_STR = "u"
 cdef void_int _pandas_category_series_as_arrow(
         PandasCol pandas_col, col_t* col) except -1:
     cdef const char* format
-    col.source = col_source_t.col_source_nulls  # placeholder value.
-    _pandas_series_as_arrow(pandas_col, col, col_source_t.col_source_str_pyobj)
-    if col.source == col_source_t.col_source_str_pyobj:
-        return 0  # PyArrow wasn't imported.
+    _pandas_series_as_arrow(pandas_col, col)
     format = col.arrow_schema.format
     if strncmp(format, _ARROW_FMT_INT8, 1) == 0:
         col.source = col_source_t.col_source_str_i8_cat
@@ -798,8 +791,8 @@ cdef void_int _pandas_category_series_as_arrow(
         raise IngressError(
             IngressErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
-            'Expected an arrow category index ' +
-            f'format, got {(<bytes>format).decode("utf-8")!r}.')
+            'Unsupported arrow category index type. ' +
+            f'Got {(<bytes>format).decode("utf-8")!r}.')
     
     format = col.arrow_schema.dictionary.format
     if strncmp(format, _ARROW_FMT_SML_STR, 1) != 0:
@@ -873,8 +866,7 @@ cdef void_int _pandas_resolve_source_and_buffers(
         _pandas_series_as_pybuf(pandas_col, col)
     elif isinstance(dtype, _PANDAS.BooleanDtype):
         col.source = col_source_t.col_source_bool_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_bool_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_UINT8):
         col.source = col_source_t.col_source_u8_numpy
         _pandas_series_as_pybuf(pandas_col, col)
@@ -901,57 +893,44 @@ cdef void_int _pandas_resolve_source_and_buffers(
         _pandas_series_as_pybuf(pandas_col, col)
     elif isinstance(dtype, _PANDAS.UInt8Dtype):
         col.source = col_source_t.col_source_u8_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.Int8Dtype):
         col.source = col_source_t.col_source_i8_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.UInt16Dtype):
         col.source = col_source_t.col_source_u16_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.Int16Dtype):
         col.source = col_source_t.col_source_i16_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.UInt32Dtype):
         col.source = col_source_t.col_source_u32_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.Int32Dtype):
         col.source = col_source_t.col_source_i32_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.UInt64Dtype):
         col.source = col_source_t.col_source_u64_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.Int64Dtype):
         col.source = col_source_t.col_source_i64_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_int_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_FLOAT32):
         col.source = col_source_t.col_source_f32_numpy
-        _pandas_series_as_pybuf(
-            pandas_col, col)
+        _pandas_series_as_pybuf(pandas_col, col)
     elif isinstance(dtype, _NUMPY_FLOAT64):
         col.source = col_source_t.col_source_f64_numpy
-        _pandas_series_as_pybuf(
-            pandas_col, col)
+        _pandas_series_as_pybuf(pandas_col, col)
     elif isinstance(dtype, _PANDAS.Float32Dtype):
         col.source = col_source_t.col_source_f32_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_float_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.Float64Dtype):
         col.source = col_source_t.col_source_f64_arrow
-        _pandas_series_as_arrow(
-            pandas_col, col, col_source_t.col_source_float_pyobj)
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.StringDtype):
         if dtype.storage == 'pyarrow':
             col.source = col_source_t.col_source_str_arrow
-            _pandas_series_as_arrow(
-                pandas_col, col, col_source_t.col_source_str_pyobj)
+            _pandas_series_as_arrow(pandas_col, col)
         elif dtype.storage == 'python':
             col.source = col_source_t.col_source_str_pyobj
             _pandas_series_as_pybuf(pandas_col, col)
@@ -969,11 +948,7 @@ cdef void_int _pandas_resolve_source_and_buffers(
     elif (isinstance(dtype, _PANDAS.DatetimeTZDtype) and
             _pandas_is_supported_datetime(dtype)):
         col.source = col_source_t.col_source_dt64ns_tz_arrow
-        _pandas_series_as_arrow(
-            pandas_col,
-            col,
-            col_source_t.col_source_dt64ns_numpy,
-            'datetime64[ns]')
+        _pandas_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_OBJECT):
         _pandas_series_sniff_pyobj(pandas_col, col)
     else:

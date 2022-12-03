@@ -32,6 +32,7 @@ stages:
               python3 -m pip install cython
               python3 -m pip install numpy
               python3 -m pip install pandas
+              python3 -m pip install pyarrow
             displayName: Installing Python dependencies
           - script: python3 proj.py build
             displayName: "Build"
