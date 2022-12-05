@@ -40,18 +40,22 @@ def try_pip_install(package):
         sys.stderr.write(f'    Ignored unsatisfiable dependency:\n{msg}\n')
 
 
-def ensure_zoneinfo():
+def ensure_timezone():
     try:
         import zoneinfo
     except ImportError:
-        pip_install('backports.zoneinfo')
-        from backports import zoneinfo
+        pip_install('pytz')
 
 
 def main():
-    ensure_zoneinfo()
-    if platform.system() == 'Windows':
-        pip_install('tzdata')  # for zoneinfo
+    ensure_timezone()
+
+    try:
+        import zoneinfo
+        if platform.system() == 'Windows':
+            pip_install('tzdata')  # for zoneinfo
+    except ImportError:
+        pass  # We're using `pytz` instead.
 
     try_pip_install('pandas')
     try_pip_install('numpy')

@@ -7,8 +7,10 @@ import unittest
 
 try:
     import zoneinfo
+    _TZ = zoneinfo.ZoneInfo('America/New_York')
 except ImportError:
-    import backports.zoneinfo as zoneinfo
+    import pytz
+    _TZ = pytz.timezone('America/New_York')
 
 import patch_path
 
@@ -672,19 +674,18 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=2000000t\n')
 
     def test_datetime64_tz_arrow_col(self):
-        tz = zoneinfo.ZoneInfo('America/New_York')
         df = pd.DataFrame({
             'a': [
                 pd.Timestamp(
                     year=2019, month=1, day=1,
-                    hour=0, minute=0, second=0, tz=tz),
+                    hour=0, minute=0, second=0, tz=_TZ),
                 pd.Timestamp(
                     year=2019, month=1, day=1,
-                    hour=0, minute=0, second=1, tz=tz),
+                    hour=0, minute=0, second=1, tz=_TZ),
                 None,
                 pd.Timestamp(
                     year=2019, month=1, day=1,
-                    hour=0, minute=0, second=3, tz=tz)],
+                    hour=0, minute=0, second=3, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3', 'sym4']})
         buf = _pandas(df, table_name='tbl1', symbols=['b'])
         self.assertEqual(
@@ -700,13 +701,13 @@ class TestPandas(unittest.TestCase):
             'a': [
                 pd.Timestamp(
                     year=1970, month=1, day=1,
-                    hour=0, minute=0, second=0, tz=tz),
+                    hour=0, minute=0, second=0, tz=_TZ),
                 pd.Timestamp(
                     year=1970, month=1, day=1,
-                    hour=0, minute=0, second=1, tz=tz),
+                    hour=0, minute=0, second=1, tz=_TZ),
                 pd.Timestamp(
                     year=1970, month=1, day=1,
-                    hour=0, minute=0, second=2, tz=tz)],
+                    hour=0, minute=0, second=2, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3']})
         buf = _pandas(df, table_name='tbl1', symbols=['b'])
         self.assertEqual(
@@ -721,13 +722,13 @@ class TestPandas(unittest.TestCase):
             'a': [
                 pd.Timestamp(
                     year=1969, month=12, day=31,
-                    hour=19, minute=0, second=0, tz=tz),
+                    hour=19, minute=0, second=0, tz=_TZ),
                 pd.Timestamp(
                     year=1969, month=12, day=31,
-                    hour=19, minute=0, second=1, tz=tz),
+                    hour=19, minute=0, second=1, tz=_TZ),
                 pd.Timestamp(
                     year=1969, month=12, day=31,
-                    hour=19, minute=0, second=2, tz=tz)],
+                    hour=19, minute=0, second=2, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3']})
         buf = _pandas(df, table_name='tbl1', symbols=['b'])
         self.assertEqual(
@@ -740,11 +741,12 @@ class TestPandas(unittest.TestCase):
             'a': [
                 pd.Timestamp(
                     year=1900, month=1, day=1,
-                    hour=0, minute=0, second=0, tz=tz)],
+                    hour=0, minute=0, second=0, tz=_TZ)],
             'b': ['sym1']})
         with self.assertRaisesRegex(
-                qi.IngressError, "Failed.*'a'.*-2208970800000000 is negative."):
+                qi.IngressError, "Failed.*'a'.*-220897.* is negative."):
             _pandas(df2, table_name='tbl1', symbols=['b'])
+        return   ###############################################################
 
     def test_datetime64_numpy_at(self):
         df = pd.DataFrame({
@@ -788,19 +790,18 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=3i 2000000000\n')
 
     def test_datetime64_tz_arrow_at(self):
-        tz = zoneinfo.ZoneInfo('America/New_York')
         df = pd.DataFrame({
             'a': [
                 pd.Timestamp(
                     year=2019, month=1, day=1,
-                    hour=0, minute=0, second=0, tz=tz),
+                    hour=0, minute=0, second=0, tz=_TZ),
                 pd.Timestamp(
                     year=2019, month=1, day=1,
-                    hour=0, minute=0, second=1, tz=tz),
+                    hour=0, minute=0, second=1, tz=_TZ),
                 None,
                 pd.Timestamp(
                     year=2019, month=1, day=1,
-                    hour=0, minute=0, second=3, tz=tz)],
+                    hour=0, minute=0, second=3, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3', 'sym4']})
         buf = _pandas(df, table_name='tbl1', symbols=['b'], at='a')
         self.assertEqual(
@@ -815,10 +816,10 @@ class TestPandas(unittest.TestCase):
             'a': [
                 pd.Timestamp(
                     year=1900, month=1, day=1,
-                    hour=0, minute=0, second=0, tz=tz)],
+                    hour=0, minute=0, second=0, tz=_TZ)],
             'b': ['sym1']})
         with self.assertRaisesRegex(
-                qi.IngressError, "Failed.*'a'.*-2208970800000000000 is neg"):
+                qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
             _pandas(df2, table_name='tbl1', symbols=['b'], at='a')
 
     def _test_pyobjstr_table(self, dtype):
