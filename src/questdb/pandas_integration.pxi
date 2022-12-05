@@ -985,24 +985,6 @@ cdef void _pandas_init_cursor(col_t* col):
     col.cursor.offset = col.cursor.chunk.offset
 
 
-cdef void_int _pandas_resolve_col(
-        qdb_pystr_buf* b,
-        size_t index,
-        PandasCol pandas_col,
-        col_t* col) except -1:
-    # The target is resolved in stages:
-    # * We first assign all columns to be fields.
-    # * Then, depending on argument parsing some/none of the columns
-    #   obtain a meta-target of "table", "symbol" or "at".
-    # * Finally, based on the source, any remaining "meta_target_field"
-    #   columns are converted to the appropriate target.
-    #   See: _pandas_resolve_col_targets_and_dc(..).
-    col.meta_target = meta_target_t.meta_target_field
-    col.orig_index = index  # We will sort columns later.
-    _pandas_resolve_source_and_buffers(pandas_col, col)
-    _pandas_init_cursor(col)
-
-
 cdef void_int _pandas_resolve_cols(
         qdb_pystr_buf* b,
         list pandas_cols,
@@ -1010,11 +992,28 @@ cdef void_int _pandas_resolve_cols(
         bint* any_cols_need_gil_out) except -1:
     cdef size_t index
     cdef size_t len_pandas_cols = len(pandas_cols)
+    cdef PandasCol pandas_col
     cdef col_t* col
     any_cols_need_gil_out[0] = False
     for index in range(len_pandas_cols):
+        pandas_col = pandas_cols[index]
         col = &cols.d[index]
-        _pandas_resolve_col(b, index, pandas_cols[index], col)
+
+        # The target is resolved in stages:
+        # * We first assign all column `.meta_target`s to be fields.
+        # * Then, depending on argument parsing some/none of the columns
+        #   obtain a meta-target of "table", "symbol" or "at".
+        # * Finally, based on the source, any remaining "meta_target_field"
+        #   columns are converted to the appropriate target.
+        #   See: _pandas_resolve_col_targets_and_dc(..).
+        col.meta_target = meta_target_t.meta_target_field
+
+        # We will sort columns later. The index will be used to achieve a stable
+        # sort among columns with the same `.meta_target`.
+        col.orig_index = index
+
+        _pandas_resolve_source_and_buffers(pandas_col, col)
+        _pandas_init_cursor(col)
         if col_source_needs_gil(col.source):
             any_cols_need_gil_out[0] = True
 
