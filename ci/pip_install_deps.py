@@ -46,10 +46,6 @@ def ensure_timezone():
     except ImportError:
         pip_install('pytz')
 
-
-def main():
-    ensure_timezone()
-
     try:
         import zoneinfo
         if platform.system() == 'Windows':
@@ -57,11 +53,15 @@ def main():
     except ImportError:
         pass  # We're using `pytz` instead.
 
+
+def main():
+    ensure_timezone()
     try_pip_install('pandas')
     try_pip_install('numpy')
     try_pip_install('pyarrow')
 
-    if platform.python_implementation() == 'CPython':
+    is_64bits = sys.maxsize > 2**32
+    if is_64bits and (platform.python_implementation() == 'CPython'):
         # We import the dependencies we expect to have correctly installed.
         import pandas
         import numpy
