@@ -61,7 +61,7 @@ include "pandas_integration.pxi"
 
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
-    Iterable, Literal
+    Iterable
 import pathlib
 
 import sys
