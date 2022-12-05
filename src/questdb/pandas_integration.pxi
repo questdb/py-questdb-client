@@ -415,9 +415,10 @@ cdef object _pandas_may_import_deps():
         import pyarrow
     except ImportError as ie:
         raise ImportError(
-            'Missing dependencies: pandas, numpy and pyarrow must all be '+
-            'installed to use the `.pandas()` method. ' +
-            'Run: `python3 -m pip install -U pandas numpy pyarrow`.') from ie
+            'Missing dependencies: `pandas`, `numpy` and `pyarrow` must all ' +
+            'be installed to use the `.pandas()` method. ' +
+            'See: https://py-questdb-client.readthedocs.io/' +
+            'en/latest/installation.html.') from ie
     _NUMPY = numpy
     _NUMPY_BOOL = type(_NUMPY.dtype('bool'))
     _NUMPY_UINT8 = type(_NUMPY.dtype('uint8'))
