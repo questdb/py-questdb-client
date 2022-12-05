@@ -44,18 +44,21 @@ def ensure_zoneinfo():
     try:
         import zoneinfo
     except ImportError:
-        pip_install('backports.zoneinfo[tzdata]')
+        pip_install('backports.zoneinfo')
         from backports import zoneinfo
 
 
 def main():
     ensure_zoneinfo()
+    if platform.system() == 'Windows':
+        pip_install('tzdata')  # for zoneinfo
+
     try_pip_install('pandas')
     try_pip_install('numpy')
     try_pip_install('pyarrow')
 
     if platform.python_implementation() == 'CPython':
-        # We import the dependency we expect to have correctly installed.
+        # We import the dependencies we expect to have correctly installed.
         import pandas
         import numpy
         import pyarrow

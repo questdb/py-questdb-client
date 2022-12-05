@@ -1037,16 +1037,19 @@ cdef class Buffer:
             *,
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
-            symbols: Union[
-                Literal['auto'], bool, List[int], List[str]] = 'auto',
-            at: Union[None, int, str, TimestampNanos, datetime] = None,
-            sort: bool = True):
+            symbols: Union[str, bool, List[int], List[str]] = 'auto',
+            at: Union[None, int, str, TimestampNanos, datetime] = None):
         """
         Add a pandas DataFrame to the buffer.
         """
-        # See https://cython.readthedocs.io/en/latest/src/userguide/
-        #     numpy_tutorial.html#numpy-tutorial
-        _pandas(self._impl, self._b, data, table_name, table_name_col, symbols, at, sort)
+        _pandas(
+            self._impl,
+            self._b,
+            data,
+            table_name,
+            table_name_col,
+            symbols,
+            at)
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'

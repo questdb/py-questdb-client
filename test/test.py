@@ -24,7 +24,7 @@ except ImportError:
 
 
 if pa is not None:
-    from test_pandas import TestPandas
+    from test_pandas_integration import TestPandas
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):

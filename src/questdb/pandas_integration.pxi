@@ -2070,8 +2070,7 @@ cdef void_int _pandas(
         object table_name,
         object table_name_col,
         object symbols,
-        object at,
-        bint sort) except -1:
+        object at) except -1:
     cdef size_t col_count
     cdef line_sender_table_name c_table_name
     cdef int64_t at_value = _AT_IS_SET_BY_COLUMN
