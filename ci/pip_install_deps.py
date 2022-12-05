@@ -60,9 +60,13 @@ def main():
     try_pip_install('numpy')
     try_pip_install('pyarrow')
 
+    on_linux_is_glibc = (
+        (not platform.system() == 'Linux') or
+        (platform.libc_ver()[0] == 'glibc'))
     is_64bits = sys.maxsize > 2**32
-    if is_64bits and (platform.python_implementation() == 'CPython'):
-        # We import the dependencies we expect to have correctly installed.
+    is_cpython = platform.python_implementation() == 'CPython'
+    if on_linux_is_glibc and is_64bits and is_cpython:
+        # Ensure that we've managed to install the expected dependencies.
         import pandas
         import numpy
         import pyarrow
