@@ -43,15 +43,10 @@ def try_pip_install(package):
 def ensure_timezone():
     try:
         import zoneinfo
-    except ImportError:
-        pip_install('pytz')
-
-    try:
-        import zoneinfo
         if platform.system() == 'Windows':
             pip_install('tzdata')  # for zoneinfo
     except ImportError:
-        pass  # We're using `pytz` instead.
+        pip_install('pytz')
 
 
 def main():

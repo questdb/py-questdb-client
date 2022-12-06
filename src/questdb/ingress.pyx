@@ -867,170 +867,6 @@ cdef class Buffer:
         self._row(table_name, symbols, columns, at)
         return self
 
-    # def tabular(
-    #         self,
-    #         table_name: str,
-    #         data: Iterable[Iterable[Union[
-    #             bool, int, float, str,
-    #             TimestampMicros, TimestampNanos, datetime]]],
-    #         *,
-    #         header: Optional[List[Optional[str]]]=None,
-    #         symbols: Union[bool, List[int]]=False,
-    #         at: Union[None, TimestampNanos, datetime]=None):
-    #     """
-    #     Add multiple rows as an iterable of iterables (e.g. list of lists) to
-    #     the buffer.
-
-    #     **Data and header**
-
-    #     The ``data`` argument specifies rows which must all be for the same
-    #     table. Column names are provided as the ``header``.
-
-    #     .. code-block:: python
-
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, 123, 3.14, 'xyz'],
-    #              [False, 456, 6.28, 'abc'],
-    #              [True, 789, 9.87, 'def']],
-    #             header=['col1', 'col2', 'col3', 'col4'])
-
-    #     **Designated Timestamp Column**
-
-    #     QuestDB supports a special `designated timestamp
-    #     <https://questdb.io/docs/concept/designated-timestamp/>`_ column that it
-    #     uses to sort the rows by timestamp.
-
-    #     If the data section contains the same number of columns as the header,
-    #     then the designated is going to be
-    #     assigned by the server, unless specified for all columns the `at`
-    #     argument as either an integer wrapped in a ``TimestampNanos`` object
-    #     representing nanoseconds since unix epoch (1970-01-01 00:00:00 UTC) or
-    #     as a ``datetime.datetime`` object.
-
-    #     .. code-block:: python
-
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, None, 3.14, 'xyz'],
-    #              [False, 123, 6.28, 'abc'],
-    #              [True, 456, 9.87, 'def']],
-    #             header=['col1', 'col2', 'col3', 'col4'],
-    #             at=datetime.datetime.utcnow())
-
-    #             # or ...
-    #             # at=TimestampNanos(1657386397157631000))
-
-    #     If the rows need different `designated timestamp
-    #     <https://questdb.io/docs/concept/designated-timestamp/>`_ values across
-    #     different rows, you can provide them as an additional unlabeled column.
-    #     An unlabled column is one that has its name set to ``None``.
-
-    #     .. code-block:: python
-
-    #         ts1 = datetime.datetime.utcnow()
-    #         ts2 = (
-    #             datetime.datetime.utcnow() +
-    #             datetime.timedelta(microseconds=1))
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, 123, ts1],
-    #              [False, 456, ts2]],
-    #             header=['col1', 'col2', None])
-
-    #     Like the ``at`` argument, the designated timestamp column may also be
-    #     specified as ``TimestampNanos`` objects.
-
-    #     .. code-block:: python
-
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, 123, TimestampNanos(1657386397157630000)],
-    #              [False, 456, TimestampNanos(1657386397157631000)]],
-    #             header=['col1', 'col2', None])
-
-    #     The designated timestamp column may appear anywhere positionally.
-
-    #     .. code-block:: python
-
-    #         ts1 = datetime.datetime.utcnow()
-    #         ts2 = (
-    #             datetime.datetime.utcnow() +
-    #             datetime.timedelta(microseconds=1))
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[1000, ts1, 123],
-    #              [2000, ts2, 456]],
-    #             header=['col1', None, 'col2'])
-
-    #     **Other timestamp columns**
-
-    #     Other columns may also contain timestamps. These columns can take
-    #     ``datetime.datetime`` objects or ``TimestampMicros`` (*not nanos*)
-    #     objects.
-
-    #     .. code-block:: python
-
-    #         ts1 = datetime.datetime.utcnow()
-    #         ts2 = (
-    #             datetime.datetime.utcnow() +
-    #             datetime.timedelta(microseconds=1))
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[1000, ts1, 123],
-    #              [2000, ts2, 456]],
-    #             header=['col1', 'col2', 'col3'],
-    #             at=datetime.datetime.utcnow())
-
-    #     **Symbol Columns**
-
-    #     QuestDB can represent strings via the ``STRING`` or ``SYMBOL`` types.
-
-    #     If all the columns of type ``str`` are to be treated as ``STRING``, then
-    #     specify ``symbols=False`` (default - see exaples above).
-
-    #     If all need to be treated as ``SYMBOL`` specify ``symbols=True``.
-
-    #     .. code-block:: python
-
-    #         buffer.tabular(
-    #             'table_name',
-    #             [['abc', 123, 3.14, 'xyz'],
-    #              ['def', 456, None, 'abc'],
-    #              ['ghi', 789, 9.87, 'def']],
-    #             header=['col1', 'col2', 'col3', 'col4'],
-    #             symbols=True)  # `col1` and `col4` are SYMBOL columns.
-
-    #    Whilst if only a select few are to be treated as ``SYMBOL``, specify a
-    #    list of column indices to the ``symbols`` arg.
-
-    #    .. code-block:: python
-
-    #        buffer.tabular(
-    #            'table_name',
-    #            [['abc', 123, 3.14, 'xyz'],
-    #             ['def', 456, 6.28, 'abc'],
-    #             ['ghi', 789, 9.87, 'def']],
-    #            header=['col1', 'col2', 'col3', 'col4'],
-    #            symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.
-
-    #    Alternatively, you can specify a list of symbol column names.
-
-    #    .. code-block:: python
-
-    #        buffer.tabular(
-    #            'table_name',
-    #            [['abc', 123, 3.14, 'xyz'],
-    #             ['def', 456, 6.28, 'abc'],
-    #             ['ghi', 789, 9.87, 'def']],
-    #            header=['col1', 'col2', 'col3', 'col4'],
-    #            symbols=['col1'])  # `col1` is SYMBOL; 'col4' is STRING.
-
-    #     Note that column indices are 0-based and negative indices are counted
-    #     from the end.
-    #     """
-    #     raise ValueError('nyi')
-
     def pandas(
             self,
             data,  # : pd.DataFrame
@@ -1041,7 +877,114 @@ cdef class Buffer:
             at: Union[None, int, str, TimestampNanos, datetime] = None):
         """
         Add a pandas DataFrame to the buffer.
+
+        Also see the :func:`Sender.pandas` method if you're
+        not using the buffer explicitly. It supports the same parameters
+        and also supports auto-flushing.
+
+        This feature requires the ``pandas``, ``numpy` and ``pyarrow``
+        package to be installed.
+
+        :param data: The pandas DataFrame to serialize to the buffer.
+        :type data: pandas.DataFrame
+
+        :param table_name: The name of the table to which the rows belong.
+
+            If ``None``, the table name is taken from the ``table_name_col``
+            parameter. If both ``table_name`` and ``table_name_col`` are
+            ``None``, the table name is taken from the DataFrame's ``.name``.
+        :type table_name: str or None
+
+        :param table_name_col: The name or index of the column in the DataFrame
+            that contains the table name.
+            
+            If ``None``, the table name is taken
+            from the ``table_name`` parameter. If both ``table_name`` and
+            ``table_name_col`` are ``None``, the table name is taken from the
+            DataFrame's ``.name``.
+
+            If ``table_name_col`` is an integer, it is interpreted as the index
+            of the column starting from ``0``. The index of the column can be
+            negative, in which case it is interpreted as an offset from the end
+            of the DataFrame. E.g. ``-1`` is the last column.
+        :type table_name_col: str or int or None
+
+        :param symbols: The columns to be serialized as symbols.
+        
+            If ``'auto'`` (default), all columns of dtype ``'categorical'`` are
+            serialized as symbols. If ``True``, all ``str`` columns are
+            serialized as symbols. If ``False``, no columns are serialized as
+            symbols.
+            
+            The list of symbols can also be specified explicitly as a ``list``
+            of column names (``str``) or indices (``int``). Integer indices
+            start at ``0`` and can be negative, offset from the end of the
+            DataFrame. E.g. ``-1`` is the last column.
+
+            Only columns containing strings can be serialized as symbols.
+
+        :type symbols: str or bool or list of str or list of int
+
+        :param at: The designated timestamp of the rows.
+        
+            You can specify a single value for all rows or column name or index.
+            If ``None``, timestamp is assigned by the server for all rows.
+            If ``datetime``, the timestamp is converted to nanoseconds.
+            A ``datetime`` object is assumed to be in the UTC timezone unless
+            one is specified explicitly (so call ``datetime.utcnow()`` instead
+            of ``datetime.now()`` for the current timestamp).
+            To pass in a timestamp explicity as an integer use the
+            ``TimestampNanos`` wrapper type.
+
+            To specify a different timestamp for each row, pass in a column name
+            (``str``) or index (``int``, 0-based index, negative index
+            supported): In this case, the column needs to be of dtype
+            ``datetime64[ns]`` (assumed to be in the UTC timezone) or
+            ``datetime64[ns, tz]``. When a timezone is specified in the column,
+            it is converted to UTC automatically.
+
+            A timestamp column can also contain ``None`` values. The server will
+            assign the current timestamp to those rows.
+            Note that the timestamp is always converted to nanoseconds and in
+            the UTC timezone. Timezone information is dropped before sending.
+        :type at: TimestampNanos, datetime.datetime, int or str or None
+
+        **Note**: It is an error to specify both ``table_name`` and
+        ``table_name_col``.
+
+        **Note**: The "index" column of the DataFrame is never serialized,
+        even if it is named.
+
+        Example:
+
+        .. code-block:: python
+
+            import pandas as pd
+            import questdb.ingress as qi
+
+            buf = qi.Buffer()
+            # ...
+
+            df = pd.DataFrame({
+                'location': ['London', 'Managua', 'London'],
+                'temperature': [24.5, 35.0, 25.5],
+                'humidity': [0.5, 0.6, 0.45],
+                'ts': pd.date_range('2021-07-01', periods=3)})
+            buf.pandas(df, table_name='weather', at='ts', symbols=['location'])
+
+            # ...
+            sender.flush(buf)
+
+        ILP / Pandas Datatype Mappings:
+
+        +------------------+------------------+-----------------+
+        | ILP Datatype     | Pandas ``dtype`` | Nulls Allowed   |
+        +==================+==================+=================+
+        | ``SYMBOL``       | ``'object'`` column containing ``str``         | Yes       |
+        +------------------+------------------+-----------------+
+
         """
+        # TODO: Continue docs, examples and datatype mappings
         _pandas(
             self._impl,
             self._b,
@@ -1399,6 +1342,56 @@ cdef class Sender:
         Refer to the :func:`Buffer.row` documentation for details on arguments.
         """
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
+
+    def pandas(
+            self,
+            data,  # : pd.DataFrame
+            *,
+            table_name: Optional[str] = None,
+            table_name_col: Union[None, int, str] = None,
+            symbols: Union[str, bool, List[int], List[str]] = 'auto',
+            at: Union[None, int, str, TimestampNanos, datetime] = None):
+        """
+        Write a Pandas DataFrame to the internal buffer.
+
+        Example:
+
+        .. code-block:: python
+
+            import pandas as pd
+            import questdb.ingress as qi
+
+            df = pd.DataFrame({
+                'car': pd.Categorical(['Nic 42', 'Eddi', 'Nic 42', 'Eddi']),
+                'position': [1, 2, 1, 2],
+                'speed': [89.3, 98.2, 3, 4],
+                'lat_gforce': [0.1, -0.2, -0.6, 0.4],
+                'accelleration': [0.1, -0.2, 0.6, 4.4],
+                'tyre_pressure': [2.6, 2.5, 2.6, 2.5],
+                'ts': [
+                    pd.Timestamp('2022-08-09 13:56:00'),
+                    pd.Timestamp('2022-08-09 13:56:01'),
+                    pd.Timestamp('2022-08-09 13:56:02'),
+                    pd.Timestamp('2022-08-09 13:56:03')]})
+
+            with qi.Sender('localhost', 9000) as sender:
+                sender.pandas(df, table_name='race_metrics', at='ts')
+
+        This method builds on top of the :func:`Buffer.pandas` method.
+        See its documentation for details on arguments.
+
+        Additionally, this method also supports auto-flushing the buffer
+        as specified in the ``Sender``'s ``auto_flush`` constructor argument.
+
+        In case of data errors with auto-flushing enabled, some of the rows
+        may have been transmitted to the server already.
+        """
+        self._buffer.pandas(
+            data,
+            table_name=table_name,
+            table_name_col=table_name_col,
+            symbols=symbols,
+            at=at)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
         """

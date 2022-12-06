@@ -1269,6 +1269,8 @@ class TestPandas(unittest.TestCase):
 
 # TODO: Test all datatypes, but one, two, 10 and 1000 rows. Include None, NA and NaN.
 # TODO: Test all datatypes, but multiple row chunks.
+# TODO: Test datetime `at` argument with timezone.
+# TODO: Test `df.name = 'foo'`
 
 
 if __name__ == '__main__':
