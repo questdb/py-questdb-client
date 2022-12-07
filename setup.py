@@ -21,6 +21,15 @@ MODE = platform.architecture()[0]  # '32bit' or '64bit'
 WIN_32BIT_CARGO_TARGET = 'i686-pc-windows-msvc'
 
 
+INSTRUMENT_FUZZING = False
+if os.environ.get('TEST_QUESTDB_FUZZING') == '1':
+    INSTRUMENT_FUZZING = True
+    ORIG_CC = os.environ.get('CC')
+    os.environ['CC'] = "clang"
+    ORIG_CXX = os.environ.get('CXX')
+    os.environ['CXX'] = "clang++"
+
+
 def ingress_extension():
     lib_prefix = ''
     lib_suffix = ''
@@ -42,8 +51,12 @@ def ingress_extension():
     else:
         questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
         pystr_to_utf8_lib_dir = pystr_to_utf8_dir / 'target' / 'release'
-        extra_compile_args.append('-flto')
-        extra_link_args.append('-flto')
+        if INSTRUMENT_FUZZING:
+            extra_compile_args.append('-fsanitize=fuzzer-no-link')
+            extra_link_args.append('-fsanitize=fuzzer-no-link')
+        else:
+            extra_compile_args.append('-flto')
+            extra_link_args.append('-flto')
 
     if PLATFORM == 'darwin':
         lib_prefix = 'lib'
@@ -114,13 +127,25 @@ def cargo_build():
     if PLATFORM == 'win32' and MODE == '32bit':
         cargo_args.append(f'--target={WIN_32BIT_CARGO_TARGET}')
 
+    env = os.environ.copy()
+    if INSTRUMENT_FUZZING:
+        if ORIG_CC is not None:
+            env['CC'] = ORIG_CC
+        else:
+            del env['CC']
+        if ORIG_CXX is not None:
+            env['CXX'] = ORIG_CXX
+        else:
+            del env['CXX']
     subprocess.check_call(
         cargo_args,
-        cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'))
+        cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'),
+        env=env)
 
     subprocess.check_call(
         cargo_args,
-        cwd=str(PROJ_ROOT / 'pystr-to-utf8'))
+        cwd=str(PROJ_ROOT / 'pystr-to-utf8'),
+        env=env)
 
 
 class questdb_build_ext(build_ext):

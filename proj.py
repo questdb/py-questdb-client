@@ -67,6 +67,12 @@ def build():
 
 
 @command
+def build_fuzzing():
+    _run('python3', 'setup.py', 'build_ext', '--inplace',
+        env={'TEST_QUESTDB_FUZZING': '1'})
+
+
+@command
 def test(all=False, patch_path='1', *args):
     _run('cargo', 'test', cwd=PROJ_ROOT / 'pystr-to-utf8')
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
@@ -74,6 +80,30 @@ def test(all=False, patch_path='1', *args):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
     _run('python3', 'test/test.py', '-v', *args,
          env=env)
+
+
+@command
+def test_fuzzing(*args):
+    import atheris
+    import pathlib
+    lib_path = pathlib.Path(atheris.path()) / 'asan_with_fuzzer.so'
+    if not lib_path.exists():
+        sys.stderr.write(f'WARNING: {lib_path} not found\n')
+        sys.exit(42)
+    ld_preload = os.environ.get('LD_PRELOAD', '')
+    if ld_preload:
+        ld_preload += ':'
+    ld_preload += str(lib_path)
+    cmd = [
+        'python3',
+        'test/test_pandas_integration_fuzz.py'] + list(args)
+    if not args:
+        cmd.extend([
+            '-detect_leaks=0',
+            '-rss_limit_mb=32768',
+            '-artifact_prefix=fuzz-artifact/',
+            '-create_missing_dirs=1'])
+    _run(*cmd, env={'LD_PRELOAD': ld_preload})
 
 
 @command

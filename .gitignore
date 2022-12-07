@@ -6,6 +6,9 @@ rustup-init.exe
 perf.data*
 perf/*.svg
 
+# Atheris Crash/OOM and other files
+fuzz-artifact/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
