@@ -329,6 +329,10 @@ cdef void col_t_release(col_t* col):
     if col.arrow_schema.release != NULL:
         col.arrow_schema.release(&col.arrow_schema)
 
+    free(col.chunks.chunks)
+    col.chunks.chunks = NULL
+    col.chunks.n_chunks = 0
+
 
 # Calloc'd array of col_t.
 cdef struct col_t_arr:
