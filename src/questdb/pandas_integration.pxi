@@ -442,16 +442,16 @@ cdef object _pandas_may_import_deps():
     _PYARROW = pyarrow
 
 
-cdef object _pandas_check_is_dataframe(object data):
-    if not isinstance(data, _PANDAS.DataFrame):
+cdef object _pandas_check_is_dataframe(object df):
+    if not isinstance(df, _PANDAS.DataFrame):
         raise TypeError(
-            f'Bad argument `data`: Expected {_fqn(_PANDAS.DataFrame)}, ' +
-            f'not an object of type {_fqn(type(data))}.')
+            f'Bad argument `df`: Expected {_fqn(_PANDAS.DataFrame)}, ' +
+            f'not an object of type {_fqn(type(df))}.')
 
 
 cdef ssize_t _pandas_resolve_table_name(
         qdb_pystr_buf* b,
-        object data,
+        object df,
         list pandas_cols,
         col_t_arr* cols,
         object table_name,
@@ -459,18 +459,9 @@ cdef ssize_t _pandas_resolve_table_name(
         size_t col_count,
         line_sender_table_name* name_out) except -2:
     """
-    Return a tuple-pair of:
-      * int column index
-      * object
-    
-    If the column index is -1, then `name_out` is set and either the returned
-    object is None or a bytes object to track ownership of data in `name_out`.
+    Resolve the table name string or column.
 
-    Alternatively, if the returned column index > 0, then `name_out` is not set
-    and the column index relates to which pandas column contains the table name
-    on a per-row basis. In such case, the object is always None.
-
-    This method validates input and may raise.
+    Returns -1 if the table name is a string, otherwise the column index.
     """
     cdef size_t col_index = 0
     cdef PandasCol pandas_col
@@ -491,7 +482,7 @@ cdef ssize_t _pandas_resolve_table_name(
             raise TypeError('Bad argument `table_name`: Must be str.')
     elif table_name_col is not None:
         if isinstance(table_name_col, str):
-            _pandas_get_loc(data, table_name_col, 'table_name_col', &col_index)
+            _pandas_get_loc(df, table_name_col, 'table_name_col', &col_index)
         elif isinstance(table_name_col, int):
             _bind_col_index(
                 'table_name_col', table_name_col, col_count, &col_index)
@@ -509,9 +500,25 @@ cdef ssize_t _pandas_resolve_table_name(
         name_out.len = 0
         name_out.buf = NULL
         return col_index
+    elif df.index.name:
+        if not isinstance(df.index.name, str):
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                'Bad dataframe index name as table name: Expected str, ' +
+                f'not an object of type {_fqn(type(df.index.name))}.')
+
+        # If the index has a name, use that as the table name.
+        try:
+            str_to_table_name_copy(b, <PyObject*>df.index.name, name_out)
+            return -1  # Magic value for "no column index".
+        except IngressError as ie:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f'Bad dataframe index name as table name: {ie}')
     else:
         raise ValueError(
-            'Must specify at least one of `table_name` or `table_name_col`.')
+            'Must specify at least one of `table_name` or `table_name_col`, ' +
+            'or set the dataframe index name (df.index.name = \'tbl_name\').')
 
 
 cdef void_int _bind_col_index(
@@ -569,7 +576,7 @@ cdef class PandasCol:
 
 
 cdef void_int _pandas_resolve_symbols(
-        object data,
+        object df,
         list pandas_cols,
         col_t_arr* cols,
         ssize_t table_name_col,
@@ -602,7 +609,7 @@ cdef void_int _pandas_resolve_symbols(
                 'of column names (str) or indices (int).')
         for symbol in symbols:
             if isinstance(symbol, str):
-                _pandas_get_loc(data, symbol, 'symbols', &col_index)
+                _pandas_get_loc(df, symbol, 'symbols', &col_index)
             elif isinstance(symbol, int):
                 _bind_col_index('symbol', symbol, cols.size, &col_index) 
             else:
@@ -616,7 +623,7 @@ cdef void_int _pandas_resolve_symbols(
             if (at_col >= 0) and (col_index == <size_t>at_col):
                 raise ValueError(
                     f'Bad argument `symbols`: Cannot use the `at` column ' +
-                    f'({data.columns[at_col]!r}) as a symbol column.')
+                    f'({df.columns[at_col]!r}) as a symbol column.')
             pandas_col = pandas_cols[col_index]
             col = &cols.d[col_index]
             _pandas_check_column_is_str(
@@ -627,13 +634,13 @@ cdef void_int _pandas_resolve_symbols(
 
 
 cdef void_int _pandas_get_loc(
-        object data, str col_name, str arg_name,
+        object df, str col_name, str arg_name,
         size_t* col_index_out) except -1:
     """
     Return the column index for `col_name`.
     """
     try:
-        col_index_out[0] = data.columns.get_loc(col_name)
+        col_index_out[0] = df.columns.get_loc(col_name)
     except KeyError:
         raise KeyError(
             f'Bad argument `{arg_name}`: ' +
@@ -658,7 +665,7 @@ cdef object _pandas_is_supported_datetime(object dtype):
 
 
 cdef ssize_t _pandas_resolve_at(
-        object data,
+        object df,
         col_t_arr* cols,
         object at,
         size_t col_count,
@@ -676,7 +683,7 @@ cdef ssize_t _pandas_resolve_at(
         at_value_out[0] = datetime_to_nanos(at)
         return -1
     elif isinstance(at, str):
-        _pandas_get_loc(data, at, 'at', &col_index)
+        _pandas_get_loc(df, at, 'at', &col_index)
     elif isinstance(at, int):
         _bind_col_index('at', at, col_count, &col_index)
     else:
@@ -684,7 +691,7 @@ cdef ssize_t _pandas_resolve_at(
             f'Bad argument `at`: Unsupported type {_fqn(type(at))}. ' +
             'Must be one of: None, TimestampNanos, datetime, ' +
             'int (column index), str (colum name)')
-    dtype = data.dtypes[col_index]
+    dtype = df.dtypes[col_index]
     if _pandas_is_supported_datetime(dtype):
         at_value_out[0] = _AT_IS_SET_BY_COLUMN
         col = &cols.d[col_index]
@@ -1059,7 +1066,7 @@ cdef int _pandas_compare_cols(const void* lhs, const void* rhs) nogil:
 
 
 cdef void_int _pandas_resolve_args(
-        object data,
+        object df,
         object table_name,
         object table_name_col,
         object symbols,
@@ -1074,21 +1081,20 @@ cdef void_int _pandas_resolve_args(
     cdef ssize_t at_col
 
     cdef list pandas_cols = [
-        PandasCol(name, data.dtypes[index], series)
-        for index, (name, series) in enumerate(data.items())]
+        PandasCol(name, df.dtypes[index], series)
+        for index, (name, series) in enumerate(df.items())]
     _pandas_resolve_cols(b, pandas_cols, cols, any_cols_need_gil_out)
     name_col = _pandas_resolve_table_name(
         b,
-        data,
+        df,
         pandas_cols,
         cols,
         table_name,
         table_name_col,
         col_count,
         c_table_name_out)
-    at_col = _pandas_resolve_at(data, cols, at, col_count, at_value_out)
-    _pandas_resolve_symbols(
-        data, pandas_cols, cols, name_col, at_col, symbols)
+    at_col = _pandas_resolve_at(df, cols, at, col_count, at_value_out)
+    _pandas_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
     _pandas_resolve_cols_target_name_and_dc(b, pandas_cols, cols)
     qsort(cols.d, col_count, sizeof(col_t), _pandas_compare_cols)
 
@@ -2069,7 +2075,7 @@ cdef size_t _CELL_GIL_BLIP_INTERVAL = 40000
 cdef void_int _pandas(
         line_sender_buffer* impl,
         qdb_pystr_buf* b,
-        object data,
+        object df,
         object table_name,
         object table_name_col,
         object symbols,
@@ -2090,9 +2096,9 @@ cdef void_int _pandas(
     cdef bint was_serializing_cell = False
 
     _pandas_may_import_deps()
-    _pandas_check_is_dataframe(data)
-    row_count = len(data)
-    col_count = len(data.columns)
+    _pandas_check_is_dataframe(df)
+    row_count = len(df)
+    col_count = len(df.columns)
     if (col_count == 0) or (row_count == 0):
         return 0  # Nothing to do.
 
@@ -2100,7 +2106,7 @@ cdef void_int _pandas(
         qdb_pystr_buf_clear(b)
         cols = col_t_arr_new(col_count)
         _pandas_resolve_args(
-            data,
+            df,
             table_name,
             table_name_col,
             symbols,
@@ -2176,9 +2182,9 @@ cdef void_int _pandas(
                 raise IngressError(
                     IngressErrorCode.BadDataFrame,
                     'Failed to serialize value of column ' +
-                    repr(data.columns[col.orig_index]) +
+                    repr(df.columns[col.orig_index]) +
                     f' at row index {row_index} (' +
-                    repr(data.iloc[row_index, col.orig_index]) +
+                    repr(df.iloc[row_index, col.orig_index]) +
                     f'): {e}  [dc={<int>col.dispatch_code}]') from e
             elif (isinstance(e, IngressError) and
                     (e.code == IngressErrorCode.InvalidApiCall)):

@@ -869,7 +869,7 @@ cdef class Buffer:
 
     def pandas(
             self,
-            data,  # : pd.DataFrame
+            df,  # : pd.DataFrame
             *,
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
@@ -885,14 +885,15 @@ cdef class Buffer:
         This feature requires the ``pandas``, ``numpy` and ``pyarrow``
         package to be installed.
 
-        :param data: The pandas DataFrame to serialize to the buffer.
-        :type data: pandas.DataFrame
+        :param df: The pandas DataFrame to serialize to the buffer.
+        :type df: pandas.DataFrame
 
         :param table_name: The name of the table to which the rows belong.
 
             If ``None``, the table name is taken from the ``table_name_col``
             parameter. If both ``table_name`` and ``table_name_col`` are
-            ``None``, the table name is taken from the DataFrame's ``.name``.
+            ``None``, the table name is taken from the DataFrame's index
+            name (``df.index.name`` attribute).
         :type table_name: str or None
 
         :param table_name_col: The name or index of the column in the DataFrame
@@ -901,7 +902,7 @@ cdef class Buffer:
             If ``None``, the table name is taken
             from the ``table_name`` parameter. If both ``table_name`` and
             ``table_name_col`` are ``None``, the table name is taken from the
-            DataFrame's ``.name``.
+            DataFrame's index name (``df.index.name`` attribute).
 
             If ``table_name_col`` is an integer, it is interpreted as the index
             of the column starting from ``0``. The index of the column can be
@@ -988,7 +989,7 @@ cdef class Buffer:
         _pandas(
             self._impl,
             self._b,
-            data,
+            df,
             table_name,
             table_name_col,
             symbols,
@@ -1345,7 +1346,7 @@ cdef class Sender:
 
     def pandas(
             self,
-            data,  # : pd.DataFrame
+            df,  # : pd.DataFrame
             *,
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
@@ -1387,7 +1388,7 @@ cdef class Sender:
         may have been transmitted to the server already.
         """
         self._buffer.pandas(
-            data,
+            df,
             table_name=table_name,
             table_name_col=table_name_col,
             symbols=symbols,

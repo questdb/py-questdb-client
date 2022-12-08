@@ -10,8 +10,8 @@ import sys
 import struct
 import patch_path
 patch_path.patch()
-from random import Random
 import numpy as np
+from numpy.random import Generator, PCG64
 import pandas as pd
 import pyarrow as pa
 import re
@@ -56,14 +56,6 @@ def get_random_unicode(rand, length, none_val_prob=0):
     return ''.join(rand.choice(TEST_ALPHABET) for _ in range(length))
 
 
-class TooMany(Exception):
-    pass
-
-
-class IllegalConstruct(Exception):
-    pass
-
-
 @atheris.instrument_func
 def gen_string_series(rand, n_rows, none_val_prob, length, dtype):
     series_n_rows = n_rows
@@ -79,14 +71,30 @@ def gen_string_series(rand, n_rows, none_val_prob, length, dtype):
     return pd.Series(data, dtype=dtype)
 
 
+def gen_numpy_series(rand, n_rows, dtype):
+    return pd.Series(
+        rand.integers(
+            np.iinfo(dtype).min,
+            np.iinfo(dtype).max,
+            size=n_rows,
+            dtype=dtype))
+
+
+@atheris.instrument_func
+def gen_series_i8_numpy(rand, n_rows, none_val_prob):
+    return gen_numpy_series(rand, n_rows, np.int8)
+
+
 @atheris.instrument_func
 def gen_series_pyobj_str(rand, n_rows, none_val_prob):
     return gen_string_series(rand, n_rows, none_val_prob, 6, 'object')
 
 
+# TODO: Test all datatypes
+# TODO: Include None, NA and NaN.
 series_generators = [
-    # gen_series_i8,
-    # gen_series_i16,
+    gen_series_i8_numpy,
+    # gen_series_i16_numpy,
     gen_series_pyobj_str]
 
 
@@ -103,7 +111,7 @@ def parse_input_bytes(input_bytes):
         series_generators[fdp.ConsumeIntInRange(0, len(series_generators) - 1)]
         for _ in range(n_cols)]
     n_rows = fdp.ConsumeIntInRange(10, 5000)
-    rand = Random(rand_seed)
+    rand = Generator(PCG64(rand_seed))
     series_list = []
     col_name = lambda: f'{get_random_unicode(rand, 4)}_{len(series_list)}'
     table_name = None
@@ -137,10 +145,7 @@ def parse_input_bytes(input_bytes):
 @atheris.instrument_func
 def test_pandas(input_bytes):
     # print(f'input_bytes: {input_bytes}')
-    try:
-        params = parse_input_bytes(input_bytes)
-    except (TooMany, IllegalConstruct):
-        return
+    params = parse_input_bytes(input_bytes)
     df, table_name, table_name_col, symbols, at = params
 
     try:

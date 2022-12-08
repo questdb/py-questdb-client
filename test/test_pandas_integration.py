@@ -140,6 +140,37 @@ class TestPandas(unittest.TestCase):
             't2,A=a2,D=a2 E=2.0,F=2i 1520726400000000000\n' +
             't1,A=a3,B=b3,C=b3,D=a3 E=3.0,F=3i 1520812800000000000\n')
 
+    def test_named_dataframe(self):
+        df = pd.DataFrame({
+            'a': [1, 2, 3],
+            'b': ['a', 'b', 'c']})
+        df.index.name = 'table_name'
+        buf = _pandas(df)
+        self.assertEqual(
+            buf,
+            'table_name a=1i,b="a"\n' +
+            'table_name a=2i,b="b"\n' +
+            'table_name a=3i,b="c"\n')
+    
+        buf = _pandas(df, table_name='tbl1')
+        self.assertEqual(
+            buf,
+            'tbl1 a=1i,b="a"\n' +
+            'tbl1 a=2i,b="b"\n' +
+            'tbl1 a=3i,b="c"\n')
+
+        buf = _pandas(df, table_name_col='b')
+        self.assertEqual(
+            buf,
+            'a a=1i\n' +
+            'b a=2i\n' +
+            'c a=3i\n')
+
+        df.index.name = 42  # bad type, not str
+        with self.assertRaisesRegex(qi.IngressError,
+                'Bad dataframe index name as table.*: Expected str, not.*int.'):
+            _pandas(df)
+
     def test_row_of_nulls(self):
         df = pd.DataFrame({'a': ['a1', None, 'a3']})
         with self.assertRaisesRegex(
@@ -1266,11 +1297,8 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=2i\n' +
             'tbl1 b=3i\n')
 
-
-# TODO: Test all datatypes, but one, two, 10 and 1000 rows. Include None, NA and NaN.
 # TODO: Test all datatypes, but multiple row chunks.
 # TODO: Test datetime `at` argument with timezone.
-# TODO: Test `df.name = 'foo'`
 
 
 if __name__ == '__main__':
