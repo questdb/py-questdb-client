@@ -11,7 +11,6 @@ BROKEN_TIMEZONES = True
 try:
     import zoneinfo
     _TZ = zoneinfo.ZoneInfo('America/New_York')
-    # PyTz backup data (which we rely on) isn't accurate for epoch-0 testing.
     BROKEN_TIMEZONES = os.name == 'nt'
 except ImportError:
     import pytz
