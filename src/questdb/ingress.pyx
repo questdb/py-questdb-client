@@ -341,6 +341,10 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(dt.microsecond * 1000))
 
 
+cdef int64_t _US_SEC = 1000000
+cdef int64_t _NS_US = 1000
+
+
 cdef int64_t get_time_now_us() except -1:
     """
     Get the current time in microseconds.
@@ -348,10 +352,14 @@ cdef int64_t get_time_now_us() except -1:
     IF UNAME_SYSNAME == 'Windows':
         return time.time_ns() // 1000
     ELSE:
+        # Note: Y2K38 bug on 32-bit systems, but we don't care.
         cdef timespec ts
         if clock_gettime(CLOCK_REALTIME, &ts) != 0:
             raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
-        return ts.tv_sec * 1000000 + ts.tv_nsec // 1000
+        return <int64_t>(ts.tv_sec) * _US_SEC + <int64_t>(ts.tv_nsec) // _NS_US
+
+
+cdef int64_t _NS_SEC = 1000000000
 
 
 cdef int64_t get_time_now_ns() except -1:
@@ -361,10 +369,11 @@ cdef int64_t get_time_now_ns() except -1:
     IF UNAME_SYSNAME == 'Windows':
         return time.time_ns()
     ELSE:
+        # Note: Y2K38 bug on 32-bit systems, but we don't care.
         cdef timespec ts
         if clock_gettime(CLOCK_REALTIME, &ts) != 0:
             raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
-        return ts.tv_sec * 1000000000 + ts.tv_nsec
+        return <int64_t>(ts.tv_sec) * _NS_SEC + <int64_t>(ts.tv_nsec)
 
 
 cdef class TimestampMicros:
@@ -429,6 +438,9 @@ cdef class TimestampMicros:
         """Number of microseconds (Unix epoch timestamp, UTC)."""
         return self._value
 
+    def __repr__(self):
+        return f'TimestampMicros.({self._value})'
+
 
 cdef class TimestampNanos:
     """
@@ -490,6 +502,9 @@ cdef class TimestampNanos:
     def value(self) -> int:
         """Number of nanoseconds (Unix epoch timestamp, UTC)."""
         return self._value
+
+    def __repr__(self):
+        return f'TimestampNanos({self.value})'
 
 
 cdef class Sender

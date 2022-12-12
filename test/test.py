@@ -11,14 +11,6 @@ import patch_path
 from mock_server import Server
 
 
-BROKEN_TIMEZONES = True
-try:
-    import zoneinfo
-    BROKEN_TIMEZONES = os.name == 'nt'
-except ImportError:
-    pass
-
-
 import questdb.ingress as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
