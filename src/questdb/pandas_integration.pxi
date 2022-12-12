@@ -647,8 +647,9 @@ cdef void_int _pandas_get_loc(
             f'Column {col_name!r} not found in the dataframe.')
 
 
-# The -1 value is safe to use as a sentinel because the TimestampNanos type
-# already validates that the value is >= 0.
+# The values -2 and -1 are safe to use as a sentinel because the TimestampNanos
+# type already validates that the value is >= 0.
+cdef int64_t _AT_IS_SERVER_NOW = -2
 cdef int64_t _AT_IS_SET_BY_COLUMN = -1
 
 
@@ -673,13 +674,19 @@ cdef ssize_t _pandas_resolve_at(
     cdef size_t col_index
     cdef object dtype
     cdef PandasCol pandas_col
+    cdef TimestampNanos at_nanos
     if at is None:
-        at_value_out[0] = 0  # Special value for `at_now`.
+        at_value_out[0] = _AT_IS_SERVER_NOW
         return -1
     elif isinstance(at, TimestampNanos):
-        at_value_out[0] = at._value
+        at_nanos = at
+        at_value_out[0] = at_nanos._value
         return -1
     elif isinstance(at, datetime):
+        if at.timestamp() < 0:
+            raise ValueError(
+                'Bad argument `at`: Cannot use a datetime before the ' +
+                'Unix epoch (1970-01-01 00:00:00).')
         at_value_out[0] = datetime_to_nanos(at)
         return -1
     elif isinstance(at, str):
@@ -2165,11 +2172,11 @@ cdef void_int _pandas(
                 was_serializing_cell = False
 
                 # Fixed "at" value (not from a column).
-                if at_value == 0:
+                if at_value == _AT_IS_SERVER_NOW:
                     if not line_sender_buffer_at_now(impl, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
-                elif at_value > 0:
+                elif at_value >= 0:
                     if not line_sender_buffer_at(impl, at_value, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)

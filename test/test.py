@@ -445,6 +445,54 @@ class TestSender(unittest.TestCase):
             qi.Sender(host='localhost', port=9009, max_name_len=-1)
 
 
+class TestBases:
+    class Timestamp(unittest.TestCase):
+        def test_from_int(self):
+            ns = 1670857929778202000
+            num = ns // self.ns_scale
+            ts = self.timestamp_cls(num)
+            self.assertEqual(ts.value, num)
+
+            ts0 = self.timestamp_cls(0)
+            self.assertEqual(ts0.value, 0)
+
+            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+                self.timestamp_cls(-1)
+
+        def test_from_datetime(self):
+            utc = datetime.timezone.utc
+
+            dt1 = datetime.datetime(2022, 1, 1, 12, 0, 0, 0, tzinfo=utc)
+            ts1 = self.timestamp_cls.from_datetime(dt1)
+            self.assertEqual(ts1.value, 1641038400000000000 // self.ns_scale)
+            self.assertEqual(
+                ts1.value,
+                int(dt1.timestamp() * 1000000000 // self.ns_scale))
+
+            dt2 = datetime.datetime(1970, 1, 1, tzinfo=utc)
+            ts2 = self.timestamp_cls.from_datetime(dt2)
+            self.assertEqual(ts2.value, 0)
+
+            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+                self.timestamp_cls.from_datetime(
+                    datetime.datetime(1969, 12, 31, tzinfo=utc))
+
+            dt_naive = datetime.datetime(2022, 1, 1, 12, 0, 0, 0,
+                tzinfo=utc).astimezone(None).replace(tzinfo=None)
+            ts3 = self.timestamp_cls.from_datetime(dt_naive)
+            self.assertEqual(ts3.value, 1641038400000000000 // self.ns_scale)
+
+
+class TestTimestampMicros(TestBases.Timestamp):
+    timestamp_cls = qi.TimestampMicros
+    ns_scale = 1000
+
+
+class TestTimestampNanos(TestBases.Timestamp):
+    timestamp_cls = qi.TimestampNanos
+    ns_scale = 1
+
+
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile

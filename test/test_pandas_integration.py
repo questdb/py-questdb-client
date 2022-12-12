@@ -4,6 +4,7 @@ import sys
 import os
 sys.dont_write_bytecode = True
 import unittest
+import datetime as dt
 
 try:
     import zoneinfo
@@ -170,6 +171,68 @@ class TestPandas(unittest.TestCase):
         with self.assertRaisesRegex(qi.IngressError,
                 'Bad dataframe index name as table.*: Expected str, not.*int.'):
             _pandas(df)
+
+    def test_at_good(self):
+        df = pd.DataFrame({
+            'a': [1, 2, 3],
+            'b': ['a', 'b', 'c']})
+        df.index.name = 'test_at_good'
+        with self.assertRaisesRegex(KeyError,
+                'Bad argument `at`: Column .2018-03.* not found .* dataframe.'):
+            _pandas(df, at='2018-03-10T00:00:00Z')
+
+        # Same timestamp, specified in various ways.
+        t1_setup = dt.datetime(2018, 3, 10, 0, 0, 0, tzinfo=dt.timezone.utc)
+        t1 = t1_setup.astimezone(tz=None).replace(tzinfo=None)  # naive, local
+        t2 = dt.datetime(2018, 3, 10, 0, 0, 0, tzinfo=dt.timezone.utc)
+        t3 = dt.datetime(2018, 3, 9, 19, 0, 0, tzinfo=_TZ)
+        t4 = qi.TimestampNanos(1520640000000000000)
+        t5 = qi.TimestampNanos.from_datetime(t1)
+        t6 = qi.TimestampNanos.from_datetime(t2)
+        t7 = qi.TimestampNanos.from_datetime(t3)
+        timestamps = [t1, t2, t3, t4, t5, t6, t7]
+        for ts in timestamps:
+            buf = _pandas(df, table_name='tbl1', at=ts)
+            self.assertEqual(
+                buf,
+                'tbl1 a=1i,b="a" 1520640000000000000\n' +
+                'tbl1 a=2i,b="b" 1520640000000000000\n' +
+                'tbl1 a=3i,b="c" 1520640000000000000\n')
+
+    def test_at_neg(self):
+        n1 = dt.datetime(1965, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+        n2 = dt.datetime(1965, 1, 1, 0, 0, 0, tzinfo=_TZ)
+        n3 = dt.datetime(1965, 1, 1, 0, 0, 0)
+        neg_timestamps = [n1, n2, n3]
+        for ts in neg_timestamps:
+            with self.assertRaisesRegex(ValueError,
+                    'Bad.*`at`: Cannot .* before the Unix epoch .1970-01-01.*'):
+                _pandas(DF2, at=ts, table_name='test_at_neg')
+
+    def test_at_ts_0(self):
+        df = pd.DataFrame({
+            'a': [1, 2, 3],
+            'b': ['a', 'b', 'c']})
+        df.index.name = 'test_at_ts_0'
+
+        # Epoch 0, specified in various ways.
+        e1_setup = dt.datetime(1970, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+        e1 = e1_setup.astimezone(tz=None).replace(tzinfo=None)  # naive, local
+        e2 = dt.datetime(1970, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+        e3 = dt.datetime(1969, 12, 31, 19, 0, 0, tzinfo=_TZ)
+        e4 = qi.TimestampNanos(0)
+        e5 = qi.TimestampNanos.from_datetime(e1)
+        e6 = qi.TimestampNanos.from_datetime(e2)
+        e7 = qi.TimestampNanos.from_datetime(e3)
+        edge_timestamps = [e1, e2, e3, e4, e5, e6, e7]
+
+        for ts in edge_timestamps:
+            buf = _pandas(df, table_name='tbl1', at=ts)
+            self.assertEqual(
+                buf,
+                'tbl1 a=1i,b="a" 0\n' +
+                'tbl1 a=2i,b="b" 0\n' +
+                'tbl1 a=3i,b="c" 0\n')
 
     def test_row_of_nulls(self):
         df = pd.DataFrame({'a': ['a1', None, 'a3']})

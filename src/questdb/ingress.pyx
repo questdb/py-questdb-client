@@ -36,6 +36,7 @@ from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
 from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
 from libc.string cimport strncmp, memset
 from libc.math cimport isnan
+from libc.errno cimport errno
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
@@ -65,6 +66,13 @@ from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
 import pathlib
 
 import sys
+
+# For `get_time_now_ns` and `get_time_now_us` functions.
+IF UNAME_SYSNAME == 'Windows':
+    import time
+ELSE:
+    from posix.time cimport timespec, clock_gettime, CLOCK_REALTIME
+
 
 class IngressErrorCode(Enum):
     """Category of Error."""
@@ -333,40 +341,70 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(dt.microsecond * 1000))
 
 
+cdef int64_t get_time_now_us() except -1:
+    """
+    Get the current time in microseconds.
+    """
+    IF UNAME_SYSNAME == 'Windows':
+        return time.time_ns() // 1000
+    ELSE:
+        cdef timespec ts
+        if clock_gettime(CLOCK_REALTIME, &ts) != 0:
+            raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
+        return ts.tv_sec * 1000000 + ts.tv_nsec // 1000
+
+
+cdef int64_t get_time_now_ns() except -1:
+    """
+    Get the current time in nanoseconds.
+    """
+    IF UNAME_SYSNAME == 'Windows':
+        return time.time_ns()
+    ELSE:
+        cdef timespec ts
+        if clock_gettime(CLOCK_REALTIME, &ts) != 0:
+            raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
+        return ts.tv_sec * 1000000000 + ts.tv_nsec
+
+
 cdef class TimestampMicros:
     """
-    A timestamp in microseconds since the UNIX epoch.
+    A timestamp in microseconds since the UNIX epoch (UTC).
 
-    You may construct a ``TimestampMicros`` from an integer or a ``datetime``.
+    You may construct a ``TimestampMicros`` from an integer or a
+    ``datetime.datetime``, or simply call the :func:`TimestampMicros.now`
+    method.
 
     .. code-block:: python
 
-        # Can't be negative.
-        TimestampMicros(1657888365426838016)
+        # Recommended way to get the current timestamp.
+        TimestampMicros.now()
 
-        # Careful with the timezeone!
-        TimestampMicros.from_datetime(datetime.datetime.utcnow())
+        # The above is equivalent to:
+        TimestampMicros(time.time_ns() // 1000)
 
-    When constructing from a ``datetime``, you should take extra care
-    to ensure that the timezone is correct.
+        # You can provide a numeric timestamp too. It can't be negative.
+        TimestampMicros(1657888365426838)
 
-    For example, ``datetime.now()`` implies the `local` timezone which
-    is probably not what you want.
-
-    When constructing the ``datetime`` object explicity, you pass in the
-    timezone to use.
+    ``TimestampMicros`` can also be constructed from a ``datetime.datetime``
+    object.
 
     .. code-block:: python
 
         TimestampMicros.from_datetime(
-            datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+            datetime.datetime.now(tz=datetime.timezone.utc))
 
+    We recommend that when using ``datetime`` objects, you explicitly pass in
+    the timezone to use. This is because ``datetime`` objects without an
+    associated timezone are assumed to be in the local timezone and it is easy
+    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
+    bug).
     """
     cdef int64_t _value
 
     def __cinit__(self, value: int):
         if value < 0:
-            raise ValueError('value must positive integer.')
+            raise ValueError('value must be a positive integer.')
         self._value = value
 
     @classmethod
@@ -378,46 +416,57 @@ cdef class TimestampMicros:
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_micros(dt))
 
+    @classmethod
+    def now(cls):
+        """
+        Construct a ``TimestampMicros`` from the current time as UTC.
+        """
+        cdef int64_t value = get_time_now_us()
+        return cls(value)
+
     @property
     def value(self) -> int:
-        """Number of microseconds."""
+        """Number of microseconds (Unix epoch timestamp, UTC)."""
         return self._value
 
 
 cdef class TimestampNanos:
     """
-    A timestamp in nanoseconds since the UNIX epoch.
+    A timestamp in nanoseconds since the UNIX epoch (UTC).
 
-    You may construct a ``TimestampNanos`` from an integer or a ``datetime``.
+    You may construct a ``TimestampNanos`` from an integer or a
+    ``datetime.datetime``, or simply call the :func:`TimestampNanos.now`
+    method.
 
     .. code-block:: python
 
-        # Can't be negative.
+        # Recommended way to get the current timestamp.
+        TimestampNanos.now()
+
+        # The above is equivalent to:
+        TimestampNanos(time.time_ns())
+
+        # You can provide a numeric timestamp too. It can't be negative.
         TimestampNanos(1657888365426838016)
 
-        # Careful with the timezeone!
-        TimestampNanos.from_datetime(datetime.datetime.utcnow())
-
-    When constructing from a ``datetime``, you should take extra care
-    to ensure that the timezone is correct.
-
-    For example, ``datetime.now()`` implies the `local` timezone which
-    is probably not what you want.
-
-    When constructing the ``datetime`` object explicity, you pass in the
-    timezone to use.
+    ``TimestampNanos`` can also be constructed from a ``datetime`` object.
 
     .. code-block:: python
 
-        TimestampMicros.from_datetime(
-            datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+        TimestampNanos.from_datetime(
+            datetime.datetime.now(tz=datetime.timezone.utc))
 
+    We recommend that when using ``datetime`` objects, you explicitly pass in
+    the timezone to use. This is because ``datetime`` objects without an
+    associated timezone are assumed to be in the local timezone and it is easy
+    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
+    bug).
     """
     cdef int64_t _value
 
     def __cinit__(self, value: int):
         if value < 0:
-            raise ValueError('value must positive integer.')
+            raise ValueError('value must be a positive integer.')
         self._value = value
 
     @classmethod
@@ -429,9 +478,17 @@ cdef class TimestampNanos:
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_nanos(dt))
 
+    @classmethod
+    def now(cls):
+        """
+        Construct a ``TimestampNanos`` from the current time as UTC.
+        """
+        cdef int64_t value = get_time_now_ns()
+        return cls(value)
+
     @property
     def value(self) -> int:
-        """Number of nanoseconds."""
+        """Number of nanoseconds (Unix epoch timestamp, UTC)."""
         return self._value
 
 
@@ -811,7 +868,7 @@ cdef class Buffer:
                 columns={
                     'temperature': 24.5,
                     'humidity': 0.5},
-                at=datetime.datetime.utcnow())
+                at=datetime.datetime.now(tz=datetime.timezone.utc))
 
 
         Python strings passed as values to ``symbols`` are going to be encoded
@@ -930,24 +987,31 @@ cdef class Buffer:
         
             You can specify a single value for all rows or column name or index.
             If ``None``, timestamp is assigned by the server for all rows.
-            If ``datetime``, the timestamp is converted to nanoseconds.
-            A ``datetime`` object is assumed to be in the UTC timezone unless
-            one is specified explicitly (so call ``datetime.utcnow()`` instead
-            of ``datetime.now()`` for the current timestamp).
             To pass in a timestamp explicity as an integer use the
-            ``TimestampNanos`` wrapper type.
+            ``TimestampNanos`` wrapper type. To get the current timestamp,
+            use ``TimestampNanos.now()``.
+            When passing a ``datetime.datetime`` object, the timestamp is
+            converted to nanoseconds.
+            A ``datetime`` object is assumed to be in the local timezone unless
+            one is specified explicitly (so call
+            ``datetime.datetime.now(tz=datetime.timezone.utc)`` instead
+            of ``datetime.datetime.utcnow()`` for the current timestamp to
+            avoid bugs).
 
             To specify a different timestamp for each row, pass in a column name
             (``str``) or index (``int``, 0-based index, negative index
             supported): In this case, the column needs to be of dtype
-            ``datetime64[ns]`` (assumed to be in the UTC timezone) or
+            ``datetime64[ns]`` (assumed to be in the **UTC timezone** and not
+            local, due to differences in Pandas and Python datetime handling) or
             ``datetime64[ns, tz]``. When a timezone is specified in the column,
             it is converted to UTC automatically.
 
             A timestamp column can also contain ``None`` values. The server will
             assign the current timestamp to those rows.
-            Note that the timestamp is always converted to nanoseconds and in
-            the UTC timezone. Timezone information is dropped before sending.
+
+            **Note**: All timestamps are always converted to nanoseconds and in
+            the UTC timezone. Timezone information is dropped before sending and
+            QuestDB will not store any timezone information.
         :type at: TimestampNanos, datetime.datetime, int or str or None
 
         **Note**: It is an error to specify both ``table_name`` and
