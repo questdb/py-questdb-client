@@ -482,6 +482,13 @@ class TestBases:
             ts3 = self.timestamp_cls.from_datetime(dt_naive)
             self.assertEqual(ts3.value, 1641038400000000000 // self.ns_scale)
 
+        def test_now(self):
+            expected = time.time_ns() // self.ns_scale
+            actual = self.timestamp_cls.now().value
+            delta = abs(expected - actual)
+            one_sec = 1000000000 // self.ns_scale
+            self.assertLess(delta, one_sec)
+
 
 class TestTimestampMicros(TestBases.Timestamp):
     timestamp_cls = qi.TimestampMicros

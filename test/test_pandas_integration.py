@@ -204,6 +204,7 @@ class TestPandas(unittest.TestCase):
                 'tbl1 a=2i,b="b" 1520640000000000000\n' +
                 'tbl1 a=3i,b="c" 1520640000000000000\n')
 
+    @unittest.skipIf(BROKEN_TIMEZONES, 'requires accurate timezones')
     def test_at_neg(self):
         n1 = dt.datetime(1965, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
         n2 = dt.datetime(1965, 1, 1, 0, 0, 0, tzinfo=_TZ)
