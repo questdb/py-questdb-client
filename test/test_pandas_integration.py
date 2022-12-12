@@ -6,9 +6,13 @@ sys.dont_write_bytecode = True
 import unittest
 import datetime as dt
 
+BROKEN_TIMEZONES = True
+
 try:
     import zoneinfo
     _TZ = zoneinfo.ZoneInfo('America/New_York')
+    # PyTz backup data (which we rely on) isn't accurate for epoch-0 testing.
+    BROKEN_TIMEZONES = os.name == 'nt'
 except ImportError:
     import pytz
     _TZ = pytz.timezone('America/New_York')
@@ -172,6 +176,7 @@ class TestPandas(unittest.TestCase):
                 'Bad dataframe index name as table.*: Expected str, not.*int.'):
             _pandas(df)
 
+    @unittest.skipIf(BROKEN_TIMEZONES, 'requires accurate timezones')
     def test_at_good(self):
         df = pd.DataFrame({
             'a': [1, 2, 3],
@@ -209,6 +214,7 @@ class TestPandas(unittest.TestCase):
                     'Bad.*`at`: Cannot .* before the Unix epoch .1970-01-01.*'):
                 _pandas(DF2, at=ts, table_name='test_at_neg')
 
+    @unittest.skipIf(BROKEN_TIMEZONES, 'requires accurate timezones')
     def test_at_ts_0(self):
         df = pd.DataFrame({
             'a': [1, 2, 3],
