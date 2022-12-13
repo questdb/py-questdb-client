@@ -2090,25 +2090,34 @@ cdef void_int _pandas_handle_auto_flush(
             auto_flush_t af,
             line_sender_buffer* ls_buf,
             PyThreadState** gs) except -1:
-    cdef line_sender_error* err = NULL
+    cdef line_sender_error* flush_err
+    cdef line_sender_error* marker_err
+    cdef bint flush_ok
+    cdef bint marker_ok
     if (af.sender == NULL) or (line_sender_buffer_size(ls_buf) < af.watermark):
         return 0
 
     # Always temporarily release GIL during a flush.
     had_gil = _ensure_doesnt_have_gil(gs)
-    if not line_sender_flush(af.sender, ls_buf, &err):
-        line_sender_buffer_clear(ls_buf)  # To avoid double-flush in __exit__.
-        _ensure_has_gil(gs)
-        raise c_err_to_py(err)
+    flush_ok = line_sender_flush(af.sender, ls_buf, &flush_err)
+    if not flush_ok:
+        # To avoid flush reattempt on Sender.__exit__.
+        line_sender_buffer_clear(ls_buf)
 
-    # Flushing will have cleared the marker: We need to set it again.
-    if not line_sender_buffer_set_marker(ls_buf, &err):
-        _ensure_has_gil(gs)
-        raise c_err_to_py(err)
+    # Flushing will have cleared the marker: We need to set it again
+    # We need this also on error due to our error handling logic which will
+    # try to rewind the buffer on error and fail if the marker is unset.
+    marker_ok = line_sender_buffer_set_marker(ls_buf, &marker_err)
 
-    # Re-acquire GIL if we previously had it.
-    if had_gil:
+    if had_gil or (not flush_ok) or (not marker_ok):
         _ensure_has_gil(gs)
+
+    if not flush_ok:
+        raise c_err_to_py_fmt(flush_err, _FLUSH_FMT)
+
+    # The flush error takes precedence over the marker error.
+    if not marker_ok:
+        raise c_err_to_py(marker_err)
 
 
 # Every how many cells to release and re-acquire the Python GIL.

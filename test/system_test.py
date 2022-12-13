@@ -131,7 +131,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_auth_tls_ca_str(self):
         self._test_scenario(self.qdb_auth, AUTH, str(CA_PATH))
 
-    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(not pd, 'pandas not installed')
     def test_basic_pandas(self):
         port = self.qdb_plain.line_tcp_port
         pending = None

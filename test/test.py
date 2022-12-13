@@ -415,6 +415,55 @@ class TestSender(unittest.TestCase):
             msgs = server.recv()
             self.assertEqual(msgs, [])
 
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_pandas(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port) as sender:
+                server.accept()
+                df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
+                sender.pandas(df, table_name='tbl1')
+            msgs = server.recv()
+            self.assertEqual(
+                msgs,
+                [b'tbl1 a=1i,b=3.0',
+                    b'tbl1 a=2i,b=4.0'])
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_pandas_auto_flush(self):
+        with Server() as server:
+            # An auto-flush size of 20 bytes is enough to auto-flush the first
+            # row, but not the second.
+            with qi.Sender('localhost', server.port, auto_flush=20) as sender:
+                server.accept()
+                df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
+                sender.pandas(df, table_name='tbl1')
+                msgs = server.recv()
+                self.assertEqual(
+                    msgs,
+                    [b'tbl1 a=100000i,b=3.0'])
+
+                # The second row is still pending send.
+                self.assertEqual(len(sender), 16)
+
+                # So we give it some more data and we should see it flush.
+                sender.row('tbl1', columns={'a': 3, 'b': 5.0})
+                msgs = server.recv()
+                self.assertEqual(
+                    msgs,
+                    [b'tbl1 a=2i,b=4.0',
+                     b'tbl1 a=3i,b=5.0'])
+
+                self.assertEqual(len(sender), 0)
+
+                # We can now disconnect the server and see auto flush failing.
+                server.close()
+
+                exp_err = 'Could not flush buffer.* - See https'
+                with self.assertRaisesRegex(qi.IngressError, exp_err):
+                    for _ in range(1000):
+                        time.sleep(0.01)
+                        sender.pandas(df.head(1), table_name='tbl1')
+
     def test_new_buffer(self):
         sender = qi.Sender(
             host='localhost',
