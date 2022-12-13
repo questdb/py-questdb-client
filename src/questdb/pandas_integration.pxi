@@ -2097,6 +2097,7 @@ cdef void_int _pandas_handle_auto_flush(
     # Always temporarily release GIL during a flush.
     had_gil = _ensure_doesnt_have_gil(gs)
     if not line_sender_flush(af.sender, ls_buf, &err):
+        line_sender_buffer_clear(ls_buf)  # To avoid double-flush in __exit__.
         _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
