@@ -769,7 +769,7 @@ cdef class Buffer:
                 'TimestampMicros',
                 'datetime.datetime'))
             raise TypeError(
-                f'Unsupported type: {type(value)}. Must be one of: {valid}')
+                f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
     cdef inline void_int _may_trigger_row_complete(self) except -1:
         cdef line_sender_error* err = NULL
@@ -804,7 +804,7 @@ cdef class Buffer:
             self._at_dt(ts)
         else:
             raise TypeError(
-                f'Unsupported type: {type(ts)}. Must be one of: ' +
+                f'Unsupported type: {_fqn(type(ts))}. Must be one of: ' +
                 'TimestampNanos, datetime, None')
 
     cdef void_int _row(
@@ -1321,7 +1321,7 @@ cdef class Sender:
             else:
                 raise TypeError(
                     'tls must be a bool, a path or string pointing to CA file '
-                    f'or "insecure_skip_verify", not {type(tls)}')
+                    f'or "insecure_skip_verify", not {_fqn(type(tls))}')
 
         if read_timeout is not None:
             line_sender_opts_read_timeout(self._opts, read_timeout)
