@@ -12,6 +12,14 @@ sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from fixture import QuestDbFixture, install_questdb, CA_PATH, AUTH
 
 
+try:
+    import pandas as pd
+    import numpy
+    import pyarrow
+except ImportError:
+    pd = None
+
+
 import questdb.ingress as qi
 
 
@@ -123,6 +131,44 @@ class TestWithDatabase(unittest.TestCase):
     def test_auth_tls_ca_str(self):
         self._test_scenario(self.qdb_auth, AUTH, str(CA_PATH))
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_basic_pandas(self):
+        port = self.qdb_plain.line_tcp_port
+        pending = None
+        table_name = uuid.uuid4().hex
+        df = pd.DataFrame({
+            'col_a': [1, 2, 3],
+            'col_b': ['a', 'b', 'c'],
+            'col_c': [True, False, True],
+            'col_d': [1.5, 2.5, 3.5],
+            'col_e': pd.Categorical(['A', 'B', 'C']),
+            'col_f': [
+                numpy.datetime64('2021-01-01'),
+                numpy.datetime64('2021-01-02'),
+                numpy.datetime64('2021-01-03')]})
+        df.index.name = table_name
+        with qi.Sender('localhost', port) as sender:
+            sender.pandas(df)
+            pending = str(sender)
+
+        resp = self.qdb_plain.retry_check_table(
+            table_name, min_rows=3, log_ctx=pending)
+        exp_columns = [
+            {'name': 'col_e', 'type': 'SYMBOL'},
+            {'name': 'col_a', 'type': 'LONG'},
+            {'name': 'col_b', 'type': 'STRING'},
+            {'name': 'col_c', 'type': 'BOOLEAN'},
+            {'name': 'col_d', 'type': 'DOUBLE'},
+            {'name': 'col_f', 'type': 'TIMESTAMP'},
+            {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+
+        exp_dataset = [  # Comparison excludes timestamp column.
+            ['A', 1, 'a', True, 1.5, '2021-01-01T00:00:00.000000Z'],
+            ['B', 2, 'b', False, 2.5, '2021-01-02T00:00:00.000000Z'],
+            ['C', 3, 'c', True, 3.5, '2021-01-03T00:00:00.000000Z']]
+        scrubbed_dataset = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed_dataset, exp_dataset)
 
 if __name__ == '__main__':
     unittest.main()

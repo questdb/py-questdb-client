@@ -17,14 +17,14 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import TestWithDatabase
 
 try:
-    import pandas as pa
-    import numpy as np
-    import pyarrow as pa
+    import pandas as pd
+    import numpy
+    import pyarrow
 except ImportError:
-    pa = None
+    pd = None
 
 
-if pa is not None:
+if pd is not None:
     from test_pandas_integration import TestPandas
 else:
     class TestNoPandas(unittest.TestCase):
