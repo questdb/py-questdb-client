@@ -74,6 +74,24 @@ ELSE:
     from posix.time cimport timespec, clock_gettime, CLOCK_REALTIME
 
 
+cdef bint _has_gil(PyThreadState** gs):
+    return gs[0] == NULL
+
+
+cdef bint _ensure_doesnt_have_gil(PyThreadState** gs):
+    """Returns True if previously had the GIL, False otherwise."""
+    if _has_gil(gs):
+        gs[0] = PyEval_SaveThread()
+        return True
+    return False
+
+
+cdef void _ensure_has_gil(PyThreadState** gs):
+    if not _has_gil(gs):
+        PyEval_RestoreThread(gs[0])
+        gs[0] = NULL
+
+
 class IngressErrorCode(Enum):
     """Category of Error."""
     CouldNotResolveAddr = line_sender_error_could_not_resolve_addr
@@ -1066,6 +1084,7 @@ cdef class Buffer:
         """
         # TODO: Continue docs, examples and datatype mappings
         _pandas(
+            auto_flush_blank(),
             self._impl,
             self._b,
             df,
@@ -1466,12 +1485,19 @@ cdef class Sender:
         In case of data errors with auto-flushing enabled, some of the rows
         may have been transmitted to the server already.
         """
-        self._buffer.pandas(
+        cdef auto_flush_t af = auto_flush_blank()
+        if self._auto_flush_enabled:
+            af.sender = self._impl
+            af.watermark = self._auto_flush_watermark
+        _pandas(
+            af,
+            self._buffer._impl,
+            self._buffer._b,
             df,
-            table_name=table_name,
-            table_name_col=table_name_col,
-            symbols=symbols,
-            at=at)
+            table_name,
+            table_name_col,
+            symbols,
+            at)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
         """
@@ -1493,12 +1519,16 @@ cdef class Sender:
             Note that ``clear=False`` is only supported if ``buffer`` is also
             specified.
         """
+        cdef line_sender* sender = self._impl
+        cdef line_sender_error* err = NULL
+        cdef line_sender_buffer* c_buf = NULL
+        cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
+        cdef bint ok = False
+
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
 
-        cdef line_sender_error* err = NULL
-        cdef line_sender_buffer* c_buf = NULL
-        if self._impl == NULL:
+        if sender == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Not connected.')
@@ -1509,20 +1539,21 @@ cdef class Sender:
         if line_sender_buffer_size(c_buf) == 0:
             return
 
-        try:
-            if clear:
-                if not line_sender_flush(self._impl, c_buf, &err):
-                    raise c_err_to_py_fmt(err, _FLUSH_FMT)
-            else:
-                if not line_sender_flush_and_keep(self._impl, c_buf, &err):
-                    raise c_err_to_py_fmt(err, _FLUSH_FMT)
-        except:
-            # Prevent a follow-up call to `.close(flush=True)` (as is usually
-            # called from `__exit__`) to raise after the sender entered an error
-            # state following a failed call to `.flush()`.
+        # We might be blocking on IO, so temporarily release the GIL.
+        _ensure_doesnt_have_gil(&gs)
+        if clear:
+            ok = line_sender_flush(sender, c_buf, &err)
+        else:
+            ok = line_sender_flush_and_keep(sender, c_buf, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
             if c_buf == self._buffer._impl:
+                # Prevent a follow-up call to `.close(flush=True)` (as is
+                # usually called from `__exit__`) to raise after the sender
+                # entered an error state following a failed call to `.flush()`.
+                # Note: In this case `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
-            raise
+            raise c_err_to_py_fmt(err, _FLUSH_FMT)
 
     cdef _close(self):
         self._buffer = None
