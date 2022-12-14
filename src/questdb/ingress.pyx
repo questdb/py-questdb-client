@@ -57,7 +57,7 @@ from .ingress_helper cimport *
 ctypedef int void_int
 
 import cython
-include "pandas_integration.pxi"
+include "dataframe.pxi"
 
 
 from enum import Enum
@@ -957,7 +957,7 @@ cdef class Buffer:
         self._row(table_name, symbols, columns, at)
         return self
 
-    def pandas(
+    def dataframe(
             self,
             df,  # : pd.DataFrame
             *,
@@ -968,7 +968,7 @@ cdef class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        Also see the :func:`Sender.pandas` method if you're
+        Also see the :func:`Sender.dataframe` method if you're
         not using the buffer explicitly. It supports the same parameters
         and also supports auto-flushing.
 
@@ -1068,7 +1068,8 @@ cdef class Buffer:
                 'temperature': [24.5, 35.0, 25.5],
                 'humidity': [0.5, 0.6, 0.45],
                 'ts': pd.date_range('2021-07-01', periods=3)})
-            buf.pandas(df, table_name='weather', at='ts', symbols=['location'])
+            buf.dataframe(
+                df, table_name='weather', at='ts', symbols=['location'])
 
             # ...
             sender.flush(buf)
@@ -1200,7 +1201,7 @@ cdef class Buffer:
               interpreted as the current time set by the server on receipt of
               message.
         """
-        _pandas(
+        _dataframe(
             auto_flush_blank(),
             self._impl,
             self._b,
@@ -1559,7 +1560,7 @@ cdef class Sender:
         """
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
 
-    def pandas(
+    def dataframe(
             self,
             df,  # : pd.DataFrame
             *,
@@ -1591,9 +1592,9 @@ cdef class Sender:
                     pd.Timestamp('2022-08-09 13:56:03')]})
 
             with qi.Sender('localhost', 9000) as sender:
-                sender.pandas(df, table_name='race_metrics', at='ts')
+                sender.dataframe(df, table_name='race_metrics', at='ts')
 
-        This method builds on top of the :func:`Buffer.pandas` method.
+        This method builds on top of the :func:`Buffer.dataframe` method.
         See its documentation for details on arguments.
 
         Additionally, this method also supports auto-flushing the buffer
@@ -1606,7 +1607,7 @@ cdef class Sender:
         if self._auto_flush_enabled:
             af.sender = self._impl
             af.watermark = self._auto_flush_watermark
-        _pandas(
+        _dataframe(
             af,
             self._buffer._impl,
             self._buffer._b,

@@ -96,7 +96,7 @@ def test_fuzzing(*args):
     ld_preload += str(lib_path)
     cmd = [
         'python3',
-        'test/test_pandas_integration_fuzz.py'] + list(args)
+        'test/test_dataframe_fuzz.py'] + list(args)
     if not args:
         cmd.extend([
             '-detect_leaks=0',

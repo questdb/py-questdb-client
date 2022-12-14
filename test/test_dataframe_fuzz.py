@@ -143,7 +143,7 @@ def parse_input_bytes(input_bytes):
 
 
 @atheris.instrument_func
-def test_pandas(input_bytes):
+def test_dataframe(input_bytes):
     # print(f'input_bytes: {input_bytes}')
     params = parse_input_bytes(input_bytes)
     df, table_name, table_name_col, symbols, at = params
@@ -152,7 +152,7 @@ def test_pandas(input_bytes):
         BUF = qi.Buffer()
         BUF.clear()
         try:
-            BUF.pandas(
+            BUF.dataframe(
                 df,
                 table_name=table_name,
                 table_name_col=table_name_col,
@@ -184,7 +184,7 @@ def test_pandas(input_bytes):
 
 def main():
     args = list(sys.argv)
-    atheris.Setup(args, test_pandas)
+    atheris.Setup(args, test_dataframe)
     atheris.Fuzz()
 
 

@@ -132,7 +132,7 @@ class TestWithDatabase(unittest.TestCase):
         self._test_scenario(self.qdb_auth, AUTH, str(CA_PATH))
 
     @unittest.skipIf(not pd, 'pandas not installed')
-    def test_basic_pandas(self):
+    def test_basic_dataframe(self):
         port = self.qdb_plain.line_tcp_port
         pending = None
         table_name = uuid.uuid4().hex
@@ -148,7 +148,7 @@ class TestWithDatabase(unittest.TestCase):
                 numpy.datetime64('2021-01-03')]})
         df.index.name = table_name
         with qi.Sender('localhost', port) as sender:
-            sender.pandas(df)
+            sender.dataframe(df)
             pending = str(sender)
 
         resp = self.qdb_plain.retry_check_table(

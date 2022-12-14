@@ -25,14 +25,14 @@ except ImportError:
 
 
 if pd is not None:
-    from test_pandas_integration import TestPandas
+    from test_dataframe import TestPandas
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
             buf = qi.Buffer()
             exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
             with self.assertRaisesRegex(ImportError, exp):
-                buf.pandas(None)
+                buf.dataframe(None)
 
 
 class TestBuffer(unittest.TestCase):
@@ -416,12 +416,12 @@ class TestSender(unittest.TestCase):
             self.assertEqual(msgs, [])
 
     @unittest.skipIf(not pd, 'pandas not installed')
-    def test_pandas(self):
+    def test_dataframe(self):
         with Server() as server:
             with qi.Sender('localhost', server.port) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
-                sender.pandas(df, table_name='tbl1')
+                sender.dataframe(df, table_name='tbl1')
             msgs = server.recv()
             self.assertEqual(
                 msgs,
@@ -429,14 +429,14 @@ class TestSender(unittest.TestCase):
                     b'tbl1 a=2i,b=4.0'])
 
     @unittest.skipIf(not pd, 'pandas not installed')
-    def test_pandas_auto_flush(self):
+    def test_dataframe_auto_flush(self):
         with Server() as server:
             # An auto-flush size of 20 bytes is enough to auto-flush the first
             # row, but not the second.
             with qi.Sender('localhost', server.port, auto_flush=20) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
-                sender.pandas(df, table_name='tbl1')
+                sender.dataframe(df, table_name='tbl1')
                 msgs = server.recv()
                 self.assertEqual(
                     msgs,
@@ -462,7 +462,7 @@ class TestSender(unittest.TestCase):
                 with self.assertRaisesRegex(qi.IngressError, exp_err):
                     for _ in range(1000):
                         time.sleep(0.01)
-                        sender.pandas(df.head(1), table_name='tbl1')
+                        sender.dataframe(df.head(1), table_name='tbl1')
 
     def test_new_buffer(self):
         sender = qi.Sender(

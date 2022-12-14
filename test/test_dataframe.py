@@ -22,9 +22,9 @@ import questdb.ingress as qi
 import pandas as pd
 
 
-def _pandas(*args, **kwargs):
+def _dataframe(*args, **kwargs):
     buf = qi.Buffer()
-    buf.pandas(*args, **kwargs)
+    buf.dataframe(*args, **kwargs)
     return str(buf)
 
 
@@ -55,85 +55,85 @@ DF2 = pd.DataFrame({
 class TestPandas(unittest.TestCase):
     def test_bad_dataframe(self):
         with self.assertRaisesRegex(TypeError, 'Expected pandas'):
-            _pandas([])
+            _dataframe([])
 
     def test_no_table_name(self):
         with self.assertRaisesRegex(ValueError, 'Must specify at least one of'):
-            _pandas(DF1)
+            _dataframe(DF1)
 
     def test_bad_table_name_type(self):
         with self.assertRaisesRegex(TypeError, 'Must be str'):
-            _pandas(DF1, table_name=1.5)
+            _dataframe(DF1, table_name=1.5)
 
     def test_invalid_table_name(self):
         with self.assertRaisesRegex(
                 qi.IngressError, '`table_name`: Bad string "."'):
-            _pandas(DF1, table_name='.')
+            _dataframe(DF1, table_name='.')
 
     def test_invalid_column_dtype(self):
         with self.assertRaisesRegex(qi.IngressError,
                 '`table_name_col`: Bad dtype'):
-            _pandas(DF1, table_name_col='B')
+            _dataframe(DF1, table_name_col='B')
         with self.assertRaisesRegex(qi.IngressError,
                 '`table_name_col`: Bad dtype'):
-            _pandas(DF1, table_name_col=1)
+            _dataframe(DF1, table_name_col=1)
         with self.assertRaisesRegex(qi.IngressError,
                 '`table_name_col`: Bad dtype'):
-            _pandas(DF1, table_name_col=-3)
+            _dataframe(DF1, table_name_col=-3)
         with self.assertRaisesRegex(IndexError, '`table_name_col`: -5 index'):
-            _pandas(DF1, table_name_col=-5)
+            _dataframe(DF1, table_name_col=-5)
 
     def test_bad_str_obj_col(self):
         with self.assertRaisesRegex(qi.IngressError,
                 "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
-            _pandas(DF1, table_name_col='D')
+            _dataframe(DF1, table_name_col='D')
         with self.assertRaisesRegex(qi.IngressError,
                 "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
-            _pandas(DF1, table_name_col=3)
+            _dataframe(DF1, table_name_col=3)
         with self.assertRaisesRegex(qi.IngressError,
                 "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
-            _pandas(DF1, table_name_col=-1)
+            _dataframe(DF1, table_name_col=-1)
 
     def test_bad_symbol(self):
         with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
-            _pandas(DF1, table_name='tbl1', symbols=0)
+            _dataframe(DF1, table_name='tbl1', symbols=0)
         with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
-            _pandas(DF1, table_name='tbl1', symbols={})
+            _dataframe(DF1, table_name='tbl1', symbols={})
         with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
-            _pandas(DF1, table_name='tbl1', symbols=None)
+            _dataframe(DF1, table_name='tbl1', symbols=None)
         with self.assertRaisesRegex(qi.IngressError,
                 "`symbols`: Bad dtype `float64`.*'A'.*Must.*strings col"):
-            _pandas(DF1, table_name='tbl1', symbols=(0,))
+            _dataframe(DF1, table_name='tbl1', symbols=(0,))
         with self.assertRaisesRegex(qi.IngressError,
                 "`symbols`: Bad dtype `int64`.*'B'.*Must be a strings column."):
-            _pandas(DF1, table_name='tbl1', symbols=[1])
+            _dataframe(DF1, table_name='tbl1', symbols=[1])
 
     def test_bad_at(self):
         with self.assertRaisesRegex(KeyError, '`at`.*2018.*not found in the'):
-            _pandas(DF1, table_name='tbl1', at='2018-03-10T00:00:00Z')
+            _dataframe(DF1, table_name='tbl1', at='2018-03-10T00:00:00Z')
         with self.assertRaisesRegex(TypeError, '`at`.*float64.*be a datetime'):
-            _pandas(DF1, table_name='tbl1', at='A')
+            _dataframe(DF1, table_name='tbl1', at='A')
         with self.assertRaisesRegex(TypeError, '`at`.*int64.*be a datetime'):
-            _pandas(DF1, table_name='tbl1', at=1)
+            _dataframe(DF1, table_name='tbl1', at=1)
         with self.assertRaisesRegex(TypeError, '`at`.*object.*be a datetime'):
-            _pandas(DF1, table_name='tbl1', at=-1)
+            _dataframe(DF1, table_name='tbl1', at=-1)
 
     def test_empty_dataframe(self):
-        buf = _pandas(pd.DataFrame(), table_name='tbl1')
+        buf = _dataframe(pd.DataFrame(), table_name='tbl1')
         self.assertEqual(buf, '')
 
     def test_zero_row_dataframe(self):
-        buf = _pandas(pd.DataFrame(columns=['A', 'B']), table_name='tbl1')
+        buf = _dataframe(pd.DataFrame(columns=['A', 'B']), table_name='tbl1')
         self.assertEqual(buf, '')
 
     def test_zero_column_dataframe(self):
         df = pd.DataFrame(index=[0, 1, 2])
         self.assertEqual(len(df), 3)
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(buf, '')
-    
+
     def test_basic(self):
-        buf = _pandas(
+        buf = _dataframe(
             DF2,
             table_name_col='T',
             symbols=['A', 'B', 'C', 'D'],
@@ -149,21 +149,21 @@ class TestPandas(unittest.TestCase):
             'a': [1, 2, 3],
             'b': ['a', 'b', 'c']})
         df.index.name = 'table_name'
-        buf = _pandas(df)
+        buf = _dataframe(df)
         self.assertEqual(
             buf,
             'table_name a=1i,b="a"\n' +
             'table_name a=2i,b="b"\n' +
             'table_name a=3i,b="c"\n')
-    
-        buf = _pandas(df, table_name='tbl1')
+
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
             'tbl1 a=2i,b="b"\n' +
             'tbl1 a=3i,b="c"\n')
 
-        buf = _pandas(df, table_name_col='b')
+        buf = _dataframe(df, table_name_col='b')
         self.assertEqual(
             buf,
             'a a=1i\n' +
@@ -173,7 +173,7 @@ class TestPandas(unittest.TestCase):
         df.index.name = 42  # bad type, not str
         with self.assertRaisesRegex(qi.IngressError,
                 'Bad dataframe index name as table.*: Expected str, not.*int.'):
-            _pandas(df)
+            _dataframe(df)
 
     @unittest.skipIf(BROKEN_TIMEZONES, 'requires accurate timezones')
     def test_at_good(self):
@@ -183,7 +183,7 @@ class TestPandas(unittest.TestCase):
         df.index.name = 'test_at_good'
         with self.assertRaisesRegex(KeyError,
                 'Bad argument `at`: Column .2018-03.* not found .* dataframe.'):
-            _pandas(df, at='2018-03-10T00:00:00Z')
+            _dataframe(df, at='2018-03-10T00:00:00Z')
 
         # Same timestamp, specified in various ways.
         t1_setup = dt.datetime(2018, 3, 10, 0, 0, 0, tzinfo=dt.timezone.utc)
@@ -196,7 +196,7 @@ class TestPandas(unittest.TestCase):
         t7 = qi.TimestampNanos.from_datetime(t3)
         timestamps = [t1, t2, t3, t4, t5, t6, t7]
         for ts in timestamps:
-            buf = _pandas(df, table_name='tbl1', at=ts)
+            buf = _dataframe(df, table_name='tbl1', at=ts)
             self.assertEqual(
                 buf,
                 'tbl1 a=1i,b="a" 1520640000000000000\n' +
@@ -212,7 +212,7 @@ class TestPandas(unittest.TestCase):
         for ts in neg_timestamps:
             with self.assertRaisesRegex(ValueError,
                     'Bad.*`at`: Cannot .* before the Unix epoch .1970-01-01.*'):
-                _pandas(DF2, at=ts, table_name='test_at_neg')
+                _dataframe(DF2, at=ts, table_name='test_at_neg')
 
     @unittest.skipIf(BROKEN_TIMEZONES, 'requires accurate timezones')
     def test_at_ts_0(self):
@@ -233,7 +233,7 @@ class TestPandas(unittest.TestCase):
         edge_timestamps = [e1, e2, e3, e4, e5, e6, e7]
 
         for ts in edge_timestamps:
-            buf = _pandas(df, table_name='tbl1', at=ts)
+            buf = _dataframe(df, table_name='tbl1', at=ts)
             self.assertEqual(
                 buf,
                 'tbl1 a=1i,b="a" 0\n' +
@@ -243,8 +243,8 @@ class TestPandas(unittest.TestCase):
     def test_row_of_nulls(self):
         df = pd.DataFrame({'a': ['a1', None, 'a3']})
         with self.assertRaisesRegex(
-                qi.IngressError, 'Bad pandas row .*1: All values are nulls.'):
-            _pandas(df, table_name='tbl1', symbols=['a'])
+                qi.IngressError, 'Bad dataframe row.*1: All values are nulls.'):
+            _dataframe(df, table_name='tbl1', symbols=['a'])
 
     def test_u8_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -252,7 +252,7 @@ class TestPandas(unittest.TestCase):
                 0,
                 255],  # u8 max
             dtype='uint8')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -267,7 +267,7 @@ class TestPandas(unittest.TestCase):
                 -128,  # i8 min
                 127,   # i8 max
                 0], dtype='int8')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -283,7 +283,7 @@ class TestPandas(unittest.TestCase):
                 0,
                 65535],  # u16 max
             dtype='uint16')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -298,7 +298,7 @@ class TestPandas(unittest.TestCase):
                 -32768,  # i16 min
                 32767,   # i16 max
                 0], dtype='int16')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -314,7 +314,7 @@ class TestPandas(unittest.TestCase):
                 0,
                 4294967295],  # u32 max
             dtype='uint32')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -330,7 +330,7 @@ class TestPandas(unittest.TestCase):
                 0,
                 2147483647],  # i32 max
             dtype='int32')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -346,7 +346,7 @@ class TestPandas(unittest.TestCase):
                 0,
                 9223372036854775807],  # i64 max
             dtype='uint64')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -356,7 +356,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=9223372036854775807i\n')
 
         buf = qi.Buffer()
-        buf.pandas(pd.DataFrame({'b': [.5, 1.0, 1.5]}), table_name='tbl2')
+        buf.dataframe(pd.DataFrame({'b': [.5, 1.0, 1.5]}), table_name='tbl2')
         exp1 = (
             'tbl2 b=0.5\n' +
             'tbl2 b=1.0\n' +
@@ -372,7 +372,7 @@ class TestPandas(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'serialize .* column .a. .* 4 .9223372036854775808.*int64'):
-            buf.pandas(df2, table_name='tbl1')
+            buf.dataframe(df2, table_name='tbl1')
 
         self.assertEqual(
             str(buf),
@@ -385,7 +385,7 @@ class TestPandas(unittest.TestCase):
                 0,
                 9223372036854775807],  # i64 max
             dtype='int64')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +
@@ -394,7 +394,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=-9223372036854775808i\n' +
             'tbl1 a=0i\n' +
             'tbl1 a=9223372036854775807i\n')
-    
+
     def test_f32_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 1.0, 2.0, 3.0,
@@ -404,7 +404,7 @@ class TestPandas(unittest.TestCase):
                 float('nan'),
                 3.4028234663852886e38],  # f32 max
             dtype='float32')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1.0\n' +
@@ -425,7 +425,7 @@ class TestPandas(unittest.TestCase):
                 float('nan'),
                 1.7976931348623157e308],  # f64 max
             dtype='float64')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1.0\n' +
@@ -446,7 +446,7 @@ class TestPandas(unittest.TestCase):
                     255],  # u8 max
                 dtype=pd.UInt8Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -455,7 +455,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=0i,b="d"\n' +
             'tbl1 b="e"\n' +
             'tbl1 a=255i,b="f"\n')
-    
+
     def test_i8_arrow_col(self):
         df = pd.DataFrame({
             'a': pd.Series([
@@ -466,7 +466,7 @@ class TestPandas(unittest.TestCase):
                     127],  # i8 max
                 dtype=pd.Int8Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -486,7 +486,7 @@ class TestPandas(unittest.TestCase):
                     65535],  # u16 max
                 dtype=pd.UInt16Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -506,7 +506,7 @@ class TestPandas(unittest.TestCase):
                     32767],  # i16 max
                 dtype=pd.Int16Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -526,7 +526,7 @@ class TestPandas(unittest.TestCase):
                     4294967295],  # u32 max
                 dtype=pd.UInt32Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -546,7 +546,7 @@ class TestPandas(unittest.TestCase):
                     2147483647],  # i32 max
                 dtype=pd.Int32Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -566,7 +566,7 @@ class TestPandas(unittest.TestCase):
                     9223372036854775807],  # i64 max
                 dtype=pd.UInt64Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -584,7 +584,7 @@ class TestPandas(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'serialize .* column .a. .* 4 .9223372036854775808.*int64'):
-            _pandas(df2, table_name='tbl1')
+            _dataframe(df2, table_name='tbl1')
 
     def test_i64_arrow_col(self):
         df = pd.DataFrame({
@@ -596,7 +596,7 @@ class TestPandas(unittest.TestCase):
                     9223372036854775807],  # i64 max
                 dtype=pd.Int64Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1i,b="a"\n' +
@@ -619,7 +619,7 @@ class TestPandas(unittest.TestCase):
                     None],
                 dtype=pd.Float32Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1.0,b="a"\n' +
@@ -644,7 +644,7 @@ class TestPandas(unittest.TestCase):
                     None],
                 dtype=pd.Float64Dtype()),
             'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1.0,b="a"\n' +
@@ -662,7 +662,7 @@ class TestPandas(unittest.TestCase):
                 True, False, False,
                 False, True, False],
             dtype='bool')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=t\n' +
@@ -679,7 +679,7 @@ class TestPandas(unittest.TestCase):
                 True, True, True,
                 False, False, False],
             dtype='boolean')})  # Note `boolean` != `bool`.
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=t\n' +
@@ -694,7 +694,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=f\n' +
             'tbl1 a=f\n' +
             'tbl1 a=f\n')
-        
+
         df2 = pd.DataFrame({'a': pd.Series([
                 True, False, False,
                 None, True, False],
@@ -702,14 +702,14 @@ class TestPandas(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'Failed.*at row index 3 .*<NA>.: .*insert null .*boolean col'):
-            _pandas(df2, table_name='tbl1')
+            _dataframe(df2, table_name='tbl1')
 
     def test_bool_obj_col(self):
         df = pd.DataFrame({'a': pd.Series([
                 True, False, False,
                 False, True, False],
             dtype='object')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=t\n' +
@@ -718,14 +718,14 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=f\n' +
             'tbl1 a=t\n' +
             'tbl1 a=f\n')
-        
+
         df2 = pd.DataFrame({'a': pd.Series([
                 True, False, 'false'],
             dtype='object')})
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'serialize .* column .a. .* 2 .*false.*bool'):
-            _pandas(df2, table_name='tbl1')
+            _dataframe(df2, table_name='tbl1')
 
         df3 = pd.DataFrame({'a': pd.Series([
                 None, True, False],
@@ -733,7 +733,7 @@ class TestPandas(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'serialize.*\\(None\\): Cannot insert null.*boolean column'):
-            _pandas(df3, table_name='tbl1')
+            _dataframe(df3, table_name='tbl1')
 
     def test_datetime64_numpy_col(self):
         df = pd.DataFrame({
@@ -749,7 +749,7 @@ class TestPandas(unittest.TestCase):
                     pd.NA],
                 dtype='datetime64[ns]'),
             'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=1546300800000000t,b="a"\n' +
@@ -766,7 +766,7 @@ class TestPandas(unittest.TestCase):
                 pd.Timestamp('1970-01-01 00:00:00'),
                 pd.Timestamp('1970-01-01 00:00:01'),
                 pd.Timestamp('1970-01-01 00:00:02')])})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a=0t\n' +
@@ -787,7 +787,7 @@ class TestPandas(unittest.TestCase):
                     year=2019, month=1, day=1,
                     hour=0, minute=0, second=3, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3', 'sym4']})
-        buf = _pandas(df, table_name='tbl1', symbols=['b'])
+        buf = _dataframe(df, table_name='tbl1', symbols=['b'])
         self.assertEqual(
             buf,
             # Note how these are 5hr offset from `test_datetime64_numpy_col`.
@@ -809,7 +809,7 @@ class TestPandas(unittest.TestCase):
                     year=1970, month=1, day=1,
                     hour=0, minute=0, second=2, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3']})
-        buf = _pandas(df, table_name='tbl1', symbols=['b'])
+        buf = _dataframe(df, table_name='tbl1', symbols=['b'])
         self.assertEqual(
             buf,
             # Note how these are 5hr offset from `test_datetime64_numpy_col`.
@@ -830,7 +830,7 @@ class TestPandas(unittest.TestCase):
                     year=1969, month=12, day=31,
                     hour=19, minute=0, second=2, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3']})
-        buf = _pandas(df, table_name='tbl1', symbols=['b'])
+        buf = _dataframe(df, table_name='tbl1', symbols=['b'])
         self.assertEqual(
             buf,
             'tbl1,b=sym1 a=0t\n' +
@@ -845,7 +845,7 @@ class TestPandas(unittest.TestCase):
             'b': ['sym1']})
         with self.assertRaisesRegex(
                 qi.IngressError, "Failed.*'a'.*-220897.* is negative."):
-            _pandas(df2, table_name='tbl1', symbols=['b'])
+            _dataframe(df2, table_name='tbl1', symbols=['b'])
         return   ###############################################################
 
     def test_datetime64_numpy_at(self):
@@ -862,7 +862,7 @@ class TestPandas(unittest.TestCase):
                     pd.NaT],
                 dtype='datetime64[ns]'),
             'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
-        buf = _pandas(df, table_name='tbl1', at='a')
+        buf = _dataframe(df, table_name='tbl1', at='a')
         self.assertEqual(
             buf,
             'tbl1 b=1i 1546300800000000000\n' +
@@ -882,7 +882,7 @@ class TestPandas(unittest.TestCase):
                     pd.Timestamp('1970-01-01 00:00:02')],
                 dtype='datetime64[ns]'),
             'b': [1, 2, 3]})
-        buf = _pandas(df, table_name='tbl1', at='a')
+        buf = _dataframe(df, table_name='tbl1', at='a')
         self.assertEqual(
             buf,
             'tbl1 b=1i 0\n' +
@@ -903,7 +903,7 @@ class TestPandas(unittest.TestCase):
                     year=2019, month=1, day=1,
                     hour=0, minute=0, second=3, tz=_TZ)],
             'b': ['sym1', 'sym2', 'sym3', 'sym4']})
-        buf = _pandas(df, table_name='tbl1', symbols=['b'], at='a')
+        buf = _dataframe(df, table_name='tbl1', symbols=['b'], at='a')
         self.assertEqual(
             buf,
             # Note how these are 5hr offset from `test_datetime64_numpy_col`.
@@ -920,7 +920,7 @@ class TestPandas(unittest.TestCase):
             'b': ['sym1']})
         with self.assertRaisesRegex(
                 qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
-            _pandas(df2, table_name='tbl1', symbols=['b'], at='a')
+            _dataframe(df2, table_name='tbl1', symbols=['b'], at='a')
 
     def _test_pyobjstr_table(self, dtype):
         df = pd.DataFrame({
@@ -933,7 +933,7 @@ class TestPandas(unittest.TestCase):
                     '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
                 dtype=dtype),
             'b': [1, 2, 3, 4, 5]})
-        buf = _pandas(df, table_name_col=0)
+        buf = _dataframe(df, table_name_col=0)
         self.assertEqual(
             buf,
             'a b=1i\n' +
@@ -944,13 +944,13 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, "Too long"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({'a': pd.Series(['b' * 128], dtype=dtype)}),
                 table_name_col='a')
 
         with self.assertRaisesRegex(
                 qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '.': pd.Series(['x', None], dtype=dtype),
                     'b': [1, 2]}),
@@ -958,7 +958,7 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '.': pd.Series(['x', float('nan')], dtype=dtype),
                     'b': [1, 2]}),
@@ -966,7 +966,7 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '.': pd.Series(['x', pd.NA], dtype=dtype),
                     'b': [1, 2]}),
@@ -974,7 +974,7 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, "''.*must have a non-zero length"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '/': pd.Series([''], dtype=dtype),
                     'b': [1]}),
@@ -982,7 +982,7 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '/': pd.Series(['tab..1'], dtype=dtype),
                     'b': [1]}),
@@ -993,7 +993,7 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, 'table name .*got an object of type int'):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '.': pd.Series(['x', 42], dtype='object'),
                     'z': [1, 2]}),
@@ -1003,7 +1003,7 @@ class TestPandas(unittest.TestCase):
         self._test_pyobjstr_table('string')
 
         self.assertEqual(
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '.': pd.Series(['x', 42], dtype='string'),
                     'z': [1, 2]}),
@@ -1022,7 +1022,7 @@ class TestPandas(unittest.TestCase):
                 '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
                 '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
             dtype=dtype)})
-        buf = _pandas(df, table_name='tbl1', symbols=True)
+        buf = _dataframe(df, table_name='tbl1', symbols=True)
         self.assertEqual(
             buf,
             'tbl1,a=a\n' +
@@ -1036,7 +1036,7 @@ class TestPandas(unittest.TestCase):
 
         for null_obj in (None, float('nan'), pd.NA):
             self.assertEqual(
-                _pandas(
+                _dataframe(
                     pd.DataFrame({
                         'x': pd.Series(['a', null_obj], dtype=dtype),
                         'y': [1, 2]}),
@@ -1049,7 +1049,7 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, 'Expected a string, got an .* type int'):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     'x': pd.Series(['x', 42], dtype='object'),
                     'y': [1, 2]}),
@@ -1059,7 +1059,7 @@ class TestPandas(unittest.TestCase):
         self._test_pyobjstr_numpy_symbol('string')
 
         self.assertEqual(
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     'x': pd.Series(['x', 42], dtype='string'),
                     'y': [1, 2]}),
@@ -1078,7 +1078,7 @@ class TestPandas(unittest.TestCase):
                 '嚜꓂',                   # UCS-2, 3 bytes for UTF-8.
                 '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
             dtype='str')})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 a="a"\n' +
@@ -1100,7 +1100,7 @@ class TestPandas(unittest.TestCase):
                 '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
                 dtype='string[pyarrow]'),
             'b': [1, 2, 3, 4, 5]})
-        buf = _pandas(df, table_name_col=0)
+        buf = _dataframe(df, table_name_col=0)
         self.assertEqual(
             buf,
             'a b=1i\n' +
@@ -1111,14 +1111,14 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, "Too long"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     'a': pd.Series(['b' * 128], dtype='string[pyarrow]')}),
                 table_name_col='a')
 
         with self.assertRaisesRegex(
                 qi.IngressError, "Failed .*<NA>.*Table name cannot be null"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '.': pd.Series(['x', None], dtype='string[pyarrow]'),
                     'b': [1, 2]}),
@@ -1126,14 +1126,14 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, "''.*must have a non-zero length"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '/': pd.Series([''], dtype='string[pyarrow]')}),
                 table_name_col='/')
 
         with self.assertRaisesRegex(
                 qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     '/': pd.Series(['tab..1'], dtype='string[pyarrow]')}),
                 table_name_col='/')
@@ -1152,7 +1152,7 @@ class TestPandas(unittest.TestCase):
                 '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
                 dtype='string[pyarrow]'),
             'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
-        buf = _pandas(df, table_name='tbl1', symbols=True)
+        buf = _dataframe(df, table_name='tbl1', symbols=True)
         self.assertEqual(
             buf,
             'tbl1,a=a b=1i\n' +
@@ -1179,7 +1179,7 @@ class TestPandas(unittest.TestCase):
                 '💩🦞'],                 # UCS-4, 4 bytes for UTF-8.
                 dtype='string[pyarrow]'),
             'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
-        buf = _pandas(df, table_name='tbl1', symbols=False)
+        buf = _dataframe(df, table_name='tbl1', symbols=False)
         self.assertEqual(
             buf,
             'tbl1 a="a",b=1i\n' +
@@ -1194,7 +1194,7 @@ class TestPandas(unittest.TestCase):
 
     def test_pyobj_int_col(self):
         self.assertEqual(
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     'a': pd.Series([
                         1, 2, 3, None, float('nan'), pd.NA, 7], dtype='object'),
@@ -1207,10 +1207,10 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=5i\n' +
             'tbl1 b=6i\n' +
             'tbl1 a=7i,b=7i\n')
-        
+
         with self.assertRaisesRegex(
                 qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\\."):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     'a': pd.Series([1, 'STRING'], dtype='object'),
                     'b': [1, 2]}),
@@ -1220,7 +1220,7 @@ class TestPandas(unittest.TestCase):
 
     def test_pyobj_float_col(self):
         self.assertEqual(
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     'a': pd.Series(
                         [1.0, 2.0, 3.0, None, float('nan'), pd.NA, 7.0],
@@ -1237,7 +1237,7 @@ class TestPandas(unittest.TestCase):
 
         with self.assertRaisesRegex(
                 qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\\."):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({
                     'a': pd.Series([1.0, 'STRING'], dtype='object'),
                     'b': [1, 2]}),
@@ -1249,7 +1249,7 @@ class TestPandas(unittest.TestCase):
         # We want to test others are rejected.
         with self.assertRaisesRegex(
                 qi.IngressError, "Bad column 'a'.*got a category of .*int64"):
-            _pandas(
+            _dataframe(
                 pd.DataFrame({'a': pd.Series([1, 2, 3, 2], dtype='category')}),
                 table_name='tbl1')
 
@@ -1259,20 +1259,20 @@ class TestPandas(unittest.TestCase):
         df = pd.DataFrame({
             'a': pd.Series(slist, dtype='category'),
             'b': list(range(len(slist)))})
-        
-        buf = _pandas(df, table_name_col=0)
+
+        buf = _dataframe(df, table_name_col=0)
         exp = ''.join(
             f'{s} b={i}i\n'
             for i, s in enumerate(slist))
         self.assertEqual(buf, exp)
-        
+
         slist[2] = None
         df2 = pd.DataFrame({
             'a': pd.Series(slist, dtype='category'),
             'b': list(range(len(slist)))})
         with self.assertRaisesRegex(
                 qi.IngressError, 'Table name cannot be null'):
-            _pandas(df2, table_name_col=0)
+            _dataframe(df2, table_name_col=0)
 
     def test_cat_i8_table(self):
         self._test_cat_table(30)
@@ -1293,20 +1293,20 @@ class TestPandas(unittest.TestCase):
         df = pd.DataFrame({
             'a': pd.Series(slist, dtype='category'),
             'b': list(range(len(slist)))})
-        
-        buf = _pandas(df, table_name='tbl1', symbols=True)
+
+        buf = _dataframe(df, table_name='tbl1', symbols=True)
         exp = ''.join(
             f'tbl1,a={s} b={i}i\n'
             for i, s in enumerate(slist))
         self.assertEqual(buf, exp)
-        
+
         slist[2] = None
         df2 = pd.DataFrame({
             'a': pd.Series(slist, dtype='category'),
             'b': list(range(len(slist)))})
 
         exp2 = exp.replace('tbl1,a=s2 b=2i\n', 'tbl1 b=2i\n')
-        buf2 = _pandas(df2, table_name='tbl1', symbols=True)
+        buf2 = _dataframe(df2, table_name='tbl1', symbols=True)
         self.assertEqual(buf2, exp2)
 
     def test_cat_i8_symbol(self):
@@ -1328,20 +1328,20 @@ class TestPandas(unittest.TestCase):
         df = pd.DataFrame({
             'a': pd.Series(slist, dtype='category'),
             'b': list(range(len(slist)))})
-        
-        buf = _pandas(df, table_name='tbl1', symbols=False)
+
+        buf = _dataframe(df, table_name='tbl1', symbols=False)
         exp = ''.join(
             f'tbl1 a="{s}",b={i}i\n'
             for i, s in enumerate(slist))
         self.assertEqual(buf, exp)
-        
+
         slist[2] = None
         df2 = pd.DataFrame({
             'a': pd.Series(slist, dtype='category'),
             'b': list(range(len(slist)))})
 
         exp2 = exp.replace('tbl1 a="s2",b=2i\n', 'tbl1 b=2i\n')
-        buf2 = _pandas(df2, table_name='tbl1', symbols=False)
+        buf2 = _dataframe(df2, table_name='tbl1', symbols=False)
         self.assertEqual(buf2, exp2)
 
     def test_cat_i8_str(self):
@@ -1361,7 +1361,7 @@ class TestPandas(unittest.TestCase):
         df = pd.DataFrame({
             'a': [None, pd.NA, float('nan')],
             'b': [1, 2, 3]})
-        buf = _pandas(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1')
         self.assertEqual(
             buf,
             'tbl1 b=1i\n' +
