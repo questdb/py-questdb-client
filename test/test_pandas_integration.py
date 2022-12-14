@@ -1216,6 +1216,8 @@ class TestPandas(unittest.TestCase):
                     'b': [1, 2]}),
                 table_name='tbl1')
 
+        # TODO test ints outside of int64 range
+
     def test_pyobj_float_col(self):
         self.assertEqual(
             _pandas(

@@ -1073,16 +1073,133 @@ cdef class Buffer:
             # ...
             sender.flush(buf)
 
-        ILP / Pandas Datatype Mappings:
+        **Pandas to ILP datatype mappings**
 
-        +------------------+------------------+-----------------+
-        | ILP Datatype     | Pandas ``dtype`` | Nulls Allowed   |
-        +==================+==================+=================+
-        | ``SYMBOL``       | ``'object'`` column containing ``str``         | Yes       |
-        +------------------+------------------+-----------------+
+        .. seealso:: https://questdb.io/docs/reference/api/ilp/columnset-types/
 
+        .. list-table:: Pandas Mappings
+            :header-rows: 1
+
+            * - Pandas ``dtype``
+              - Nulls
+              - ILP Datatype
+            * - ``'bool'``
+              - N
+              - ``BOOLEAN``
+            * - ``'boolean'``
+              - N **α**
+              - ``BOOLEAN``
+            * - ``'object'`` (``bool`` objects)
+              - N **α**
+              - ``BOOLEAN``
+            * - ``'uint8'``
+              - N
+              - ``INTEGER``
+            * - ``'int8'``
+              - N
+              - ``INTEGER``
+            * - ``'uint16'``
+              - N
+              - ``INTEGER``
+            * - ``'int16'``
+              - N
+              - ``INTEGER``
+            * - ``'uint32'``
+              - N
+              - ``INTEGER``
+            * - ``'int32'``
+              - N
+              - ``INTEGER``
+            * - ``'uint64'``
+              - N
+              - ``INTEGER`` **β**
+            * - ``'int64'``
+              - N
+              - ``INTEGER``
+            * - ``'UInt8'``
+              - Y
+              - ``INTEGER``
+            * - ``'Int8'``
+              - Y
+              - ``INTEGER``
+            * - ``'UInt16'``
+              - Y
+              - ``INTEGER``
+            * - ``'Int16'``
+              - Y
+              - ``INTEGER``
+            * - ``'UInt32'``
+              - Y
+              - ``INTEGER``
+            * - ``'Int32'``
+              - Y
+              - ``INTEGER``
+            * - ``'UInt64'``
+              - Y
+              - ``INTEGER`` **β**
+            * - ``'Int64'``
+              - Y
+              - ``INTEGER``
+            * - ``'object'`` (``int`` objects)
+              - Y
+              - ``INTEGER`` **β**
+            * - ``'float32'`` **γ**
+              - Y (``NaN``)
+              - ``FLOAT``
+            * - ``'float64'``
+              - Y (``NaN``)
+              - ``FLOAT``
+            * - ``'object'`` (``float`` objects)
+              - Y (``NaN``)
+              - ``FLOAT``
+            * - ``'string'`` (``str`` objects)
+              - Y
+              - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'string[pyarrow]'``
+              - Y
+              - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'category'`` (``str`` objects) **ε**
+              - Y
+              - ``SYMBOL`` (default), ``STRING`` via ``symbols`` arg. **δ**
+            * - ``'object'`` (``str`` objects)
+              - Y
+              - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'datetime64[ns]'``
+              - Y
+              - ``TIMESTAMP`` **ζ**
+            * - ``'datetime64[ns, tz]'``
+              - Y
+              - ``TIMESTAMP`` **ζ**
+
+        .. note::
+
+            * **α**: Note some pandas dtypes allow nulls (e.g. ``'boolean'``),
+              where the QuestDB database does not.
+
+            * **β**: The valid range for integer values is -2^63 to 2^63-1.
+              Any ``'uint64'``, ``'UInt64'`` or python ``int`` object values
+              outside this range will raise an error during serialization.
+
+            * **γ**: Upcast to 64-bit float during serialization.
+
+            * **δ**: Columns containing strings can also be used to specify the
+              table name. See ``table_name_col``.
+
+            * **ε**: We only support categories containing strings. If the
+              category contains non-string values, an error will be raised.
+
+            * **ζ**: We don't support datetimes with precisions other than
+              nanoseconds. The designated timestamp column (see ``at``
+              parameter) maintains the nanosecond precision, whilst values
+              stored as columns have their precision truncated to microseconds.
+              All dates are sent as UTC and any additional timezone information
+              is dropped. If no timezone is specified, we follow
+              the pandas convention of assuming the timezone is UTC.
+              Date times before 1970-01-01 00:00:00 UTC are not supported.
+              If a datetime value is specified as ``None`` (``NaT``), it is
+              interpreted as the current time set by the server on receipt of
+              message.
         """
-        # TODO: Continue docs, examples and datatype mappings
         _pandas(
             auto_flush_blank(),
             self._impl,
