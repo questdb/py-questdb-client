@@ -5,6 +5,9 @@ import os
 sys.dont_write_bytecode = True
 import unittest
 import datetime as dt
+import functools
+import tempfile
+import pathlib
 
 BROKEN_TIMEZONES = True
 
@@ -52,6 +55,14 @@ DF2 = pd.DataFrame({
         pd.Timestamp('20180310'),
         pd.Timestamp('20180311'),
         pd.Timestamp('20180312')]})
+
+
+def with_tmp_dir(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with tempfile.TemporaryDirectory(prefix='py-questdb-client_') as tmpdir:
+            return func(self, *args, pathlib.Path(tmpdir), **kwargs)
+    return wrapper
 
 
 class TestPandas(unittest.TestCase):
@@ -1390,7 +1401,7 @@ class TestPandas(unittest.TestCase):
         two_d = np.array([
             [1, 10],
             [2, 20],
-            [3, 30]])
+            [3, 30]], dtype='int64')
         col2 = two_d[:, 1]
         col2.flags['WRITEABLE'] = False
 
@@ -1453,6 +1464,10 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=9i,b=90i\n')
         self.assertEqual(buf, exp)
 
+        if getattr(pd, 'ArrowDtype') is None:
+            # We don't have pandas ArrowDtype, so we can't test the rest.
+            return
+
         # To preserve the chunking we need to use a special pandas type:
         pandarrow_a = pd.array(chunked_a, dtype='int16[pyarrow]')
         pandarrow_b = pd.array(chunked_b, dtype='int32[pyarrow]')
@@ -1465,6 +1480,10 @@ class TestPandas(unittest.TestCase):
                 qi.IngressError,
                 "Unsupported dtype int16\[pyarrow\] for column 'a'.*github"):
             _dataframe(df, table_name='tbl1')
+
+    @with_tmp_dir
+    def test_parquet(self, tmpdir):
+        print(tmpdir)
 
 
 if __name__ == '__main__':
