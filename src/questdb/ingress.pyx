@@ -1189,16 +1189,16 @@ cdef class Buffer:
             * **ε**: We only support categories containing strings. If the
               category contains non-string values, an error will be raised.
 
-            * **ζ**: We don't support datetimes with precisions other than
-              nanoseconds. The designated timestamp column (see ``at``
+            * **ζ**: The '.dataframe()' method only supports datetimes with
+              nanosecond precision. The designated timestamp column (see ``at``
               parameter) maintains the nanosecond precision, whilst values
               stored as columns have their precision truncated to microseconds.
               All dates are sent as UTC and any additional timezone information
               is dropped. If no timezone is specified, we follow
               the pandas convention of assuming the timezone is UTC.
-              Date times before 1970-01-01 00:00:00 UTC are not supported.
+              Datetimes before 1970-01-01 00:00:00 UTC are not supported.
               If a datetime value is specified as ``None`` (``NaT``), it is
-              interpreted as the current time set by the server on receipt of
+              interpreted as the current QuestDB server time set on receipt of
               message.
         """
         _dataframe(
