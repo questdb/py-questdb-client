@@ -1193,12 +1193,17 @@ class TestPandas(unittest.TestCase):
             'tbl1 a="💩🦞",b=9i\n')
 
     def test_pyobj_int_col(self):
+        int64_min = -2**63
+        int64_max = 2**63 - 1
         self.assertEqual(
             _dataframe(
                 pd.DataFrame({
                     'a': pd.Series([
-                        1, 2, 3, None, float('nan'), pd.NA, 7], dtype='object'),
-                    'b': [1, 2, 3, 4, 5, 6, 7]}),
+                        1, 2, 3, None, float('nan'), pd.NA, 7,
+                        0,
+                        int64_min,
+                        int64_max], dtype='object'),
+                    'b': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}),
                 table_name='tbl1'),
             'tbl1 a=1i,b=1i\n' +
             'tbl1 a=2i,b=2i\n' +
@@ -1206,7 +1211,10 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=4i\n' +
             'tbl1 b=5i\n' +
             'tbl1 b=6i\n' +
-            'tbl1 a=7i,b=7i\n')
+            'tbl1 a=7i,b=7i\n' +
+            'tbl1 a=0i,b=8i\n' +
+            'tbl1 a=' + str(int64_min) + 'i,b=9i\n' +
+            'tbl1 a=' + str(int64_max) + 'i,b=10i\n')
 
         with self.assertRaisesRegex(
                 qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\\."):
@@ -1216,7 +1224,15 @@ class TestPandas(unittest.TestCase):
                     'b': [1, 2]}),
                 table_name='tbl1')
 
-        # TODO test ints outside of int64 range
+        out_of_range = [int64_min - 1, int64_max + 1]
+        for num in out_of_range:
+            with self.assertRaisesRegex(
+                    qi.IngressError, "index 1 .*922337203685477.*int too big"):
+                _dataframe(
+                    pd.DataFrame({
+                        'a': pd.Series([1, num], dtype='object'),
+                        'b': [1, 2]}),
+                    table_name='tbl1')
 
     def test_pyobj_float_col(self):
         self.assertEqual(
