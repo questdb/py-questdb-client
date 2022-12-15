@@ -1467,10 +1467,6 @@ class TestPandas(unittest.TestCase):
             _dataframe(df, table_name='tbl1')
 
 
-# TODO: Test all datatypes, but multiple row chunks.
-# TODO: Test datetime `at` argument with timezone.
-
-
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile
