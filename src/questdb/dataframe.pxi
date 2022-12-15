@@ -999,7 +999,7 @@ cdef void_int _dataframe_resolve_source_and_buffers(
     else:
         raise IngressError(
             IngressErrorCode.BadDataFrame,
-            f'Unsupported dtype {dtype} for column {pandas_col.name}. ' +
+            f'Unsupported dtype {dtype} for column {pandas_col.name!r}. ' +
             'Raise an issue if you think it should be supported: ' +
             'https://github.com/questdb/py-questdb-client/issues.')
 

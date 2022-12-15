@@ -21,6 +21,7 @@ import patch_path
 import questdb.ingress as qi
 import pandas as pd
 import numpy as np
+import pyarrow as pa
 
 
 def _dataframe(*args, **kwargs):
@@ -1419,6 +1420,51 @@ class TestPandas(unittest.TestCase):
                 f'tbl1 a={i}i,b={i}i\n'
                 for i in range(index * 10, (index + 1) * 10))
             self.assertEqual(buf, exp)
+
+    def test_arrow_chunked_array(self):
+        # We build a table with chunked arrow arrays as columns.
+        chunks_a = [
+            pa.array([1, 2, 3], type=pa.int16()),
+            pa.array([4, 5, 6], type=pa.int16()),
+            pa.array([], type=pa.int16()),
+            pa.array([7, 8, 9], type=pa.int16())]
+        chunked_a = pa.chunked_array(chunks_a)
+        chunks_b = [
+            pa.array([10, 20], type=pa.int32()),
+            pa.array([], type=pa.int32()),
+            pa.array([30, 40, 50, 60], type=pa.int32()),
+            pa.array([70, 80, 90], type=pa.int32())]
+        chunked_b = pa.chunked_array(chunks_b)
+        arr_tab = pa.Table.from_arrays([chunked_a, chunked_b], names=['a', 'b'])
+
+        # NOTE!
+        # This does *not* preserve the chunking of the arrow arrays.
+        df = arr_tab.to_pandas()
+        buf = _dataframe(df, table_name='tbl1')
+        exp = (
+            'tbl1 a=1i,b=10i\n' +
+            'tbl1 a=2i,b=20i\n' +
+            'tbl1 a=3i,b=30i\n' +
+            'tbl1 a=4i,b=40i\n' +
+            'tbl1 a=5i,b=50i\n' +
+            'tbl1 a=6i,b=60i\n' +
+            'tbl1 a=7i,b=70i\n' +
+            'tbl1 a=8i,b=80i\n' +
+            'tbl1 a=9i,b=90i\n')
+        self.assertEqual(buf, exp)
+
+        # To preserve the chunking we need to use a special pandas type:
+        pandarrow_a = pd.array(chunked_a, dtype='int16[pyarrow]')
+        pandarrow_b = pd.array(chunked_b, dtype='int32[pyarrow]')
+        df = pd.DataFrame({'a': pandarrow_a, 'b': pandarrow_b})
+
+        # Note that this dtype is experimental (currently),
+        # so we don't support it yet.. but we have everything in place should we
+        # need to, so - as for now - we just test that we raise a nice error.
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                "Unsupported dtype int16\[pyarrow\] for column 'a'.*github"):
+            _dataframe(df, table_name='tbl1')
 
 
 # TODO: Test all datatypes, but multiple row chunks.
