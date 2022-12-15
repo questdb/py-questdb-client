@@ -1405,6 +1405,20 @@ class TestPandas(unittest.TestCase):
                 ValueError, 'not.*contiguous'):
             _dataframe(df, table_name='tbl1')
 
+    def test_serializing_in_chunks(self):
+        df = pd.DataFrame({
+            'a': pd.Series(np.arange(30), dtype='int64'),
+            'b': pd.Series(np.arange(30), dtype='Int64')})
+        parts = [
+            df.iloc[:10],
+            df.iloc[10:20],
+            df.iloc[20:]]
+        for index, part in enumerate(parts):
+            buf = _dataframe(part, table_name='tbl1')
+            exp = ''.join(
+                f'tbl1 a={i}i,b={i}i\n'
+                for i in range(index * 10, (index + 1) * 10))
+            self.assertEqual(buf, exp)
 
 
 # TODO: Test all datatypes, but multiple row chunks.
