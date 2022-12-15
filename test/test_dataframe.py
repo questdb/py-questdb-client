@@ -20,6 +20,7 @@ import patch_path
 
 import questdb.ingress as qi
 import pandas as pd
+import numpy as np
 
 
 def _dataframe(*args, **kwargs):
@@ -1383,6 +1384,28 @@ class TestPandas(unittest.TestCase):
             'tbl1 b=1i\n' +
             'tbl1 b=2i\n' +
             'tbl1 b=3i\n')
+
+    def test_strided_numpy_column(self):
+        two_d = np.array([
+            [1, 10],
+            [2, 20],
+            [3, 30]])
+        col2 = two_d[:, 1]
+        col2.flags['WRITEABLE'] = False
+
+        # Checking our test case setup.
+        mv = memoryview(col2)
+        self.assertEqual(mv.contiguous, False)
+        self.assertEqual(mv.strides, (16,))
+
+        df = pd.DataFrame(col2, copy=False)
+        df.columns = ['a']
+
+        with self.assertRaisesRegex(
+                ValueError, 'not.*contiguous'):
+            _dataframe(df, table_name='tbl1')
+
+
 
 # TODO: Test all datatypes, but multiple row chunks.
 # TODO: Test datetime `at` argument with timezone.
