@@ -1464,7 +1464,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=9i,b=90i\n')
         self.assertEqual(buf, exp)
 
-        if getattr(pd, 'ArrowDtype') is None:
+        if not hasattr(pd, 'ArrowDtype'):
             # We don't have pandas ArrowDtype, so we can't test the rest.
             return
 
