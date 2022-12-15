@@ -761,9 +761,13 @@ cdef void_int _dataframe_series_as_pybuf(
         # Note! We don't need to support numpy strides since Pandas doesn't.
         # Also note that this guarantees a 1D buffer.
         get_buf_ret = PyObject_GetBuffer(nparr, &col.setup.pybuf, PyBUF_SIMPLE)
-
+    except ValueError as ve:
+        raise IngressError(
+            IngressErrorCode.BadDataFrame,
+            f'Bad column {pandas_col.name!r}: {ve}') from ve
     except BufferError as be:
-        raise TypeError(
+        raise IngressError(
+            IngressErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: Expected a buffer, got ' +
             f'{pandas_col.series!r} ({_fqn(type(pandas_col.series))})') from be
     _dataframe_alloc_chunks(1, col)

@@ -1402,7 +1402,7 @@ class TestPandas(unittest.TestCase):
         df.columns = ['a']
 
         with self.assertRaisesRegex(
-                ValueError, 'not.*contiguous'):
+                qi.IngressError, "Bad column 'a': .*not.*contiguous"):
             _dataframe(df, table_name='tbl1')
 
     def test_serializing_in_chunks(self):
