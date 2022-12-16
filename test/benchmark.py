@@ -13,6 +13,11 @@ import patch_path
 import questdb.ingress as qi
 
 
+def _tp(buf, t0, t1):
+    tp = len(buf) / (t1 - t0) / 1024 / 1024
+    return f'{tp:.2f} MiB/s'
+
+
 class TestBenchmarkPandas(unittest.TestCase):
     def test_pystr_i64_10m(self):
         # This is a benchmark, not a test.
@@ -32,7 +37,7 @@ class TestBenchmarkPandas(unittest.TestCase):
         t0 = time.monotonic()
         buf.dataframe(df, table_name='tbl1', symbols=True)
         t1 = time.monotonic()
-        print(f'Time: {t1 - t0}, size: {len(buf)}')
+        print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
     def test_mixed_10m(self):
         # This is a benchmark, not a test.
@@ -58,7 +63,7 @@ class TestBenchmarkPandas(unittest.TestCase):
         t0 = time.monotonic()
         buf.dataframe(df, table_name='tbl1', symbols=True)
         t1 = time.monotonic()
-        print(f'Time: {t1 - t0}, size: {len(buf)}')
+        print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
     def test_string_escaping_10m(self):
         count = 10_000_000
@@ -82,7 +87,7 @@ class TestBenchmarkPandas(unittest.TestCase):
         t0 = time.monotonic()
         buf.dataframe(df, table_name='tbl1', symbols=True)
         t1 = time.monotonic()
-        print(f'Time: {t1 - t0}, size: {len(buf)}')
+        print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
     def test_string_encoding_10m(self):
         count = 10_000_000
@@ -114,7 +119,7 @@ class TestBenchmarkPandas(unittest.TestCase):
         t0 = time.monotonic()
         buf.dataframe(df, table_name='tbl1', symbols=False)
         t1 = time.monotonic()
-        print(f'Time: {t1 - t0}, size: {len(buf)}')
+        print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
     def _test_gil_release_10m(self, threads):
         count = 10_000_000
@@ -167,7 +172,8 @@ class TestBenchmarkPandas(unittest.TestCase):
             total_time += elapsed
         avg_time = total_time / len(results)
         print(f'Avg time: {avg_time}')
-        print(f'Wall time: {max_time - min_time}')
+        tp = (len(bufs[0]) * len(bufs)) / (max_time - min_time) / 1024 / 1024
+        print(f'Wall time: {max_time - min_time}, tp: {tp:.2f} MiB/s')
 
     def test_gil_release_10m_1t(self):
         self._test_gil_release_10m(1)

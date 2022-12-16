@@ -1482,8 +1482,67 @@ class TestPandas(unittest.TestCase):
             _dataframe(df, table_name='tbl1')
 
     @with_tmp_dir
-    def test_parquet(self, tmpdir):
-        print(tmpdir)
+    def test_parquet_roundtrip(self, tmpdir):
+        pa_parquet_path = tmpdir / 'test_pa.parquet'
+        fp_parquet_path = tmpdir / 'test_fp.parquet'
+        df = pd.DataFrame({
+            's': pd.Categorical(['a', 'b', 'a', 'c', 'a']),
+            'a': pd.Series([1, 2, 3, 4, 5], dtype='int16'),
+            'b': pd.Series([10, 20, 30, None, 50], dtype='UInt8'),
+            'c': [0.5, float('nan'), 2.5, 3.5, None]})
+        df.to_parquet(pa_parquet_path, engine='pyarrow')
+        df.to_parquet(fp_parquet_path, engine='fastparquet')
+        pa2pa_df = pd.read_parquet(pa_parquet_path, engine='pyarrow')
+        pa2fp_df = pd.read_parquet(pa_parquet_path, engine='fastparquet')
+        fp2pa_df = pd.read_parquet(fp_parquet_path, engine='pyarrow')
+        fp2fp_df = pd.read_parquet(fp_parquet_path, engine='fastparquet')
+
+        exp_dtypes = ['category', 'int16', 'UInt8', 'float64']
+        self.assertEqual(list(df.dtypes), exp_dtypes)
+
+        def df_eq(exp_df, deser_df, exp_dtypes):
+            self.assertEqual(list(deser_df.dtypes), exp_dtypes)
+            if not exp_df.equals(deser_df):
+                print('\nexp_df:')
+                print(exp_df)
+                print('\ndeser_df:')
+                print(deser_df)
+            self.assertTrue(exp_df.equals(deser_df))
+
+        # fastparquet doesn't roundtrip with pyarrow parquet properly.
+        # It decays categories to object and UInt8 to float64.
+        # We need to set up special case expected results for that.
+        fallback_exp_dtypes = [
+            np.dtype('O'),
+            np.dtype('int16'),
+            np.dtype('float64'),
+            np.dtype('float64')]
+        fallback_df = df.astype({'s': 'object', 'b': 'float64'})
+
+        df_eq(df, pa2pa_df, exp_dtypes)
+        df_eq(df, pa2fp_df, exp_dtypes)
+        df_eq(fallback_df, fp2pa_df, fallback_exp_dtypes)
+        df_eq(df, fp2fp_df, exp_dtypes)
+
+        exp = (
+            'tbl1,s=a a=1i,b=10i,c=0.5\n' +
+            'tbl1,s=b a=2i,b=20i,c=NaN\n' +
+            'tbl1,s=a a=3i,b=30i,c=2.5\n' +
+            'tbl1,s=c a=4i,c=3.5\n' +
+            'tbl1,s=a a=5i,b=50i,c=NaN\n')
+
+        fallback_exp = (
+            'tbl1 s="a",a=1i,b=10.0,c=0.5\n' +
+            'tbl1 s="b",a=2i,b=20.0,c=NaN\n' +
+            'tbl1 s="a",a=3i,b=30.0,c=2.5\n' +
+            'tbl1 s="c",a=4i,b=NaN,c=3.5\n' +
+            'tbl1 s="a",a=5i,b=50.0,c=NaN\n')
+
+        self.assertEqual(_dataframe(df, table_name='tbl1'), exp)
+        self.assertEqual(_dataframe(pa2pa_df, table_name='tbl1'), exp)
+        self.assertEqual(_dataframe(pa2fp_df, table_name='tbl1'), exp)
+        self.assertEqual(_dataframe(fp2pa_df, table_name='tbl1'), fallback_exp)
+        self.assertEqual(_dataframe(fp2fp_df, table_name='tbl1'), exp)
 
 
 if __name__ == '__main__':
