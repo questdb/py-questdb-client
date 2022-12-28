@@ -54,6 +54,7 @@ def main():
     try_pip_install('pandas')
     try_pip_install('numpy')
     try_pip_install('pyarrow')
+    try_pip_install('fastparquet')
 
     on_linux_is_glibc = (
         (not platform.system() == 'Linux') or
@@ -65,6 +66,7 @@ def main():
         import pandas
         import numpy
         import pyarrow
+        import fastparquet
 
 
 if __name__ == "__main__":
