@@ -26,6 +26,11 @@ import pandas as pd
 import numpy as np
 import pyarrow as pa
 
+try:
+    import fastparquet
+except ImportError:
+    fastparquet = None
+
 
 def _dataframe(*args, **kwargs):
     buf = qi.Buffer()
@@ -1481,6 +1486,7 @@ class TestPandas(unittest.TestCase):
                 "Unsupported dtype int16\[pyarrow\] for column 'a'.*github"):
             _dataframe(df, table_name='tbl1')
 
+    @unittest.skipIf(not fastparquet, 'fastparquet not installed')
     @with_tmp_dir
     def test_parquet_roundtrip(self, tmpdir):
         pa_parquet_path = tmpdir / 'test_pa.parquet'
