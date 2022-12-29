@@ -193,6 +193,12 @@ def repl(*args):
 
 
 @command
+def example(name, *args):
+    _run('python3', 'examples/' + name + '.py', *args,
+         env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
+
+
+@command
 def cw(*args):
     cibuildwheel(args)
 

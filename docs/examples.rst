@@ -57,3 +57,42 @@ based on a timer if the auto-flushing logic was not triggered recently.
 
 .. literalinclude:: ../examples/random_data.py
    :language: python
+
+Inserting from Data Frames
+==========================
+
+Pandas Basics
+-------------
+
+The following example shows how to insert data from a Pandas DataFrame to the
+``'trades'`` table.
+
+.. literalinclude:: ../examples/pandas_basic.py
+   :language: python
+
+For details on all options, see the
+:func:`questdb.ingress.Buffer.dataframe` method.
+
+
+``pd.Categorical`` and multiple tables
+--------------------------------------
+
+The next example shows some more advanced features inserting data from Pandas.
+
+* The data is sent to multiple tables.
+
+* It uses the ``pd.Categorical`` type to determine the table to insert and also
+  uses it for the sensor name.
+
+* Columns of type ``pd.Categorical`` are sent as ``SYMBOL`` types.
+
+* The ``at`` parameter is specified using a column index: -1 is the last column.
+
+.. literalinclude:: ../examples/pandas_advanced.py
+   :language: python
+
+After running this example, the rows will be split across the ``'humidity'``,
+``'temp_c'`` and ``'voc_index'`` tables.
+
+For details on all options, see the
+:func:`questdb.ingress.Buffer.dataframe` method.

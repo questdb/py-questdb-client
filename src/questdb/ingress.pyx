@@ -972,7 +972,7 @@ cdef class Buffer:
         not using the buffer explicitly. It supports the same parameters
         and also supports auto-flushing.
 
-        This feature requires the ``pandas``, ``numpy` and ``pyarrow``
+        This feature requires the ``pandas``, ``numpy`` and ``pyarrow``
         package to be installed.
 
         :param df: The pandas DataFrame to serialize to the buffer.
