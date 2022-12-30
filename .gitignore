@@ -14,6 +14,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Parquet files generated as part of example runs
+*.parquet
+
 # C extensions
 *.so
 
