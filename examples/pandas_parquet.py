@@ -4,10 +4,10 @@ import pandas as pd
 
 def write_parquet_file():
     df = pd.DataFrame({
-        'company': pd.Categorical(
-            ['BP Pulse', 'Ubitricity', 'Source London', 'BP Pulse']),
         'location': pd.Categorical(
             ['BP-5541', 'UB-3355', 'SL-0995', 'BP-6653']),
+        'provider': pd.Categorical(
+            ['BP Pulse', 'Ubitricity', 'Source London', 'BP Pulse']),
         'speed_kwh': pd.Categorical(
             [50, 7, 7, 120]),
         'connector_type': pd.Categorical(
@@ -16,6 +16,8 @@ def write_parquet_file():
             ['dc', 'ac', 'ac', 'dc']),
         'price_pence':
             [54, 34, 32, 59],
+        'in_use':
+            [True, False, False, True],
         'ts': [
             pd.Timestamp('2022-12-30 12:15:00'),
             pd.Timestamp('2022-12-30 12:16:00'),
@@ -33,7 +35,7 @@ def example(host: str = 'localhost', port: int = 9009):
 
     df = pd.read_parquet(filename)
     with Sender(host, port) as sender:
-        # Note: Table name is set from the dataframe's index name.
+        # Note: Table name is looked up from the dataframe's index name.
         sender.dataframe(df, at='ts')
 
 
