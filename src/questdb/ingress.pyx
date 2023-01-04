@@ -1200,6 +1200,31 @@ cdef class Buffer:
               If a datetime value is specified as ``None`` (``NaT``), it is
               interpreted as the current QuestDB server time set on receipt of
               message.
+
+        **Error Handling and Recovery**
+
+        In case an exception is raised during dataframe serialization, the
+        buffer is left in its previous state.
+        The buffer remains in a valid state and can be used for further calls
+        even after an error.
+
+        For clarification, as an example, if an invalid ``None``
+        value appears at the 3rd row for a ``bool`` column, neither the 3rd nor
+        the preceding rows are added to the buffer.
+
+        **Note**: This differs from the :func:`Sender.dataframe` method, which
+        modifies this guarantee due to its ``auto_flush`` logic.
+
+        **Performance Considerations**
+
+        The Python GIL is released during serialization if it is not needed.
+        If any column requires the GIL, the entire serialization is done whilst
+        holding the GIL.
+
+        Column types that require the GIL are:
+
+        * Columns of ``str``, ``float`` or ``int`` or ``float`` Python objects.
+        * The ``'string[python]'`` dtype.
         """
         _dataframe(
             auto_flush_blank(),
@@ -1599,6 +1624,11 @@ cdef class Sender:
 
         Additionally, this method also supports auto-flushing the buffer
         as specified in the ``Sender``'s ``auto_flush`` constructor argument.
+        Auto-flushing is implemented incrementally, meanting that when
+        calling ``sender.dataframe(df)`` with a large ``df``, the sender may
+        have sent some of the rows to the server already whist the rest of the
+        rows are going to be sent at the next auto-flush or next explicit call
+        to :func:`Sender.flush`.
 
         In case of data errors with auto-flushing enabled, some of the rows
         may have been transmitted to the server already.
@@ -1636,6 +1666,8 @@ cdef class Sender:
             If ``False``, the flushed buffer is left in the internal buffer.
             Note that ``clear=False`` is only supported if ``buffer`` is also
             specified.
+
+        The Python GIL is released during the network IO operation.
         """
         cdef line_sender* sender = self._impl
         cdef line_sender_error* err = NULL
