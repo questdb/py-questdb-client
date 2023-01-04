@@ -1238,7 +1238,7 @@ cdef class Buffer:
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
-    'v1.0.2'
+    'v1.1.0'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
