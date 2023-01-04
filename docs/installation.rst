@@ -5,7 +5,7 @@ Installation
 The Python QuestDB client does not have any additional run-time dependencies and
 will run on any version of Python >= 3.7 on most platforms and architectures.
 
-You can install it (or updated it) globally by running::
+You can install it (or update it) globally by running::
 
     python3 -m pip install -U questdb
 
@@ -44,7 +44,7 @@ following statements from a ``python3`` interactive shell:
     >>> str(buf)
     'test,a=b\n'
 
-If you also want to check you can serialize from Pandas
+If you also want to if check you can serialize from Pandas
 (which requires additional dependencies):
 
 .. code-block:: python
