@@ -10,10 +10,29 @@ import time
 import patch_path
 from mock_server import Server
 
+
 import questdb.ingress as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import TestWithDatabase
+
+try:
+    import pandas as pd
+    import numpy
+    import pyarrow
+except ImportError:
+    pd = None
+
+
+if pd is not None:
+    from test_dataframe import TestPandas
+else:
+    class TestNoPandas(unittest.TestCase):
+        def test_no_pandas(self):
+            buf = qi.Buffer()
+            exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
+            with self.assertRaisesRegex(ImportError, exp):
+                buf.dataframe(None)
 
 
 class TestBuffer(unittest.TestCase):
@@ -106,8 +125,43 @@ class TestBuffer(unittest.TestCase):
 
     def test_unicode(self):
         buf = qi.Buffer()
-        buf.row('tbl1', symbols={'questdb1': '❤️'}, columns={'questdb2': '❤️'})
-        self.assertEqual(str(buf), 'tbl1,questdb1=❤️ questdb2="❤️"\n')
+        buf.row(
+            'tbl1',                            # ASCII
+            symbols={'questdb1': 'q❤️p'},       # Mixed ASCII and UCS-2
+            columns={'questdb2': '❤️' * 1200})  # Over the 1024 buffer prealloc.
+        buf.row(
+            'tbl1',
+            symbols={
+                'Questo è il nome di una colonna':  # Non-ASCII UCS-1
+                'Це символьне значення'},  # UCS-2, 2 bytes for UTF-8.
+            columns={
+                'questdb1': '',  # Empty string
+                'questdb2': '嚜꓂',  # UCS-2, 3 bytes for UTF-8.
+                'questdb3': '💩🦞'})  # UCS-4, 4 bytes for UTF-8.
+        self.assertEqual(str(buf),
+            f'tbl1,questdb1=q❤️p questdb2="{"❤️" * 1200}"\n' +
+            'tbl1,Questo\\ è\\ il\\ nome\\ di\\ una\\ colonna=' +
+            'Це\\ символьне\\ значення ' +
+            'questdb1="",questdb2="嚜꓂",questdb3="💩🦞"\n')
+
+        buf.clear()
+        buf.row('tbl1', symbols={'questdb1': 'q❤️p'})
+        self.assertEqual(str(buf), 'tbl1,questdb1=q❤️p\n')
+
+        # A bad char in Python.
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                '.*codepoint 0xd800 in string .*'):
+            buf.row('tbl1', symbols={'questdb1': 'a\ud800'})
+
+        # Strong exception safety: no partial writes.
+        # Ensure we can continue using the buffer after an error.
+        buf.row('tbl1', symbols={'questdb1': 'another line of input'})
+        self.assertEqual(
+            str(buf),
+            'tbl1,questdb1=q❤️p\n' +
+            # Note: No partially written failed line here.
+            'tbl1,questdb1=another\\ line\\ of\\ input\n')
 
     def test_float(self):
         buf = qi.Buffer()
@@ -137,7 +191,6 @@ class TestBuffer(unittest.TestCase):
         # Underflow.
         with self.assertRaises(OverflowError):
             buf.row('tbl1', columns={'num': -2**63-1})
-
 
 
 class TestSender(unittest.TestCase):
@@ -362,6 +415,55 @@ class TestSender(unittest.TestCase):
             msgs = server.recv()
             self.assertEqual(msgs, [])
 
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_dataframe(self):
+        with Server() as server:
+            with qi.Sender('localhost', server.port) as sender:
+                server.accept()
+                df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
+                sender.dataframe(df, table_name='tbl1')
+            msgs = server.recv()
+            self.assertEqual(
+                msgs,
+                [b'tbl1 a=1i,b=3.0',
+                    b'tbl1 a=2i,b=4.0'])
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_dataframe_auto_flush(self):
+        with Server() as server:
+            # An auto-flush size of 20 bytes is enough to auto-flush the first
+            # row, but not the second.
+            with qi.Sender('localhost', server.port, auto_flush=20) as sender:
+                server.accept()
+                df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
+                sender.dataframe(df, table_name='tbl1')
+                msgs = server.recv()
+                self.assertEqual(
+                    msgs,
+                    [b'tbl1 a=100000i,b=3.0'])
+
+                # The second row is still pending send.
+                self.assertEqual(len(sender), 16)
+
+                # So we give it some more data and we should see it flush.
+                sender.row('tbl1', columns={'a': 3, 'b': 5.0})
+                msgs = server.recv()
+                self.assertEqual(
+                    msgs,
+                    [b'tbl1 a=2i,b=4.0',
+                     b'tbl1 a=3i,b=5.0'])
+
+                self.assertEqual(len(sender), 0)
+
+                # We can now disconnect the server and see auto flush failing.
+                server.close()
+
+                exp_err = 'Could not flush buffer.* - See https'
+                with self.assertRaisesRegex(qi.IngressError, exp_err):
+                    for _ in range(1000):
+                        time.sleep(0.01)
+                        sender.dataframe(df.head(1), table_name='tbl1')
+
     def test_new_buffer(self):
         sender = qi.Sender(
             host='localhost',
@@ -393,5 +495,64 @@ class TestSender(unittest.TestCase):
             qi.Sender(host='localhost', port=9009, max_name_len=-1)
 
 
+class TestBases:
+    class Timestamp(unittest.TestCase):
+        def test_from_int(self):
+            ns = 1670857929778202000
+            num = ns // self.ns_scale
+            ts = self.timestamp_cls(num)
+            self.assertEqual(ts.value, num)
+
+            ts0 = self.timestamp_cls(0)
+            self.assertEqual(ts0.value, 0)
+
+            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+                self.timestamp_cls(-1)
+
+        def test_from_datetime(self):
+            utc = datetime.timezone.utc
+
+            dt1 = datetime.datetime(2022, 1, 1, 12, 0, 0, 0, tzinfo=utc)
+            ts1 = self.timestamp_cls.from_datetime(dt1)
+            self.assertEqual(ts1.value, 1641038400000000000 // self.ns_scale)
+            self.assertEqual(
+                ts1.value,
+                int(dt1.timestamp() * 1000000000 // self.ns_scale))
+
+            dt2 = datetime.datetime(1970, 1, 1, tzinfo=utc)
+            ts2 = self.timestamp_cls.from_datetime(dt2)
+            self.assertEqual(ts2.value, 0)
+
+            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+                self.timestamp_cls.from_datetime(
+                    datetime.datetime(1969, 12, 31, tzinfo=utc))
+
+            dt_naive = datetime.datetime(2022, 1, 1, 12, 0, 0, 0,
+                tzinfo=utc).astimezone(None).replace(tzinfo=None)
+            ts3 = self.timestamp_cls.from_datetime(dt_naive)
+            self.assertEqual(ts3.value, 1641038400000000000 // self.ns_scale)
+
+        def test_now(self):
+            expected = time.time_ns() // self.ns_scale
+            actual = self.timestamp_cls.now().value
+            delta = abs(expected - actual)
+            one_sec = 1000000000 // self.ns_scale
+            self.assertLess(delta, one_sec)
+
+
+class TestTimestampMicros(TestBases.Timestamp):
+    timestamp_cls = qi.TimestampMicros
+    ns_scale = 1000
+
+
+class TestTimestampNanos(TestBases.Timestamp):
+    timestamp_cls = qi.TimestampNanos
+    ns_scale = 1
+
+
 if __name__ == '__main__':
-    unittest.main()
+    if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
+        import cProfile
+        cProfile.run('unittest.main()', sort='cumtime')
+    else:
+        unittest.main()

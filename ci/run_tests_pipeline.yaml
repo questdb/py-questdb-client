@@ -28,7 +28,9 @@ stages:
             submodules: true
           - task: UsePythonVersion@0
           - script: python3 --version
-          - script: python3 -m pip install cython
+          - script: |
+              python3 -m pip install cython
+              python3 ci/pip_install_deps.py
             displayName: Installing Python dependencies
           - script: python3 proj.py build
             displayName: "Build"

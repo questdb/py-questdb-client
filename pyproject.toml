@@ -51,6 +51,7 @@ requires = [
 # See: https://cibuildwheel.readthedocs.io/en/stable/options/#configuration-file
 build-verbosity = "3"
 before-build = "python {project}/install_rust.py"
+before-test = "python {project}/ci/pip_install_deps.py"
 test-command = "python {project}/test/test.py -v"
 skip = [
     # No 32-bit musl C native tool chain for Rust.

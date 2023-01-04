@@ -1,3 +1,7 @@
 {
-    "esbonio.sphinx.confDir": ""
+    "esbonio.sphinx.confDir": "",
+    "cmake.configureOnOpen": false,
+    "files.associations": {
+        "ingress_helper.h": "c"
+    }
 }

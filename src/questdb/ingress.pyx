@@ -30,58 +30,67 @@
 API for fast data ingestion into QuestDB.
 """
 
-from libc.stdint cimport uint8_t, uint64_t, int64_t
+# For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
+from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
+    INT64_MAX, INT64_MIN
+from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
+from libc.string cimport strncmp, memset
+from libc.math cimport isnan
+from libc.errno cimport errno
 from cpython.datetime cimport datetime
-from cpython.bool cimport bool, PyBool_Check
+from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
-from cpython.float cimport PyFloat_Check
-from cpython.int cimport PyInt_Check
-from cpython.unicode cimport PyUnicode_Check
+from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
+    PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
+from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *
+from .pystr_to_utf8 cimport *
+from .arrow_c_data_interface cimport *
+from .extra_cpython cimport *
+from .ingress_helper cimport *
 
-cdef extern from "Python.h":
-    ctypedef uint8_t Py_UCS1  # unicodeobject.h
+# An int we use only for error reporting.
+#  0 is success.
+# -1 is failure.
+ctypedef int void_int
 
-    ctypedef unsigned int uint
-
-    cdef enum PyUnicode_Kind:
-        PyUnicode_1BYTE_KIND
-        PyUnicode_2BYTE_KIND
-        PyUnicode_4BYTE_KIND
-
-    # Note: Returning an `object` rather than `PyObject` as the function
-    # returns a new reference rather than borrowing an existing one.
-    object PyUnicode_FromKindAndData(
-        int kind, const void* buffer, Py_ssize_t size)
-
-    # Ditto, see comment on why not returning a `PyObject` above.
-    str PyUnicode_FromStringAndSize(
-        const char* u, Py_ssize_t size)
-
-    # Must be called before accessing data or is compact check.
-    int PyUnicode_READY(object o) except -1
-
-    # Is UCS1 and ascii (and therefore valid UTF-8).
-    bint PyUnicode_IS_COMPACT_ASCII(object o)
-
-    # Get length.
-    Py_ssize_t PyUnicode_GET_LENGTH(object o)
-
-    # Zero-copy access to buffer.
-    Py_UCS1* PyUnicode_1BYTE_DATA(object o)
-
-    Py_ssize_t PyBytes_GET_SIZE(object o)
-
-    char* PyBytes_AsString(object o)
+import cython
+include "dataframe.pxi"
 
 
 from enum import Enum
-from typing import List, Tuple, Dict, Union, Any, Optional, Callable, Iterable
+from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
+    Iterable
 import pathlib
 
 import sys
+
+# For `get_time_now_ns` and `get_time_now_us` functions.
+IF UNAME_SYSNAME == 'Windows':
+    import time
+ELSE:
+    from posix.time cimport timespec, clock_gettime, CLOCK_REALTIME
+
+
+cdef bint _has_gil(PyThreadState** gs):
+    return gs[0] == NULL
+
+
+cdef bint _ensure_doesnt_have_gil(PyThreadState** gs):
+    """Returns True if previously had the GIL, False otherwise."""
+    if _has_gil(gs):
+        gs[0] = PyEval_SaveThread()
+        return True
+    return False
+
+
+cdef void _ensure_has_gil(PyThreadState** gs):
+    if not _has_gil(gs):
+        PyEval_RestoreThread(gs[0])
+        gs[0] = NULL
+
 
 class IngressErrorCode(Enum):
     """Category of Error."""
@@ -93,6 +102,7 @@ class IngressErrorCode(Enum):
     InvalidTimestamp = line_sender_error_invalid_timestamp
     AuthError = line_sender_error_auth_error
     TlsError = line_sender_error_tls_error
+    BadDataFrame = <int>line_sender_error_tls_error + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -160,53 +170,173 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     return IngressError(tup[0], fmt.format(tup[1]))
 
 
-cdef bytes str_to_utf8(str string, line_sender_utf8* utf8_out):
+cdef object _utf8_decode_error(
+        PyObject* string, uint32_t bad_codepoint):
+    cdef str s = <str><object>string
+    return IngressError(
+        IngressErrorCode.InvalidUtf8,
+        f'Invalid codepoint 0x{bad_codepoint:x} in string {s!r}: ' +
+        'Cannot be encoded as UTF-8.')
+
+
+cdef str _fqn(type obj):
+    if obj.__module__ == 'builtins':
+        return obj.__qualname__
+    else:
+        return f'{obj.__module__}.{obj.__qualname__}'
+
+
+cdef inline void_int _encode_utf8(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_utf8* utf8_out) except -1:
+    cdef uint32_t bad_codepoint = 0
+    cdef size_t count = <size_t>(PyUnicode_GET_LENGTH(string))
+    cdef int kind = PyUnicode_KIND(string)
+    if kind == PyUnicode_1BYTE_KIND:
+        # No error handling for UCS1: All code points translate into valid UTF8.
+        qdb_ucs1_to_utf8(
+            b,
+            count,
+            PyUnicode_1BYTE_DATA(string),
+            &utf8_out.len,
+            &utf8_out.buf)
+    elif kind == PyUnicode_2BYTE_KIND:
+        if not qdb_ucs2_to_utf8(
+                b,
+                count,
+                PyUnicode_2BYTE_DATA(string),
+                &utf8_out.len,
+                &utf8_out.buf,
+                &bad_codepoint):
+            raise _utf8_decode_error(string, bad_codepoint)
+    elif kind == PyUnicode_4BYTE_KIND:
+        if not qdb_ucs4_to_utf8(
+                b,
+                count,
+
+                # This cast is required and is possibly a Cython compiler bug.
+                # It doesn't recognize that `const Py_UCS4*`
+                # is the same as `const uint32_t*`.
+                <const uint32_t*>PyUnicode_4BYTE_DATA(string),
+
+                &utf8_out.len,
+                &utf8_out.buf,
+                &bad_codepoint):
+            raise _utf8_decode_error(string, bad_codepoint)
+    else:
+        raise ValueError(f'Unknown UCS kind: {kind}.')
+
+
+cdef void_int str_to_utf8(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_utf8* utf8_out) except -1:
     """
-    Init the `utf8_out` object from the `string`.
-    If the string is held as a UCS1 and is purely ascii, then
-    the memory is borrowed.
-    Otherwise the string is first encoded to UTF-8 into a bytes object
-    and such bytes object is returned to transfer ownership and extend
-    the lifetime of the buffer pointed to by `utf8_out`.
+    Convert a Python string to a UTF-8 borrowed buffer.
+    This is done without allocating new Python `bytes` objects.
+    In case the string is an ASCII string, it's also generally zero-copy.
+    The `utf8_out` param will point to (borrow from) either the ASCII buffer
+    inside the original Python object or a part of memory allocated inside the
+    `b` buffer.
+
+    If you need to use `utf8_out` without the GIL, call `qdb_pystr_buf_copy`.
     """
-    # Note that we bypass `line_sender_utf8_init`.
-    cdef bytes owner = None
+    if not PyUnicode_CheckExact(string):
+        raise TypeError(
+            'Expected a str object, not an object of type ' +
+            _fqn(type(<str><object>string)))
     PyUnicode_READY(string)
+
+    # We optimize the common case of ASCII strings.
+    # This avoid memory allocations and copies altogether.
+    # We get away with this because ASCII is a subset of UTF-8.
     if PyUnicode_IS_COMPACT_ASCII(string):
         utf8_out.len = <size_t>(PyUnicode_GET_LENGTH(string))
         utf8_out.buf = <const char*>(PyUnicode_1BYTE_DATA(string))
-        return owner
-    else:
-        owner = string.encode('utf-8')
-        utf8_out.len = <size_t>(PyBytes_GET_SIZE(owner))
-        utf8_out.buf = <const char*>(PyBytes_AsString(owner))
-        return owner
+        return 0
+
+    _encode_utf8(b, string, utf8_out)
 
 
-cdef bytes str_to_table_name(str string, line_sender_table_name* name_out):
+
+cdef void_int str_to_utf8_copy(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_utf8* utf8_out) except -1:
+    """
+    Variant of `str_to_utf8` that always copies the string to a new buffer.
+
+    The resulting `utf8_out` can be used when not holding the GIL:
+    The pointed-to memory is owned by `b`.
+    """
+    if not PyUnicode_CheckExact(string):
+        raise TypeError(
+            'Expected a str object, not an object of type ' +
+            _fqn(type(<str><object>string)))
+
+    PyUnicode_READY(string)
+    _encode_utf8(b, string, utf8_out)
+
+
+cdef void_int str_to_table_name(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_table_name* name_out) except -1:
     """
     Python string to borrowed C table name.
     Also see `str_to_utf8`.
     """
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    cdef bytes owner = str_to_utf8(string, &utf8)
+    str_to_utf8(b, string, &utf8)
     if not line_sender_table_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
-    return owner
 
 
-cdef bytes str_to_column_name(str string, line_sender_column_name* name_out):
+cdef void_int str_to_table_name_copy(
+        qdb_pystr_buf* b,
+        PyObject* string,
+        line_sender_table_name* name_out) except -1:
+    """
+    Python string to copied C table name.
+    Also see `str_to_utf8_copy`.
+    """
+    cdef line_sender_error* err = NULL
+    cdef line_sender_utf8 utf8
+    str_to_utf8_copy(b, string, &utf8)
+    if not line_sender_table_name_init(name_out, utf8.len, utf8.buf, &err):
+        raise c_err_to_py(err)
+
+
+cdef void_int str_to_column_name(
+        qdb_pystr_buf* b,
+        str string,
+        line_sender_column_name* name_out) except -1:
     """
     Python string to borrowed C column name.
     Also see `str_to_utf8`.
     """
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    cdef bytes owner = str_to_utf8(string, &utf8)
+    str_to_utf8(b, <PyObject*>string, &utf8)
     if not line_sender_column_name_init(name_out, utf8.len, utf8.buf, &err):
         raise c_err_to_py(err)
-    return owner
+
+
+cdef void_int str_to_column_name_copy(
+        qdb_pystr_buf* b,
+        str string,
+        line_sender_column_name* name_out) except -1:
+    """
+    Python string to copied C column name.
+    Also see `str_to_utf8_copy`.
+    """
+    cdef line_sender_error* err = NULL
+    cdef line_sender_utf8 utf8
+    str_to_utf8_copy(b, <PyObject*>string, &utf8)
+    if not line_sender_column_name_init(name_out, utf8.len, utf8.buf, &err):
+        raise c_err_to_py(err)
 
 
 cdef int64_t datetime_to_micros(datetime dt):
@@ -229,40 +359,79 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(dt.microsecond * 1000))
 
 
+cdef int64_t _US_SEC = 1000000
+cdef int64_t _NS_US = 1000
+
+
+cdef int64_t get_time_now_us() except -1:
+    """
+    Get the current time in microseconds.
+    """
+    IF UNAME_SYSNAME == 'Windows':
+        return time.time_ns() // 1000
+    ELSE:
+        # Note: Y2K38 bug on 32-bit systems, but we don't care.
+        cdef timespec ts
+        if clock_gettime(CLOCK_REALTIME, &ts) != 0:
+            raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
+        return <int64_t>(ts.tv_sec) * _US_SEC + <int64_t>(ts.tv_nsec) // _NS_US
+
+
+cdef int64_t _NS_SEC = 1000000000
+
+
+cdef int64_t get_time_now_ns() except -1:
+    """
+    Get the current time in nanoseconds.
+    """
+    IF UNAME_SYSNAME == 'Windows':
+        return time.time_ns()
+    ELSE:
+        # Note: Y2K38 bug on 32-bit systems, but we don't care.
+        cdef timespec ts
+        if clock_gettime(CLOCK_REALTIME, &ts) != 0:
+            raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
+        return <int64_t>(ts.tv_sec) * _NS_SEC + <int64_t>(ts.tv_nsec)
+
+
 cdef class TimestampMicros:
     """
-    A timestamp in microseconds since the UNIX epoch.
+    A timestamp in microseconds since the UNIX epoch (UTC).
 
-    You may construct a ``TimestampMicros`` from an integer or a ``datetime``.
+    You may construct a ``TimestampMicros`` from an integer or a
+    ``datetime.datetime``, or simply call the :func:`TimestampMicros.now`
+    method.
 
     .. code-block:: python
 
-        # Can't be negative.
-        TimestampMicros(1657888365426838016)
+        # Recommended way to get the current timestamp.
+        TimestampMicros.now()
 
-        # Careful with the timezeone!
-        TimestampMicros.from_datetime(datetime.datetime.utcnow())
+        # The above is equivalent to:
+        TimestampMicros(time.time_ns() // 1000)
 
-    When constructing from a ``datetime``, you should take extra care
-    to ensure that the timezone is correct.
+        # You can provide a numeric timestamp too. It can't be negative.
+        TimestampMicros(1657888365426838)
 
-    For example, ``datetime.now()`` implies the `local` timezone which
-    is probably not what you want.
-
-    When constructing the ``datetime`` object explicity, you pass in the
-    timezone to use.
+    ``TimestampMicros`` can also be constructed from a ``datetime.datetime``
+    object.
 
     .. code-block:: python
 
         TimestampMicros.from_datetime(
-            datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+            datetime.datetime.now(tz=datetime.timezone.utc))
 
+    We recommend that when using ``datetime`` objects, you explicitly pass in
+    the timezone to use. This is because ``datetime`` objects without an
+    associated timezone are assumed to be in the local timezone and it is easy
+    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
+    bug).
     """
     cdef int64_t _value
 
     def __cinit__(self, value: int):
         if value < 0:
-            raise ValueError('value must positive integer.')
+            raise ValueError('value must be a positive integer.')
         self._value = value
 
     @classmethod
@@ -274,46 +443,60 @@ cdef class TimestampMicros:
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_micros(dt))
 
+    @classmethod
+    def now(cls):
+        """
+        Construct a ``TimestampMicros`` from the current time as UTC.
+        """
+        cdef int64_t value = get_time_now_us()
+        return cls(value)
+
     @property
     def value(self) -> int:
-        """Number of microseconds."""
+        """Number of microseconds (Unix epoch timestamp, UTC)."""
         return self._value
+
+    def __repr__(self):
+        return f'TimestampMicros.({self._value})'
 
 
 cdef class TimestampNanos:
     """
-    A timestamp in nanoseconds since the UNIX epoch.
+    A timestamp in nanoseconds since the UNIX epoch (UTC).
 
-    You may construct a ``TimestampNanos`` from an integer or a ``datetime``.
+    You may construct a ``TimestampNanos`` from an integer or a
+    ``datetime.datetime``, or simply call the :func:`TimestampNanos.now`
+    method.
 
     .. code-block:: python
 
-        # Can't be negative.
+        # Recommended way to get the current timestamp.
+        TimestampNanos.now()
+
+        # The above is equivalent to:
+        TimestampNanos(time.time_ns())
+
+        # You can provide a numeric timestamp too. It can't be negative.
         TimestampNanos(1657888365426838016)
 
-        # Careful with the timezeone!
-        TimestampNanos.from_datetime(datetime.datetime.utcnow())
-
-    When constructing from a ``datetime``, you should take extra care
-    to ensure that the timezone is correct.
-
-    For example, ``datetime.now()`` implies the `local` timezone which
-    is probably not what you want.
-
-    When constructing the ``datetime`` object explicity, you pass in the
-    timezone to use.
+    ``TimestampNanos`` can also be constructed from a ``datetime`` object.
 
     .. code-block:: python
 
-        TimestampMicros.from_datetime(
-            datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+        TimestampNanos.from_datetime(
+            datetime.datetime.now(tz=datetime.timezone.utc))
 
+    We recommend that when using ``datetime`` objects, you explicitly pass in
+    the timezone to use. This is because ``datetime`` objects without an
+    associated timezone are assumed to be in the local timezone and it is easy
+    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
+    bug).
     """
     cdef int64_t _value
 
     def __cinit__(self, value: int):
         if value < 0:
-            raise ValueError('value must positive integer.')
+            raise ValueError('value must be a positive integer.')
         self._value = value
 
     @classmethod
@@ -325,17 +508,28 @@ cdef class TimestampNanos:
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_nanos(dt))
 
+    @classmethod
+    def now(cls):
+        """
+        Construct a ``TimestampNanos`` from the current time as UTC.
+        """
+        cdef int64_t value = get_time_now_ns()
+        return cls(value)
+
     @property
     def value(self) -> int:
-        """Number of nanoseconds."""
+        """Number of nanoseconds (Unix epoch timestamp, UTC)."""
         return self._value
+
+    def __repr__(self):
+        return f'TimestampNanos({self.value})'
 
 
 cdef class Sender
 cdef class Buffer
 
 
-cdef int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
+cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
     if sender._auto_flush_enabled:
         if len(buffer) >= sender._auto_flush_watermark:
             sender.flush(buffer)
@@ -406,6 +600,7 @@ cdef class Buffer:
 
     """
     cdef line_sender_buffer* _impl
+    cdef qdb_pystr_buf* _b
     cdef size_t _init_capacity
     cdef size_t _max_name_len
     cdef object _row_complete_sender
@@ -420,6 +615,7 @@ cdef class Buffer:
 
     cdef inline _cinit_impl(self, size_t init_capacity, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(max_name_len)
+        self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_capacity)
         self._init_capacity = init_capacity
         self._max_name_len = max_name_len
@@ -427,6 +623,7 @@ cdef class Buffer:
 
     def __dealloc__(self):
         self._row_complete_sender = None
+        qdb_pystr_buf_free(self._b)
         line_sender_buffer_free(self._impl)
 
     @property
@@ -473,6 +670,7 @@ cdef class Buffer:
         ``sender.flush(buffer, clear=False)``.
         """
         line_sender_buffer_clear(self._impl)
+        qdb_pystr_buf_clear(self._b)
 
     def __len__(self) -> int:
         """
@@ -491,12 +689,12 @@ cdef class Buffer:
         cdef const char* utf8 = line_sender_buffer_peek(self._impl, &size)
         return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)
 
-    cdef inline int _set_marker(self) except -1:
+    cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_set_marker(self._impl, &err):
             raise c_err_to_py(err)
 
-    cdef inline int _rewind_to_marker(self) except -1:
+    cdef inline void_int _rewind_to_marker(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_rewind_to_marker(self._impl, &err):
             raise c_err_to_py(err)
@@ -504,84 +702,82 @@ cdef class Buffer:
     cdef inline _clear_marker(self):
         line_sender_buffer_clear_marker(self._impl)
 
-    cdef inline int _table(self, str table_name) except -1:
+    cdef inline void_int _table(self, str table_name) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_table_name c_table_name
-        cdef bytes owner = str_to_table_name(table_name, &c_table_name)
+        str_to_table_name(
+            self._cleared_b(), <PyObject*>table_name, &c_table_name)
         if not line_sender_buffer_table(self._impl, c_table_name, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _symbol(self, str name, str value) except -1:
+    cdef inline qdb_pystr_buf* _cleared_b(self):
+        qdb_pystr_buf_clear(self._b)
+        return self._b
+
+    cdef inline void_int _symbol(self, str name, str value) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_column_name c_name
         cdef line_sender_utf8 c_value
-        cdef bytes owner_name = str_to_column_name(name, &c_name)
-        cdef bytes owner_value = str_to_utf8(value, &c_value)
+        str_to_column_name(self._cleared_b(), name, &c_name)
+        str_to_utf8(self._b, <PyObject*>value, &c_value)
         if not line_sender_buffer_symbol(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_bool(
+    cdef inline void_int _column_bool(
             self, line_sender_column_name c_name, bint value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_i64(
+    cdef inline void_int _column_i64(
             self, line_sender_column_name c_name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
         return 0
 
-    cdef inline int _column_f64(
+    cdef inline void_int _column_f64(
             self, line_sender_column_name c_name, double value) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_str(
+    cdef inline void_int _column_str(
             self, line_sender_column_name c_name, str value) except -1:
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_value
-        cdef bytes owner_value = str_to_utf8(value, &c_value)
+        str_to_utf8(self._b, <PyObject*>value, &c_value)
         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_ts(
+    cdef inline void_int _column_ts(
             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_ts(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column_dt(
+    cdef inline void_int _column_dt(
             self, line_sender_column_name c_name, datetime dt) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_ts(
                 self._impl, c_name, datetime_to_micros(dt), &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _column(self, str name, object value) except -1:
+    cdef inline void_int _column(self, str name, object value) except -1:
         cdef line_sender_column_name c_name
-        cdef bytes owner_name = str_to_column_name(name, &c_name)
-        if PyBool_Check(value):
-            return self._column_bool(c_name, value)
-        elif PyInt_Check(value):
-            return self._column_i64(c_name, value)
-        elif PyFloat_Check(value):
-            return self._column_f64(c_name, value)
-        elif PyUnicode_Check(value):
-            return self._column_str(c_name, value)
+        str_to_column_name(self._cleared_b(), name, &c_name)
+        if PyBool_Check(<PyObject*>value):
+            self._column_bool(c_name, value)
+        elif PyLong_CheckExact(<PyObject*>value):
+            self._column_i64(c_name, value)
+        elif PyFloat_CheckExact(<PyObject*>value):
+            self._column_f64(c_name, value)
+        elif PyUnicode_CheckExact(<PyObject*>value):
+            self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
-            return self._column_ts(c_name, value)
+            self._column_ts(c_name, value)
         elif isinstance(value, datetime):
-            return self._column_dt(c_name, value)
+            self._column_dt(c_name, value)
         else:
             valid = ', '.join((
                 'bool',
@@ -591,9 +787,9 @@ cdef class Buffer:
                 'TimestampMicros',
                 'datetime.datetime'))
             raise TypeError(
-                f'Unsupported type: {type(value)}. Must be one of: {valid}')
+                f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
-    cdef inline int _may_trigger_row_complete(self) except -1:
+    cdef inline void_int _may_trigger_row_complete(self) except -1:
         cdef line_sender_error* err = NULL
         cdef PyObject* sender = NULL
         if self._row_complete_sender != None:
@@ -601,38 +797,35 @@ cdef class Buffer:
             if sender != NULL:
                 may_flush_on_row_complete(self, <Sender><object>sender)
 
-    cdef inline int _at_ts(self, TimestampNanos ts) except -1:
+    cdef inline void_int _at_ts(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at(self._impl, ts._value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _at_dt(self, datetime dt) except -1:
+    cdef inline void_int _at_dt(self, datetime dt) except -1:
         cdef int64_t value = datetime_to_nanos(dt)
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at(self._impl, value, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _at_now(self) except -1:
+    cdef inline void_int _at_now(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at_now(self._impl, &err):
             raise c_err_to_py(err)
-        return 0
 
-    cdef inline int _at(self, object ts) except -1:
+    cdef inline void_int _at(self, object ts) except -1:
         if ts is None:
-            return self._at_now()
+            self._at_now()
         elif isinstance(ts, TimestampNanos):
-            return self._at_ts(ts)
+            self._at_ts(ts)
         elif isinstance(ts, datetime):
-            return self._at_dt(ts)
+            self._at_dt(ts)
         else:
             raise TypeError(
-                f'Unsupported type: {type(ts)}. Must be one of: ' +
+                f'Unsupported type: {_fqn(type(ts))}. Must be one of: ' +
                 'TimestampNanos, datetime, None')
 
-    cdef int _row(
+    cdef void_int _row(
             self,
             str table_name,
             dict symbols=None,
@@ -708,7 +901,7 @@ cdef class Buffer:
                 columns={
                     'temperature': 24.5,
                     'humidity': 0.5},
-                at=datetime.datetime.utcnow())
+                at=datetime.datetime.now(tz=datetime.timezone.utc))
 
 
         Python strings passed as values to ``symbols`` are going to be encoded
@@ -764,181 +957,284 @@ cdef class Buffer:
         self._row(table_name, symbols, columns, at)
         return self
 
-    # def tabular(
-    #         self,
-    #         table_name: str,
-    #         data: Iterable[Iterable[Union[
-    #             bool, int, float, str,
-    #             TimestampMicros, TimestampNanos, datetime]]],
-    #         *,
-    #         header: Optional[List[Optional[str]]]=None,
-    #         symbols: Union[bool, List[int]]=False,
-    #         at: Union[None, TimestampNanos, datetime]=None):
-    #     """
-    #     Add multiple rows as an iterable of iterables (e.g. list of lists) to
-    #     the buffer.
+    def dataframe(
+            self,
+            df,  # : pd.DataFrame
+            *,
+            table_name: Optional[str] = None,
+            table_name_col: Union[None, int, str] = None,
+            symbols: Union[str, bool, List[int], List[str]] = 'auto',
+            at: Union[None, int, str, TimestampNanos, datetime] = None):
+        """
+        Add a pandas DataFrame to the buffer.
 
-    #     **Data and header**
+        Also see the :func:`Sender.dataframe` method if you're
+        not using the buffer explicitly. It supports the same parameters
+        and also supports auto-flushing.
 
-    #     The ``data`` argument specifies rows which must all be for the same
-    #     table. Column names are provided as the ``header``.
+        This feature requires the ``pandas``, ``numpy`` and ``pyarrow``
+        package to be installed.
 
-    #     .. code-block:: python
+        :param df: The pandas DataFrame to serialize to the buffer.
+        :type df: pandas.DataFrame
 
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, 123, 3.14, 'xyz'],
-    #              [False, 456, 6.28, 'abc'],
-    #              [True, 789, 9.87, 'def']],
-    #             header=['col1', 'col2', 'col3', 'col4'])
+        :param table_name: The name of the table to which the rows belong.
 
-    #     **Designated Timestamp Column**
+            If ``None``, the table name is taken from the ``table_name_col``
+            parameter. If both ``table_name`` and ``table_name_col`` are
+            ``None``, the table name is taken from the DataFrame's index
+            name (``df.index.name`` attribute).
+        :type table_name: str or None
 
-    #     QuestDB supports a special `designated timestamp
-    #     <https://questdb.io/docs/concept/designated-timestamp/>`_ column that it
-    #     uses to sort the rows by timestamp.
+        :param table_name_col: The name or index of the column in the DataFrame
+            that contains the table name.
+            
+            If ``None``, the table name is taken
+            from the ``table_name`` parameter. If both ``table_name`` and
+            ``table_name_col`` are ``None``, the table name is taken from the
+            DataFrame's index name (``df.index.name`` attribute).
 
-    #     If the data section contains the same number of columns as the header,
-    #     then the designated is going to be
-    #     assigned by the server, unless specified for all columns the `at`
-    #     argument as either an integer wrapped in a ``TimestampNanos`` object
-    #     representing nanoseconds since unix epoch (1970-01-01 00:00:00 UTC) or
-    #     as a ``datetime.datetime`` object.
+            If ``table_name_col`` is an integer, it is interpreted as the index
+            of the column starting from ``0``. The index of the column can be
+            negative, in which case it is interpreted as an offset from the end
+            of the DataFrame. E.g. ``-1`` is the last column.
+        :type table_name_col: str or int or None
 
-    #     .. code-block:: python
+        :param symbols: The columns to be serialized as symbols.
+        
+            If ``'auto'`` (default), all columns of dtype ``'categorical'`` are
+            serialized as symbols. If ``True``, all ``str`` columns are
+            serialized as symbols. If ``False``, no columns are serialized as
+            symbols.
+            
+            The list of symbols can also be specified explicitly as a ``list``
+            of column names (``str``) or indices (``int``). Integer indices
+            start at ``0`` and can be negative, offset from the end of the
+            DataFrame. E.g. ``-1`` is the last column.
 
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, None, 3.14, 'xyz'],
-    #              [False, 123, 6.28, 'abc'],
-    #              [True, 456, 9.87, 'def']],
-    #             header=['col1', 'col2', 'col3', 'col4'],
-    #             at=datetime.datetime.utcnow())
+            Only columns containing strings can be serialized as symbols.
 
-    #             # or ...
-    #             # at=TimestampNanos(1657386397157631000))
+        :type symbols: str or bool or list of str or list of int
 
-    #     If the rows need different `designated timestamp
-    #     <https://questdb.io/docs/concept/designated-timestamp/>`_ values across
-    #     different rows, you can provide them as an additional unlabeled column.
-    #     An unlabled column is one that has its name set to ``None``.
+        :param at: The designated timestamp of the rows.
+        
+            You can specify a single value for all rows or column name or index.
+            If ``None``, timestamp is assigned by the server for all rows.
+            To pass in a timestamp explicity as an integer use the
+            ``TimestampNanos`` wrapper type. To get the current timestamp,
+            use ``TimestampNanos.now()``.
+            When passing a ``datetime.datetime`` object, the timestamp is
+            converted to nanoseconds.
+            A ``datetime`` object is assumed to be in the local timezone unless
+            one is specified explicitly (so call
+            ``datetime.datetime.now(tz=datetime.timezone.utc)`` instead
+            of ``datetime.datetime.utcnow()`` for the current timestamp to
+            avoid bugs).
 
-    #     .. code-block:: python
+            To specify a different timestamp for each row, pass in a column name
+            (``str``) or index (``int``, 0-based index, negative index
+            supported): In this case, the column needs to be of dtype
+            ``datetime64[ns]`` (assumed to be in the **UTC timezone** and not
+            local, due to differences in Pandas and Python datetime handling) or
+            ``datetime64[ns, tz]``. When a timezone is specified in the column,
+            it is converted to UTC automatically.
 
-    #         ts1 = datetime.datetime.utcnow()
-    #         ts2 = (
-    #             datetime.datetime.utcnow() +
-    #             datetime.timedelta(microseconds=1))
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, 123, ts1],
-    #              [False, 456, ts2]],
-    #             header=['col1', 'col2', None])
+            A timestamp column can also contain ``None`` values. The server will
+            assign the current timestamp to those rows.
 
-    #     Like the ``at`` argument, the designated timestamp column may also be
-    #     specified as ``TimestampNanos`` objects.
+            **Note**: All timestamps are always converted to nanoseconds and in
+            the UTC timezone. Timezone information is dropped before sending and
+            QuestDB will not store any timezone information.
+        :type at: TimestampNanos, datetime.datetime, int or str or None
 
-    #     .. code-block:: python
+        **Note**: It is an error to specify both ``table_name`` and
+        ``table_name_col``.
 
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[True, 123, TimestampNanos(1657386397157630000)],
-    #              [False, 456, TimestampNanos(1657386397157631000)]],
-    #             header=['col1', 'col2', None])
+        **Note**: The "index" column of the DataFrame is never serialized,
+        even if it is named.
 
-    #     The designated timestamp column may appear anywhere positionally.
+        Example:
 
-    #     .. code-block:: python
+        .. code-block:: python
 
-    #         ts1 = datetime.datetime.utcnow()
-    #         ts2 = (
-    #             datetime.datetime.utcnow() +
-    #             datetime.timedelta(microseconds=1))
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[1000, ts1, 123],
-    #              [2000, ts2, 456]],
-    #             header=['col1', None, 'col2'])
+            import pandas as pd
+            import questdb.ingress as qi
 
-    #     **Other timestamp columns**
+            buf = qi.Buffer()
+            # ...
 
-    #     Other columns may also contain timestamps. These columns can take
-    #     ``datetime.datetime`` objects or ``TimestampMicros`` (*not nanos*)
-    #     objects.
+            df = pd.DataFrame({
+                'location': ['London', 'Managua', 'London'],
+                'temperature': [24.5, 35.0, 25.5],
+                'humidity': [0.5, 0.6, 0.45],
+                'ts': pd.date_range('2021-07-01', periods=3)})
+            buf.dataframe(
+                df, table_name='weather', at='ts', symbols=['location'])
 
-    #     .. code-block:: python
+            # ...
+            sender.flush(buf)
 
-    #         ts1 = datetime.datetime.utcnow()
-    #         ts2 = (
-    #             datetime.datetime.utcnow() +
-    #             datetime.timedelta(microseconds=1))
-    #         buffer.tabular(
-    #             'table_name',
-    #             [[1000, ts1, 123],
-    #              [2000, ts2, 456]],
-    #             header=['col1', 'col2', 'col3'],
-    #             at=datetime.datetime.utcnow())
+        **Pandas to ILP datatype mappings**
 
-    #     **Symbol Columns**
+        .. seealso:: https://questdb.io/docs/reference/api/ilp/columnset-types/
 
-    #     QuestDB can represent strings via the ``STRING`` or ``SYMBOL`` types.
+        .. list-table:: Pandas Mappings
+            :header-rows: 1
 
-    #     If all the columns of type ``str`` are to be treated as ``STRING``, then
-    #     specify ``symbols=False`` (default - see exaples above).
+            * - Pandas ``dtype``
+              - Nulls
+              - ILP Datatype
+            * - ``'bool'``
+              - N
+              - ``BOOLEAN``
+            * - ``'boolean'``
+              - N **α**
+              - ``BOOLEAN``
+            * - ``'object'`` (``bool`` objects)
+              - N **α**
+              - ``BOOLEAN``
+            * - ``'uint8'``
+              - N
+              - ``INTEGER``
+            * - ``'int8'``
+              - N
+              - ``INTEGER``
+            * - ``'uint16'``
+              - N
+              - ``INTEGER``
+            * - ``'int16'``
+              - N
+              - ``INTEGER``
+            * - ``'uint32'``
+              - N
+              - ``INTEGER``
+            * - ``'int32'``
+              - N
+              - ``INTEGER``
+            * - ``'uint64'``
+              - N
+              - ``INTEGER`` **β**
+            * - ``'int64'``
+              - N
+              - ``INTEGER``
+            * - ``'UInt8'``
+              - Y
+              - ``INTEGER``
+            * - ``'Int8'``
+              - Y
+              - ``INTEGER``
+            * - ``'UInt16'``
+              - Y
+              - ``INTEGER``
+            * - ``'Int16'``
+              - Y
+              - ``INTEGER``
+            * - ``'UInt32'``
+              - Y
+              - ``INTEGER``
+            * - ``'Int32'``
+              - Y
+              - ``INTEGER``
+            * - ``'UInt64'``
+              - Y
+              - ``INTEGER`` **β**
+            * - ``'Int64'``
+              - Y
+              - ``INTEGER``
+            * - ``'object'`` (``int`` objects)
+              - Y
+              - ``INTEGER`` **β**
+            * - ``'float32'`` **γ**
+              - Y (``NaN``)
+              - ``FLOAT``
+            * - ``'float64'``
+              - Y (``NaN``)
+              - ``FLOAT``
+            * - ``'object'`` (``float`` objects)
+              - Y (``NaN``)
+              - ``FLOAT``
+            * - ``'string'`` (``str`` objects)
+              - Y
+              - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'string[pyarrow]'``
+              - Y
+              - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'category'`` (``str`` objects) **ε**
+              - Y
+              - ``SYMBOL`` (default), ``STRING`` via ``symbols`` arg. **δ**
+            * - ``'object'`` (``str`` objects)
+              - Y
+              - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'datetime64[ns]'``
+              - Y
+              - ``TIMESTAMP`` **ζ**
+            * - ``'datetime64[ns, tz]'``
+              - Y
+              - ``TIMESTAMP`` **ζ**
 
-    #     If all need to be treated as ``SYMBOL`` specify ``symbols=True``.
+        .. note::
 
-    #     .. code-block:: python
+            * **α**: Note some pandas dtypes allow nulls (e.g. ``'boolean'``),
+              where the QuestDB database does not.
 
-    #         buffer.tabular(
-    #             'table_name',
-    #             [['abc', 123, 3.14, 'xyz'],
-    #              ['def', 456, None, 'abc'],
-    #              ['ghi', 789, 9.87, 'def']],
-    #             header=['col1', 'col2', 'col3', 'col4'],
-    #             symbols=True)  # `col1` and `col4` are SYMBOL columns.
+            * **β**: The valid range for integer values is -2^63 to 2^63-1.
+              Any ``'uint64'``, ``'UInt64'`` or python ``int`` object values
+              outside this range will raise an error during serialization.
 
-    #    Whilst if only a select few are to be treated as ``SYMBOL``, specify a
-    #    list of column indices to the ``symbols`` arg.
+            * **γ**: Upcast to 64-bit float during serialization.
 
-    #    .. code-block:: python
+            * **δ**: Columns containing strings can also be used to specify the
+              table name. See ``table_name_col``.
 
-    #        buffer.tabular(
-    #            'table_name',
-    #            [['abc', 123, 3.14, 'xyz'],
-    #             ['def', 456, 6.28, 'abc'],
-    #             ['ghi', 789, 9.87, 'def']],
-    #            header=['col1', 'col2', 'col3', 'col4'],
-    #            symbols=[0])  # `col1` is SYMBOL; 'col4' is STRING.
+            * **ε**: We only support categories containing strings. If the
+              category contains non-string values, an error will be raised.
 
-    #    Alternatively, you can specify a list of symbol column names.
+            * **ζ**: The '.dataframe()' method only supports datetimes with
+              nanosecond precision. The designated timestamp column (see ``at``
+              parameter) maintains the nanosecond precision, whilst values
+              stored as columns have their precision truncated to microseconds.
+              All dates are sent as UTC and any additional timezone information
+              is dropped. If no timezone is specified, we follow
+              the pandas convention of assuming the timezone is UTC.
+              Datetimes before 1970-01-01 00:00:00 UTC are not supported.
+              If a datetime value is specified as ``None`` (``NaT``), it is
+              interpreted as the current QuestDB server time set on receipt of
+              message.
 
-    #    .. code-block:: python
+        **Error Handling and Recovery**
 
-    #        buffer.tabular(
-    #            'table_name',
-    #            [['abc', 123, 3.14, 'xyz'],
-    #             ['def', 456, 6.28, 'abc'],
-    #             ['ghi', 789, 9.87, 'def']],
-    #            header=['col1', 'col2', 'col3', 'col4'],
-    #            symbols=['col1'])  # `col1` is SYMBOL; 'col4' is STRING.
+        In case an exception is raised during dataframe serialization, the
+        buffer is left in its previous state.
+        The buffer remains in a valid state and can be used for further calls
+        even after an error.
 
-    #     Note that column indices are 0-based and negative indices are counted
-    #     from the end.
-    #     """
-    #     raise ValueError('nyi')
+        For clarification, as an example, if an invalid ``None``
+        value appears at the 3rd row for a ``bool`` column, neither the 3rd nor
+        the preceding rows are added to the buffer.
 
-    # def pandas(
-    #         self,
-    #         table_name: str,
-    #         data: pd.DataFrame,
-    #         *,
-    #         symbols: Union[bool, List[int]]=False,
-    #         at: Union[None, TimestampNanos, datetime]=None):
-    #     """
-    #     Add a pandas DataFrame to the buffer.
-    #     """
-    #     raise ValueError('nyi')
+        **Note**: This differs from the :func:`Sender.dataframe` method, which
+        modifies this guarantee due to its ``auto_flush`` logic.
+
+        **Performance Considerations**
+
+        The Python GIL is released during serialization if it is not needed.
+        If any column requires the GIL, the entire serialization is done whilst
+        holding the GIL.
+
+        Column types that require the GIL are:
+
+        * Columns of ``str``, ``float`` or ``int`` or ``float`` Python objects.
+        * The ``'string[python]'`` dtype.
+        """
+        _dataframe(
+            auto_flush_blank(),
+            self._impl,
+            self._b,
+            df,
+            table_name,
+            table_name_col,
+            symbols,
+            at)
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
@@ -1100,15 +1396,12 @@ cdef class Sender:
         cdef line_sender_error* err = NULL
 
         cdef line_sender_utf8 host_utf8
-        cdef bytes host_owner
 
         cdef str port_str
         cdef line_sender_utf8 port_utf8
-        cdef bytes port_owner
 
         cdef str interface_str
         cdef line_sender_utf8 interface_utf8
-        cdef bytes interface_owner
 
         cdef str a_key_id
         cdef bytes a_key_id_owner
@@ -1126,27 +1419,36 @@ cdef class Sender:
         cdef bytes a_pub_key_y_owner
         cdef line_sender_utf8 a_pub_key_y_utf8
 
-        cdef bytes ca_owner
         cdef line_sender_utf8 ca_utf8
+
+        cdef qdb_pystr_buf* b
 
         self._opts = NULL
         self._impl = NULL
-        self._buffer = None
 
-        if PyInt_Check(port):
+        self._init_capacity = init_capacity
+        self._max_name_len = max_name_len
+
+        self._buffer = Buffer(
+            init_capacity=init_capacity,
+            max_name_len=max_name_len)
+
+        b = self._buffer._b
+
+        if PyLong_CheckExact(<PyObject*>port):
             port_str = str(port)
-        elif PyUnicode_Check(port):
+        elif PyUnicode_CheckExact(<PyObject*>port):
             port_str = port
         else:
             raise TypeError(
-                f'port must be an integer or a string, not {type(port)}')
+                f'port must be an int or a str, not {_fqn(type(port))}')
 
-        host_owner = str_to_utf8(host, &host_utf8)
-        port_owner = str_to_utf8(port_str, &port_utf8)
+        str_to_utf8(b, <PyObject*>host, &host_utf8)
+        str_to_utf8(b, <PyObject*>port_str, &port_utf8)
         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
 
         if interface is not None:
-            interface_owner = str_to_utf8(interface, &interface_utf8)
+            str_to_utf8(b, <PyObject*>interface, &interface_utf8)
             line_sender_opts_net_interface(self._opts, interface_utf8)
 
         if auth is not None:
@@ -1154,10 +1456,10 @@ cdef class Sender:
              a_priv_key,
              a_pub_key_x,
              a_pub_key_y) = auth
-            a_key_id_owner = str_to_utf8(a_key_id, &a_key_id_utf8)
-            a_priv_key_owner = str_to_utf8(a_priv_key, &a_priv_key_utf8)
-            a_pub_key_x_owner = str_to_utf8(a_pub_key_x, &a_pub_key_x_utf8)
-            a_pub_key_y_owner = str_to_utf8(a_pub_key_y, &a_pub_key_y_utf8)
+            str_to_utf8(b, <PyObject*>a_key_id, &a_key_id_utf8)
+            str_to_utf8(b, <PyObject*>a_priv_key, &a_priv_key_utf8)
+            str_to_utf8(b, <PyObject*>a_pub_key_x, &a_pub_key_x_utf8)
+            str_to_utf8(b, <PyObject*>a_pub_key_y, &a_pub_key_y_utf8)
             line_sender_opts_auth(
                 self._opts,
                 a_key_id_utf8,
@@ -1172,26 +1474,19 @@ cdef class Sender:
                 if tls == 'insecure_skip_verify':
                     line_sender_opts_tls_insecure_skip_verify(self._opts)
                 else:
-                    ca_owner = str_to_utf8(tls, &ca_utf8)
+                    str_to_utf8(b, <PyObject*>tls, &ca_utf8)
                     line_sender_opts_tls_ca(self._opts, ca_utf8)
             elif isinstance(tls, pathlib.Path):
                 tls = str(tls)
-                ca_owner = str_to_utf8(tls, &ca_utf8)
+                str_to_utf8(b, <PyObject*>tls, &ca_utf8)
                 line_sender_opts_tls_ca(self._opts, ca_utf8)
             else:
                 raise TypeError(
                     'tls must be a bool, a path or string pointing to CA file '
-                    f'or "insecure_skip_verify", not {type(tls)}')
+                    f'or "insecure_skip_verify", not {_fqn(type(tls))}')
 
         if read_timeout is not None:
             line_sender_opts_read_timeout(self._opts, read_timeout)
-
-        self._init_capacity = init_capacity
-        self._max_name_len = max_name_len
-
-        self._buffer = Buffer(
-            init_capacity=init_capacity,
-            max_name_len=max_name_len)
 
         self._auto_flush_enabled = not not auto_flush
         self._auto_flush_watermark = int(auto_flush) \
@@ -1200,6 +1495,8 @@ cdef class Sender:
             raise ValueError(
                 'auto_flush_watermark must be >= 0, '
                 f'not {self._auto_flush_watermark}')
+        
+        qdb_pystr_buf_clear(b)
 
     def new_buffer(self):
         """
@@ -1288,6 +1585,68 @@ cdef class Sender:
         """
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
 
+    def dataframe(
+            self,
+            df,  # : pd.DataFrame
+            *,
+            table_name: Optional[str] = None,
+            table_name_col: Union[None, int, str] = None,
+            symbols: Union[str, bool, List[int], List[str]] = 'auto',
+            at: Union[None, int, str, TimestampNanos, datetime] = None):
+        """
+        Write a Pandas DataFrame to the internal buffer.
+
+        Example:
+
+        .. code-block:: python
+
+            import pandas as pd
+            import questdb.ingress as qi
+
+            df = pd.DataFrame({
+                'car': pd.Categorical(['Nic 42', 'Eddi', 'Nic 42', 'Eddi']),
+                'position': [1, 2, 1, 2],
+                'speed': [89.3, 98.2, 3, 4],
+                'lat_gforce': [0.1, -0.2, -0.6, 0.4],
+                'accelleration': [0.1, -0.2, 0.6, 4.4],
+                'tyre_pressure': [2.6, 2.5, 2.6, 2.5],
+                'ts': [
+                    pd.Timestamp('2022-08-09 13:56:00'),
+                    pd.Timestamp('2022-08-09 13:56:01'),
+                    pd.Timestamp('2022-08-09 13:56:02'),
+                    pd.Timestamp('2022-08-09 13:56:03')]})
+
+            with qi.Sender('localhost', 9000) as sender:
+                sender.dataframe(df, table_name='race_metrics', at='ts')
+
+        This method builds on top of the :func:`Buffer.dataframe` method.
+        See its documentation for details on arguments.
+
+        Additionally, this method also supports auto-flushing the buffer
+        as specified in the ``Sender``'s ``auto_flush`` constructor argument.
+        Auto-flushing is implemented incrementally, meanting that when
+        calling ``sender.dataframe(df)`` with a large ``df``, the sender may
+        have sent some of the rows to the server already whist the rest of the
+        rows are going to be sent at the next auto-flush or next explicit call
+        to :func:`Sender.flush`.
+
+        In case of data errors with auto-flushing enabled, some of the rows
+        may have been transmitted to the server already.
+        """
+        cdef auto_flush_t af = auto_flush_blank()
+        if self._auto_flush_enabled:
+            af.sender = self._impl
+            af.watermark = self._auto_flush_watermark
+        _dataframe(
+            af,
+            self._buffer._impl,
+            self._buffer._b,
+            df,
+            table_name,
+            table_name_col,
+            symbols,
+            at)
+
     cpdef flush(self, Buffer buffer=None, bint clear=True):
         """
         If called with no arguments, immediately flushes the internal buffer.
@@ -1307,13 +1666,19 @@ cdef class Sender:
             If ``False``, the flushed buffer is left in the internal buffer.
             Note that ``clear=False`` is only supported if ``buffer`` is also
             specified.
+
+        The Python GIL is released during the network IO operation.
         """
+        cdef line_sender* sender = self._impl
+        cdef line_sender_error* err = NULL
+        cdef line_sender_buffer* c_buf = NULL
+        cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
+        cdef bint ok = False
+
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
 
-        cdef line_sender_error* err = NULL
-        cdef line_sender_buffer* c_buf = NULL
-        if self._impl == NULL:
+        if sender == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Not connected.')
@@ -1324,20 +1689,21 @@ cdef class Sender:
         if line_sender_buffer_size(c_buf) == 0:
             return
 
-        try:
-            if clear:
-                if not line_sender_flush(self._impl, c_buf, &err):
-                    raise c_err_to_py_fmt(err, _FLUSH_FMT)
-            else:
-                if not line_sender_flush_and_keep(self._impl, c_buf, &err):
-                    raise c_err_to_py_fmt(err, _FLUSH_FMT)
-        except:
-            # Prevent a follow-up call to `.close(flush=True)` (as is usually
-            # called from `__exit__`) to raise after the sender entered an error
-            # state following a failed call to `.flush()`.
+        # We might be blocking on IO, so temporarily release the GIL.
+        _ensure_doesnt_have_gil(&gs)
+        if clear:
+            ok = line_sender_flush(sender, c_buf, &err)
+        else:
+            ok = line_sender_flush_and_keep(sender, c_buf, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
             if c_buf == self._buffer._impl:
+                # Prevent a follow-up call to `.close(flush=True)` (as is
+                # usually called from `__exit__`) to raise after the sender
+                # entered an error state following a failed call to `.flush()`.
+                # Note: In this case `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
-            raise
+            raise c_err_to_py_fmt(err, _FLUSH_FMT)
 
     cdef _close(self):
         self._buffer = None

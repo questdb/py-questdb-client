@@ -1,0 +1,12 @@
+[package]
+name = "pystr-to-utf8"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "pystr_to_utf8"
+crate-type = ["staticlib"]
+
+[build-dependencies]
+cbindgen = { version = "0.24.3", optional = true, default-features = false }

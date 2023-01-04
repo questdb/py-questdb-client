@@ -67,12 +67,87 @@ def build():
 
 
 @command
+def build_fuzzing():
+    _run('python3', 'setup.py', 'build_ext', '--inplace',
+        env={'TEST_QUESTDB_FUZZING': '1'})
+
+
+@command
 def test(all=False, patch_path='1', *args):
+    _run('cargo', 'test', cwd=PROJ_ROOT / 'pystr-to-utf8')
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
     if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
     _run('python3', 'test/test.py', '-v', *args,
          env=env)
+
+
+@command
+def test_fuzzing(*args):
+    import atheris
+    import pathlib
+    lib_path = pathlib.Path(atheris.path()) / 'asan_with_fuzzer.so'
+    if not lib_path.exists():
+        sys.stderr.write(f'WARNING: {lib_path} not found\n')
+        sys.exit(42)
+    ld_preload = os.environ.get('LD_PRELOAD', '')
+    if ld_preload:
+        ld_preload += ':'
+    ld_preload += str(lib_path)
+    cmd = [
+        'python3',
+        'test/test_dataframe_fuzz.py'] + list(args)
+    if not args:
+        cmd.extend([
+            '-detect_leaks=0',
+            '-rss_limit_mb=32768',
+            '-artifact_prefix=fuzz-artifact/',
+            '-create_missing_dirs=1'])
+    _run(*cmd, env={'LD_PRELOAD': ld_preload})
+
+
+@command
+def benchmark(*args):
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    _run('python3', 'test/benchmark.py', '-v', *args, env=env)
+
+
+@command
+def gdb_test(*args):
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    _run('gdb', '-ex', 'r', '--args', 'python3', 'test/test.py', '-v', *args,
+         env=env)
+
+
+@command
+def rr_test(*args):
+    """
+    Linux-only reverse debugger.
+    https://github.com/rr-debugger/rr
+    https://www.youtube.com/watch?v=61kD3x4Pu8I
+
+    Install rr:
+    $ sudo apt install rr
+    $ sudo vim /proc/sys/kernel/perf_event_paranoid  # set to -1
+    """
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    try:
+        _run('rr', 'record', 'python3', 'test/test.py', '-v', *args,
+             env=env)
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        red = '\033[01;31m'
+        reset = '\033[0m'
+        sys.stderr.write(f'''\n{red}
+            Now first re-run marking stdout/stderr events with a unique ID:
+                $ rr -M replay -a
+                
+            Then re-run inside GDB, running up to a specific event:
+                $ rr replay -g $EVENT_ID
+                (rr) break ingress.c:9999
+                (rr) continue  # or step, next, etc.{reset}\n\n''')
+    
 
 
 @command
@@ -113,6 +188,17 @@ def cibuildwheel(*args):
 
 
 @command
+def repl(*args):
+    _run('python3', env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
+
+
+@command
+def example(name, *args):
+    _run('python3', 'examples/' + name + '.py', *args,
+         env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
+
+
+@command
 def cw(*args):
     cibuildwheel(args)
 
@@ -128,6 +214,7 @@ def clean():
     _rmtree(PROJ_ROOT / 'dist')
     _rmtree(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi' / 'target')
     _rmtree(PROJ_ROOT / 'c-questdb-client' / 'build')
+    _rmtree(PROJ_ROOT / 'pystr-to-utf8' / 'target')
     _rmtree(PROJ_ROOT / 'src' / 'questdb.egg-info')
     _rmtree(PROJ_ROOT / 'venv')
     _rmtree(PROJ_ROOT / 'wheelhouse')

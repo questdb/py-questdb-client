@@ -5,6 +5,9 @@
     Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
     and [repo](https://github.com/questdb/py-questdb-client).
 
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
     ```
     python3 -m pip install questdb
     ```
@@ -14,6 +17,9 @@
   header: |-
     Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
     and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
 
     ```
     python3 -m pip install questdb

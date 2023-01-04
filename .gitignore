@@ -1,11 +1,21 @@
-src/questdb/ingress.html
 src/questdb/ingress.c
+src/questdb/*.html
 rustup-init.exe
+
+# Linux Perf profiles
+perf.data*
+perf/*.svg
+
+# Atheris Crash/OOM and other files
+fuzz-artifact/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Parquet files generated as part of example runs
+*.parquet
 
 # C extensions
 *.so

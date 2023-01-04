@@ -9,5 +9,8 @@ import os
 import pathlib
 PROJ_ROOT = pathlib.Path(__file__).parent.parent
 
-if os.environ.get('TEST_QUESTDB_PATCH_PATH') == '1':
+def patch():
     sys.path.append(str(PROJ_ROOT / 'src'))
+
+if os.environ.get('TEST_QUESTDB_PATCH_PATH') == '1':
+    patch()
