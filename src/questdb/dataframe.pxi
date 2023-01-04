@@ -466,7 +466,8 @@ cdef object _dataframe_may_import_deps():
 
 cdef object _dataframe_check_is_dataframe(object df):
     if not isinstance(df, _PANDAS.DataFrame):
-        raise TypeError(
+        raise IngressError(
+            IngressErrorCode.InvalidApiCall,
             f'Bad argument `df`: Expected {_fqn(_PANDAS.DataFrame)}, ' +
             f'not an object of type {_fqn(type(df))}.')
 
@@ -497,8 +498,7 @@ cdef ssize_t _dataframe_resolve_table_name(
                 str_to_table_name_copy(b, <PyObject*>table_name, name_out)
                 return -1  # Magic value for "no column index".
             except IngressError as ie:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise ValueError(
                     f'Bad argument `table_name`: {ie}')
         else:
             raise TypeError('Bad argument `table_name`: Must be str.')
@@ -524,8 +524,7 @@ cdef ssize_t _dataframe_resolve_table_name(
         return col_index
     elif df.index.name:
         if not isinstance(df.index.name, str):
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise TypeError(
                 'Bad dataframe index name as table name: Expected str, ' +
                 f'not an object of type {_fqn(type(df.index.name))}.')
 
@@ -534,8 +533,7 @@ cdef ssize_t _dataframe_resolve_table_name(
             str_to_table_name_copy(b, <PyObject*>df.index.name, name_out)
             return -1  # Magic value for "no column index".
         except IngressError as ie:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise ValueError(
                 f'Bad dataframe index name as table name: {ie}')
     else:
         raise ValueError(
@@ -2263,6 +2261,13 @@ cdef void_int _dataframe(
                     f'): {e}  [dc={<int>col.dispatch_code}]') from e
             else:
                 raise
+    except Exception as e:
+        if not isinstance(e, IngressError):
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                str(e)) from e
+        else:
+            raise
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
         line_sender_buffer_clear_marker(ls_buf)

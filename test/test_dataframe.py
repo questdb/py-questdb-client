@@ -72,20 +72,22 @@ def with_tmp_dir(func):
 
 class TestPandas(unittest.TestCase):
     def test_bad_dataframe(self):
-        with self.assertRaisesRegex(TypeError, 'Expected pandas'):
+        with self.assertRaisesRegex(qi.IngressError,
+                'Expected pandas'):
             _dataframe([])
 
     def test_no_table_name(self):
-        with self.assertRaisesRegex(ValueError, 'Must specify at least one of'):
+        with self.assertRaisesRegex(qi.IngressError,
+                'Must specify at least one of'):
             _dataframe(DF1)
 
     def test_bad_table_name_type(self):
-        with self.assertRaisesRegex(TypeError, 'Must be str'):
+        with self.assertRaisesRegex(qi.IngressError, 'Must be str'):
             _dataframe(DF1, table_name=1.5)
 
     def test_invalid_table_name(self):
-        with self.assertRaisesRegex(
-                qi.IngressError, '`table_name`: Bad string "."'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`table_name`: Bad string "."'):
             _dataframe(DF1, table_name='.')
 
     def test_invalid_column_dtype(self):
@@ -98,7 +100,8 @@ class TestPandas(unittest.TestCase):
         with self.assertRaisesRegex(qi.IngressError,
                 '`table_name_col`: Bad dtype'):
             _dataframe(DF1, table_name_col=-3)
-        with self.assertRaisesRegex(IndexError, '`table_name_col`: -5 index'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`table_name_col`: -5 index'):
             _dataframe(DF1, table_name_col=-5)
 
     def test_bad_str_obj_col(self):
@@ -113,11 +116,14 @@ class TestPandas(unittest.TestCase):
             _dataframe(DF1, table_name_col=-1)
 
     def test_bad_symbol(self):
-        with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`symbols`.*bool.*tuple.*list'):
             _dataframe(DF1, table_name='tbl1', symbols=0)
-        with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`symbols`.*bool.*tuple.*list'):
             _dataframe(DF1, table_name='tbl1', symbols={})
-        with self.assertRaisesRegex(TypeError, '`symbols`.*bool.*tuple.*list'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`symbols`.*bool.*tuple.*list'):
             _dataframe(DF1, table_name='tbl1', symbols=None)
         with self.assertRaisesRegex(qi.IngressError,
                 "`symbols`: Bad dtype `float64`.*'A'.*Must.*strings col"):
@@ -127,13 +133,17 @@ class TestPandas(unittest.TestCase):
             _dataframe(DF1, table_name='tbl1', symbols=[1])
 
     def test_bad_at(self):
-        with self.assertRaisesRegex(KeyError, '`at`.*2018.*not found in the'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`at`.*2018.*not found in the'):
             _dataframe(DF1, table_name='tbl1', at='2018-03-10T00:00:00Z')
-        with self.assertRaisesRegex(TypeError, '`at`.*float64.*be a datetime'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`at`.*float64.*be a datetime'):
             _dataframe(DF1, table_name='tbl1', at='A')
-        with self.assertRaisesRegex(TypeError, '`at`.*int64.*be a datetime'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`at`.*int64.*be a datetime'):
             _dataframe(DF1, table_name='tbl1', at=1)
-        with self.assertRaisesRegex(TypeError, '`at`.*object.*be a datetime'):
+        with self.assertRaisesRegex(qi.IngressError,
+                '`at`.*object.*be a datetime'):
             _dataframe(DF1, table_name='tbl1', at=-1)
 
     def test_empty_dataframe(self):
@@ -199,7 +209,7 @@ class TestPandas(unittest.TestCase):
             'a': [1, 2, 3],
             'b': ['a', 'b', 'c']})
         df.index.name = 'test_at_good'
-        with self.assertRaisesRegex(KeyError,
+        with self.assertRaisesRegex(qi.IngressError,
                 'Bad argument `at`: Column .2018-03.* not found .* dataframe.'):
             _dataframe(df, at='2018-03-10T00:00:00Z')
 
@@ -228,7 +238,7 @@ class TestPandas(unittest.TestCase):
         n3 = dt.datetime(1965, 1, 1, 0, 0, 0)
         neg_timestamps = [n1, n2, n3]
         for ts in neg_timestamps:
-            with self.assertRaisesRegex(ValueError,
+            with self.assertRaisesRegex(qi.IngressError,
                     'Bad.*`at`: Cannot .* before the Unix epoch .1970-01-01.*'):
                 _dataframe(DF2, at=ts, table_name='test_at_neg')
 
