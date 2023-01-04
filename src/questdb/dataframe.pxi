@@ -2244,15 +2244,7 @@ cdef void_int _dataframe(
             if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
                 raise c_err_to_py(err)
 
-            if was_serializing_cell:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
-                    'Failed to serialize value of column ' +
-                    repr(df.columns[col.setup.orig_index]) +
-                    f' at row index {row_index} (' +
-                    repr(df.iloc[row_index, col.setup.orig_index]) +
-                    f'): {e}  [dc={<int>col.dispatch_code}]') from e
-            elif (isinstance(e, IngressError) and
+            if (isinstance(e, IngressError) and
                     (e.code == IngressErrorCode.InvalidApiCall)):
                 # TODO: This should be allowed by the database.
                 # It currently isn't so we have to raise an error.
@@ -2261,6 +2253,14 @@ cdef void_int _dataframe(
                     f'Bad dataframe row at index {row_index}: ' +
                     'All values are nulls. '+
                     'Ensure at least one column is not null.') from e
+            elif was_serializing_cell:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    'Failed to serialize value of column ' +
+                    repr(df.columns[col.setup.orig_index]) +
+                    f' at row index {row_index} (' +
+                    repr(df.iloc[row_index, col.setup.orig_index]) +
+                    f'): {e}  [dc={<int>col.dispatch_code}]') from e
             else:
                 raise
     finally:

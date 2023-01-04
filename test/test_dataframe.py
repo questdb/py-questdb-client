@@ -258,6 +258,12 @@ class TestPandas(unittest.TestCase):
                 'tbl1 a=2i,b="b" 0\n' +
                 'tbl1 a=3i,b="c" 0\n')
 
+    def test_single_at_col(self):
+        df = pd.DataFrame({'timestamp': pd.to_datetime(['2023-01-01'])})
+        with self.assertRaisesRegex(qi.IngressError,
+                'Bad dataframe row at index 0: All values are nulls.'):
+            _dataframe(df, table_name='tbl1', at='timestamp')
+
     def test_row_of_nulls(self):
         df = pd.DataFrame({'a': ['a1', None, 'a3']})
         with self.assertRaisesRegex(
