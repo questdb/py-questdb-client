@@ -25,7 +25,10 @@ def pip_install(package):
     if res.returncode == 0:
         return
     output = res.stdout.decode('utf-8')
-    if 'Could not find a version that satisfies the requirement' in output:
+    is_unsupported = (
+        ('Could not find a version that satisfies the requirement' in output) or
+        ('The conflict is caused by' in output))
+    if is_unsupported:
         raise UnsupportedDependency(output)
     else:
         sys.stderr.write(output + '\n')
