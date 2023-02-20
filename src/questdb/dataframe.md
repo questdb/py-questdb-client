@@ -97,6 +97,7 @@ We need to extract:
 ```python
 import pandas as pd
 import pyarrow as pa
+import datetime as dt
 ```
 
 ### Booleans
