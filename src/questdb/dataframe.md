@@ -97,6 +97,7 @@ We need to extract:
 ```python
 import pandas as pd
 import pyarrow as pa
+import datetime as dt
 ```
 
 ### Booleans
@@ -519,8 +520,8 @@ though they are all UTF-8 buffers already so.. little gain.
 #### Timezone-free timestamp
 
 ```python
->>> n1 = pd.Timestamp(dt.datetime.utcnow())
->>> n2 = pd.Timestamp(dt.datetime.utcnow())
+>>> n1 = pd.Timestamp(dt.datetime.now())
+>>> n2 = pd.Timestamp(dt.datetime.now())
 >>> df = pd.DataFrame({'a': [n1, n2]})
 >>> df
                            a
