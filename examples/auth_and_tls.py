@@ -1,4 +1,4 @@
-from questdb.ingress import Sender, IngressError
+from questdb.ingress import Sender, IngressError, TimestampNanos
 import sys
 import datetime
 
@@ -28,7 +28,7 @@ def example(host: str = 'localhost', port: int = 9009):
                     'traded_ts': datetime.datetime(
                         2022, 8, 6, 7, 35, 23, 189062,
                         tzinfo=datetime.timezone.utc)},
-                at=datetime.datetime.utcnow())
+                at=TimestampNanos.now())
 
             # If no 'at' param is passed, the server will use its own timestamp.
             sender.row(
