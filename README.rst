@@ -45,7 +45,7 @@ You can also send Pandas dataframes:
         'id': pd.Categorical(['toronto1', 'paris3']),
         'temperature': [20.0, 21.0],
         'humidity': [0.5, 0.6],
-        'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])'})
+        'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
     with Sender('localhost', 9009) as sender:
         sender.dataframe(df, table_name='sensors')
