@@ -37,6 +37,7 @@ from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
 from libc.string cimport strncmp, memset
 from libc.math cimport isnan
 from libc.errno cimport errno
+from libc.stdio cimport stderr, fprintf
 from cpython.datetime cimport datetime
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
