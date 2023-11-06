@@ -66,12 +66,16 @@ def main():
         (platform.libc_ver()[0] == 'glibc'))
     is_64bits = sys.maxsize > 2**32
     is_cpython = platform.python_implementation() == 'CPython'
+    is_windows_py3_12 = (
+        # https://github.com/dask/fastparquet/issues/892
+        platform.system() == 'Windows' and
+        sys.version_info >= (3, 12))
     if on_linux_is_glibc and is_64bits and is_cpython:
         # Ensure that we've managed to install the expected dependencies.
         import pandas
         import numpy
         import pyarrow
-        if sys.version_info >= (3, 8):
+        if (sys.version_info >= (3, 8)) and (not is_windows_py3_12):
             import fastparquet
 
 
