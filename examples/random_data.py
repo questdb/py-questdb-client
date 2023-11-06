@@ -1,4 +1,4 @@
-from questdb.ingress import Sender
+from questdb.ingress import Sender, TimestampNanos
 import random
 import uuid
 import time
@@ -23,7 +23,8 @@ def example(host: str = 'localhost', port: int = 9009):
                         'dst': random.choice(('ALPHA', 'BETA', 'OMEGA'))},
                     columns={
                         'price': random.randint(200, 500),
-                        'qty': random.randint(1, 5)})
+                        'qty': random.randint(1, 5)},
+                    at=TimestampNanos.now())
                 total_rows += 1
 
                 # If the internal buffer is empty, then auto-flush triggered.
