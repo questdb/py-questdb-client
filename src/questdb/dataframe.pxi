@@ -740,7 +740,7 @@ cdef void_int _dataframe_alloc_chunks(
         raise MemoryError()
 
 
-cdef void _dataframe_free_mapped_arrow(ArrowArray* arr):
+cdef void _dataframe_free_mapped_arrow(ArrowArray* arr) noexcept:
     free(arr.buffers)
     arr.buffers = NULL
     arr.release = NULL
@@ -1087,7 +1087,7 @@ cdef void_int _dataframe_resolve_cols_target_name_and_dc(
             str_to_column_name_copy(b, pandas_col.name, &col.name)
 
 
-cdef int _dataframe_compare_cols(const void* lhs, const void* rhs) nogil:
+cdef int _dataframe_compare_cols(const void* lhs, const void* rhs) nogil noexcept:
     cdef col_t* lhs_col = <col_t*>lhs
     cdef col_t* rhs_col = <col_t*>rhs
     cdef int source_diff = lhs_col.setup.meta_target - rhs_col.setup.meta_target
