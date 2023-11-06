@@ -3,7 +3,7 @@ Installation
 ============
 
 The Python QuestDB client does not have any additional run-time dependencies and
-will run on any version of Python >= 3.7 on most platforms and architectures.
+will run on any version of Python >= 3.8 on most platforms and architectures.
 
 You can install it (or update it) globally by running::
 
