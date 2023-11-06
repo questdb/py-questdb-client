@@ -54,7 +54,9 @@ def ensure_timezone():
 
 def main():
     ensure_timezone()
-    try_pip_install('setuptools')
+    pip_install('pip')
+    pip_install('setuptools')
+    pip_install('cibuildwheel')
     try_pip_install('fastparquet>=2022.12.0')
     try_pip_install('pandas')
     try_pip_install('numpy')
