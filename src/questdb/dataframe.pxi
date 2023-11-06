@@ -1087,7 +1087,7 @@ cdef void_int _dataframe_resolve_cols_target_name_and_dc(
             str_to_column_name_copy(b, pandas_col.name, &col.name)
 
 
-cdef int _dataframe_compare_cols(const void* lhs, const void* rhs) nogil noexcept:
+cdef int _dataframe_compare_cols(const void* lhs, const void* rhs) noexcept nogil:
     cdef col_t* lhs_col = <col_t*>lhs
     cdef col_t* rhs_col = <col_t*>rhs
     cdef int source_diff = lhs_col.setup.meta_target - rhs_col.setup.meta_target
@@ -1892,8 +1892,7 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
     if cell != _NAT:
-        cell //= 1000  # Convert from nanoseconds to microseconds.
-        if not line_sender_buffer_column_ts(ls_buf, col.name, cell, &err):
+        if not line_sender_buffer_column_ts_nanos(ls_buf, col.name, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
@@ -1910,8 +1909,7 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
     if valid:
         access = <int64_t*>col.cursor.chunk.buffers[1]
         cell = access[col.cursor.offset]
-        cell //= 1000  # Convert from nanoseconds to microseconds.
-        if not line_sender_buffer_column_ts(ls_buf, col.name, cell, &err):
+        if not line_sender_buffer_column_ts_nanos(ls_buf, col.name, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
@@ -1930,7 +1928,7 @@ cdef void_int _dataframe_serialize_cell_at_dt64ns_numpy(
             raise c_err_to_py(err)
     else:
         # Note: ls_buf will validate against negative numbers.
-        if not line_sender_buffer_at(ls_buf, cell, &err):
+        if not line_sender_buffer_at_nanos(ls_buf, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
@@ -1948,7 +1946,7 @@ cdef void_int _dataframe_serialize_cell_at_dt64ns_tz_arrow(
         access = <int64_t*>col.cursor.chunk.buffers[1]
         cell = access[col.cursor.offset]
         # Note: ls_buf will validate against negative numbers.
-        if not line_sender_buffer_at(ls_buf, cell, &err):
+        if not line_sender_buffer_at_nanos(ls_buf, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
@@ -2232,7 +2230,7 @@ cdef void_int _dataframe(
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
                 elif at_value >= 0:
-                    if not line_sender_buffer_at(ls_buf, at_value, &err):
+                    if not line_sender_buffer_at_nanos(ls_buf, at_value, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 

@@ -24,7 +24,7 @@
 
 from libc.stdint cimport int64_t, uint16_t, uint64_t
 
-cdef extern from "questdb/ilp/line_sender.h":
+cdef extern from "questdb/ingress/line_sender.h":
 
   cdef enum line_sender_error_code:
     line_sender_error_could_not_resolve_addr,
@@ -168,14 +168,23 @@ cdef extern from "questdb/ilp/line_sender.h":
                                      line_sender_utf8 value,
                                      line_sender_error **err_out)
 
-  bint line_sender_buffer_column_ts(line_sender_buffer *buffer,
-                                    line_sender_column_name name,
-                                    int64_t micros,
-                                    line_sender_error **err_out)
+  bint line_sender_buffer_column_ts_nanos(line_sender_buffer *buffer,
+                                          line_sender_column_name name,
+                                          int64_t nanos,
+                                          line_sender_error **err_out)
 
-  bint line_sender_buffer_at(line_sender_buffer *buffer,
-                             int64_t epoch_nanos,
-                             line_sender_error **err_out)
+  bint line_sender_buffer_column_ts_micros(line_sender_buffer *buffer,
+                                           line_sender_column_name name,
+                                           int64_t micros,
+                                           line_sender_error **err_out)
+
+  bint line_sender_buffer_at_nanos(line_sender_buffer *buffer,
+                                  int64_t epoch_nanos,
+                                  line_sender_error **err_out)
+
+  bint line_sender_buffer_at_micros(line_sender_buffer *buffer,
+                                    int64_t epoch_micros,
+                                    line_sender_error **err_out)
 
   bint line_sender_buffer_at_now(line_sender_buffer *buffer, line_sender_error **err_out)
 
@@ -192,3 +201,7 @@ cdef extern from "questdb/ilp/line_sender.h":
   bint line_sender_flush_and_keep(line_sender *sender,
                                   const line_sender_buffer *buffer,
                                   line_sender_error **err_out)
+
+  int64_t line_sender_now_nanos()
+
+  int64_t line_sender_now_micros()

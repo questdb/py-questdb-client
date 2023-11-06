@@ -67,12 +67,6 @@ import pathlib
 
 import sys
 
-# For `get_time_now_ns` and `get_time_now_us` functions.
-IF UNAME_SYSNAME == 'Windows':
-    import time
-ELSE:
-    from posix.time cimport timespec, clock_gettime, CLOCK_REALTIME
-
 
 cdef bint _has_gil(PyThreadState** gs):
     return gs[0] == NULL
@@ -359,41 +353,6 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(dt.microsecond * 1000))
 
 
-cdef int64_t _US_SEC = 1000000
-cdef int64_t _NS_US = 1000
-
-
-cdef int64_t get_time_now_us() except -1:
-    """
-    Get the current time in microseconds.
-    """
-    IF UNAME_SYSNAME == 'Windows':
-        return time.time_ns() // 1000
-    ELSE:
-        # Note: Y2K38 bug on 32-bit systems, but we don't care.
-        cdef timespec ts
-        if clock_gettime(CLOCK_REALTIME, &ts) != 0:
-            raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
-        return <int64_t>(ts.tv_sec) * _US_SEC + <int64_t>(ts.tv_nsec) // _NS_US
-
-
-cdef int64_t _NS_SEC = 1000000000
-
-
-cdef int64_t get_time_now_ns() except -1:
-    """
-    Get the current time in nanoseconds.
-    """
-    IF UNAME_SYSNAME == 'Windows':
-        return time.time_ns()
-    ELSE:
-        # Note: Y2K38 bug on 32-bit systems, but we don't care.
-        cdef timespec ts
-        if clock_gettime(CLOCK_REALTIME, &ts) != 0:
-            raise OSError(errno, 'clock_gettime(CLOCK_REALTIME, &ts) failed')
-        return <int64_t>(ts.tv_sec) * _NS_SEC + <int64_t>(ts.tv_nsec)
-
-
 cdef class TimestampMicros:
     """
     A timestamp in microseconds since the UNIX epoch (UTC).
@@ -448,7 +407,7 @@ cdef class TimestampMicros:
         """
         Construct a ``TimestampMicros`` from the current time as UTC.
         """
-        cdef int64_t value = get_time_now_us()
+        cdef int64_t value = line_sender_now_micros()
         return cls(value)
 
     @property
@@ -513,7 +472,7 @@ cdef class TimestampNanos:
         """
         Construct a ``TimestampNanos`` from the current time as UTC.
         """
-        cdef int64_t value = get_time_now_ns()
+        cdef int64_t value = line_sender_now_nanos()
         return cls(value)
 
     @property
@@ -753,13 +712,13 @@ cdef class Buffer:
     cdef inline void_int _column_ts(
             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_column_ts(self._impl, c_name, ts._value, &err):
+        if not line_sender_buffer_column_ts_micros(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_dt(
             self, line_sender_column_name c_name, datetime dt) except -1:
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_column_ts(
+        if not line_sender_buffer_column_ts_micros(
                 self._impl, c_name, datetime_to_micros(dt), &err):
             raise c_err_to_py(err)
 
@@ -799,13 +758,13 @@ cdef class Buffer:
 
     cdef inline void_int _at_ts(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_at(self._impl, ts._value, &err):
+        if not line_sender_buffer_at_nanos(self._impl, ts._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _at_dt(self, datetime dt) except -1:
         cdef int64_t value = datetime_to_nanos(dt)
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_at(self._impl, value, &err):
+        if not line_sender_buffer_at_nanos(self._impl, value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _at_now(self) except -1:
