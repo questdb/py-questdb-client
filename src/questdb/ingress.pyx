@@ -1217,11 +1217,13 @@ cdef class Sender:
             sender.row(
                 'weather_sensor',
                 symbols={'id': 'toronto1'},
-                columns={'temperature': 23.5, 'humidity': 0.49})
+                columns={'temperature': 23.5, 'humidity': 0.49},
+                at=TimestampNanos.now())
             sensor.row(
                 'weather_sensor',
                 symbols={'id': 'dubai2'},
-                columns={'temperature': 41.2, 'humidity': 0.34})
+                columns={'temperature': 41.2, 'humidity': 0.34},
+                at=TimestampNanos.now())
 
     The ``Sender`` object holds an internal buffer. The call to ``.row()``
     simply forwards all arguments to the :func:`Buffer.row` method.
@@ -1238,12 +1240,14 @@ cdef class Sender:
             sender.row(
                 'weather_sensor',
                 symbols={'id': 'toronto1'},
-                columns={'temperature': 23.5, 'humidity': 0.49})
+                columns={'temperature': 23.5, 'humidity': 0.49},
+                at=TimestampNanos.now())
             sender.flush()
             sender.row(
                 'weather_sensor',
                 symbols={'id': 'dubai2'},
-                columns={'temperature': 41.2, 'humidity': 0.34})
+                columns={'temperature': 41.2, 'humidity': 0.34},
+                at=TimestampNanos.now())
             sender.flush()
 
 
