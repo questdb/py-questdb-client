@@ -25,13 +25,14 @@ The latest version of the library is 1.1.0.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb.ingress import Sender, TimestampNanos
 
     with Sender('localhost', 9009) as sender:
         sender.row(
             'sensors',
             symbols={'id': 'toronto1'},
-            columns={'temperature': 20.0, 'humidity': 0.5})
+            columns={'temperature': 20.0, 'humidity': 0.5},
+            at=TimestampNanos.now())
         sender.flush()
 
 You can also send Pandas dataframes:
@@ -48,7 +49,7 @@ You can also send Pandas dataframes:
         'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
     with Sender('localhost', 9009) as sender:
-        sender.dataframe(df, table_name='sensors')
+        sender.dataframe(df, table_name='sensors', at='timestamp')
 
 
 Docs

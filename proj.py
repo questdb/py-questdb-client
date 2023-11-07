@@ -114,8 +114,17 @@ def benchmark(*args):
 
 @command
 def gdb_test(*args):
-    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    env = {'TEST_QUESTDB_PATCH_PATH': '1', 'PYTHONMALLOC': 'malloc'}
     _run('gdb', '-ex', 'r', '--args', 'python3', 'test/test.py', '-v', *args,
+         env=env)
+
+
+@command
+def valgrind_test(*args):
+    env = {'TEST_QUESTDB_PATCH_PATH': '1', 'PYTHONMALLOC': 'malloc'}
+    _run('valgrind', '--leak-check=full', '--show-leak-kinds=all',
+         '--track-origins=yes', '--verbose',
+         'python3', 'test/test.py', '-v', *args,
          env=env)
 
 

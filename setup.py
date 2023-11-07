@@ -65,7 +65,7 @@ def ingress_extension():
     elif PLATFORM == 'win32':
         lib_prefix = ''
         lib_suffix = '.lib'
-        libraries.extend(['wsock32', 'ws2_32', 'AdvAPI32', 'bcrypt', 'UserEnv'])
+        libraries.extend(['wsock32', 'ws2_32', 'ntdll', 'AdvAPI32', 'bcrypt', 'UserEnv'])
     elif PLATFORM == 'linux':
         lib_prefix = 'lib'
         lib_suffix = '.a'
@@ -167,7 +167,7 @@ setup(
     name='questdb',
     version='1.1.0',
     platforms=['any'],
-    python_requires='>=3.7',
+    python_requires='>=3.8',
     install_requires=[],
     ext_modules = cythonize([ingress_extension()], annotate=True),
     cmdclass={'build_ext': questdb_build_ext},

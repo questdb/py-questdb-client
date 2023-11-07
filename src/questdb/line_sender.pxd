@@ -24,7 +24,7 @@
 
 from libc.stdint cimport int64_t, uint16_t, uint64_t
 
-cdef extern from "questdb/ilp/line_sender.h":
+cdef extern from "questdb/ingress/line_sender.h":
 
   cdef enum line_sender_error_code:
     line_sender_error_could_not_resolve_addr,
@@ -60,135 +60,148 @@ cdef extern from "questdb/ilp/line_sender.h":
     size_t len
     const char *buf
 
-  line_sender_error_code line_sender_error_get_code(const line_sender_error *error)
+  line_sender_error_code line_sender_error_get_code(const line_sender_error *error) noexcept nogil
 
-  const char *line_sender_error_msg(const line_sender_error *error, size_t *len_out)
+  const char *line_sender_error_msg(const line_sender_error *error, size_t *len_out) noexcept nogil
 
-  void line_sender_error_free(line_sender_error *error)
+  void line_sender_error_free(line_sender_error *error) noexcept nogil
 
   bint line_sender_utf8_init(line_sender_utf8 *string,
                              size_t len,
                              const char *buf,
-                             line_sender_error **err_out)
+                             line_sender_error **err_out) noexcept nogil
 
-  line_sender_utf8 line_sender_utf8_assert(size_t len, const char *buf)
+  line_sender_utf8 line_sender_utf8_assert(size_t len, const char *buf) noexcept nogil
 
   bint line_sender_table_name_init(line_sender_table_name *name,
                                    size_t len,
                                    const char *buf,
-                                   line_sender_error **err_out)
+                                   line_sender_error **err_out) noexcept nogil
 
-  line_sender_table_name line_sender_table_name_assert(size_t len, const char *buf)
+  line_sender_table_name line_sender_table_name_assert(size_t len, const char *buf) noexcept nogil
 
   bint line_sender_column_name_init(line_sender_column_name *name,
                                     size_t len,
                                     const char *buf,
-                                    line_sender_error **err_out)
+                                    line_sender_error **err_out) noexcept nogil
 
-  line_sender_table_name line_sender_column_name_assert(size_t len, const char *buf)
+  line_sender_table_name line_sender_column_name_assert(size_t len, const char *buf) noexcept nogil
 
-  line_sender_opts *line_sender_opts_new(line_sender_utf8 host, uint16_t port)
+  line_sender_opts *line_sender_opts_new(line_sender_utf8 host, uint16_t port) noexcept nogil
 
-  line_sender_opts *line_sender_opts_new_service(line_sender_utf8 host, line_sender_utf8 port)
+  line_sender_opts *line_sender_opts_new_service(line_sender_utf8 host, line_sender_utf8 port) noexcept nogil
 
-  void line_sender_opts_capacity(line_sender_opts *opts, size_t capacity)
+  void line_sender_opts_capacity(line_sender_opts *opts, size_t capacity) noexcept nogil
 
-  void line_sender_opts_net_interface(line_sender_opts *opts, line_sender_utf8 net_interface)
+  void line_sender_opts_net_interface(line_sender_opts *opts, line_sender_utf8 net_interface) noexcept nogil
 
   void line_sender_opts_auth(line_sender_opts *opts,
                              line_sender_utf8 key_id,
                              line_sender_utf8 priv_key,
                              line_sender_utf8 pub_key_x,
-                             line_sender_utf8 pub_key_y)
+                             line_sender_utf8 pub_key_y) noexcept nogil
 
-  void line_sender_opts_tls(line_sender_opts *opts)
+  void line_sender_opts_tls(line_sender_opts *opts) noexcept nogil
 
-  void line_sender_opts_tls_ca(line_sender_opts *opts, line_sender_utf8 ca_path)
+  void line_sender_opts_tls_ca(line_sender_opts *opts, line_sender_utf8 ca_path) noexcept nogil
 
-  void line_sender_opts_tls_insecure_skip_verify(line_sender_opts *opts)
+  void line_sender_opts_tls_insecure_skip_verify(line_sender_opts *opts) noexcept nogil
 
-  void line_sender_opts_read_timeout(line_sender_opts *opts, uint64_t timeout_millis)
+  void line_sender_opts_read_timeout(line_sender_opts *opts, uint64_t timeout_millis) noexcept nogil
 
-  line_sender_opts *line_sender_opts_clone(const line_sender_opts *opts)
+  line_sender_opts *line_sender_opts_clone(const line_sender_opts *opts) noexcept nogil
 
-  void line_sender_opts_free(line_sender_opts *opts)
+  void line_sender_opts_free(line_sender_opts *opts) noexcept nogil
 
-  line_sender_buffer *line_sender_buffer_new()
+  line_sender_buffer *line_sender_buffer_new() noexcept nogil
 
-  line_sender_buffer *line_sender_buffer_with_max_name_len(size_t max_name_len)
+  line_sender_buffer *line_sender_buffer_with_max_name_len(size_t max_name_len) noexcept nogil
 
-  void line_sender_buffer_free(line_sender_buffer *buffer)
+  void line_sender_buffer_free(line_sender_buffer *buffer) noexcept nogil
 
-  line_sender_buffer *line_sender_buffer_clone(const line_sender_buffer *buffer)
+  line_sender_buffer *line_sender_buffer_clone(const line_sender_buffer *buffer) noexcept nogil
 
-  void line_sender_buffer_reserve(line_sender_buffer *buffer, size_t additional)
+  void line_sender_buffer_reserve(line_sender_buffer *buffer, size_t additional) noexcept nogil
 
-  size_t line_sender_buffer_capacity(const line_sender_buffer *buffer)
+  size_t line_sender_buffer_capacity(const line_sender_buffer *buffer) noexcept nogil
 
   bint line_sender_buffer_set_marker(line_sender_buffer* buffer,
-                                     line_sender_error** err_out)
+                                     line_sender_error** err_out) noexcept nogil
 
   bint line_sender_buffer_rewind_to_marker(line_sender_buffer* buffer,
-                                           line_sender_error** err_out)
+                                           line_sender_error** err_out) noexcept nogil
 
-  void line_sender_buffer_clear_marker(line_sender_buffer* buffer)
+  void line_sender_buffer_clear_marker(line_sender_buffer* buffer) noexcept nogil
 
-  void line_sender_buffer_clear(line_sender_buffer *buffer)
+  void line_sender_buffer_clear(line_sender_buffer *buffer) noexcept nogil
 
-  size_t line_sender_buffer_size(const line_sender_buffer *buffer)
+  size_t line_sender_buffer_size(const line_sender_buffer *buffer) noexcept nogil
 
-  const char *line_sender_buffer_peek(const line_sender_buffer *buffer, size_t *len_out)
+  const char *line_sender_buffer_peek(const line_sender_buffer *buffer, size_t *len_out) noexcept nogil
 
   bint line_sender_buffer_table(line_sender_buffer *buffer,
                                 line_sender_table_name name,
-                                line_sender_error **err_out)
+                                line_sender_error **err_out) noexcept nogil
 
   bint line_sender_buffer_symbol(line_sender_buffer *buffer,
                                  line_sender_column_name name,
                                  line_sender_utf8 value,
-                                 line_sender_error **err_out)
+                                 line_sender_error **err_out) noexcept nogil
 
   bint line_sender_buffer_column_bool(line_sender_buffer *buffer,
                                       line_sender_column_name name,
                                       bint value,
-                                      line_sender_error **err_out)
+                                      line_sender_error **err_out) noexcept nogil
 
   bint line_sender_buffer_column_i64(line_sender_buffer *buffer,
                                      line_sender_column_name name,
                                      int64_t value,
-                                     line_sender_error **err_out)
+                                     line_sender_error **err_out) noexcept nogil
 
   bint line_sender_buffer_column_f64(line_sender_buffer *buffer,
                                      line_sender_column_name name,
                                      double value,
-                                     line_sender_error **err_out)
+                                     line_sender_error **err_out) noexcept nogil
 
   bint line_sender_buffer_column_str(line_sender_buffer *buffer,
                                      line_sender_column_name name,
                                      line_sender_utf8 value,
-                                     line_sender_error **err_out)
+                                     line_sender_error **err_out) noexcept nogil
 
-  bint line_sender_buffer_column_ts(line_sender_buffer *buffer,
-                                    line_sender_column_name name,
-                                    int64_t micros,
-                                    line_sender_error **err_out)
+  bint line_sender_buffer_column_ts_nanos(line_sender_buffer *buffer,
+                                          line_sender_column_name name,
+                                          int64_t nanos,
+                                          line_sender_error **err_out) noexcept nogil
 
-  bint line_sender_buffer_at(line_sender_buffer *buffer,
-                             int64_t epoch_nanos,
-                             line_sender_error **err_out)
+  bint line_sender_buffer_column_ts_micros(line_sender_buffer *buffer,
+                                           line_sender_column_name name,
+                                           int64_t micros,
+                                           line_sender_error **err_out) noexcept nogil
 
-  bint line_sender_buffer_at_now(line_sender_buffer *buffer, line_sender_error **err_out)
+  bint line_sender_buffer_at_nanos(line_sender_buffer *buffer,
+                                  int64_t epoch_nanos,
+                                  line_sender_error **err_out) noexcept nogil
 
-  line_sender *line_sender_connect(const line_sender_opts *opts, line_sender_error **err_out)
+  bint line_sender_buffer_at_micros(line_sender_buffer *buffer,
+                                    int64_t epoch_micros,
+                                    line_sender_error **err_out) noexcept nogil
 
-  bint line_sender_must_close(const line_sender *sender)
+  bint line_sender_buffer_at_now(line_sender_buffer *buffer, line_sender_error **err_out) noexcept nogil
 
-  void line_sender_close(line_sender *sender)
+  line_sender *line_sender_connect(const line_sender_opts *opts, line_sender_error **err_out) noexcept nogil
+
+  bint line_sender_must_close(const line_sender *sender) noexcept nogil
+
+  void line_sender_close(line_sender *sender) noexcept nogil
 
   bint line_sender_flush(line_sender *sender,
                          line_sender_buffer *buffer,
-                         line_sender_error **err_out)
+                         line_sender_error **err_out) noexcept nogil
 
   bint line_sender_flush_and_keep(line_sender *sender,
                                   const line_sender_buffer *buffer,
-                                  line_sender_error **err_out)
+                                  line_sender_error **err_out) noexcept nogil
+
+  int64_t line_sender_now_nanos() noexcept nogil
+
+  int64_t line_sender_now_micros() noexcept nogil

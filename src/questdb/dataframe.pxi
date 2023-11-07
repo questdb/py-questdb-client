@@ -5,7 +5,7 @@ cdef struct auto_flush_t:
     size_t watermark
 
 
-cdef auto_flush_t auto_flush_blank():
+cdef auto_flush_t auto_flush_blank() noexcept nogil:
     cdef auto_flush_t af
     af.sender = NULL
     af.watermark = 0
@@ -85,7 +85,7 @@ cdef enum col_source_t:
     col_source_dt64ns_tz_arrow = 502000
 
 
-cdef bint col_source_needs_gil(col_source_t source):
+cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
     # Check if hundreds digit is 1.
     return <int>source // 100 % 10 == 1
 
@@ -323,7 +323,7 @@ cdef struct col_t:
     col_setup_t* setup  # Grouping to reduce size of struct.
 
 
-cdef void col_t_release(col_t* col):
+cdef void col_t_release(col_t* col) noexcept:
     """
     Release a (possibly) initialized column.
 
@@ -359,14 +359,14 @@ cdef struct col_t_arr:
     col_t* d
 
 
-cdef col_t_arr col_t_arr_blank():
+cdef col_t_arr col_t_arr_blank() noexcept nogil:
     cdef col_t_arr arr
     arr.size = 0
     arr.d = NULL
     return arr
 
 
-cdef col_t_arr col_t_arr_new(size_t size):
+cdef col_t_arr col_t_arr_new(size_t size) noexcept nogil:
     cdef col_t_arr arr
     cdef size_t index
     arr.size = size
@@ -376,7 +376,7 @@ cdef col_t_arr col_t_arr_new(size_t size):
     return arr
 
 
-cdef void col_t_arr_release(col_t_arr* arr):
+cdef void col_t_arr_release(col_t_arr* arr) noexcept:
     cdef size_t index
     if arr.d:
         for index in range(arr.size):
@@ -740,7 +740,7 @@ cdef void_int _dataframe_alloc_chunks(
         raise MemoryError()
 
 
-cdef void _dataframe_free_mapped_arrow(ArrowArray* arr):
+cdef void _dataframe_free_mapped_arrow(ArrowArray* arr) noexcept nogil:
     free(arr.buffers)
     arr.buffers = NULL
     arr.release = NULL
@@ -846,11 +846,11 @@ cdef void_int _dataframe_category_series_as_arrow(
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
 
-cdef inline bint _dataframe_is_float_nan(PyObject* obj):
+cdef inline bint _dataframe_is_float_nan(PyObject* obj) noexcept:
     return PyFloat_CheckExact(obj) and isnan(PyFloat_AS_DOUBLE(obj))
 
 
-cdef inline bint _dataframe_is_null_pyobj(PyObject* obj):
+cdef inline bint _dataframe_is_null_pyobj(PyObject* obj) noexcept:
     return (
         (obj == Py_None) or
         (obj == <PyObject*>_PANDAS_NA) or
@@ -1021,7 +1021,7 @@ cdef void_int _dataframe_resolve_target(
         f' ({pandas_col.dtype}) to any ILP type.')
 
 
-cdef void _dataframe_init_cursor(col_t* col):
+cdef void _dataframe_init_cursor(col_t* col) noexcept nogil:
     col.cursor.chunk = col.setup.chunks.chunks
     col.cursor.chunk_index = 0
     col.cursor.offset = col.cursor.chunk.offset
@@ -1087,7 +1087,7 @@ cdef void_int _dataframe_resolve_cols_target_name_and_dc(
             str_to_column_name_copy(b, pandas_col.name, &col.name)
 
 
-cdef int _dataframe_compare_cols(const void* lhs, const void* rhs) nogil:
+cdef int _dataframe_compare_cols(const void* lhs, const void* rhs) noexcept nogil:
     cdef col_t* lhs_col = <col_t*>lhs
     cdef col_t* rhs_col = <col_t*>rhs
     cdef int source_diff = lhs_col.setup.meta_target - rhs_col.setup.meta_target
@@ -1130,13 +1130,13 @@ cdef void_int _dataframe_resolve_args(
     qsort(cols.d, col_count, sizeof(col_t), _dataframe_compare_cols)
 
 
-cdef inline bint _dataframe_arrow_get_bool(col_cursor_t* cursor):
+cdef inline bint _dataframe_arrow_get_bool(col_cursor_t* cursor) noexcept nogil:
     return (
         (<uint8_t*>cursor.chunk.buffers[1])[cursor.offset // 8] &
         (1 << (cursor.offset % 8)))
 
 
-cdef inline bint _dataframe_arrow_is_valid(col_cursor_t* cursor):
+cdef inline bint _dataframe_arrow_is_valid(col_cursor_t* cursor) noexcept nogil:
     """Check if the value is set according to the validity bitmap."""
     return (
         cursor.chunk.null_count == 0 or
@@ -1149,7 +1149,7 @@ cdef inline void _dataframe_arrow_get_cat_value(
         col_cursor_t* cursor, 
         size_t key,
         size_t* len_out,
-        const char** buf_out):
+        const char** buf_out) noexcept nogil:
     cdef int32_t* value_index_access
     cdef int32_t value_begin
     cdef uint8_t* value_char_access
@@ -1161,7 +1161,7 @@ cdef inline void _dataframe_arrow_get_cat_value(
 
 
 cdef inline bint _dataframe_arrow_get_cat_i8(
-        col_cursor_t* cursor, size_t* len_out, const char** buf_out):
+        col_cursor_t* cursor, size_t* len_out, const char** buf_out) noexcept nogil:
     cdef bint valid = _dataframe_arrow_is_valid(cursor)
     cdef int8_t* key_access
     cdef int8_t key
@@ -1173,7 +1173,7 @@ cdef inline bint _dataframe_arrow_get_cat_i8(
 
 
 cdef inline bint _dataframe_arrow_get_cat_i16(
-        col_cursor_t* cursor, size_t* len_out, const char** buf_out):
+        col_cursor_t* cursor, size_t* len_out, const char** buf_out) noexcept nogil:
     cdef bint valid = _dataframe_arrow_is_valid(cursor)
     cdef int16_t* key_access
     cdef int16_t key
@@ -1185,7 +1185,7 @@ cdef inline bint _dataframe_arrow_get_cat_i16(
 
 
 cdef inline bint _dataframe_arrow_get_cat_i32(
-        col_cursor_t* cursor, size_t* len_out, const char** buf_out):
+        col_cursor_t* cursor, size_t* len_out, const char** buf_out) noexcept nogil:
     cdef bint valid = _dataframe_arrow_is_valid(cursor)
     cdef int32_t* key_access
     cdef int32_t key
@@ -1199,7 +1199,7 @@ cdef inline bint _dataframe_arrow_get_cat_i32(
 cdef inline bint _dataframe_arrow_str(
         col_cursor_t* cursor,
         size_t* len_out,
-        const char** buf_out):
+        const char** buf_out) noexcept nogil:
     cdef int32_t* index_access
     cdef uint8_t* char_access
     cdef int32_t begin
@@ -1892,8 +1892,7 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
     cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
     cdef int64_t cell = access[col.cursor.offset]
     if cell != _NAT:
-        cell //= 1000  # Convert from nanoseconds to microseconds.
-        if not line_sender_buffer_column_ts(ls_buf, col.name, cell, &err):
+        if not line_sender_buffer_column_ts_nanos(ls_buf, col.name, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
@@ -1910,8 +1909,7 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
     if valid:
         access = <int64_t*>col.cursor.chunk.buffers[1]
         cell = access[col.cursor.offset]
-        cell //= 1000  # Convert from nanoseconds to microseconds.
-        if not line_sender_buffer_column_ts(ls_buf, col.name, cell, &err):
+        if not line_sender_buffer_column_ts_nanos(ls_buf, col.name, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
@@ -1930,7 +1928,7 @@ cdef void_int _dataframe_serialize_cell_at_dt64ns_numpy(
             raise c_err_to_py(err)
     else:
         # Note: ls_buf will validate against negative numbers.
-        if not line_sender_buffer_at(ls_buf, cell, &err):
+        if not line_sender_buffer_at_nanos(ls_buf, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
@@ -1948,7 +1946,7 @@ cdef void_int _dataframe_serialize_cell_at_dt64ns_tz_arrow(
         access = <int64_t*>col.cursor.chunk.buffers[1]
         cell = access[col.cursor.offset]
         # Note: ls_buf will validate against negative numbers.
-        if not line_sender_buffer_at(ls_buf, cell, &err):
+        if not line_sender_buffer_at_nanos(ls_buf, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
@@ -2062,7 +2060,7 @@ cdef void_int _dataframe_serialize_cell(
     # Don't add complex conditions above!
 
 
-cdef void _dataframe_col_advance(col_t* col):
+cdef void _dataframe_col_advance(col_t* col) noexcept nogil:
     # Branchless version of:
     #     cdef bint new_chunk = cursor.offset == <size_t>cursor.chunk.length
     #     if new_chunk == 0:
@@ -2232,7 +2230,7 @@ cdef void_int _dataframe(
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
                 elif at_value >= 0:
-                    if not line_sender_buffer_at(ls_buf, at_value, &err):
+                    if not line_sender_buffer_at_nanos(ls_buf, at_value, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 

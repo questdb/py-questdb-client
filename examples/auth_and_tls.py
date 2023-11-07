@@ -30,15 +30,8 @@ def example(host: str = 'localhost', port: int = 9009):
                         tzinfo=datetime.timezone.utc)},
                 at=TimestampNanos.now())
 
-            # If no 'at' param is passed, the server will use its own timestamp.
-            sender.row(
-                'trades',
-                symbols={'pair': 'EURJPY'},
-                columns={
-                    'traded_price': 135.97,
-                    'qty': 400,
-                    'limit_price': None})  # NULL columns can be passed as None,
-                                           # or simply be left out.
+            # You can call `sender.row` multiple times inside the same `with`
+            # block. The client will buffer the rows and send them in batches.
 
             # We recommend flushing periodically, for example every few seconds.
             # If you don't flush explicitly, the client will flush automatically
