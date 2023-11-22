@@ -1297,7 +1297,7 @@ cdef class Sender:
 
     * The special ``'os_certs'`` string: Use the OS-provided certificate store.
 
-    * The special ``'webpki_roots'`` string: Use the `webpki-roots
+    * The special ``'webpki'`` string: Use the `webpki-roots
       <https://crates.io/crates/webpki-roots>`_ Rust crate to recognize
       certificates.
 
@@ -1451,7 +1451,7 @@ cdef class Sender:
                 elif tls == 'os_certs':
                     line_sender_opts_tls_os_certs(self._opts)
                 elif tls == 'webpki_and_os_certs':
-                    line_sender_opts_tls_webpki_and_os_certs
+                    line_sender_opts_tls_webpki_and_os_certs(self._opts)
                 elif tls == 'insecure_skip_verify':
                     line_sender_opts_tls_insecure_skip_verify(self._opts)
                 else:
