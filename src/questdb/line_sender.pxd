@@ -103,6 +103,10 @@ cdef extern from "questdb/ingress/line_sender.h":
 
   void line_sender_opts_tls(line_sender_opts *opts) noexcept nogil
 
+  void line_sender_opts_tls_os_certs(line_sender_opts *opts) noexcept nogil
+
+  void line_sender_opts_tls_webpki_and_os_certs(line_sender_opts *opts) noexcept nogil
+
   void line_sender_opts_tls_ca(line_sender_opts *opts, line_sender_utf8 ca_path) noexcept nogil
 
   void line_sender_opts_tls_insecure_skip_verify(line_sender_opts *opts) noexcept nogil
