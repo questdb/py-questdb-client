@@ -878,9 +878,13 @@ class TestPandas(unittest.TestCase):
                     hour=0, minute=0, second=0, tz=_TZ)],
             'b': ['sym1']})
         buf = _dataframe(df2, table_name='tbl1', symbols=['b'])
-        self.assertEqual(
+
+        # Accounting for different datatime library differences.
+        # Mostly, here assert that negative timestamps are allowed.
+        self.assertIn(
             buf,
-            'tbl1,b=sym1 a=-2208970800000000t\n')
+            ['tbl1,b=sym1 a=-2208970800000000t\n',
+             'tbl1,b=sym1 a=-2208971040000000t\n'])
 
     def test_datetime64_numpy_at(self):
         df = pd.DataFrame({
