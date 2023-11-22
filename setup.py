@@ -61,11 +61,11 @@ def ingress_extension():
     if PLATFORM == 'darwin':
         lib_prefix = 'lib'
         lib_suffix = '.a'
-        extra_link_args.extend(['-framework', 'Security'])
+        extra_link_args.extend(['-framework', 'Security', '-framework', 'CoreFoundation'])
     elif PLATFORM == 'win32':
         lib_prefix = ''
         lib_suffix = '.lib'
-        libraries.extend(['wsock32', 'ws2_32', 'ntdll', 'AdvAPI32', 'bcrypt', 'UserEnv'])
+        libraries.extend(['wsock32', 'ws2_32', 'ntdll', 'AdvAPI32', 'bcrypt', 'UserEnv', 'crypt32', 'Secur32', 'NCrypt'])
     elif PLATFORM == 'linux':
         lib_prefix = 'lib'
         lib_suffix = '.a'
