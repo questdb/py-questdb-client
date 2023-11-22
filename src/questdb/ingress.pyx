@@ -1295,13 +1295,13 @@ cdef class Sender:
     * A ``str`` or ``pathlib.Path``: Path to a PEM-encoded certificate authority
       file. This is useful for testing with self-signed certificates.
 
-    * The special ``'os_certs'`` string: Use the OS-provided certificate store.
+    * The special ``'os_roots'`` string: Use the OS-provided certificate store.
 
-    * The special ``'webpki'`` string: Use the `webpki-roots
+    * The special ``'webpki_roots'`` string: Use the `webpki-roots
       <https://crates.io/crates/webpki-roots>`_ Rust crate to recognize
       certificates.
 
-    * The special ``'webpki_and_os_certs'`` string: Use both the `webpki-roots
+    * The special ``'webpki_and_os_roots'`` string: Use both the `webpki-roots
       <https://crates.io/crates/webpki-roots>`_ Rust crate and the OS-provided
       certificate store to recognize certificates. (equivalent to `True`).
 
@@ -1444,14 +1444,14 @@ cdef class Sender:
 
         if tls:
             if tls is True:
-                line_sender_opts_tls_webpki_and_os_certs(self._opts)
+                line_sender_opts_tls_webpki_and_os_roots(self._opts)
             elif isinstance(tls, str):
-                if tls == 'webpki':
+                if tls == 'webpki_roots':
                     line_sender_opts_tls(self._opts)
-                elif tls == 'os_certs':
-                    line_sender_opts_tls_os_certs(self._opts)
-                elif tls == 'webpki_and_os_certs':
-                    line_sender_opts_tls_webpki_and_os_certs(self._opts)
+                elif tls == 'os_roots':
+                    line_sender_opts_tls_os_roots(self._opts)
+                elif tls == 'webpki_and_os_roots':
+                    line_sender_opts_tls_webpki_and_os_roots(self._opts)
                 elif tls == 'insecure_skip_verify':
                     line_sender_opts_tls_insecure_skip_verify(self._opts)
                 else:
