@@ -81,9 +81,8 @@ class TestPandas(unittest.TestCase):
                 'Must specify at least one of'):
             _dataframe(DF1)
 
-    # TODO: Fix me and re-enable me!
-    def _test_bad_table_name_type(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Must be str'):
+    def test_bad_table_name_type(self):
+        with self.assertRaisesRegex(TypeError, "'table_name' has incorrect type"):
             _dataframe(DF1, table_name=1.5)
 
     def test_invalid_table_name(self):
@@ -808,8 +807,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=1000000t\n' +
             'tbl1 a=2000000t\n')
 
-    # TODO: Fix me and re-enable me!
-    def _test_datetime64_tz_arrow_col(self):
+    def test_datetime64_tz_arrow_col(self):
         df = pd.DataFrame({
             'a': [
                 pd.Timestamp(
@@ -879,10 +877,10 @@ class TestPandas(unittest.TestCase):
                     year=1900, month=1, day=1,
                     hour=0, minute=0, second=0, tz=_TZ)],
             'b': ['sym1']})
-        with self.assertRaisesRegex(
-                qi.IngressError, "Failed.*'a'.*-220897.* is negative."):
-            _dataframe(df2, table_name='tbl1', symbols=['b'])
-        return   ###############################################################
+        buf = _dataframe(df2, table_name='tbl1', symbols=['b'])
+        self.assertEqual(
+            buf,
+            'tbl1,b=sym1 a=-2208970800000000t\n')
 
     def test_datetime64_numpy_at(self):
         df = pd.DataFrame({
