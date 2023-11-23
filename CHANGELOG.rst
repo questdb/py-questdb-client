@@ -2,6 +2,40 @@
 Changelog
 =========
 
+1.2.0 (2023-11-23)
+------------------
+
+This is a minor release bringing in minor new features and a few bug fixes,
+without any breaking changes.
+
+Most changes are inherited by internally upgrading to version ``3.1.0`` of
+the ``c-questdb-client``.
+
+Features
+~~~~~~~~
+
+* ``Sender(..., tls=True)`` now also uses the OS-provided certificate store.
+  The `tls` argument can now also be set to ``tls='os_roots'`` (to *only* use
+  the OS-provided certs) or ``tls='webpki_roots'`` (to *only* use the certs
+  provided by the ``webpki-roots``, i.e. the old behaviour prior to this
+  release). The new default behaviour for ``tls=True`` is equivalent to setting
+  ``tls='webpki_and_os_roots'``.
+
+* Upgraded dependencies to newer library versions. This also includes the latest
+  `webpki-roots <https://github.com/rustls/webpki-roots>`_ crate providing
+  updated TLS CA certificate roots.
+
+* Various example code and documentation improvements.
+
+Bug fixes
+~~~~~~~~~
+
+* Fixed a bug where timestamp columns could not accept values before Jan 1st
+  1970 UTC.
+
+* TCP connections now enable ``SO_KEEPALIVE``: This should ensure that
+  connections don't drop after a period of inactivity.
+
 1.1.0 (2023-01-04)
 ------------------
 
@@ -59,8 +93,8 @@ Features
   values. This has the same semantics as skipping the column altogether.
   Closes `#3 <https://github.com/questdb/py-questdb-client/issues/3>`_.
 
-Bugfixes
-~~~~~~~~
+Bug fixes
+~~~~~~~~~
 
 * Fixed a major bug where Python ``int`` and ``float`` types were handled with
   32-bit instead of 64-bit precision. This caused certain ``int`` values to be
