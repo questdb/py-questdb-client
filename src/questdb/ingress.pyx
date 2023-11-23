@@ -1288,13 +1288,24 @@ cdef class Sender:
     * ``False``: No TLS encryption (default).
 
     * ``True``: TLS encryption, accepting all common certificates as recognized
-      by the `webpki-roots <https://crates.io/crates/webpki-roots>`_ Rust crate
-      which in turn relies on https://mkcert.org/.
+      by either the `webpki-roots <https://crates.io/crates/webpki-roots>`_ Rust
+      crate (which in turn relies on https://mkcert.org/), or the OS-provided
+      certificate store.
 
     * A ``str`` or ``pathlib.Path``: Path to a PEM-encoded certificate authority
       file. This is useful for testing with self-signed certificates.
 
-    * A special ``'insecure_skip_verify'`` string: Dangerously disable all
+    * The special ``'os_roots'`` string: Use the OS-provided certificate store.
+
+    * The special ``'webpki_roots'`` string: Use the `webpki-roots
+      <https://crates.io/crates/webpki-roots>`_ Rust crate to recognize
+      certificates.
+
+    * The special ``'webpki_and_os_roots'`` string: Use both the `webpki-roots
+      <https://crates.io/crates/webpki-roots>`_ Rust crate and the OS-provided
+      certificate store to recognize certificates. (equivalent to `True`).
+
+    * The special ``'insecure_skip_verify'`` string: Dangerously disable all
       TLS certificate verification (do *NOT* use in production environments).
 
     **Positional constructor arguments for the Sender(..)**
@@ -1433,9 +1444,15 @@ cdef class Sender:
 
         if tls:
             if tls is True:
-                line_sender_opts_tls(self._opts)
+                line_sender_opts_tls_webpki_and_os_roots(self._opts)
             elif isinstance(tls, str):
-                if tls == 'insecure_skip_verify':
+                if tls == 'webpki_roots':
+                    line_sender_opts_tls(self._opts)
+                elif tls == 'os_roots':
+                    line_sender_opts_tls_os_roots(self._opts)
+                elif tls == 'webpki_and_os_roots':
+                    line_sender_opts_tls_webpki_and_os_roots(self._opts)
+                elif tls == 'insecure_skip_verify':
                     line_sender_opts_tls_insecure_skip_verify(self._opts)
                 else:
                     str_to_utf8(b, <PyObject*>tls, &ca_utf8)
