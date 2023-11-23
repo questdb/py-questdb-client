@@ -17,7 +17,7 @@ encryption with TLS.
 Quickstart
 ==========
 
-The latest version of the library is 1.1.0.
+The latest version of the library is 1.2.0.
 
 ::
 
