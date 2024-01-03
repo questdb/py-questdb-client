@@ -1317,11 +1317,15 @@ cdef class Sender:
 
     **Keyword-only constructor arguments for the Sender(..)**
 
+    * ``http`` (``bool``): Use ILP/HTTP instead of ILP/TCP.
+      When set to ``True``, the ``port`` argument must be set to the HTTP port.
+      *Default: False.*
+
     * ``interface`` (``str``): Network interface to bind to.
       Set this if you have an accelerated network interface (e.g. Solarflare)
       and want to use it.
 
-    * ``auth`` (``tuple``): Authentication tuple or ``None`` (default).
+    * ``auth`` (``tuple`` or ``str``): Authentication credentials or ``None`` (default).
       *See above for details*.
 
     * ``tls`` (``bool``, ``pathlib.Path`` or ``str``): TLS configuration or
@@ -1361,6 +1365,7 @@ cdef class Sender:
             str host,
             object port,
             *,
+            bint http=False,
             str interface=None,
             tuple auth=None,
             object tls=False,
@@ -1368,30 +1373,31 @@ cdef class Sender:
             uint64_t init_capacity=65536,  # 64KiB
             uint64_t max_name_len=127,
             object auto_flush=64512):  # 63KiB
-        cdef line_sender_error* err = NULL
-
         cdef line_sender_utf8 host_utf8
 
         cdef str port_str
         cdef line_sender_utf8 port_utf8
 
-        cdef str interface_str
         cdef line_sender_utf8 interface_utf8
 
+        cdef line_sender_utf8 a_token_auth_utf8
+
+        cdef str a_username
+        cdef line_sender_utf8 a_username_utf8
+
+        cdef str a_password
+        cdef line_sender_utf8 a_password_utf8
+
         cdef str a_key_id
-        cdef bytes a_key_id_owner
         cdef line_sender_utf8 a_key_id_utf8
 
         cdef str a_priv_key
-        cdef bytes a_priv_key_owner
         cdef line_sender_utf8 a_priv_key_utf8
 
         cdef str a_pub_key_x
-        cdef bytes a_pub_key_x_owner
         cdef line_sender_utf8 a_pub_key_x_utf8
 
         cdef str a_pub_key_y
-        cdef bytes a_pub_key_y_owner
         cdef line_sender_utf8 a_pub_key_y_utf8
 
         cdef line_sender_utf8 ca_utf8
@@ -1422,25 +1428,36 @@ cdef class Sender:
         str_to_utf8(b, <PyObject*>port_str, &port_utf8)
         self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
 
+        if http:
+            line_sender_opts_http(self._opts)
+
         if interface is not None:
             str_to_utf8(b, <PyObject*>interface, &interface_utf8)
             line_sender_opts_net_interface(self._opts, interface_utf8)
 
         if auth is not None:
-            (a_key_id,
-             a_priv_key,
-             a_pub_key_x,
-             a_pub_key_y) = auth
-            str_to_utf8(b, <PyObject*>a_key_id, &a_key_id_utf8)
-            str_to_utf8(b, <PyObject*>a_priv_key, &a_priv_key_utf8)
-            str_to_utf8(b, <PyObject*>a_pub_key_x, &a_pub_key_x_utf8)
-            str_to_utf8(b, <PyObject*>a_pub_key_y, &a_pub_key_y_utf8)
-            line_sender_opts_auth(
-                self._opts,
-                a_key_id_utf8,
-                a_priv_key_utf8,
-                a_pub_key_x_utf8,
-                a_pub_key_y_utf8)
+            if http:
+                if isinstance(auth, str):
+                    str_to_utf8(b, <PyObject*>auth, &a_token_auth_utf8)
+                    line_sender_opts_token_auth(self._opts, a_token_auth_utf8)
+                else:
+                    (a_username, a_password) = auth
+                    str_to_utf8(b, <PyObject*>a_username, &a_username_utf8)
+                    str_to_utf8(b, <PyObject*>a_password, &a_password_utf8)
+                    line_sender_opts_basic_auth(
+                        self._opts, a_username_utf8, a_password_utf8)
+            else:
+                (a_key_id, a_priv_key, a_pub_key_x, a_pub_key_y) = auth
+                str_to_utf8(b, <PyObject*>a_key_id, &a_key_id_utf8)
+                str_to_utf8(b, <PyObject*>a_priv_key, &a_priv_key_utf8)
+                str_to_utf8(b, <PyObject*>a_pub_key_x, &a_pub_key_x_utf8)
+                str_to_utf8(b, <PyObject*>a_pub_key_y, &a_pub_key_y_utf8)
+                line_sender_opts_auth(
+                    self._opts,
+                    a_key_id_utf8,
+                    a_priv_key_utf8,
+                    a_pub_key_x_utf8,
+                    a_pub_key_y_utf8)
 
         if tls:
             if tls is True:
