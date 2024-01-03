@@ -22,7 +22,7 @@
 ##
 ################################################################################
 
-from libc.stdint cimport int64_t, uint16_t, uint64_t
+from libc.stdint cimport int64_t, uint16_t, uint32_t, uint64_t
 
 cdef extern from "questdb/ingress/line_sender.h":
 
@@ -35,6 +35,8 @@ cdef extern from "questdb/ingress/line_sender.h":
     line_sender_error_invalid_timestamp,
     line_sender_error_auth_error,
     line_sender_error_tls_error,
+    line_sender_error_http_not_supported,
+    line_sender_error_server_flush_error,
 
   cdef struct line_sender:
     pass
@@ -101,6 +103,22 @@ cdef extern from "questdb/ingress/line_sender.h":
                              line_sender_utf8 pub_key_x,
                              line_sender_utf8 pub_key_y) noexcept nogil
 
+  void line_sender_opts_basic_auth(line_sender_opts *opts,
+                                   line_sender_utf8 username,
+                                   line_sender_utf8 password) noexcept nogil
+
+  void line_sender_opts_token_auth(line_sender_opts *opts, line_sender_utf8 token) noexcept nogil
+
+  void line_sender_opts_http(line_sender_opts *opts) noexcept nogil
+
+  void line_sender_opts_max_retries(line_sender_opts *opts, uint32_t max_retries) noexcept nogil
+
+  void line_sender_opts_retry_interval(line_sender_opts *opts, uint64_t retry_interval_millis) noexcept nogil
+
+  void line_sender_opts_min_throughput(line_sender_opts *opts, uint64_t bytes_per_sec) noexcept nogil
+
+  void line_sender_opts_transactional(line_sender_opts *opts) noexcept nogil
+
   void line_sender_opts_tls(line_sender_opts *opts) noexcept nogil
 
   void line_sender_opts_tls_os_roots(line_sender_opts *opts) noexcept nogil
@@ -140,6 +158,10 @@ cdef extern from "questdb/ingress/line_sender.h":
   void line_sender_buffer_clear(line_sender_buffer *buffer) noexcept nogil
 
   size_t line_sender_buffer_size(const line_sender_buffer *buffer) noexcept nogil
+
+  size_t line_sender_buffer_row_count(const line_sender_buffer *buffer) noexcept nogil
+
+  size_t line_sender_buffer_table_count(const line_sender_buffer *buffer) noexcept nogil
 
   const char *line_sender_buffer_peek(const line_sender_buffer *buffer, size_t *len_out) noexcept nogil
 
