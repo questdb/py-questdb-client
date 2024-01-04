@@ -41,7 +41,7 @@ stages:
           - script: |
               git clone --depth https://github.com/questdb/questdb.git
             displayName: git clone questdb
-            condition: eq(variables.vsQuestDbMaster, true))
+            condition: eq(variables.vsQuestDbMaster, true)
           - task: Maven@3
             displayName: "Compile QuestDB"
             inputs:
@@ -57,4 +57,4 @@ stages:
             env:
               JAVA_HOME: $(JAVA_HOME_11_X64)
               QDB_REPO_PATH: './questdb'
-            condition: eq(variables.vsQuestDbMaster, true))
+            condition: eq(variables.vsQuestDbMaster, true)
