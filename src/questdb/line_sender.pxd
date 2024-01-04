@@ -161,7 +161,7 @@ cdef extern from "questdb/ingress/line_sender.h":
 
   size_t line_sender_buffer_row_count(const line_sender_buffer *buffer) noexcept nogil
 
-  size_t line_sender_buffer_table_count(const line_sender_buffer *buffer) noexcept nogil
+  bint line_sender_buffer_transactional(const line_sender_buffer *buffer) noexcept nogil
 
   const char *line_sender_buffer_peek(const line_sender_buffer *buffer, size_t *len_out) noexcept nogil
 
