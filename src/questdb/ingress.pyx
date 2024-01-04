@@ -97,7 +97,9 @@ class IngressErrorCode(Enum):
     InvalidTimestamp = line_sender_error_invalid_timestamp
     AuthError = line_sender_error_auth_error
     TlsError = line_sender_error_tls_error
-    BadDataFrame = <int>line_sender_error_tls_error + 1
+    HttpNotSupported = line_sender_error_http_not_supported
+    ServerFlushError = line_sender_error_server_flush_error
+    BadDataFrame = <int>line_sender_error_server_flush_error + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -133,6 +135,10 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.AuthError
     elif code == line_sender_error_tls_error:
         return IngressErrorCode.TlsError
+    elif code == line_sender_error_http_not_supported:
+        return IngressErrorCode.HttpNotSupported
+    elif code == line_sender_error_server_flush_error:
+        return IngressErrorCode.ServerFlushError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -1346,6 +1352,35 @@ cdef class Sender:
       buffer when it reaches a certain byte-size watermark.
       *Default: 64512 (63KiB).*
       *See above for details.*
+
+    **HTTP-only keyword-only constructor arguments for the Sender(..)**
+    
+    * ``transactional`` (``bool``): Each HTTP flush is transactional if all
+      the rows in the batch are for the same table.
+      Setting ``transactional=True`` will prevent flushing batches of rows
+      with mixed table names.
+      To fully control transactions, you also need to set ``auto_flush=False``
+      or buffered lines may be flushed automatically and thus split across
+      multiple transactions.
+      If ``transactional=False`` (default), the client will send the batch
+      as-is to the server even if it contains rows for multiple tables.
+      In such case the server may end up committing some rows and not others.
+      *Default: False.*
+
+    * ``max_retries`` (``int``): Maximum number of retries for a failed HTTP
+      flush. *Default: 3.*
+    
+    * ``retry_interval`` (``int``): Initial retry interval (in milliseconds).
+      The retry interval is doubled after each failed attempt, up to the maximum
+      number of retries (``max_retries``).
+      *Default: 100 (milliseconds).*
+
+    * ``min_throughput`` (``int``): Minimum expected throughput in bytes per
+      second for HTTP requests. If the throughput is lower than this value, the
+      connection will time out.
+      The timeout is calculated as the number of bytes in the buffer divided by
+      the minimum throughput plus a grace period of ``read_timeout``.
+      *Default: 102400 (100 KiB/s).*
     """
 
     # We need the Buffer held by a Sender can hold a weakref to its Sender.
@@ -1372,7 +1407,11 @@ cdef class Sender:
             uint64_t read_timeout=15000,
             uint64_t init_capacity=65536,  # 64KiB
             uint64_t max_name_len=127,
-            object auto_flush=64512):  # 63KiB
+            object auto_flush=64512,   # 63KiB
+            bint transactional=False,
+            uint32_t max_retries=3,
+            uint64_t retry_interval=100,  # milliseconds
+            uint64_t min_throughput=102400):  # bytes/sec
         cdef line_sender_utf8 host_utf8
 
         cdef str port_str
@@ -1485,6 +1524,13 @@ cdef class Sender:
 
         if read_timeout is not None:
             line_sender_opts_read_timeout(self._opts, read_timeout)
+
+        if transactional:
+            line_sender_opts_transactional(self._opts)
+
+        line_sender_opts_max_retries(self._opts, max_retries)
+        line_sender_opts_retry_interval(self._opts, retry_interval)
+        line_sender_opts_min_throughput(self._opts, min_throughput)
 
         self._auto_flush_enabled = not not auto_flush
         self._auto_flush_watermark = int(auto_flush) \

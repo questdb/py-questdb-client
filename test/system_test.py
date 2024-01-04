@@ -2,14 +2,17 @@
 
 import sys
 sys.dont_write_bytecode = True
+import os
 import shutil
 import unittest
 import uuid
+import pathlib
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
-from fixture import QuestDbFixture, install_questdb, CA_PATH, AUTH
+from fixture import \
+    QuestDbFixture, install_questdb, install_questdb_from_repo, CA_PATH, AUTH
 
 
 try:
@@ -34,12 +37,17 @@ def may_install_questdb():
     if QUESTDB_PLAIN_INSTALL_PATH:
         return
 
-    url = ('https://github.com/questdb/questdb/releases/download/' +
-           QUESTDB_VERSION +
-           '/questdb-' +
-           QUESTDB_VERSION +
-           '-no-jre-bin.tar.gz')
-    install_path = install_questdb(QUESTDB_VERSION, url)
+    install_path = None
+    if os.environ.get('QDB_REPO_PATH'):
+        repo = pathlib.Path(os.environ['QDB_REPO_PATH'])
+        install_path = install_questdb_from_repo(repo)
+    else:
+        url = ('https://github.com/questdb/questdb/releases/download/' +
+            QUESTDB_VERSION +
+            '/questdb-' +
+            QUESTDB_VERSION +
+            '-no-jre-bin.tar.gz')
+        install_path = install_questdb(QUESTDB_VERSION, url)
 
     QUESTDB_PLAIN_INSTALL_PATH = PROJ_ROOT / 'build' / 'questdb' / 'plain'
     shutil.copytree(
@@ -59,7 +67,7 @@ class TestWithDatabase(unittest.TestCase):
         cls.qdb_auth = None
 
         cls.qdb_plain = QuestDbFixture(
-            QUESTDB_PLAIN_INSTALL_PATH, auth=False, wrap_tls=True)
+            QUESTDB_PLAIN_INSTALL_PATH, auth=False, wrap_tls=True, http=True)
         cls.qdb_plain.start()
 
         cls.qdb_auth = QuestDbFixture(
@@ -169,6 +177,47 @@ class TestWithDatabase(unittest.TestCase):
             ['C', 3, 'c', True, 3.5, '2021-01-03T00:00:00.000000Z']]
         scrubbed_dataset = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_dataset, exp_dataset)
+
+    def test_http(self):
+        port = self.qdb_plain.http_server_port
+        table_name = uuid.uuid4().hex
+        with qi.Sender('localhost', port, http=True) as sender:
+            for _ in range(3):
+                sender.row(
+                    table_name,
+                    symbols={
+                        'name_a': 'val_a'},
+                    columns={
+                        'name_b': True,
+                        'name_c': 42,
+                        'name_d': 2.5,
+                        'name_e': 'val_b'},
+                    at=qi.TimestampNanos.now())
+            
+            if self.qdb_plain.version <= (7, 3, 7):
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        r'.*HTTP endpoint does not support ILP.*'):
+                    sender.flush()
+                return
+
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        exp_columns = [
+            {'name': 'name_a', 'type': 'SYMBOL'},
+            {'name': 'name_b', 'type': 'BOOLEAN'},
+            {'name': 'name_c', 'type': 'LONG'},
+            {'name': 'name_d', 'type': 'DOUBLE'},
+            {'name': 'name_e', 'type': 'STRING'},
+            {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+
+        exp_dataset = [  # Comparison excludes timestamp column.
+            ['val_a', True, 42, 2.5, 'val_b'],
+            ['val_a', True, 42, 2.5, 'val_b'],
+            ['val_a', True, 42, 2.5, 'val_b']]
+        scrubbed_dataset = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed_dataset, exp_dataset)
+
 
 if __name__ == '__main__':
     unittest.main()
