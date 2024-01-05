@@ -496,7 +496,11 @@ cdef class Buffer
 
 
 cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
-    if sender._auto_flush_enabled:
+    cdef bint flush = False
+    if sender._auto_flush_mode == auto_flush_row_count:
+        if line_sender_buffer_row_count(buffer._impl) >= sender._auto_flush_watermark:
+            sender.flush(buffer)
+    elif sender._auto_flush_mode == auto_flush_byte_count:
         if len(buffer) >= sender._auto_flush_watermark:
             sender.flush(buffer)
 
@@ -1208,6 +1212,46 @@ _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
+class AutoFlush:
+    """
+    Auto flush mode.
+
+    Use one of ``AutoFlush.Disabled``, ``AutoFlush.RowCount`` or
+    ``AutoFlush.ByteCount``.
+    """
+
+    class Disabled:
+        """
+        Auto flush disabled.
+        Call ``flush()`` manually.
+        """
+        pass
+
+    class RowCount:
+        """
+        Auto flush after a number of rows.
+        """
+        def __init__(self, value: int):
+            if value < 0:
+                raise ValueError('value must be a positive integer.')
+            self.value = value
+
+    class ByteCount:
+        """
+        Auto flush after a number of bytes.
+        """
+        def __init__(self, value: int):
+            if value < 0:
+                raise ValueError('value must be a positive integer.')
+            self.value = value
+
+
+cdef enum auto_flush_mode_t:
+    auto_flush_disabled,
+    auto_flush_row_count,
+    auto_flush_byte_count,
+
+
 cdef class Sender:
     """
     A sender is a client that inserts rows into QuestDB via the ILP protocol.
@@ -1265,19 +1309,25 @@ cdef class Sender:
     You can control this behavior by setting the ``auto_flush`` argument.
 
     .. code-block:: python
+        from questdb.ingress import AutoFlush
 
-        # Never flushes automatically.
-        sender = Sender('localhost', 9009, auto_flush=False)
-        sender = Sender('localhost', 9009, auto_flush=None) # Ditto.
-        sender = Sender('localhost', 9009, auto_flush=0)  # Ditto.
+        # Flushes automatically after 600 rows (the default).
+        sender = Sender('localhost', 9009)
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.RowCount(600)) # Ditto.
+
+        # Flushes automatically after each row.
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.RowCount(1))
 
         # Flushes automatically when the buffer reaches 1KiB.
-        sender = Sender('localhost', 9009, auto_flush=1024)
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.ByteCount(1024))
 
-        # Flushes automatically after every row.
-        sender = Sender('localhost', 9009, auto_flush=True)
-        sender = Sender('localhost', 9009, auto_flush=1)  # Ditto.
+        # Disabled: Never flushes automatically.
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.Disabled)
 
+    When auto-flushing is disabled, you must call ``sender.flush()`` manually.
+    Note that when exiting a ``with sender:`` block, the sender will
+    automatically flush the buffer. This is *not* disabled by setting
+    ``auto_flush=AutoFlush.Disabled``.
 
     **Authentication and TLS Encryption**
 
@@ -1348,9 +1398,9 @@ cdef class Sender:
     * ``max_name_length`` (``int``): Maximum length of a table or column name.
       *See Buffer's constructor for more details.*
 
-    * ``auto_flush`` (``bool`` or ``int``): Whether to automatically flush the
-      buffer when it reaches a certain byte-size watermark.
-      *Default: 64512 (63KiB).*
+    * ``auto_flush``: Whether to automatically flush the
+      buffer when it reaches a certain row-count or byte-count watermark.
+      *Default: 600 rows.*
       *See above for details.*
 
     **HTTP-only keyword-only constructor arguments for the Sender(..)**
@@ -1359,9 +1409,9 @@ cdef class Sender:
       the rows in the batch are for the same table.
       Setting ``transactional=True`` will prevent flushing batches of rows
       with mixed table names.
-      To fully control transactions, you also need to set ``auto_flush=False``
-      or buffered lines may be flushed automatically and thus split across
-      multiple transactions.
+      To fully control transactions, you also need to set
+      ``auto_flush=AutoFlush.Disabled`` or buffered lines may be flushed
+      automatically and thus split across multiple transactions.
       If ``transactional=False`` (default), the client will send the batch
       as-is to the server even if it contains rows for multiple tables.
       In such case the server may end up committing some rows and not others.
@@ -1390,8 +1440,8 @@ cdef class Sender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
-    cdef bint _auto_flush_enabled
-    cdef ssize_t _auto_flush_watermark
+    cdef auto_flush_mode_t _auto_flush_mode
+    cdef size_t _auto_flush_watermark
     cdef size_t _init_capacity
     cdef size_t _max_name_len
 
@@ -1407,7 +1457,7 @@ cdef class Sender:
             uint64_t read_timeout=15000,
             uint64_t init_capacity=65536,  # 64KiB
             uint64_t max_name_len=127,
-            object auto_flush=64512,   # 63KiB
+            object auto_flush=None,   # AutoFlush.RowCount(600)
             bint transactional=False,
             uint32_t max_retries=3,
             uint64_t retry_interval=100,  # milliseconds
@@ -1442,6 +1492,8 @@ cdef class Sender:
         cdef line_sender_utf8 ca_utf8
 
         cdef qdb_pystr_buf* b
+
+        cdef ssize_t auto_flush_watermark = 0
 
         self._opts = NULL
         self._impl = NULL
@@ -1532,13 +1584,30 @@ cdef class Sender:
         line_sender_opts_retry_interval(self._opts, retry_interval)
         line_sender_opts_min_throughput(self._opts, min_throughput)
 
-        self._auto_flush_enabled = not not auto_flush
-        self._auto_flush_watermark = int(auto_flush) \
-            if self._auto_flush_enabled else 0
-        if self._auto_flush_watermark < 0:
+
+        # Parse `auto_flush` argument.
+        if auto_flush is None:
+            self._auto_flush_mode = auto_flush_row_count
+            auto_flush_watermark = 600
+        elif auto_flush is AutoFlush.Disabled:
+            self._auto_flush_mode = auto_flush_disabled
+            auto_flush_watermark = 0
+        elif isinstance(auto_flush, AutoFlush.RowCount):
+            self._auto_flush_mode = auto_flush_row_count
+            auto_flush_watermark = auto_flush.value
+        elif isinstance(auto_flush, AutoFlush.ByteCount):
+            self._auto_flush_mode = auto_flush_byte_count
+            auto_flush_watermark = auto_flush.value
+        else:
+            raise TypeError(
+                'auto_flush must be AutoFlush.Disabled, '
+                'AutoFlush.RowCount or AutoFlush.ByteCount, '
+                f'not {_fqn(type(auto_flush))}')
+        if auto_flush_watermark < 0:
             raise ValueError(
-                'auto_flush_watermark must be >= 0, '
-                f'not {self._auto_flush_watermark}')
+                'auto_flush watermark must be >= 0, '
+                f'not {auto_flush_watermark}')
+        self._auto_flush_watermark = auto_flush_watermark
         
         qdb_pystr_buf_clear(b)
 
@@ -1678,8 +1747,9 @@ cdef class Sender:
         may have been transmitted to the server already.
         """
         cdef auto_flush_t af = auto_flush_blank()
-        if self._auto_flush_enabled:
+        if self._auto_flush_mode:
             af.sender = self._impl
+            af.mode = self._auto_flush_mode
             af.watermark = self._auto_flush_watermark
         _dataframe(
             af,

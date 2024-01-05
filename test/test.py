@@ -359,7 +359,7 @@ class TestSender(unittest.TestCase):
 
     def test_auto_flush(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=4) as sender:
+            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.ByteCount(4)) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'})
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -368,7 +368,7 @@ class TestSender(unittest.TestCase):
 
     def test_immediate_auto_flush(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=True) as sender:
+            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.RowCount(1)) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'})
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -377,7 +377,7 @@ class TestSender(unittest.TestCase):
 
     def test_auto_flush_on_closed_socket(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=True) as sender:
+            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.RowCount(1)) as sender:
                 server.accept()
                 server.close()
                 exp_err = 'Could not flush buffer.* - See https'
@@ -389,7 +389,7 @@ class TestSender(unittest.TestCase):
     def test_dont_auto_flush(self):
         msg_counter = 0
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=0) as sender:
+            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.Disabled) as sender:
                 server.accept()
                 while len(sender) < 32768:  # 32KiB
                     sender.row('tbl1', symbols={'sym1': 'val1'})
@@ -433,7 +433,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             # An auto-flush size of 20 bytes is enough to auto-flush the first
             # row, but not the second.
-            with qi.Sender('localhost', server.port, auto_flush=20) as sender:
+            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.ByteCount(20)) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
                 sender.dataframe(df, table_name='tbl1')

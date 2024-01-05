@@ -2,12 +2,14 @@
 
 cdef struct auto_flush_t:
     line_sender* sender
+    auto_flush_mode_t mode
     size_t watermark
 
 
 cdef auto_flush_t auto_flush_blank() noexcept nogil:
     cdef auto_flush_t af
     af.sender = NULL
+    af.mode = auto_flush_disabled
     af.watermark = 0
     return af
 
@@ -2094,8 +2096,14 @@ cdef void_int _dataframe_handle_auto_flush(
     cdef line_sender_error* marker_err
     cdef bint flush_ok
     cdef bint marker_ok
-    if (af.sender == NULL) or (line_sender_buffer_size(ls_buf) < af.watermark):
+    if (af.sender == NULL) or (af.mode == auto_flush_disabled):
         return 0
+    elif af.mode == auto_flush_row_count:
+        if line_sender_buffer_row_count(ls_buf) < af.watermark:
+            return 0
+    elif af.mode == auto_flush_byte_count:
+        if line_sender_buffer_size(ls_buf) < af.watermark:
+            return 0
 
     # Always temporarily release GIL during a flush.
     had_gil = _ensure_doesnt_have_gil(gs)
