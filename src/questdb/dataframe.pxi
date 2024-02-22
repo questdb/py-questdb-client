@@ -720,7 +720,7 @@ cdef ssize_t _dataframe_resolve_at(
             f'Bad argument `at`: Unsupported type {_fqn(type(at))}. ' +
             'Must be one of: None, TimestampNanos, datetime, ' +
             'int (column index), str (colum name)')
-    dtype = df.dtypes[col_index]
+    dtype = df.dtypes.iloc[col_index]
     if _dataframe_is_supported_datetime(dtype):
         at_value_out[0] = _AT_IS_SET_BY_COLUMN
         col = &cols.d[col_index]
@@ -1114,7 +1114,7 @@ cdef void_int _dataframe_resolve_args(
     cdef ssize_t at_col
 
     cdef list pandas_cols = [
-        PandasCol(name, df.dtypes[index], series)
+        PandasCol(name, df.dtypes.iloc[index], series)
         for index, (name, series) in enumerate(df.items())]
     _dataframe_resolve_cols(b, pandas_cols, cols, any_cols_need_gil_out)
     name_col = _dataframe_resolve_table_name(
