@@ -1,6 +1,3 @@
-# See: dataframe.md for technical overview.
-from libc.stdio cimport printf
-
 cdef struct auto_flush_t:
     line_sender* sender
     auto_flush_mode_t mode
