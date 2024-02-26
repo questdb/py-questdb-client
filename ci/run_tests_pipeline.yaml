@@ -59,3 +59,19 @@ stages:
               JAVA_HOME: $(JAVA_HOME_11_X64)
               QDB_REPO_PATH: './questdb'
             condition: eq(variables.vsQuestDbMaster, true)
+          - script: python3 -m pip install pandas==2.2.1
+            displayName: "Install pandas==2.2.1"
+          - script: python3 proj.py build
+            displayName: "Build with pandas==2.2.1"
+          - script: python3 proj.py test 1
+            displayName: "Test with pandas==2.2.1"
+            env:
+              JAVA_HOME: $(JAVA_HOME_11_X64)
+          - script: python3 -m pip install pandas==2.1.1
+            displayName: "Install pandas==2.1.1"
+          - script: python3 proj.py build
+            displayName: "Build with pandas==2.1.1"
+          - script: python3 proj.py test 1
+            displayName: "Test with pandas==2.1.1"
+            env:
+              JAVA_HOME: $(JAVA_HOME_11_X64)
