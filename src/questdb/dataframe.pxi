@@ -1214,7 +1214,7 @@ cdef inline bint _dataframe_arrow_get_cat_i32(
     return valid
 
 
-cdef inline bint _dataframe_arrow_str(
+cdef inline bint _dataframe_arrow_str_utf8(
         col_cursor_t* cursor,
         size_t* len_out,
         const char** buf_out) noexcept nogil:
@@ -1230,7 +1230,7 @@ cdef inline bint _dataframe_arrow_str(
         buf_out[0] = <const char*>&char_access[begin]
     return valid
 
-cdef inline bint _dataframe_arrow_str_lrg(
+cdef inline bint _dataframe_arrow_str_utf8_lrg(
         col_cursor_t* cursor,
         size_t* len_out,
         const char** buf_out) noexcept nogil:
@@ -1294,7 +1294,7 @@ cdef void_int _dataframe_serialize_cell_table__str_utf8_arrow(
     cdef size_t c_len
     cdef const char* buf
     cdef line_sender_table_name c_table_name
-    if _dataframe_arrow_str(&col.cursor, &c_len, &buf):
+    if _dataframe_arrow_str_utf8(&col.cursor, &c_len, &buf):
         if not line_sender_table_name_init(&c_table_name, c_len, buf, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
@@ -1314,7 +1314,7 @@ cdef void_int _dataframe_serialize_cell_table__str_lrg_utf8_arrow(
     cdef size_t c_len
     cdef const char* buf
     cdef line_sender_table_name c_table_name
-    if _dataframe_arrow_str_lrg(&col.cursor, &c_len, &buf):
+    if _dataframe_arrow_str_utf8_lrg(&col.cursor, &c_len, &buf):
         if not line_sender_table_name_init(&c_table_name, c_len, buf, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
@@ -1408,7 +1408,7 @@ cdef void_int _dataframe_serialize_cell_symbol__str_utf8_arrow(
         PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    if _dataframe_arrow_str(&col.cursor, &utf8.len, &utf8.buf):
+    if _dataframe_arrow_str_utf8(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_symbol(ls_buf, col.name, utf8, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
@@ -1420,7 +1420,7 @@ cdef void_int _dataframe_serialize_cell_symbol__str_lrg_utf8_arrow(
         PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    if _dataframe_arrow_str_lrg(&col.cursor, &utf8.len, &utf8.buf):
+    if _dataframe_arrow_str_utf8_lrg(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_symbol(ls_buf, col.name, utf8, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
@@ -1904,7 +1904,7 @@ cdef void_int _dataframe_serialize_cell_column_str__str_utf8_arrow(
         PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    if _dataframe_arrow_str(&col.cursor, &utf8.len, &utf8.buf):
+    if _dataframe_arrow_str_utf8(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_column_str(ls_buf, col.name, utf8, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
@@ -1916,7 +1916,7 @@ cdef void_int _dataframe_serialize_cell_column_str__str_lrg_utf8_arrow(
         PyThreadState** gs) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_utf8 utf8
-    if _dataframe_arrow_str_lrg(&col.cursor, &utf8.len, &utf8.buf):
+    if _dataframe_arrow_str_utf8_lrg(&col.cursor, &utf8.len, &utf8.buf):
         if not line_sender_buffer_column_str(ls_buf, col.name, utf8, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
