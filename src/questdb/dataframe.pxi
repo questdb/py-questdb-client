@@ -855,7 +855,7 @@ cdef void_int _dataframe_category_series_as_arrow(
             f'Got {(<bytes>format).decode("utf-8")!r}.')
     
     format = col.setup.arrow_schema.dictionary.format
-    if strncmp(format, _ARROW_FMT_SML_STR, 1) != 0:
+    if (strncmp(format, _ARROW_FMT_SML_STR, 1) != 0) and (strncmp(format, _ARROW_FMT_LRG_STR, 1) != 0):
         raise IngressError(
             IngressErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
