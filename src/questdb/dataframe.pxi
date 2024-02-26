@@ -1,9 +1,5 @@
 # See: dataframe.md for technical overview.
-
-from pandas import __version__ as PANDAS_VERSION
-
-cdef int USE_LARGE_STRING = PANDAS_VERSION >= "2.2.0"
-
+from libc.stdio cimport printf
 
 cdef struct auto_flush_t:
     line_sender* sender
@@ -57,40 +53,40 @@ cdef dict _TARGET_NAMES = {
 
 cdef enum col_source_t:
     # Note: Hundreds digit set to 1 if GIL is required.
-    col_source_nulls =                0
-    col_source_bool_pyobj =      101100
-    col_source_bool_numpy =      102000
-    col_source_bool_arrow =      103000
-    col_source_int_pyobj =       201100
-    col_source_u8_numpy =        202000
-    col_source_i8_numpy =        203000
-    col_source_u16_numpy =       204000
-    col_source_i16_numpy =       205000
-    col_source_u32_numpy =       206000
-    col_source_i32_numpy =       207000
-    col_source_u64_numpy =       208000
-    col_source_i64_numpy =       209000
-    col_source_u8_arrow =        210000
-    col_source_i8_arrow =        211000
-    col_source_u16_arrow =       212000
-    col_source_i16_arrow =       213000
-    col_source_u32_arrow =       214000
-    col_source_i32_arrow =       215000
-    col_source_u64_arrow =       216000
-    col_source_i64_arrow =       217000
-    col_source_float_pyobj =     301100
-    col_source_f32_numpy =       302000
-    col_source_f64_numpy =       303000
-    col_source_f32_arrow =       304000
-    col_source_f64_arrow =       305000
-    col_source_str_pyobj =       401100
-    col_source_str_arrow =       402000
-    col_source_str_i8_cat =      403000
-    col_source_str_i16_cat =     404000
-    col_source_str_i32_cat =     405000
-    col_source_str_lrg_arrow =   406000
-    col_source_dt64ns_numpy =    501000
-    col_source_dt64ns_tz_arrow = 502000
+    col_source_nulls =                       0
+    col_source_bool_pyobj =             101100
+    col_source_bool_numpy =             102000
+    col_source_bool_arrow =             103000
+    col_source_int_pyobj =              201100
+    col_source_u8_numpy =               202000
+    col_source_i8_numpy =               203000
+    col_source_u16_numpy =              204000
+    col_source_i16_numpy =              205000
+    col_source_u32_numpy =              206000
+    col_source_i32_numpy =              207000
+    col_source_u64_numpy =              208000
+    col_source_i64_numpy =              209000
+    col_source_u8_arrow =               210000
+    col_source_i8_arrow =               211000
+    col_source_u16_arrow =              212000
+    col_source_i16_arrow =              213000
+    col_source_u32_arrow =              214000
+    col_source_i32_arrow =              215000
+    col_source_u64_arrow =              216000
+    col_source_i64_arrow =              217000
+    col_source_float_pyobj =            301100
+    col_source_f32_numpy =              302000
+    col_source_f64_numpy =              303000
+    col_source_f32_arrow =              304000
+    col_source_f64_arrow =              305000
+    col_source_str_pyobj =              401100
+    col_source_str_utf8_arrow =         402000
+    col_source_str_i8_cat =             403000
+    col_source_str_i16_cat =            404000
+    col_source_str_i32_cat =            405000
+    col_source_str_lrg_utf8_arrow =     406000
+    col_source_dt64ns_numpy =           501000
+    col_source_dt64ns_tz_arrow =        502000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -100,8 +96,8 @@ cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
 
 cdef set _STR_SOURCES = {
     col_source_t.col_source_str_pyobj,
-    col_source_t.col_source_str_arrow,
-    col_source_t.col_source_str_lrg_arrow,
+    col_source_t.col_source_str_utf8_arrow,
+    col_source_t.col_source_str_lrg_utf8_arrow,
     col_source_t.col_source_str_i8_cat,
     col_source_t.col_source_str_i16_cat,
     col_source_t.col_source_str_i32_cat,
@@ -122,16 +118,16 @@ cdef dict _TARGET_TO_SOURCES = {
     },
     col_target_t.col_target_table: {
         col_source_t.col_source_str_pyobj,
-        col_source_t.col_source_str_arrow,
-        col_source_t.col_source_str_lrg_arrow,
+        col_source_t.col_source_str_utf8_arrow,
+        col_source_t.col_source_str_lrg_utf8_arrow,
         col_source_t.col_source_str_i8_cat,
         col_source_t.col_source_str_i16_cat,
         col_source_t.col_source_str_i32_cat,
     },
     col_target_t.col_target_symbol: {
         col_source_t.col_source_str_pyobj,
-        col_source_t.col_source_str_arrow,
-        col_source_t.col_source_str_lrg_arrow,
+        col_source_t.col_source_str_utf8_arrow,
+        col_source_t.col_source_str_lrg_utf8_arrow,
         col_source_t.col_source_str_i8_cat,
         col_source_t.col_source_str_i16_cat,
         col_source_t.col_source_str_i32_cat,
@@ -169,8 +165,8 @@ cdef dict _TARGET_TO_SOURCES = {
     },
     col_target_t.col_target_column_str: {
         col_source_t.col_source_str_pyobj,
-        col_source_t.col_source_str_arrow,
-        col_source_t.col_source_str_lrg_arrow,
+        col_source_t.col_source_str_utf8_arrow,
+        col_source_t.col_source_str_lrg_utf8_arrow,
         col_source_t.col_source_str_i8_cat,
         col_source_t.col_source_str_i16_cat,
         col_source_t.col_source_str_i32_cat,
@@ -214,10 +210,10 @@ cdef enum col_dispatch_code_t:
 
     col_dispatch_code_table__str_pyobj = \
         col_target_t.col_target_table + col_source_t.col_source_str_pyobj
-    col_dispatch_code_table__str_arrow = \
-        col_target_t.col_target_table + col_source_t.col_source_str_arrow
-    col_dispatch_code_table__str_lrg_arrow = \
-        col_target_t.col_target_table + col_source_t.col_source_str_lrg_arrow
+    col_dispatch_code_table__str_utf8_arrow = \
+        col_target_t.col_target_table + col_source_t.col_source_str_utf8_arrow
+    col_dispatch_code_table__str_lrg_utf8_arrow = \
+        col_target_t.col_target_table + col_source_t.col_source_str_lrg_utf8_arrow
     col_dispatch_code_table__str_i8_cat = \
         col_target_t.col_target_table + col_source_t.col_source_str_i8_cat
     col_dispatch_code_table__str_i16_cat = \
@@ -227,10 +223,10 @@ cdef enum col_dispatch_code_t:
 
     col_dispatch_code_symbol__str_pyobj = \
         col_target_t.col_target_symbol + col_source_t.col_source_str_pyobj
-    col_dispatch_code_symbol__str_arrow = \
-        col_target_t.col_target_symbol + col_source_t.col_source_str_arrow
-    col_dispatch_code_symbol__str_lrg_arrow = \
-        col_target_t.col_target_symbol + col_source_t.col_source_str_lrg_arrow
+    col_dispatch_code_symbol__str_utf8_arrow = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_utf8_arrow
+    col_dispatch_code_symbol__str_lrg_utf8_arrow = \
+        col_target_t.col_target_symbol + col_source_t.col_source_str_lrg_utf8_arrow
     col_dispatch_code_symbol__str_i8_cat = \
         col_target_t.col_target_symbol + col_source_t.col_source_str_i8_cat
     col_dispatch_code_symbol__str_i16_cat = \
@@ -293,10 +289,10 @@ cdef enum col_dispatch_code_t:
 
     col_dispatch_code_column_str__str_pyobj = \
         col_target_t.col_target_column_str + col_source_t.col_source_str_pyobj
-    col_dispatch_code_column_str__str_arrow = \
-        col_target_t.col_target_column_str + col_source_t.col_source_str_arrow
-    col_dispatch_code_column_str__str_lrg_arrow = \
-        col_target_t.col_target_column_str + col_source_t.col_source_str_lrg_arrow
+    col_dispatch_code_column_str__str_utf8_arrow = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_utf8_arrow
+    col_dispatch_code_column_str__str_lrg_utf8_arrow = \
+        col_target_t.col_target_column_str + col_source_t.col_source_str_lrg_utf8_arrow
     col_dispatch_code_column_str__str_i8_cat = \
         col_target_t.col_target_column_str + col_source_t.col_source_str_i8_cat
     col_dispatch_code_column_str__str_i16_cat = \
@@ -832,8 +828,8 @@ cdef void_int _dataframe_series_as_arrow(
 cdef const char* _ARROW_FMT_INT8 = "c"
 cdef const char* _ARROW_FMT_INT16 = "s"
 cdef const char* _ARROW_FMT_INT32 = "i"
-cdef const char* _ARROW_FMT_SML_STR = "u"
-cdef const char* _ARROW_FMT_LRG_STR = "U"
+cdef const char* _ARROW_FMT_UTF8_STRING = 'u'
+cdef const char* _ARROW_FMT_LRG_UTF8_STRING = 'U'
 
 
 cdef void_int _dataframe_category_series_as_arrow(
@@ -853,9 +849,9 @@ cdef void_int _dataframe_category_series_as_arrow(
             f'Bad column {pandas_col.name!r}: ' +
             'Unsupported arrow category index type. ' +
             f'Got {(<bytes>format).decode("utf-8")!r}.')
-    
+
     format = col.setup.arrow_schema.dictionary.format
-    if (strncmp(format, _ARROW_FMT_SML_STR, 1) != 0) and (strncmp(format, _ARROW_FMT_LRG_STR, 1) != 0):
+    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0) and (strncmp(format, _ARROW_FMT_LRG_UTF8_STRING, 1) != 0):
         raise IngressError(
             IngressErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
@@ -989,11 +985,16 @@ cdef void_int _dataframe_resolve_source_and_buffers(
         _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.StringDtype):
         if dtype.storage == 'pyarrow':
-            if USE_LARGE_STRING:
-                col.setup.source = col_source_t.col_source_str_lrg_arrow
-            else:
-                col.setup.source = col_source_t.col_source_str_arrow
             _dataframe_series_as_arrow(pandas_col, col)
+            if strncmp(col.setup.arrow_schema.format, _ARROW_FMT_UTF8_STRING, 1) == 0:
+                col.setup.source = col_source_t.col_source_str_utf8_arrow
+            elif strncmp(col.setup.arrow_schema.format, _ARROW_FMT_LRG_UTF8_STRING, 1) == 0:
+                col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Unknown string dtype storage: {dtype.storage} ' +
+                    f'for column {pandas_col.name} of dtype {dtype}. Format specifier: {col.setup.arrow_schema.format}')
         elif dtype.storage == 'python':
             col.setup.source = col_source_t.col_source_str_pyobj
             _dataframe_series_as_pybuf(pandas_col, col)
@@ -1249,7 +1250,6 @@ cdef inline bint _dataframe_arrow_str_lrg(
     return valid
 
 
-
 cdef inline void_int _dataframe_cell_str_pyobj_to_utf8(
         qdb_pystr_buf* b,
         col_cursor_t* cursor,
@@ -1288,7 +1288,7 @@ cdef void_int _dataframe_serialize_cell_table__str_pyobj(
         raise c_err_to_py(err)
 
 
-cdef void_int _dataframe_serialize_cell_table__str_arrow(
+cdef void_int _dataframe_serialize_cell_table__str_utf8_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col,
@@ -1308,7 +1308,7 @@ cdef void_int _dataframe_serialize_cell_table__str_arrow(
         _ensure_has_gil(gs)
         raise ValueError('Table name cannot be null')
 
-cdef void_int _dataframe_serialize_cell_table__str_lrg_arrow(
+cdef void_int _dataframe_serialize_cell_table__str_lrg_utf8_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col,
@@ -1404,7 +1404,7 @@ cdef void_int _dataframe_serialize_cell_symbol__str_pyobj(
         raise c_err_to_py(err)
 
 
-cdef void_int _dataframe_serialize_cell_symbol__str_arrow(
+cdef void_int _dataframe_serialize_cell_symbol__str_utf8_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col,
@@ -1416,7 +1416,7 @@ cdef void_int _dataframe_serialize_cell_symbol__str_arrow(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
-cdef void_int _dataframe_serialize_cell_symbol__str_lrg_arrow(
+cdef void_int _dataframe_serialize_cell_symbol__str_lrg_utf8_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col,
@@ -1900,7 +1900,7 @@ cdef void_int _dataframe_serialize_cell_column_str__str_pyobj(
         raise c_err_to_py(err)
 
 
-cdef void_int _dataframe_serialize_cell_column_str__str_arrow(
+cdef void_int _dataframe_serialize_cell_column_str__str_utf8_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col,
@@ -1912,7 +1912,7 @@ cdef void_int _dataframe_serialize_cell_column_str__str_arrow(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
-cdef void_int _dataframe_serialize_cell_column_str__str_lrg_arrow(
+cdef void_int _dataframe_serialize_cell_column_str__str_lrg_utf8_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col,
@@ -2048,10 +2048,10 @@ cdef void_int _dataframe_serialize_cell(
         pass  # We skip a null column. Nothing to do.
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_pyobj:
         _dataframe_serialize_cell_table__str_pyobj(ls_buf, b, col)
-    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_arrow:
-        _dataframe_serialize_cell_table__str_arrow(ls_buf, b, col, gs)
-    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_lrg_arrow:
-        _dataframe_serialize_cell_table__str_lrg_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_utf8_arrow:
+        _dataframe_serialize_cell_table__str_utf8_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_table__str_lrg_utf8_arrow:
+        _dataframe_serialize_cell_table__str_lrg_utf8_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i8_cat:
         _dataframe_serialize_cell_table__str_i8_cat(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_table__str_i16_cat:
@@ -2060,10 +2060,10 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_table__str_i32_cat(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_pyobj:
         _dataframe_serialize_cell_symbol__str_pyobj(ls_buf, b, col)
-    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_arrow:
-        _dataframe_serialize_cell_symbol__str_arrow(ls_buf, b, col, gs)
-    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_lrg_arrow:
-        _dataframe_serialize_cell_symbol__str_lrg_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_utf8_arrow:
+        _dataframe_serialize_cell_symbol__str_utf8_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_lrg_utf8_arrow:
+        _dataframe_serialize_cell_symbol__str_lrg_utf8_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i8_cat:
         _dataframe_serialize_cell_symbol__str_i8_cat(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_symbol__str_i16_cat:
@@ -2122,10 +2122,10 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_f64__f64_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_pyobj:
         _dataframe_serialize_cell_column_str__str_pyobj(ls_buf, b, col)
-    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_arrow:
-        _dataframe_serialize_cell_column_str__str_arrow(ls_buf, b, col, gs)
-    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_lrg_arrow:
-        _dataframe_serialize_cell_column_str__str_lrg_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_utf8_arrow:
+        _dataframe_serialize_cell_column_str__str_utf8_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_lrg_utf8_arrow:
+        _dataframe_serialize_cell_column_str__str_lrg_utf8_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i8_cat:
         _dataframe_serialize_cell_column_str__str_i8_cat(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_str__str_i16_cat:
