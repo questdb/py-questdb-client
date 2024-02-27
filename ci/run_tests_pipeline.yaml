@@ -43,10 +43,8 @@ stages:
               python3 --version
               python3 -m pip install cython
             displayName: "Install cython"
-          - name: "Install pandas"
-            env:
-              PANDAS_VERSION: ${{ variables.pandasVersion }}
-            run:  python3 ci/pip_install_deps.py --pandasVersion==$PANDAS_VERSION
+          - script:  python3 ci/pip_install_deps.py --pandasVersion==$(pandasVersion)
+            displayName: "Install pandas"
           - script: python3 proj.py build
             displayName: "Build"
           - script: |
