@@ -67,6 +67,8 @@ def main(args):
     pip_install('setuptools')
     try_pip_install('fastparquet>=2023.10.1')
 
+    print(f"DEBUG: {args}, pandas: {args.pandasVersion}")
+
     if args.pandasVersion is not None and args.pandasVersion != '':
         try_pip_install('pandas', args.pandasVersion)
     else:
