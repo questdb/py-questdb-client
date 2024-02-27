@@ -9,13 +9,14 @@ class UnsupportedDependency(Exception):
     pass
 
 
-def pip_install(package):
+def pip_install(package, version=None):
     args = [
         sys.executable,
         '-m', 'pip', 'install',
         '--upgrade',
         '--only-binary', ':all:',
-        package]
+        package if version is None else f'{package}=={version}'
+    ]
     args_s = ' '.join(shlex.quote(arg) for arg in args)
     sys.stderr.write(args_s + '\n')
     res = subprocess.run(
@@ -35,9 +36,9 @@ def pip_install(package):
         sys.exit(res.returncode)
 
 
-def try_pip_install(package):
+def try_pip_install(package, version=None):
     try:
-        pip_install(package)
+        pip_install(package, version)
     except UnsupportedDependency as e:
         msg = textwrap.indent(str(e), ' ' * 8)
         sys.stderr.write(f'    Ignored unsatisfiable dependency:\n{msg}\n')
@@ -52,14 +53,18 @@ def ensure_timezone():
         pip_install('pytz')
 
 
-def main():
+def main(*args, **kwargs):
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')
     try_pip_install('fastparquet>=2023.10.1')
-    try_pip_install('pandas')
+    if 'pandasVersion' in kwargs:
+        try_pip_install('pandas', kwargs["pandasVersion"])
+    else:
+        try_pip_install('pandas')
     try_pip_install('numpy')
     try_pip_install('pyarrow')
+
 
     on_linux_is_glibc = (
         (not platform.system() == 'Linux') or

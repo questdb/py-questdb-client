@@ -1,3 +1,5 @@
+# See: dataframe.md for technical overview.
+
 cdef struct auto_flush_t:
     line_sender* sender
     auto_flush_mode_t mode
@@ -848,7 +850,7 @@ cdef void_int _dataframe_category_series_as_arrow(
             f'Got {(<bytes>format).decode("utf-8")!r}.')
 
     format = col.setup.arrow_schema.dictionary.format
-    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0) and (strncmp(format, _ARROW_FMT_LRG_UTF8_STRING, 1) != 0):
+    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0):
         raise IngressError(
             IngressErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
@@ -991,7 +993,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
                 raise IngressError(
                     IngressErrorCode.BadDataFrame,
                     f'Unknown string dtype storage: {dtype.storage} ' +
-                    f'for column {pandas_col.name} of dtype {dtype}. Format specifier: {col.setup.arrow_schema.format}')
+                    f'for column {pandas_col.name} of dtype {dtype}. ' +
+                    f'Format specifier: ' + repr(bytes(col.setup.arrow_schema.format).decode('latin-1')))
         elif dtype.storage == 'python':
             col.setup.source = col_source_t.col_source_str_pyobj
             _dataframe_series_as_pybuf(pandas_col, col)
