@@ -44,7 +44,7 @@ stages:
             condition: eq(variables.pandasVersion, '')
           - script:  python3 ci/pip_install_deps.py --pandasVersion==$(pandasVersion)
             displayName: "Install pandas older"
-            condition: neq(variables.pandasVersion, '')
+            condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
           - script: |
