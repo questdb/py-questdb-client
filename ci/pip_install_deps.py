@@ -58,7 +58,7 @@ def main(*args, **kwargs):
     pip_install('pip')
     pip_install('setuptools')
     try_pip_install('fastparquet>=2023.10.1')
-    if 'pandasVersion' in kwargs:
+    if 'pandasVersion' in kwargs and kwargs['pandasVersion'] != '':
         try_pip_install('pandas', kwargs["pandasVersion"])
     else:
         try_pip_install('pandas')
