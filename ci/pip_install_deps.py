@@ -3,7 +3,15 @@ import subprocess
 import shlex
 import textwrap
 import platform
+import argparse
 
+
+arg_parser = argparse.ArgumentParser(
+    prog='pip_install_deps.py',
+    description='installs dependencies'
+)
+
+arg_parser.add_argument('--pandasVersion')
 
 class UnsupportedDependency(Exception):
     pass
@@ -53,18 +61,18 @@ def ensure_timezone():
         pip_install('pytz')
 
 
-def main(*args, **kwargs):
+def main(args):
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')
     try_pip_install('fastparquet>=2023.10.1')
-    if 'pandasVersion' in kwargs and kwargs['pandasVersion'] != '':
-        try_pip_install('pandas', kwargs["pandasVersion"])
+
+    if args.pandasVersion is not None and args.pandasVersion != '':
+        try_pip_install('pandas', args.pandasVersion)
     else:
         try_pip_install('pandas')
     try_pip_install('numpy')
     try_pip_install('pyarrow')
-
 
     on_linux_is_glibc = (
         (not platform.system() == 'Linux') or
@@ -85,4 +93,5 @@ def main(*args, **kwargs):
 
 
 if __name__ == "__main__":
-    main()
+    args = arg_parser.parse_args()
+    main(args)
