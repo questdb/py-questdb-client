@@ -3,14 +3,12 @@
 cdef struct auto_flush_t:
     line_sender* sender
     auto_flush_mode_t mode
-    size_t watermark
 
 
 cdef auto_flush_t auto_flush_blank() noexcept nogil:
     cdef auto_flush_t af
     af.sender = NULL
-    af.mode = auto_flush_disabled
-    af.watermark = 0
+    af.mode.enabled = False
     return af
 
 
