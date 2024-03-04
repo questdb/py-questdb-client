@@ -390,7 +390,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=9223372036854775807i\n')
 
         buf = qi.Buffer()
-        buf.dataframe(pd.DataFrame({'b': [.5, 1.0, 1.5]}), table_name='tbl2')
+        buf.dataframe(pd.DataFrame({'b': [.5, 1.0, 1.5]}), table_name='tbl2', at=qi.ServerTimestamp)
         exp1 = (
             'tbl2 b=0.5\n' +
             'tbl2 b=1.0\n' +
@@ -419,7 +419,7 @@ class TestPandas(unittest.TestCase):
                 0,
                 9223372036854775807],  # i64 max
             dtype='int64')})
-        buf = _dataframe(df, table_name='tbl1')
+        buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
             'tbl1 a=1i\n' +

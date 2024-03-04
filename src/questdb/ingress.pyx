@@ -353,6 +353,11 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(1000000000) +
         <int64_t>(dt.microsecond * 1000))
 
+cdef class ServerTimestamp:
+    """
+    A placeholder value to indicate using a server-generated-timestamp.
+    """
+    ...
 
 cdef class TimestampMicros:
     """
@@ -828,7 +833,7 @@ cdef class Buffer:
                 str,
                 Union[None, bool, int, float, str, TimestampMicros, datetime]]
                 ]=None,
-            at: Union[None, TimestampNanos, datetime]=None):
+            at: Union[ServerTimestamp, TimestampNanos, datetime]):
         """
         Add a single row (line) to the buffer.
 
@@ -914,7 +919,7 @@ cdef class Buffer:
             nanoseconds. A nanosecond unix epoch timestamp can be passed
             explicitly as a ``TimestampNanos`` object.
         """
-        self._row(table_name, symbols, columns, at)
+        self._row(table_name, symbols, columns, at if not isinstance(at, ServerTimestamp) else None)
         return self
 
     def dataframe(
@@ -924,7 +929,7 @@ cdef class Buffer:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[None, int, str, TimestampNanos, datetime] = None):
+            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
         """
         Add a pandas DataFrame to the buffer.
 
@@ -1194,7 +1199,7 @@ cdef class Buffer:
             table_name,
             table_name_col,
             symbols,
-            at)
+            at if not isinstance(at, ServerTimestamp) else None)
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
@@ -1555,7 +1560,7 @@ cdef class Sender:
             columns: Optional[Dict[
                 str,
                 Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
-            at: Union[None, TimestampNanos, datetime]=None):
+            at: Union[TimestampNanos, datetime, ServerTimestamp]):
         """
         Write a row to the internal buffer.
 
@@ -1564,7 +1569,7 @@ cdef class Sender:
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
         """
-        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
+        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at if not isinstance(at, ServerTimestamp) else None)
 
     def dataframe(
             self,
@@ -1573,7 +1578,7 @@ cdef class Sender:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[None, int, str, TimestampNanos, datetime] = None):
+            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
         """
         Write a Pandas DataFrame to the internal buffer.
 
@@ -1626,7 +1631,7 @@ cdef class Sender:
             table_name,
             table_name_col,
             symbols,
-            at)
+            at if not isinstance(at, ServerTimestamp) else None)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
         """

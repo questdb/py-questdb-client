@@ -32,7 +32,7 @@ else:
             buf = qi.Buffer()
             exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
             with self.assertRaisesRegex(ImportError, exp):
-                buf.dataframe(None)
+                buf.dataframe(None, at=qi.ServerTimestamp)
 
 
 class TestBuffer(unittest.TestCase):
@@ -52,15 +52,15 @@ class TestBuffer(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'Table names must have a non-zero length'):
-            buf.row('', symbols={'sym1': 'val1'})
+            buf.row('', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'Bad string "x..y": Found invalid dot `.` at position 2.'):
-            buf.row('x..y', symbols={'sym1': 'val1'})
+            buf.row('x..y', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
 
     def test_symbol(self):
         buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'})
+        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
 
     def test_bad_symbol_column_name(self):
@@ -68,13 +68,13 @@ class TestBuffer(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'Column names must have a non-zero length.'):
-            buf.row('tbl1', symbols={'': 'val1'})
+            buf.row('tbl1', symbols={'': 'val1'}, at=qi.ServerTimestamp)
         with self.assertRaisesRegex(
                 qi.IngressError,
                 'Bad string "sym.bol": '
                 'Column names can\'t contain a \'.\' character, '
                 'which was found at byte position 3.'):
-            buf.row('tbl1', symbols={'sym.bol': 'val1'})
+            buf.row('tbl1', symbols={'sym.bol': 'val1'}, at=qi.ServerTimestamp)
 
     def test_column(self):
         two_h_after_epoch = datetime.datetime(
@@ -88,7 +88,7 @@ class TestBuffer(unittest.TestCase):
             'col5': 'val',
             'col6': qi.TimestampMicros(12345),
             'col7': two_h_after_epoch,
-            'col8': None})
+            'col8': None}, at=qi.ServerTimestamp)
         exp = (
             'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
             'col5="val",col6=12345t,col7=7200000000t\n')
@@ -96,31 +96,31 @@ class TestBuffer(unittest.TestCase):
 
     def test_none_symbol(self):
         buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None})
+        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None}, at=qi.ServerTimestamp)
         exp = 'tbl1,sym1=val1\n'
         self.assertEqual(str(buf), exp)
         self.assertEqual(len(buf), len(exp))
 
         # No fields to write, no fields written, therefore a no-op.
-        buf.row('tbl1', symbols={'sym1': None, 'sym2': None})
+        buf.row('tbl1', symbols={'sym1': None, 'sym2': None}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), exp)
         self.assertEqual(len(buf), len(exp))
 
     def test_none_column(self):
         buf = qi.Buffer()
-        buf.row('tbl1', columns={'col1': 1})
+        buf.row('tbl1', columns={'col1': 1}, at=qi.ServerTimestamp)
         exp = 'tbl1 col1=1i\n'
         self.assertEqual(str(buf), exp)
         self.assertEqual(len(buf), len(exp))
 
         # No fields to write, no fields written, therefore a no-op.
-        buf.row('tbl1', columns={'col1': None, 'col2': None})
+        buf.row('tbl1', columns={'col1': None, 'col2': None}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), exp)
         self.assertEqual(len(buf), len(exp))
 
     def test_no_symbol_or_col_args(self):
         buf = qi.Buffer()
-        buf.row('table_name')
+        buf.row('table_name', at=qi.ServerTimestamp)
         self.assertEqual(str(buf), '')
 
     def test_unicode(self):
@@ -145,14 +145,14 @@ class TestBuffer(unittest.TestCase):
             'questdb1="",questdb2="嚜꓂",questdb3="💩🦞"\n')
 
         buf.clear()
-        buf.row('tbl1', symbols={'questdb1': 'q❤️p'})
+        buf.row('tbl1', symbols={'questdb1': 'q❤️p'}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), 'tbl1,questdb1=q❤️p\n')
 
         # A bad char in Python.
         with self.assertRaisesRegex(
                 qi.IngressError,
                 '.*codepoint 0xd800 in string .*'):
-            buf.row('tbl1', symbols={'questdb1': 'a\ud800'})
+            buf.row('tbl1', symbols={'questdb1': 'a\ud800'}, at=qi.ServerTimestamp)
 
         # Strong exception safety: no partial writes.
         # Ensure we can continue using the buffer after an error.
@@ -165,7 +165,7 @@ class TestBuffer(unittest.TestCase):
 
     def test_float(self):
         buf = qi.Buffer()
-        buf.row('tbl1', columns={'num': 1.2345678901234567})
+        buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), f'tbl1 num=1.2345678901234567\n')
 
     def test_int_range(self):
@@ -175,22 +175,22 @@ class TestBuffer(unittest.TestCase):
         buf.clear()
 
         # 32-bit int range.
-        buf.row('tbl1', columns={'min': -2**31, 'max': 2**31-1})
+        buf.row('tbl1', columns={'min': -2**31, 'max': 2**31-1}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), f'tbl1 min=-2147483648i,max=2147483647i\n')
         buf.clear()
 
         # 64-bit int range.
-        buf.row('tbl1', columns={'min': -2**63, 'max': 2**63-1})
+        buf.row('tbl1', columns={'min': -2**63, 'max': 2**63-1}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), f'tbl1 min=-9223372036854775808i,max=9223372036854775807i\n')
         buf.clear()
 
         # Overflow.
         with self.assertRaises(OverflowError):
-            buf.row('tbl1', columns={'num': 2**63})
+            buf.row('tbl1', columns={'num': 2**63}, at=qi.ServerTimestamp)
 
         # Underflow.
         with self.assertRaises(OverflowError):
-            buf.row('tbl1', columns={'num': -2**63-1})
+            buf.row('tbl1', columns={'num': -2**63-1}, at=qi.ServerTimestamp)
 
 
 class TestSender(unittest.TestCase):
@@ -215,7 +215,8 @@ class TestSender(unittest.TestCase):
                     'tag3': 'value 3',
                     'tag4': 'value:4'},
                 columns={
-                    'field5': False})
+                    'field5': False},
+                at=qi.ServerTimestamp)
             sender.flush()
             msgs = server.recv()
             self.assertEqual(msgs, [
@@ -232,7 +233,7 @@ class TestSender(unittest.TestCase):
                 sender.connect()
                 server.accept()
                 self.assertEqual(server.recv(), [])
-                sender.row('tbl1', symbols={'sym1': 'val1'})
+                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 sender.flush()
                 msgs = server.recv()
                 self.assertEqual(msgs, [b'tbl1,sym1=val1'])
@@ -242,7 +243,7 @@ class TestSender(unittest.TestCase):
     def test_row_before_connect(self):
         try:
             sender = qi.Sender('localhost', 12345)
-            sender.row('tbl1', symbols={'sym1': 'val1'})
+            sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
                 sender.flush()
         finally:
@@ -253,7 +254,7 @@ class TestSender(unittest.TestCase):
             with qi.Sender('localhost', server.port) as sender:
                 server.accept()
                 with self.assertRaisesRegex(qi.IngressError, 'Column names'):
-                    sender.row('tbl1', symbols={'...bad name..': 'val1'})
+                    sender.row('tbl1', symbols={'...bad name..': 'val1'}, at=qi.ServerTimestamp)
                 self.assertEqual(str(sender), '')
                 sender.flush()
                 self.assertEqual(str(sender), '')
@@ -270,12 +271,12 @@ class TestSender(unittest.TestCase):
                 with self.assertRaises(qi.IngressError):
                     for _ in range(1000):
                         time.sleep(0.01)
-                        sender.row('tbl1', symbols={'a': 'b'})
+                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                         sender.flush()
 
                 # We should still be in a bad state.
                 with self.assertRaises(qi.IngressError):
-                    sender.row('tbl1', symbols={'a': 'b'})
+                    sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                     sender.flush()
 
             # Leaving the `with` scope will call __exit__ and here we test
@@ -291,7 +292,7 @@ class TestSender(unittest.TestCase):
                     server.close()
                     for _ in range(1000):
                         time.sleep(0.01)
-                        sender.row('tbl1', symbols={'a': 'b'})
+                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                         sender.flush()
 
     def test_flush_4(self):
@@ -300,7 +301,7 @@ class TestSender(unittest.TestCase):
             with self.assertRaises(ValueError):
                 with qi.Sender('localhost', server.port) as sender:
                     server.accept()
-                    sender.row('tbl1', symbols={'a': 'b'})
+                    sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                     sender.flush(buffer=None, clear=False)
 
     def test_two_rows_explicit_buffer(self):
@@ -329,7 +330,7 @@ class TestSender(unittest.TestCase):
 
     def test_independent_buffer(self):
         buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1'})
+        buf.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
         exp = 'tbl1,sym1=val1\n'
         bexp = exp[:-1].encode('utf-8')
         self.assertEqual(str(buf), exp)
@@ -361,7 +362,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             with qi.Sender('localhost', server.port, auto_flush=4) as sender:
                 server.accept()
-                sender.row('tbl1', symbols={'sym1': 'val1'})
+                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
                 msgs = server.recv()
                 self.assertEqual(msgs, [b'tbl1,sym1=val1'])
@@ -370,7 +371,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             with qi.Sender('localhost', server.port, auto_flush=True) as sender:
                 server.accept()
-                sender.row('tbl1', symbols={'sym1': 'val1'})
+                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
                 msgs = server.recv()
                 self.assertEqual(msgs, [b'tbl1,sym1=val1'])
@@ -384,7 +385,7 @@ class TestSender(unittest.TestCase):
                 with self.assertRaisesRegex(qi.IngressError, exp_err):
                     for _ in range(1000):
                         time.sleep(0.01)
-                        sender.row('tbl1', symbols={'a': 'b'})
+                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
 
     def test_dont_auto_flush(self):
         msg_counter = 0
@@ -392,7 +393,7 @@ class TestSender(unittest.TestCase):
             with qi.Sender('localhost', server.port, auto_flush=0) as sender:
                 server.accept()
                 while len(sender) < 32768:  # 32KiB
-                    sender.row('tbl1', symbols={'sym1': 'val1'})
+                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                     msg_counter += 1
                 msgs = server.recv()
                 self.assertEqual(msgs, [])
@@ -409,7 +410,7 @@ class TestSender(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 with qi.Sender('localhost', server.port) as sender:
                     server.accept()
-                    sender.row('tbl1', symbols={'sym1': 'val1'})
+                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                     self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
                     raise RuntimeError('Test exception')
             msgs = server.recv()
@@ -421,7 +422,7 @@ class TestSender(unittest.TestCase):
             with qi.Sender('localhost', server.port) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
-                sender.dataframe(df, table_name='tbl1')
+                sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
             msgs = server.recv()
             self.assertEqual(
                 msgs,
@@ -446,7 +447,7 @@ class TestSender(unittest.TestCase):
                 self.assertEqual(len(sender), 16)
 
                 # So we give it some more data and we should see it flush.
-                sender.row('tbl1', columns={'a': 3, 'b': 5.0})
+                sender.row('tbl1', columns={'a': 3, 'b': 5.0}, at=qi.ServerTimestamp)
                 msgs = server.recv()
                 self.assertEqual(
                     msgs,
@@ -479,7 +480,7 @@ class TestSender(unittest.TestCase):
     def test_connect_after_close(self):
         with Server() as server, qi.Sender('localhost', server.port) as sender:
             server.accept()
-            sender.row('tbl1', symbols={'sym1': 'val1'})
+            sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             sender.close()
             with self.assertRaises(qi.IngressError):
                 sender.connect()

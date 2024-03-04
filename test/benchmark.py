@@ -30,12 +30,12 @@ class TestBenchmarkPandas(unittest.TestCase):
         buf = qi.Buffer()
 
         # Warm up and pre-size buffer
-        buf.dataframe(df, table_name='tbl1', symbols=True)
+        buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
         buf.clear()
 
         # Run
         t0 = time.monotonic()
-        buf.dataframe(df, table_name='tbl1', symbols=True)
+        buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
         t1 = time.monotonic()
         print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
@@ -56,12 +56,12 @@ class TestBenchmarkPandas(unittest.TestCase):
         buf = qi.Buffer()
 
         # Warm up and pre-size buffer
-        buf.dataframe(df, table_name='tbl1', symbols=True)
+        buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
         buf.clear()
 
         # Run
         t0 = time.monotonic()
-        buf.dataframe(df, table_name='tbl1', symbols=True)
+        buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
         t1 = time.monotonic()
         print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
@@ -80,12 +80,12 @@ class TestBenchmarkPandas(unittest.TestCase):
         buf = qi.Buffer()
 
         # Warm up and pre-size buffer
-        buf.dataframe(df, table_name='tbl1', symbols=True)
+        buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
         buf.clear()
 
         # Run
         t0 = time.monotonic()
-        buf.dataframe(df, table_name='tbl1', symbols=True)
+        buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
         t1 = time.monotonic()
         print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
@@ -112,12 +112,12 @@ class TestBenchmarkPandas(unittest.TestCase):
         buf = qi.Buffer()
 
         # Warm up and pre-size buffer
-        buf.dataframe(df, table_name='tbl1', symbols=False)
+        buf.dataframe(df, table_name='tbl1', symbols=False, at=qi.ServerTimestamp)
         buf.clear()
 
         # Run
         t0 = time.monotonic()
-        buf.dataframe(df, table_name='tbl1', symbols=False)
+        buf.dataframe(df, table_name='tbl1', symbols=False, at=qi.ServerTimestamp)
         t1 = time.monotonic()
         print(f'Time: {t1 - t0}, size: {len(buf)}, tp: {_tp(buf, t0, t1)}')
 
@@ -137,7 +137,7 @@ class TestBenchmarkPandas(unittest.TestCase):
 
         def benchmark_run(buf):
             t0 = time.monotonic()
-            buf.dataframe(df, table_name='tbl1', symbols=True)
+            buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
             t1 = time.monotonic()
             return buf, (t0, t1)
 

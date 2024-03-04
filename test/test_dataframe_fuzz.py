@@ -117,7 +117,7 @@ def parse_input_bytes(input_bytes):
     table_name = None
     table_name_col = None
     symbols = 'auto'
-    at = None
+    at = qi.ServerTimestamp
     if table_name_type == 0:
         table_name = get_random_unicode(rand, table_name_len)
     else:

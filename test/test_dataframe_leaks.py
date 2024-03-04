@@ -20,7 +20,7 @@ def serialize_and_cleanup():
         'a': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
         'b': [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
         'c': [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]})
-    qi.Buffer().dataframe(df, table_name='test')
+    qi.Buffer().dataframe(df, table_name='test', at=qi.ServerTimestamp)
 
 
 def main():

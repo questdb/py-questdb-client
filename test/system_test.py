@@ -87,7 +87,8 @@ class TestWithDatabase(unittest.TestCase):
                         'name_b': True,
                         'name_c': 42,
                         'name_d': 2.5,
-                        'name_e': 'val_b'})
+                        'name_e': 'val_b'},
+                   at=qi.ServerTimestamp)
             pending = str(sender)
 
         resp = qdb.retry_check_table(table_name, min_rows=3, log_ctx=pending)
@@ -148,7 +149,7 @@ class TestWithDatabase(unittest.TestCase):
                 numpy.datetime64('2021-01-03')]})
         df.index.name = table_name
         with qi.Sender('localhost', port) as sender:
-            sender.dataframe(df)
+            sender.dataframe(df, at=qi.ServerTimestamp)
             pending = str(sender)
 
         resp = self.qdb_plain.retry_check_table(
