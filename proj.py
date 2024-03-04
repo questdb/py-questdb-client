@@ -187,6 +187,8 @@ def cibuildwheel(*args):
         # fail saying the 3.8 wheel is unsupported.
         # This is because the 3.8 wheel ends up getting loaded with another
         # Python version.
+        #
+        # NB: Make sure to update `cibuildwheel` on py3.8 too before running!
         python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
     _run(python, '-m',
          'cibuildwheel',

@@ -38,7 +38,7 @@ from libc.string cimport strncmp, memset
 from libc.math cimport isnan
 from libc.errno cimport errno
 # from libc.stdio cimport stderr, fprintf
-from cpython.datetime cimport datetime
+from cpython.datetime cimport datetime, timedelta
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
@@ -48,6 +48,7 @@ from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *
 from .pystr_to_utf8 cimport *
+from .conf_str cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
 from .ingress_helper cimport *
@@ -97,7 +98,10 @@ class IngressErrorCode(Enum):
     InvalidTimestamp = line_sender_error_invalid_timestamp
     AuthError = line_sender_error_auth_error
     TlsError = line_sender_error_tls_error
-    BadDataFrame = <int>line_sender_error_tls_error + 1
+    HttpNotSupported = line_sender_error_http_not_supported
+    ServerFlushError = line_sender_error_server_flush_error
+    ConfigError = line_sender_error_config_error
+    BadDataFrame = <int>line_sender_error_server_flush_error + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -133,6 +137,10 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.AuthError
     elif code == line_sender_error_tls_error:
         return IngressErrorCode.TlsError
+    elif code == line_sender_error_http_not_supported:
+        return IngressErrorCode.HttpNotSupported
+    elif code == line_sender_error_server_flush_error:
+        return IngressErrorCode.ServerFlushError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -495,9 +503,11 @@ cdef class Buffer
 
 
 cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
-    if sender._auto_flush_enabled:
-        if len(buffer) >= sender._auto_flush_watermark:
-            sender.flush(buffer)
+    if should_auto_flush(
+            &sender._auto_flush_mode,
+            buffer._impl,
+            sender._last_flush_ms[0]):
+        sender.flush(buffer)
 
 
 cdef class Buffer:
@@ -1207,6 +1217,190 @@ _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
+cdef void_int _parse_auto_flush(
+    object auto_flush,
+    object auto_flush_rows,
+    object auto_flush_bytes,
+    object auto_flush_interval,
+    auto_flush_mode_t* c_auto_flush
+) except -1:
+    # Set defaults if none of the auto_flush parameters are set.
+    if (auto_flush_rows is None) \
+            and (auto_flush_bytes is None) \
+            and (auto_flush_interval is None):
+        auto_flush_rows = 75000
+        auto_flush_bytes = None
+        auto_flush_interval = 1000
+
+    # Determine if to enable auto-flush based on the parameters.
+    if auto_flush is None:
+        auto_flush = ((auto_flush_rows is not None) or
+            (auto_flush_bytes is not None) or
+            (auto_flush_interval is not None))
+    elif (auto_flush is True) or (auto_flush == 'on'):
+        auto_flush = True
+    elif (auto_flush is False) or (auto_flush == 'off'):
+        auto_flush = False
+    else:
+        raise ValueError(
+            f'"auto_flush" must be None, bool, "on" or "off", not {auto_flush}')
+
+    # Validate auto_flush parameters.
+    if auto_flush and (auto_flush_rows is None) and (auto_flush_bytes is None) \
+            and (auto_flush_interval is None):
+        raise ValueError(
+            '"auto_flush" is enabled but no other auto-flush '
+            'parameters are enabled. Please set at least one of '
+            '"auto_flush_rows", "auto_flush_bytes" or '
+            '"auto_flush_interval".')
+
+    # Parse individual auto_flush parameters to C struct.
+    c_auto_flush.enabled = auto_flush
+
+    if auto_flush_rows is None:
+        c_auto_flush.row_count = -1
+    else:
+        c_auto_flush.row_count = auto_flush_rows
+        if c_auto_flush.row_count < 1:
+            raise ValueError(
+                '"auto_flush_rows" must be >= 1, '
+                f'not {c_auto_flush.row_count}')
+
+    if auto_flush_bytes is None:
+        c_auto_flush.byte_count = -1
+    else:
+        c_auto_flush.byte_count = auto_flush_bytes
+        if c_auto_flush.byte_count < 1:
+            raise ValueError(
+                '"auto_flush_bytes" must be >= 1, '
+                f'not {c_auto_flush.byte_count}')
+
+    if auto_flush_interval is None:
+        c_auto_flush.interval = -1
+    elif isinstance(auto_flush_interval, int):
+        c_auto_flush.interval = auto_flush_interval
+        if c_auto_flush.interval < 1:
+            raise ValueError(
+                '"auto_flush_interval" must be >= 1, '
+                f'not {c_auto_flush.interval}')
+    elif isinstance(auto_flush_interval, timedelta):
+        c_auto_flush.interval = (
+            (auto_flush_interval.microseconds // 1000) +
+            (auto_flush_interval.seconds * 1000))
+        if c_auto_flush.interval < 1:
+            raise ValueError(
+                '"auto_flush_interval" must be >= 1, '
+                f'not {c_auto_flush.interval}')
+    else:
+        raise TypeError(
+            '"auto_flush_interval" must be an int or a timedelta, '
+            f'not {_fqn(type(auto_flush_interval))}')
+
+
+class Protocol(Enum):
+    """
+    Protocol to use for sending data to QuestDB.
+    """
+    Tcp = 0
+    Tcps = 1
+    Http = 2
+    Https = 3
+
+    @staticmethod
+    def parse(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if value == 'tcp':
+                return Protocol.Tcp
+            if value == 'tcps':
+                return Protocol.Tcps
+            if value == 'http':
+                return Protocol.Http
+            if value == 'https':
+                return Protocol.Https
+        if isinstance(value, Protocol):
+            return value
+        raise ValueError('Invalid value for protocol.')
+
+    @property
+    def tls_enabled(self):
+        return self in (Protocol.Tcps, Protocol.Https)
+
+
+class TlsCa(Enum):
+    WebpkiRoots = line_sender_ca_webpki_roots
+    OsRoots = line_sender_ca_os_roots
+    WebpkiAndOsRoots = line_sender_ca_webpki_and_os_roots
+    PemFile = line_sender_ca_pem_file
+
+    @staticmethod
+    def parse(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if value == 'webpki_roots':
+                return TlsCa.WebpkiRoots
+            if value == 'os_roots':
+                return TlsCa.OsRoots
+            if value == 'webpki_and_os_roots':
+                return TlsCa.WebpkiAndOsRoots
+            if value == 'pem_file':
+                return TlsCa.PemFile
+        if isinstance(value, TlsCa):
+            return value
+        raise ValueError('Invalid value for tls_ca.')
+
+
+cdef object c_parse_conf_err_to_py(questdb_conf_str_parse_err* err):
+    cdef str msg = PyUnicode_FromStringAndSize(
+        err.msg, <Py_ssize_t>err.msg_len)
+    cdef object py_err = IngressError(IngressErrorCode.ConfigError, msg)
+    questdb_conf_str_parse_err_free(err)
+    return py_err
+
+
+cdef object parse_conf_str(
+        qdb_pystr_buf* b,
+        str conf_str):
+    """
+    Parse a config string to a tuple of (Protocol, dict[str, str]).
+    """
+    cdef size_t c_len1
+    cdef const char* c_buf1
+    cdef size_t c_len2
+    cdef const char* c_buf2
+    cdef str service
+    cdef questdb_conf_str_iter* c_iter
+    cdef str key
+    cdef str value
+    cdef dict params = {}
+    cdef line_sender_utf8 c_conf_str_utf8
+    cdef questdb_conf_str_parse_err* err
+    cdef questdb_conf_str* c_conf_str
+    str_to_utf8(b, <PyObject*>conf_str, &c_conf_str_utf8)
+    c_conf_str = questdb_conf_str_parse(
+        c_conf_str_utf8.buf,
+        c_conf_str_utf8.len,
+        &err)
+    if c_conf_str == NULL:
+        raise c_parse_conf_err_to_py(err)
+
+    c_buf1 = questdb_conf_str_service(c_conf_str, &c_len1)
+    service = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
+
+    c_iter = questdb_conf_str_iter_pairs(c_conf_str)
+    while questdb_conf_str_iter_next(c_iter, &c_buf1, &c_len1, &c_buf2, &c_len2):
+        key = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
+        value = PyUnicode_FromStringAndSize(c_buf2, <Py_ssize_t>c_len2)
+        params[key] = value
+
+    questdb_conf_str_iter_free(c_iter)
+    questdb_conf_str_free(c_conf_str)
+
+    return (Protocol.parse(service), params)
+    
+
 cdef class Sender:
     """
     A sender is a client that inserts rows into QuestDB via the ILP protocol.
@@ -1264,19 +1458,25 @@ cdef class Sender:
     You can control this behavior by setting the ``auto_flush`` argument.
 
     .. code-block:: python
+        from questdb.ingress import AutoFlush
 
-        # Never flushes automatically.
-        sender = Sender('localhost', 9009, auto_flush=False)
-        sender = Sender('localhost', 9009, auto_flush=None) # Ditto.
-        sender = Sender('localhost', 9009, auto_flush=0)  # Ditto.
+        # Flushes automatically after 600 rows (the default).
+        sender = Sender('localhost', 9009)
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.RowCount(600)) # Ditto.
+
+        # Flushes automatically after each row.
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.RowCount(1))
 
         # Flushes automatically when the buffer reaches 1KiB.
-        sender = Sender('localhost', 9009, auto_flush=1024)
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.ByteCount(1024))
 
-        # Flushes automatically after every row.
-        sender = Sender('localhost', 9009, auto_flush=True)
-        sender = Sender('localhost', 9009, auto_flush=1)  # Ditto.
+        # Disabled: Never flushes automatically.
+        sender = Sender('localhost', 9009, auto_flush=AutoFlush.Disabled)
 
+    When auto-flushing is disabled, you must call ``sender.flush()`` manually.
+    Note that when exiting a ``with sender:`` block, the sender will
+    automatically flush the buffer. This is *not* disabled by setting
+    ``auto_flush=AutoFlush.Disabled``.
 
     **Authentication and TLS Encryption**
 
@@ -1322,11 +1522,15 @@ cdef class Sender:
 
     **Keyword-only constructor arguments for the Sender(..)**
 
+    * ``http`` (``bool``): Use ILP/HTTP instead of ILP/TCP.
+      When set to ``True``, the ``port`` argument must be set to the HTTP port.
+      *Default: False.*
+
     * ``interface`` (``str``): Network interface to bind to.
       Set this if you have an accelerated network interface (e.g. Solarflare)
       and want to use it.
 
-    * ``auth`` (``tuple``): Authentication tuple or ``None`` (default).
+    * ``auth`` (``tuple`` or ``str``): Authentication credentials or ``None`` (default).
       *See above for details*.
 
     * ``tls`` (``bool``, ``pathlib.Path`` or ``str``): TLS configuration or
@@ -1343,10 +1547,39 @@ cdef class Sender:
     * ``max_name_length`` (``int``): Maximum length of a table or column name.
       *See Buffer's constructor for more details.*
 
-    * ``auto_flush`` (``bool`` or ``int``): Whether to automatically flush the
-      buffer when it reaches a certain byte-size watermark.
-      *Default: 64512 (63KiB).*
+    * ``auto_flush``: Whether to automatically flush the
+      buffer when it reaches a certain row-count or byte-count watermark.
+      *Default: 600 rows.*
       *See above for details.*
+
+    **HTTP-only keyword-only constructor arguments for the Sender(..)**
+    
+    * ``transactional`` (``bool``): Each HTTP flush is transactional if all
+      the rows in the batch are for the same table.
+      Setting ``transactional=True`` will prevent flushing batches of rows
+      with mixed table names.
+      To fully control transactions, you also need to set
+      ``auto_flush=AutoFlush.Disabled`` or buffered lines may be flushed
+      automatically and thus split across multiple transactions.
+      If ``transactional=False`` (default), the client will send the batch
+      as-is to the server even if it contains rows for multiple tables.
+      In such case the server may end up committing some rows and not others.
+      *Default: False.*
+
+    * ``max_retries`` (``int``): Maximum number of retries for a failed HTTP
+      flush. *Default: 3.*
+    
+    * ``retry_interval`` (``int``): Initial retry interval (in milliseconds).
+      The retry interval is doubled after each failed attempt, up to the maximum
+      number of retries (``max_retries``).
+      *Default: 100 (milliseconds).*
+
+    * ``min_throughput`` (``int``): Minimum expected throughput in bytes per
+      second for HTTP requests. If the throughput is lower than this value, the
+      connection will time out.
+      The timeout is calculated as the number of bytes in the buffer divided by
+      the minimum throughput plus a grace period of ``read_timeout``.
+      *Default: 102400 (100 KiB/s).*
     """
 
     # We need the Buffer held by a Sender can hold a weakref to its Sender.
@@ -1356,51 +1589,59 @@ cdef class Sender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
-    cdef bint _auto_flush_enabled
-    cdef ssize_t _auto_flush_watermark
+    cdef auto_flush_mode_t _auto_flush_mode
+    cdef int64_t* _last_flush_ms
     cdef size_t _init_capacity
     cdef size_t _max_name_len
 
     def __cinit__(
             self,
+            object protocol,
             str host,
             object port,
             *,
-            str interface=None,
-            tuple auth=None,
-            object tls=False,
-            uint64_t read_timeout=15000,
+            str bind_interface=None,
+            str username=None,
+            str password=None,
+            str token=None,
+            str token_x=None,
+            str token_y=None,
+            object auth_timeout=None,  # default: 15000 milliseconds
+            object tls_verify=None,  # default: True
+            object tls_ca=None,  # default: TlsCa.WebpkiRoots
+            object tls_roots=None,
+            object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
+            object retry_timeout=None,  # default: 10000 milliseconds
+            object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
+            object request_timeout=None,
+
             uint64_t init_capacity=65536,  # 64KiB
             uint64_t max_name_len=127,
-            object auto_flush=64512):  # 63KiB
-        cdef line_sender_error* err = NULL
+            object auto_flush=None,  # Default True
+            object auto_flush_rows=None,  # Default 75000
+            object auto_flush_bytes=None,  # Default off
+            object auto_flush_interval=None):  # Default 1000 milliseconds
 
-        cdef line_sender_utf8 host_utf8
+        cdef line_sender_error* err = NULL
+        cdef line_sender_utf8 c_host
 
         cdef str port_str
-        cdef line_sender_utf8 port_utf8
-
-        cdef str interface_str
-        cdef line_sender_utf8 interface_utf8
-
-        cdef str a_key_id
-        cdef bytes a_key_id_owner
-        cdef line_sender_utf8 a_key_id_utf8
-
-        cdef str a_priv_key
-        cdef bytes a_priv_key_owner
-        cdef line_sender_utf8 a_priv_key_utf8
-
-        cdef str a_pub_key_x
-        cdef bytes a_pub_key_x_owner
-        cdef line_sender_utf8 a_pub_key_x_utf8
-
-        cdef str a_pub_key_y
-        cdef bytes a_pub_key_y_owner
-        cdef line_sender_utf8 a_pub_key_y_utf8
-
-        cdef line_sender_utf8 ca_utf8
-
+        cdef line_sender_protocol c_protocol
+        cdef line_sender_utf8 c_port
+        cdef line_sender_utf8 c_bind_interface
+        cdef line_sender_utf8 c_username
+        cdef line_sender_utf8 c_password
+        cdef line_sender_utf8 c_token
+        cdef line_sender_utf8 c_token_x
+        cdef line_sender_utf8 c_token_y
+        cdef uint64_t c_auth_timeout
+        cdef bint c_tls_verify
+        cdef line_sender_ca c_tls_ca
+        cdef line_sender_utf8 c_tls_roots
+        cdef uint64_t c_max_buf_size
+        cdef uint64_t c_retry_timeout
+        cdef uint64_t c_request_min_throughput
+        cdef uint64_t c_request_timeout
         cdef qdb_pystr_buf* b
 
         self._opts = NULL
@@ -1415,6 +1656,8 @@ cdef class Sender:
 
         b = self._buffer._b
 
+        c_protocol = Protocol.parse(protocol).value
+
         if PyLong_CheckExact(<PyObject*>port):
             port_str = str(port)
         elif PyUnicode_CheckExact(<PyObject*>port):
@@ -1423,65 +1666,114 @@ cdef class Sender:
             raise TypeError(
                 f'port must be an int or a str, not {_fqn(type(port))}')
 
-        str_to_utf8(b, <PyObject*>host, &host_utf8)
-        str_to_utf8(b, <PyObject*>port_str, &port_utf8)
-        self._opts = line_sender_opts_new_service(host_utf8, port_utf8)
+        str_to_utf8(b, <PyObject*>host, &c_host)
+        str_to_utf8(b, <PyObject*>port_str, &c_port)
+        self._opts = line_sender_opts_new_service(c_protocol, c_host, c_port)
 
-        if interface is not None:
-            str_to_utf8(b, <PyObject*>interface, &interface_utf8)
-            line_sender_opts_net_interface(self._opts, interface_utf8)
+        if bind_interface is not None:
+            str_to_utf8(b, <PyObject*>bind_interface, &c_bind_interface)
+            if not line_sender_opts_bind_interface(self._opts, c_bind_interface, &err):
+                raise c_err_to_py(err)
 
-        if auth is not None:
-            (a_key_id,
-             a_priv_key,
-             a_pub_key_x,
-             a_pub_key_y) = auth
-            str_to_utf8(b, <PyObject*>a_key_id, &a_key_id_utf8)
-            str_to_utf8(b, <PyObject*>a_priv_key, &a_priv_key_utf8)
-            str_to_utf8(b, <PyObject*>a_pub_key_x, &a_pub_key_x_utf8)
-            str_to_utf8(b, <PyObject*>a_pub_key_y, &a_pub_key_y_utf8)
-            line_sender_opts_auth(
-                self._opts,
-                a_key_id_utf8,
-                a_priv_key_utf8,
-                a_pub_key_x_utf8,
-                a_pub_key_y_utf8)
+        if username is not None:
+            str_to_utf8(b, <PyObject*>username, &c_username)
+            if not line_sender_opts_username(self._opts, c_username, &err):
+                raise c_err_to_py(err)
 
-        if tls:
-            if tls is True:
-                line_sender_opts_tls_webpki_and_os_roots(self._opts)
-            elif isinstance(tls, str):
-                if tls == 'webpki_roots':
-                    line_sender_opts_tls(self._opts)
-                elif tls == 'os_roots':
-                    line_sender_opts_tls_os_roots(self._opts)
-                elif tls == 'webpki_and_os_roots':
-                    line_sender_opts_tls_webpki_and_os_roots(self._opts)
-                elif tls == 'insecure_skip_verify':
-                    line_sender_opts_tls_insecure_skip_verify(self._opts)
-                else:
-                    str_to_utf8(b, <PyObject*>tls, &ca_utf8)
-                    line_sender_opts_tls_ca(self._opts, ca_utf8)
-            elif isinstance(tls, pathlib.Path):
-                tls = str(tls)
-                str_to_utf8(b, <PyObject*>tls, &ca_utf8)
-                line_sender_opts_tls_ca(self._opts, ca_utf8)
+        if password is not None:
+            str_to_utf8(b, <PyObject*>password, &c_password)
+            if not line_sender_opts_password(self._opts, c_password, &err):
+                raise c_err_to_py(err)
+
+        if token is not None:
+            str_to_utf8(b, <PyObject*>token, &c_token)
+            if not line_sender_opts_token(self._opts, c_token, &err):
+                raise c_err_to_py(err)
+
+        if token_x is not None:
+            str_to_utf8(b, <PyObject*>token_x, &c_token_x)
+            if not line_sender_opts_token_x(self._opts, c_token_x, &err):
+                raise c_err_to_py(err)
+
+        if token_y is not None:
+            str_to_utf8(b, <PyObject*>token_y, &c_token_y)
+            if not line_sender_opts_token_y(self._opts, c_token_y, &err):
+                raise c_err_to_py(err)
+
+        if auth_timeout is not None:
+            c_auth_timeout = auth_timeout
+            if not line_sender_opts_auth_timeout(self._opts, c_auth_timeout, &err):
+                raise c_err_to_py(err)
+
+        if tls_verify is not None:
+            if (tls_verify is True) or (tls_verify == 'on'):
+                c_tls_verify = True
+            elif (tls_verify is False) or (tls_verify == 'unsafe_off'):
+                c_tls_verify = False
+            else:
+                raise ValueError(
+                    '"tls_verify" must be a bool, "on" or "unsafe_off", '
+                    f'not {tls_verify!r}')
+            if not line_sender_opts_tls_verify(self._opts, c_tls_verify, &err):
+                raise c_err_to_py(err)
+
+        if tls_ca is not None:
+            c_tls_ca = TlsCa.parse(tls_ca).value
+            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
+                raise c_err_to_py(err)
+
+        if tls_roots is not None:
+            tls_roots = str(tls_roots)
+            str_to_utf8(b, <PyObject*>tls_roots, &c_tls_roots)
+            if not line_sender_opts_tls_roots(self._opts, c_tls_roots, &err):
+                raise c_err_to_py(err)
+
+        if max_buf_size is not None:
+            c_max_buf_size = max_buf_size
+            if not line_sender_opts_max_buf_size(self._opts, c_max_buf_size, &err):
+                raise c_err_to_py(err)
+    
+        if retry_timeout is not None:
+            if isinstance(retry_timeout, int):
+                c_retry_timeout = retry_timeout
+                if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
+                    raise c_err_to_py(err)
+            elif isinstance(retry_timeout, timedelta):
+                c_retry_timeout = retry_timeout.microseconds // 1000 + retry_timeout.seconds * 1000
+                if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
+                    raise c_err_to_py(err)
             else:
                 raise TypeError(
-                    'tls must be a bool, a path or string pointing to CA file '
-                    f'or "insecure_skip_verify", not {_fqn(type(tls))}')
+                    '"retry_timeout" must be an int or a timedelta, '
+                    f'not {_fqn(type(retry_timeout))}')
 
-        if read_timeout is not None:
-            line_sender_opts_read_timeout(self._opts, read_timeout)
+        if request_min_throughput is not None:
+            c_request_min_throughput = request_min_throughput
+            if not line_sender_opts_request_min_throughput(self._opts, c_request_min_throughput, &err):
+                raise c_err_to_py(err)
 
-        self._auto_flush_enabled = not not auto_flush
-        self._auto_flush_watermark = int(auto_flush) \
-            if self._auto_flush_enabled else 0
-        if self._auto_flush_watermark < 0:
-            raise ValueError(
-                'auto_flush_watermark must be >= 0, '
-                f'not {self._auto_flush_watermark}')
-        
+        if request_timeout is not None:
+            if isinstance(request_timeout, int):
+                c_request_timeout = request_timeout
+                if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
+                    raise c_err_to_py(err)
+            elif isinstance(request_timeout, timedelta):
+                c_request_timeout = request_timeout.microseconds // 1000 + request_timeout.seconds * 1000
+                if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
+                    raise c_err_to_py(err)
+            else:
+                raise TypeError(
+                    '"request_timeout" must be an int or a timedelta, '
+                    f'not {_fqn(type(request_timeout))}')
+    
+        _parse_auto_flush(
+            auto_flush,
+            auto_flush_rows,
+            auto_flush_bytes,
+            auto_flush_interval,
+            &self._auto_flush_mode)
+        self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
+
         qdb_pystr_buf_clear(b)
 
     def new_buffer(self):
@@ -1520,7 +1812,7 @@ cdef class Sender:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'connect() can\'t be called after close().')
-        self._impl = line_sender_connect(self._opts, &err)
+        self._impl = line_sender_build(self._opts, &err)
         if self._impl == NULL:
             raise c_err_to_py(err)
         line_sender_opts_free(self._opts)
@@ -1529,6 +1821,8 @@ cdef class Sender:
         # Request callbacks when rows are complete.
         if self._buffer is not None:
             self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
+
+        self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
     def __enter__(self) -> Sender:
         """Call :func:`Sender.connect` at the start of a ``with`` block."""
@@ -1620,9 +1914,10 @@ cdef class Sender:
         may have been transmitted to the server already.
         """
         cdef auto_flush_t af = auto_flush_blank()
-        if self._auto_flush_enabled:
+        if self._auto_flush_mode.enabled:
             af.sender = self._impl
-            af.watermark = self._auto_flush_watermark
+            af.mode = self._auto_flush_mode
+            af.last_flush_ms = self._last_flush_ms
         _dataframe(
             af,
             self._buffer._impl,
@@ -1728,3 +2023,5 @@ cdef class Sender:
 
     def __dealloc__(self):
         self._close()
+        free(self._last_flush_ms)
+
