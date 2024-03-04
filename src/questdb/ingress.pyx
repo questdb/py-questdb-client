@@ -48,6 +48,7 @@ from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *
 from .pystr_to_utf8 cimport *
+from .conf_str cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
 from .ingress_helper cimport *
@@ -1345,6 +1346,55 @@ class TlsCa(Enum):
             return value
         raise ValueError('Invalid value for tls_ca.')
 
+
+cdef object c_parse_conf_err_to_py(questdb_conf_str_parse_err* err):
+    cdef str msg = PyUnicode_FromStringAndSize(
+        err.msg, <Py_ssize_t>err.msg_len)
+    cdef object py_err = IngressError(IngressErrorCode.ConfigError, msg)
+    questdb_conf_str_parse_err_free(err)
+    return py_err
+
+
+cdef object parse_conf_str(
+        qdb_pystr_buf* b,
+        str conf_str):
+    """
+    Parse a config string to a tuple of (Protocol, dict[str, str]).
+    """
+    cdef size_t c_len1
+    cdef const char* c_buf1
+    cdef size_t c_len2
+    cdef const char* c_buf2
+    cdef str service
+    cdef questdb_conf_str_iter* c_iter
+    cdef str key
+    cdef str value
+    cdef dict params = {}
+    cdef line_sender_utf8 c_conf_str_utf8
+    cdef questdb_conf_str_parse_err* err
+    cdef questdb_conf_str* c_conf_str
+    str_to_utf8(b, <PyObject*>conf_str, &c_conf_str_utf8)
+    c_conf_str = questdb_conf_str_parse(
+        c_conf_str_utf8.buf,
+        c_conf_str_utf8.len,
+        &err)
+    if c_conf_str == NULL:
+        raise c_parse_conf_err_to_py(err)
+
+    c_buf1 = questdb_conf_str_service(c_conf_str, &c_len1)
+    service = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
+
+    c_iter = questdb_conf_str_iter_pairs(c_conf_str)
+    while questdb_conf_str_iter_next(c_iter, &c_buf1, &c_len1, &c_buf2, &c_len2):
+        key = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
+        value = PyUnicode_FromStringAndSize(c_buf2, <Py_ssize_t>c_len2)
+        params[key] = value
+
+    questdb_conf_str_iter_free(c_iter)
+    questdb_conf_str_free(c_conf_str)
+
+    return (Protocol.parse(service), params)
+    
 
 cdef class Sender:
     """
