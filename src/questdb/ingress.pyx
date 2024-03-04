@@ -38,7 +38,7 @@ from libc.string cimport strncmp, memset
 from libc.math cimport isnan
 from libc.errno cimport errno
 # from libc.stdio cimport stderr, fprintf
-from cpython.datetime cimport datetime
+from cpython.datetime cimport datetime, timedelta
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
@@ -497,13 +497,11 @@ cdef class Buffer
 
 
 cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
-    cdef bint flush = False
-    if sender._auto_flush_mode == auto_flush_row_count:
-        if line_sender_buffer_row_count(buffer._impl) >= sender._auto_flush_watermark:
-            sender.flush(buffer)
-    elif sender._auto_flush_mode == auto_flush_byte_count:
-        if len(buffer) >= sender._auto_flush_watermark:
-            sender.flush(buffer)
+    if should_auto_flush(
+            &sender._auto_flush_mode,
+            buffer._impl,
+            sender._last_flush_ms[0]):
+        sender.flush(buffer)
 
 
 cdef class Buffer:
@@ -1213,29 +1211,45 @@ _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
-# Auto-flush settings.
-# The individual `interval`, `row_count` and `byte_count`
-# settings are set to `-1` when disabled.
-# If `.enabled`, then at least one of the settings are `!= -1`.
-cdef struct auto_flush_mode_t:
-    bint enabled
-    int64_t interval  
-    int64_t row_count
-    int64_t byte_count
-
-
 cdef void_int _parse_auto_flush(
-    bint auto_flush,
+    object auto_flush,
     object auto_flush_rows,
     object auto_flush_bytes,
     object auto_flush_interval,
     auto_flush_mode_t* c_auto_flush
 ) except -1:
-    # set defaults
+    # Set defaults if none of the auto_flush parameters are set.
+    if (auto_flush_rows is None) \
+            and (auto_flush_bytes is None) \
+            and (auto_flush_interval is None):
+        auto_flush_rows = 75000
+        auto_flush_bytes = None
+        auto_flush_interval = 1000
+
+    # Determine if to enable auto-flush based on the parameters.
+    if auto_flush is None:
+        auto_flush = ((auto_flush_rows is not None) or
+            (auto_flush_bytes is not None) or
+            (auto_flush_interval is not None))
+    elif (auto_flush is True) or (auto_flush == 'on'):
+        auto_flush = True
+    elif (auto_flush is False) or (auto_flush == 'off'):
+        auto_flush = False
+    else:
+        raise ValueError(
+            f'"auto_flush" must be None, bool, "on" or "off", not {auto_flush}')
+
+    # Validate auto_flush parameters.
+    if auto_flush and (auto_flush_rows is None) and (auto_flush_bytes is None) \
+            and (auto_flush_interval is None):
+        raise ValueError(
+            '"auto_flush" is enabled but no other auto-flush '
+            'parameters are enabled. Please set at least one of '
+            '"auto_flush_rows", "auto_flush_bytes" or '
+            '"auto_flush_interval".')
+
+    # Parse individual auto_flush parameters to C struct.
     c_auto_flush.enabled = auto_flush
-    c_auto_flush.interval = 1000
-    c_auto_flush.row_count = 75000
-    c_auto_flush.byte_count = 0
 
     if auto_flush_rows is None:
         c_auto_flush.row_count = -1
@@ -1302,6 +1316,10 @@ class Protocol(Enum):
         if isinstance(value, Protocol):
             return value
         raise ValueError('Invalid value for protocol.')
+
+    @property
+    def tls_enabled(self):
+        return self in (Protocol.Tcps, Protocol.Https)
 
 
 class TlsCa(Enum):
@@ -1516,7 +1534,8 @@ cdef class Sender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
-    cdef auto_flush _auto_flush_mode
+    cdef auto_flush_mode_t _auto_flush_mode
+    cdef int64_t* _last_flush_ms
     cdef size_t _init_capacity
     cdef size_t _max_name_len
 
@@ -1535,7 +1554,7 @@ cdef class Sender:
             object auth_timeout=None,  # default: 15000 milliseconds
             object tls_verify=None,  # default: True
             object tls_ca=None,  # default: TlsCa.WebpkiRoots
-            str tls_roots=None,
+            object tls_roots=None,
             object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
             object retry_timeout=None,  # default: 10000 milliseconds
             object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
@@ -1543,10 +1562,10 @@ cdef class Sender:
 
             uint64_t init_capacity=65536,  # 64KiB
             uint64_t max_name_len=127,
-            bint auto_flush=True,
-            object auto_flush_rows=75000,  # Default 75000
+            object auto_flush=None,  # Default True
+            object auto_flush_rows=None,  # Default 75000
             object auto_flush_bytes=None,  # Default off
-            object auto_flush_interval=1000):  # Default 1000 milliseconds
+            object auto_flush_interval=None):  # Default 1000 milliseconds
 
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_host
@@ -1561,17 +1580,14 @@ cdef class Sender:
         cdef line_sender_utf8 c_token_x
         cdef line_sender_utf8 c_token_y
         cdef uint64_t c_auth_timeout
-        cdef bint c_tls_enabled
         cdef bint c_tls_verify
         cdef line_sender_ca c_tls_ca
-        cdef line_sender_utf8 tls_roots
+        cdef line_sender_utf8 c_tls_roots
         cdef uint64_t c_max_buf_size
         cdef uint64_t c_retry_timeout
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
         cdef qdb_pystr_buf* b
-
-        cdef ssize_t auto_flush_watermark = 0
 
         self._opts = NULL
         self._impl = NULL
@@ -1634,13 +1650,15 @@ cdef class Sender:
             if not line_sender_opts_auth_timeout(self._opts, c_auth_timeout, &err):
                 raise c_err_to_py(err)
 
-        if tls_enabled is not None:
-            c_tls_enabled = tls_enabled
-            if not line_sender_opts_tls_enabled(self._opts, c_tls_enabled, &err):
-                raise c_err_to_py(err)
-
         if tls_verify is not None:
-            c_tls_verify = tls_verify
+            if (tls_verify is True) or (tls_verify == 'on'):
+                c_tls_verify = True
+            elif (tls_verify is False) or (tls_verify == 'unsafe_off'):
+                c_tls_verify = False
+            else:
+                raise ValueError(
+                    '"tls_verify" must be a bool, "on" or "unsafe_off", '
+                    f'not {tls_verify!r}')
             if not line_sender_opts_tls_verify(self._opts, c_tls_verify, &err):
                 raise c_err_to_py(err)
 
@@ -1650,8 +1668,9 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if tls_roots is not None:
-            str_to_utf8(b, <PyObject*>str(tls_roots), &tls_roots)
-            if not line_sender_opts_tls_roots(self._opts, tls_roots, &err):
+            tls_roots = str(tls_roots)
+            str_to_utf8(b, <PyObject*>tls_roots, &c_tls_roots)
+            if not line_sender_opts_tls_roots(self._opts, c_tls_roots, &err):
                 raise c_err_to_py(err)
 
         if max_buf_size is not None:
@@ -1698,10 +1717,8 @@ cdef class Sender:
             auto_flush_bytes,
             auto_flush_interval,
             &self._auto_flush_mode)
+        self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
-        line_sender_opts_max_retries(self._opts, max_retries)
-        line_sender_opts_retry_interval(self._opts, retry_interval)
-        line_sender_opts_min_throughput(self._opts, min_throughput)       
         qdb_pystr_buf_clear(b)
 
     def new_buffer(self):
@@ -1749,6 +1766,8 @@ cdef class Sender:
         # Request callbacks when rows are complete.
         if self._buffer is not None:
             self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
+
+        self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
     def __enter__(self) -> Sender:
         """Call :func:`Sender.connect` at the start of a ``with`` block."""
@@ -1840,10 +1859,10 @@ cdef class Sender:
         may have been transmitted to the server already.
         """
         cdef auto_flush_t af = auto_flush_blank()
-        if self._auto_flush_mode:
+        if self._auto_flush_mode.enabled:
             af.sender = self._impl
             af.mode = self._auto_flush_mode
-            af.watermark = self._auto_flush_watermark
+            af.last_flush_ms = self._last_flush_ms
         _dataframe(
             af,
             self._buffer._impl,
@@ -1949,3 +1968,5 @@ cdef class Sender:
 
     def __dealloc__(self):
         self._close()
+        free(self._last_flush_ms)
+

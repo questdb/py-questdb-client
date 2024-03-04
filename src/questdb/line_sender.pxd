@@ -254,12 +254,12 @@ cdef extern from "questdb/ingress/line_sender.h":
     cdef struct line_sender_opts:
         pass
 
-    line_sender_opts* line_sender_from_conf(
+    line_sender_opts* line_sender_opts_from_conf(
         line_sender_utf8 conf,
         line_sender_error** err_out
         ) noexcept nogil
 
-    line_sender_opts* line_sender_from_env(
+    line_sender_opts* line_sender_opts_from_env(
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -277,7 +277,7 @@ cdef extern from "questdb/ingress/line_sender.h":
 
     bint line_sender_opts_bind_interface(
         line_sender_opts* opts,
-        uint64_t millis,
+        line_sender_utf8 bind_interface,
         line_sender_error** err_out
         ) noexcept nogil
 

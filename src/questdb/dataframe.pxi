@@ -1,15 +1,56 @@
 # See: dataframe.md for technical overview.
 
+# Auto-flush settings.
+# The individual `interval`, `row_count` and `byte_count`
+# settings are set to `-1` when disabled.
+# If `.enabled`, then at least one of the settings are `!= -1`.
+cdef struct auto_flush_mode_t:
+    bint enabled
+    int64_t interval  
+    int64_t row_count
+    int64_t byte_count
+
+
 cdef struct auto_flush_t:
     line_sender* sender
     auto_flush_mode_t mode
+    int64_t* last_flush_ms
 
 
 cdef auto_flush_t auto_flush_blank() noexcept nogil:
     cdef auto_flush_t af
     af.sender = NULL
     af.mode.enabled = False
+    af.mode.interval = -1
+    af.mode.row_count = -1
+    af.mode.byte_count = -1
+    af.last_flush_ms = NULL
     return af
+
+
+cdef bint should_auto_flush(
+            const auto_flush_mode_t* af_mode,
+            line_sender_buffer* ls_buf,
+            int64_t last_flush_ms):
+    if not af_mode.enabled:
+        return False
+
+    # Check `auto_flush_rows` breach.
+    if (af_mode.row_count != -1) and \
+        (<int64_t>line_sender_buffer_row_count(ls_buf) >= af_mode.row_count):
+        return True
+
+    # Check `auto_flush_bytes` breach.
+    if (af_mode.byte_count != -1) and \
+        (<int64_t>line_sender_buffer_size(ls_buf) >= af_mode.byte_count):
+        return True
+
+    # Check for interval breach.
+    if (af_mode.interval != -1) and \
+        (((line_sender_now_micros() / 1000) - last_flush_ms) >= af_mode.interval):
+        return True
+
+    return False
 
 
 cdef struct col_chunks_t:
@@ -2172,26 +2213,22 @@ cdef void _dataframe_col_advance(col_t* col) noexcept nogil:
 
 
 cdef void_int _dataframe_handle_auto_flush(
-            auto_flush_t af,
+            const auto_flush_t* af,
             line_sender_buffer* ls_buf,
             PyThreadState** gs) except -1:
     cdef line_sender_error* flush_err
     cdef line_sender_error* marker_err
     cdef bint flush_ok
     cdef bint marker_ok
-    if (af.sender == NULL) or (af.mode == auto_flush_disabled):
+    if (af.sender == NULL) or (not should_auto_flush(&af.mode, ls_buf, af.last_flush_ms[0])):
         return 0
-    elif af.mode == auto_flush_row_count:
-        if line_sender_buffer_row_count(ls_buf) < af.watermark:
-            return 0
-    elif af.mode == auto_flush_byte_count:
-        if line_sender_buffer_size(ls_buf) < af.watermark:
-            return 0
 
     # Always temporarily release GIL during a flush.
     had_gil = _ensure_doesnt_have_gil(gs)
     flush_ok = line_sender_flush(af.sender, ls_buf, &flush_err)
-    if not flush_ok:
+    if flush_ok:
+        af.last_flush_ms[0] = line_sender_now_micros() // 1000
+    else:
         # To avoid flush reattempt on Sender.__exit__.
         line_sender_buffer_clear(ls_buf)
 
@@ -2325,7 +2362,7 @@ cdef void_int _dataframe(
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 
-                _dataframe_handle_auto_flush(af, ls_buf, &gs)
+                _dataframe_handle_auto_flush(&af, ls_buf, &gs)
         except Exception as e:
             # It would be an internal bug for this to raise.
             if not line_sender_buffer_rewind_to_marker(ls_buf, &err):

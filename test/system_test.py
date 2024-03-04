@@ -81,11 +81,12 @@ class TestWithDatabase(unittest.TestCase):
         if cls.qdb_plain:
             cls.qdb_plain.stop()
 
-    def _test_scenario(self, qdb, auth, tls):
-        port = qdb.tls_line_tcp_port if tls else qdb.line_tcp_port
+    def _test_scenario(self, qdb, protocol, **kwargs):
+        protocol = qi.Protocol.parse(protocol)
+        port = qdb.tls_line_tcp_port if protocol.tls_enabled else qdb.line_tcp_port
         pending = None
         table_name = uuid.uuid4().hex
-        with qi.Sender('localhost', port, auth=auth, tls=tls) as sender:
+        with qi.Sender(protocol, 'localhost', port, **kwargs) as sender:
             for _ in range(3):
                 sender.row(
                     table_name,
@@ -116,28 +117,34 @@ class TestWithDatabase(unittest.TestCase):
         self.assertEqual(scrubbed_dataset, exp_dataset)
 
     def test_plain(self):
-        self._test_scenario(self.qdb_plain, None, False)
+        self._test_scenario(self.qdb_plain, 'tcp')
 
     def test_plain_tls_insecure_skip_verify(self):
-        self._test_scenario(self.qdb_plain, None, 'insecure_skip_verify')
+        self._test_scenario(self.qdb_plain, 'tcps', tls_verify=False)
+
+    def test_plain_tls_insecure_skip_verify_str(self):
+        self._test_scenario(self.qdb_plain, 'tcps', tls_verify='unsafe_off')
 
     def test_plain_tls_ca(self):
-        self._test_scenario(self.qdb_plain, None, CA_PATH)
+        self._test_scenario(self.qdb_plain, 'tcps', tls_roots=CA_PATH)
 
     def test_plain_tls_ca_str(self):
-        self._test_scenario(self.qdb_plain, None, str(CA_PATH))
+        self._test_scenario(self.qdb_plain, 'tcps', tls_roots=str(CA_PATH))
 
     def test_auth(self):
-        self._test_scenario(self.qdb_auth, AUTH, False)
+        self._test_scenario(self.qdb_auth, 'tcp', **AUTH)
 
     def test_auth_tls_insecure_skip_verify(self):
-        self._test_scenario(self.qdb_auth, AUTH, 'insecure_skip_verify')
+        self._test_scenario(self.qdb_auth, 'tcps', tls_verify=False, **AUTH)
+
+    def test_auth_tls_insecure_skip_verify_str(self):
+        self._test_scenario(self.qdb_auth, 'tcps', tls_verify=False, **AUTH)
 
     def test_auth_tls_ca(self):
-        self._test_scenario(self.qdb_auth, AUTH, CA_PATH)
+        self._test_scenario(self.qdb_auth, 'tcps', tls_roots=CA_PATH, **AUTH)
 
     def test_auth_tls_ca_str(self):
-        self._test_scenario(self.qdb_auth, AUTH, str(CA_PATH))
+        self._test_scenario(self.qdb_auth, 'tcps', tls_roots=str(CA_PATH), **AUTH)
 
     @unittest.skipIf(not pd, 'pandas not installed')
     def test_basic_dataframe(self):
@@ -155,7 +162,7 @@ class TestWithDatabase(unittest.TestCase):
                 numpy.datetime64('2021-01-02'),
                 numpy.datetime64('2021-01-03')]})
         df.index.name = table_name
-        with qi.Sender('localhost', port) as sender:
+        with qi.Sender('tcp', 'localhost', port) as sender:
             sender.dataframe(df)
             pending = str(sender)
 
@@ -181,7 +188,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_http(self):
         port = self.qdb_plain.http_server_port
         table_name = uuid.uuid4().hex
-        with qi.Sender('localhost', port, http=True) as sender:
+        with qi.Sender('http', 'localhost', port) as sender:
             for _ in range(3):
                 sender.row(
                     table_name,

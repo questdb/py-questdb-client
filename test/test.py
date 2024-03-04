@@ -195,7 +195,7 @@ class TestBuffer(unittest.TestCase):
 
 class TestSender(unittest.TestCase):
     def test_basic(self):
-        with Server() as server, qi.Sender('localhost', server.port) as sender:
+        with Server() as server, qi.Sender('tcp', 'localhost', server.port) as sender:
             server.accept()
             self.assertEqual(server.recv(), [])
             sender.row(
@@ -228,7 +228,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             sender = None
             try:
-                sender = qi.Sender('localhost', server.port)
+                sender = qi.Sender('tcp', 'localhost', server.port)
                 sender.connect()
                 server.accept()
                 self.assertEqual(server.recv(), [])
@@ -241,7 +241,7 @@ class TestSender(unittest.TestCase):
 
     def test_row_before_connect(self):
         try:
-            sender = qi.Sender('localhost', 12345)
+            sender = qi.Sender('tcp', 'localhost', 12345)
             sender.row('tbl1', symbols={'sym1': 'val1'})
             with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
                 sender.flush()
@@ -250,7 +250,7 @@ class TestSender(unittest.TestCase):
 
     def test_flush_1(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port) as sender:
+            with qi.Sender('tcp', 'localhost', server.port) as sender:
                 server.accept()
                 with self.assertRaisesRegex(qi.IngressError, 'Column names'):
                     sender.row('tbl1', symbols={'...bad name..': 'val1'})
@@ -262,7 +262,7 @@ class TestSender(unittest.TestCase):
 
     def test_flush_2(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port) as sender:
+            with qi.Sender('tcp', 'localhost', server.port) as sender:
                 server.accept()
                 server.close()
 
@@ -286,7 +286,7 @@ class TestSender(unittest.TestCase):
         # sender's `with` block, to ensure no exceptions get trapped.
         with Server() as server:
             with self.assertRaises(qi.IngressError):
-                with qi.Sender('localhost', server.port) as sender:
+                with qi.Sender('tcp', 'localhost', server.port) as sender:
                     server.accept()
                     server.close()
                     for _ in range(1000):
@@ -298,13 +298,13 @@ class TestSender(unittest.TestCase):
         # Clearing of the internal buffer is not allowed.
         with Server() as server:
             with self.assertRaises(ValueError):
-                with qi.Sender('localhost', server.port) as sender:
+                with qi.Sender('tcp', 'localhost', server.port) as sender:
                     server.accept()
                     sender.row('tbl1', symbols={'a': 'b'})
                     sender.flush(buffer=None, clear=False)
 
     def test_two_rows_explicit_buffer(self):
-        with Server() as server, qi.Sender('localhost', server.port) as sender:
+        with Server() as server, qi.Sender('tcp', 'localhost', server.port) as sender:
             server.accept()
             self.assertEqual(server.recv(), [])
             buffer = sender.new_buffer()
@@ -335,8 +335,8 @@ class TestSender(unittest.TestCase):
         self.assertEqual(str(buf), exp)
 
         with Server() as server1, Server() as server2:
-            with qi.Sender('localhost', server1.port) as sender1, \
-                 qi.Sender('localhost', server2.port) as sender2:
+            with qi.Sender('tcp', 'localhost', server1.port) as sender1, \
+                 qi.Sender('tcp', 'localhost', server2.port) as sender2:
                     server1.accept()
                     server2.accept()
 
@@ -359,7 +359,7 @@ class TestSender(unittest.TestCase):
 
     def test_auto_flush(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.ByteCount(4)) as sender:
+            with qi.Sender('tcp', 'localhost', server.port, auto_flush_bytes=4) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'})
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -368,7 +368,7 @@ class TestSender(unittest.TestCase):
 
     def test_immediate_auto_flush(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.RowCount(1)) as sender:
+            with qi.Sender('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'})
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -377,7 +377,7 @@ class TestSender(unittest.TestCase):
 
     def test_auto_flush_on_closed_socket(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.RowCount(1)) as sender:
+            with qi.Sender('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
                 server.accept()
                 server.close()
                 exp_err = 'Could not flush buffer.* - See https'
@@ -389,7 +389,7 @@ class TestSender(unittest.TestCase):
     def test_dont_auto_flush(self):
         msg_counter = 0
         with Server() as server:
-            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.Disabled) as sender:
+            with qi.Sender('tcp', 'localhost', server.port, auto_flush=False) as sender:
                 server.accept()
                 while len(sender) < 32768:  # 32KiB
                     sender.row('tbl1', symbols={'sym1': 'val1'})
@@ -407,7 +407,7 @@ class TestSender(unittest.TestCase):
     def test_dont_flush_on_exception(self):
         with Server() as server:
             with self.assertRaises(RuntimeError):
-                with qi.Sender('localhost', server.port) as sender:
+                with qi.Sender('tcp', 'localhost', server.port) as sender:
                     server.accept()
                     sender.row('tbl1', symbols={'sym1': 'val1'})
                     self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
@@ -418,7 +418,7 @@ class TestSender(unittest.TestCase):
     @unittest.skipIf(not pd, 'pandas not installed')
     def test_dataframe(self):
         with Server() as server:
-            with qi.Sender('localhost', server.port) as sender:
+            with qi.Sender('tcp', 'localhost', server.port) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
                 sender.dataframe(df, table_name='tbl1')
@@ -433,7 +433,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             # An auto-flush size of 20 bytes is enough to auto-flush the first
             # row, but not the second.
-            with qi.Sender('localhost', server.port, auto_flush=qi.AutoFlush.ByteCount(20)) as sender:
+            with qi.Sender('tcp', 'localhost', server.port, auto_flush_bytes=20) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
                 sender.dataframe(df, table_name='tbl1')
@@ -466,6 +466,7 @@ class TestSender(unittest.TestCase):
 
     def test_new_buffer(self):
         sender = qi.Sender(
+            protocol='tcp',
             host='localhost',
             port=9009,
             init_capacity=1024,
@@ -477,7 +478,7 @@ class TestSender(unittest.TestCase):
         self.assertEqual(buffer.max_name_len, sender.max_name_len)
 
     def test_connect_after_close(self):
-        with Server() as server, qi.Sender('localhost', server.port) as sender:
+        with Server() as server, qi.Sender('tcp', 'localhost', server.port) as sender:
             server.accept()
             sender.row('tbl1', symbols={'sym1': 'val1'})
             sender.close()
@@ -486,13 +487,13 @@ class TestSender(unittest.TestCase):
 
     def test_bad_init_args(self):
         with self.assertRaises(OverflowError):
-            qi.Sender(host='localhost', port=9009, read_timeout=-1)
+            qi.Sender(protocol='tcp', host='localhost', port=9009, auth_timeout=-1)
 
         with self.assertRaises(OverflowError):
-            qi.Sender(host='localhost', port=9009, init_capacity=-1)
+            qi.Sender(protocol='tcp', host='localhost', port=9009, init_capacity=-1)
 
         with self.assertRaises(OverflowError):
-            qi.Sender(host='localhost', port=9009, max_name_len=-1)
+            qi.Sender(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
 
 
 class TestBases:
