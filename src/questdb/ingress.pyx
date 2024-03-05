@@ -361,11 +361,13 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(1000000000) +
         <int64_t>(dt.microsecond * 1000))
 
-cdef class ServerTimestamp:
+cdef class _ServerTimestamp:
     """
     A placeholder value to indicate using a server-generated-timestamp.
     """
     ...
+
+ServerTimestamp = _ServerTimestamp()
 
 cdef class TimestampMicros:
     """
@@ -929,7 +931,7 @@ cdef class Buffer:
             nanoseconds. A nanosecond unix epoch timestamp can be passed
             explicitly as a ``TimestampNanos`` object.
         """
-        self._row(table_name, symbols, columns, at if not isinstance(at, ServerTimestamp) else None)
+        self._row(table_name, symbols, columns, at if not isinstance(at, _ServerTimestamp) else None)
         return self
 
     def dataframe(
@@ -1209,7 +1211,7 @@ cdef class Buffer:
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, ServerTimestamp) else None)
+            at if not isinstance(at, _ServerTimestamp) else None)
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
@@ -1863,7 +1865,7 @@ cdef class Sender:
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
         """
-        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at if not isinstance(at, ServerTimestamp) else None)
+        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at if not isinstance(at, _ServerTimestamp) else None)
 
     def dataframe(
             self,
@@ -1926,7 +1928,7 @@ cdef class Sender:
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, ServerTimestamp) else None)
+            at if not isinstance(at, _ServerTimestamp) else None)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
         """

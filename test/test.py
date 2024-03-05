@@ -43,7 +43,7 @@ class TestBuffer(unittest.TestCase):
 
     def test_basic(self):
         buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'})
+        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
         self.assertEqual(len(buf), 25)
         self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
 
@@ -128,7 +128,8 @@ class TestBuffer(unittest.TestCase):
         buf.row(
             'tbl1',                            # ASCII
             symbols={'questdb1': 'q❤️p'},       # Mixed ASCII and UCS-2
-            columns={'questdb2': '❤️' * 1200})  # Over the 1024 buffer prealloc.
+            columns={'questdb2': '❤️' * 1200},
+        at=qi.ServerTimestamp)  # Over the 1024 buffer prealloc.
         buf.row(
             'tbl1',
             symbols={
@@ -137,7 +138,8 @@ class TestBuffer(unittest.TestCase):
             columns={
                 'questdb1': '',  # Empty string
                 'questdb2': '嚜꓂',  # UCS-2, 3 bytes for UTF-8.
-                'questdb3': '💩🦞'})  # UCS-4, 4 bytes for UTF-8.
+                'questdb3': '💩🦞'},
+        at=qi.ServerTimestamp)  # UCS-4, 4 bytes for UTF-8.
         self.assertEqual(str(buf),
             f'tbl1,questdb1=q❤️p questdb2="{"❤️" * 1200}"\n' +
             'tbl1,Questo\\ è\\ il\\ nome\\ di\\ una\\ colonna=' +
@@ -156,7 +158,7 @@ class TestBuffer(unittest.TestCase):
 
         # Strong exception safety: no partial writes.
         # Ensure we can continue using the buffer after an error.
-        buf.row('tbl1', symbols={'questdb1': 'another line of input'})
+        buf.row('tbl1', symbols={'questdb1': 'another line of input'}, at=qi.ServerTimestamp)
         self.assertEqual(
             str(buf),
             'tbl1,questdb1=q❤️p\n' +
@@ -170,7 +172,7 @@ class TestBuffer(unittest.TestCase):
 
     def test_int_range(self):
         buf = qi.Buffer()
-        buf.row('tbl1', columns={'num': 0})
+        buf.row('tbl1', columns={'num': 0}, at=qi.ServerTimestamp)
         self.assertEqual(str(buf), f'tbl1 num=0i\n')
         buf.clear()
 
@@ -437,7 +439,7 @@ class TestSender(unittest.TestCase):
             with qi.Sender('tcp', 'localhost', server.port, auto_flush_bytes=20) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
-                sender.dataframe(df, table_name='tbl1')
+                sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
                 msgs = server.recv()
                 self.assertEqual(
                     msgs,
@@ -463,7 +465,7 @@ class TestSender(unittest.TestCase):
                 with self.assertRaisesRegex(qi.IngressError, exp_err):
                     for _ in range(1000):
                         time.sleep(0.01)
-                        sender.dataframe(df.head(1), table_name='tbl1')
+                        sender.dataframe(df.head(1), table_name='tbl1', at=qi.ServerTimestamp)
 
     def test_new_buffer(self):
         sender = qi.Sender(
