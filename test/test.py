@@ -7,6 +7,7 @@ import unittest
 import datetime
 import time
 from enum import Enum
+import random
 
 import patch_path
 from mock_server import Server
@@ -285,6 +286,19 @@ def _build_conf(protocol, host, port, **kwargs):
         f'{k}={encode(k, v)};' for k, v in kwargs.items())
 
 
+def split_dict_randomly(original, seed=None):
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    sys.stderr.write(f'\nsplit_dict_randomly seed {seed}\n')
+    random.seed(seed)
+    keys = list(original.keys())
+    random.shuffle(keys)
+    split_point = random.randint(0, len(keys))
+    return (
+        {k: original[k] for k in keys[:split_point]},
+        {k: original[k] for k in keys[split_point:]})
+
+
 class Builder(Enum):
     INIT = 1
     CONF = 2
@@ -293,24 +307,26 @@ class Builder(Enum):
     def __call__(self, protocol, host, port, **kwargs):
         if self is Builder.INIT:
             return qi.Sender(protocol, host, port, **kwargs)
-        elif self is Builder.CONF:
-            return qi.Sender.from_conf(_build_conf(protocol, host, port, **kwargs))
-        elif self is Builder.ENV:
-            conf = _build_conf(protocol, host, port, **kwargs)
-            os.environ['QDB_CLIENT_CONF'] = conf
-            sender = qi.Sender.from_env()
-            del os.environ['QDB_CLIENT_CONF']
-            return sender
+        else:
+            # Specify some of the params via the conf string,
+            # and the rest via the API.
+            via_conf, via_params = split_dict_randomly(kwargs)
+            conf = _build_conf(protocol, host, port, **via_conf)
+            if self is Builder.CONF:
+                return qi.Sender.from_conf(conf, **via_params)
+            elif self is Builder.ENV:
+                os.environ['QDB_CLIENT_CONF'] = conf
+                sender = qi.Sender.from_env(**via_params)
+                del os.environ['QDB_CLIENT_CONF']
+                return sender
 
 
-class TestSender(unittest.TestCase): #, metaclass=ParametrizedTest):
+class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
     TEST_PARAMETERS = [
         dict(name='init', builder=Builder.INIT),
         dict(name='conf', builder=Builder.CONF),
         dict(name='env', builder=Builder.ENV)
     ]
-
-    builder = Builder.CONF
 
     def test_basic(self):
         with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
