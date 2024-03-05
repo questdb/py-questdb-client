@@ -365,7 +365,7 @@ cdef class _ServerTimestamp:
     """
     A placeholder value to indicate using a server-generated-timestamp.
     """
-    ...
+    pass
 
 ServerTimestamp = _ServerTimestamp()
 
@@ -826,7 +826,7 @@ cdef class Buffer:
                         self._column(name, value)
                         wrote_fields = True
             if wrote_fields:
-                self._at(at)
+                self._at(at if not isinstance(at, _ServerTimestamp) else None)
                 self._clear_marker()
             else:
                 self._rewind_to_marker()
@@ -931,7 +931,7 @@ cdef class Buffer:
             nanoseconds. A nanosecond unix epoch timestamp can be passed
             explicitly as a ``TimestampNanos`` object.
         """
-        self._row(table_name, symbols, columns, at if not isinstance(at, _ServerTimestamp) else None)
+        self._row(table_name, symbols, columns, at)
         return self
 
     def dataframe(
@@ -1211,7 +1211,7 @@ cdef class Buffer:
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, _ServerTimestamp) else None)
+            at)
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
@@ -1865,7 +1865,7 @@ cdef class Sender:
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
         """
-        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at if not isinstance(at, _ServerTimestamp) else None)
+        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
 
     def dataframe(
             self,
@@ -1928,7 +1928,7 @@ cdef class Sender:
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, _ServerTimestamp) else None)
+            at)
 
     cpdef flush(self, Buffer buffer=None, bint clear=True):
         """

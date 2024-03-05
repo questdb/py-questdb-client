@@ -37,7 +37,6 @@ def _dataframe(*args, **kwargs):
     buf.dataframe(*args, **kwargs)
     return str(buf)
 
-
 DF1 = pd.DataFrame({
     'A': [1.0, 2.0, 3.0],
     'B': [1, 2, 3],
@@ -71,6 +70,24 @@ def with_tmp_dir(func):
 
 
 class TestPandas(unittest.TestCase):
+    def test_mandatory_at_dataframe(self):
+        with self.assertRaisesRegex(TypeError, "needs keyword-only argument at"):
+            _dataframe([])
+        with self.assertRaisesRegex(TypeError, "needs keyword-only argument at"):
+            buf = qi.Buffer()
+            buf.dataframe([])
+
+        buf = qi.Buffer()
+        buf.dataframe(pd.DataFrame(), at=qi.ServerTimestamp)
+
+    def test_mandatory_at_row(self):
+        with self.assertRaisesRegex(TypeError, "needs keyword-only argument at"):
+            buf = qi.Buffer()
+            buf.row(table_name="test_buffer")
+
+        buf = qi.Buffer()
+        buf.row(table_name="test_mandatory_at_row", at=qi.ServerTimestamp)
+
     def test_bad_dataframe(self):
         with self.assertRaisesRegex(qi.IngressError,
                 'Expected pandas'):
