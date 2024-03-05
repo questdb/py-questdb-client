@@ -1396,6 +1396,8 @@ cdef object parse_conf_str(
     # We now need to parse the various values in the dict from their
     # string values to their Python types, as expected by the overrides
     # API of Sender.from_conf and Sender.from_env.
+    # Note that some of these values, such as `tls_ca` or `auto_flush`
+    # are kept as strings and are parsed by Sender._set_sender_fields.
     type_mappings = {
         'bind_interface': str,
         'username': str,
@@ -1403,7 +1405,7 @@ cdef object parse_conf_str(
         'token': str,
         'token_x': str,
         'token_y': str,
-        'auth_timeout': str,
+        'auth_timeout': int,
         'tls_verify': str,
         'tls_ca': str,
         'tls_roots': str,
@@ -1691,7 +1693,14 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if auth_timeout is not None:
-            c_auth_timeout = auth_timeout  # TODO: support timedelta
+            if isinstance(auth_timeout, int):
+                c_auth_timeout = auth_timeout
+            elif isinstance(auth_timeout, timedelta):
+                c_auth_timeout = auth_timeout.microseconds // 1000 + auth_timeout.seconds * 1000
+            else:
+                raise TypeError(
+                    '"auth_timeout" must be an int or a timedelta, '
+                    f'not {_fqn(type(auth_timeout))}')
             if not line_sender_opts_auth_timeout(self._opts, c_auth_timeout, &err):
                 raise c_err_to_py(err)
 
