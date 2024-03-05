@@ -6,6 +6,7 @@ import os
 import unittest
 import datetime
 import time
+from enum import Enum
 
 import patch_path
 from mock_server import Server
@@ -195,9 +196,124 @@ class TestBuffer(unittest.TestCase):
             buf.row('tbl1', columns={'num': -2**63-1}, at=qi.ServerTimestamp)
 
 
-class TestSender(unittest.TestCase):
+class ParametrizedTest(type):
+    """
+    Metaclass to generate parameterized tests.
+
+    Each test method will be exploded into multiple test methods, one for each
+    entry in the `TEST_PARAMETERS` list of dicts. The new test methods will have
+    the original name prefix with the parameter's `name` value, right after
+    the `test_` prefix.
+
+    Each test body will be able to access each of the parameters in each entry
+    of `TEST_PARAMETERS` as attributes of `self`.
+
+    E.g.
+
+    TEST_PARAMETERS = [
+        dict(name='init', builder=Builder.INIT),
+        ...
+    ]
+
     def test_basic(self):
-        with Server() as server, qi.Sender('tcp', 'localhost', server.port) as sender:
+        self.builder.build(..)
+
+    """
+    def __new__(cls, name, bases, dict):
+        params = dict.get('TEST_PARAMETERS')
+        to_add = []
+        to_scrub = []
+        for key, value in dict.items():
+            if key.startswith('test') and callable(value):
+                to_scrub.append(key)
+                for param in params:
+                    def test_wrapper(self):
+                        for param_name, param_value in param.items():
+                            setattr(self, param_name, param_value)
+                        try:
+                            return value(self)
+                        finally:
+                            for key in param:
+                                delattr(self, key)
+                    name = param['name']
+                    name_suffix = key[len('test'):]
+                    test_wrapper.__name__ = f'test_{name}{name_suffix}'
+                    to_add.append((test_wrapper.__name__, test_wrapper))
+        for key in to_scrub:
+            del dict[key]
+        for name, test in to_add:
+            dict[name] = test
+        return super().__new__(cls, name, bases, dict)
+
+
+def _build_conf(protocol, host, port, **kwargs):
+    protocol = qi.Protocol.parse(protocol)
+
+    def encode_duration(v):
+        if isinstance(v, datetime.timedelta):
+            return str(v.seconds * 1000 + v.microseconds // 1000)
+        return str(v)
+
+    encoders = {
+        'bind_interface': str,
+        'username': str,
+        'password': str,
+        'token': str,
+        'token_x': str,
+        'token_y': str,
+        'auth_timeout': encode_duration,
+        'tls_verify': lambda v: 'on' if v else 'unsafe_off',
+        'tls_ca': str,
+        'tls_roots': str,
+        'max_buf_size': str,
+        'retry_timeout': encode_duration,
+        'request_min_throughput': str,
+        'request_timeout': encode_duration,
+        'auto_flush': lambda v: 'on' if v else 'off',
+        'auto_flush_rows': str,
+        'auto_flush_bytes': str,
+        'auto_flush_interval': encode_duration,
+        'init_capacity': str,
+        'max_name_len': str,
+    }
+
+    def encode(k, v):
+        encoder = encoders.get(k, str)
+        return encoder(v)
+
+    return f'{protocol.tag}::addr={host}:{port};' + ''.join(
+        f'{k}={encode(k, v)};' for k, v in kwargs.items())
+
+
+class Builder(Enum):
+    INIT = 1
+    CONF = 2
+    ENV = 3
+
+    def __call__(self, protocol, host, port, **kwargs):
+        if self is Builder.INIT:
+            return qi.Sender(protocol, host, port, **kwargs)
+        elif self is Builder.CONF:
+            return qi.Sender.from_conf(_build_conf(protocol, host, port, **kwargs))
+        elif self is Builder.ENV:
+            conf = _build_conf(protocol, host, port, **kwargs)
+            os.environ['QDB_CLIENT_CONF'] = conf
+            sender = qi.Sender.from_env()
+            del os.environ['QDB_CLIENT_CONF']
+            return sender
+
+
+class TestSender(unittest.TestCase): #, metaclass=ParametrizedTest):
+    TEST_PARAMETERS = [
+        dict(name='init', builder=Builder.INIT),
+        dict(name='conf', builder=Builder.CONF),
+        dict(name='env', builder=Builder.ENV)
+    ]
+
+    builder = Builder.CONF
+
+    def test_basic(self):
+        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
             server.accept()
             self.assertEqual(server.recv(), [])
             sender.row(
@@ -231,7 +347,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             sender = None
             try:
-                sender = qi.Sender('tcp', 'localhost', server.port)
+                sender = self.builder('tcp', 'localhost', server.port)
                 sender.connect()
                 server.accept()
                 self.assertEqual(server.recv(), [])
@@ -244,7 +360,7 @@ class TestSender(unittest.TestCase):
 
     def test_row_before_connect(self):
         try:
-            sender = qi.Sender('tcp', 'localhost', 12345)
+            sender = self.builder('tcp', 'localhost', 12345)
             sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
                 sender.flush()
@@ -253,7 +369,7 @@ class TestSender(unittest.TestCase):
 
     def test_flush_1(self):
         with Server() as server:
-            with qi.Sender('tcp', 'localhost', server.port) as sender:
+            with self.builder('tcp', 'localhost', server.port) as sender:
                 server.accept()
                 with self.assertRaisesRegex(qi.IngressError, 'Column names'):
                     sender.row('tbl1', symbols={'...bad name..': 'val1'}, at=qi.ServerTimestamp)
@@ -265,7 +381,7 @@ class TestSender(unittest.TestCase):
 
     def test_flush_2(self):
         with Server() as server:
-            with qi.Sender('tcp', 'localhost', server.port) as sender:
+            with self.builder('tcp', 'localhost', server.port) as sender:
                 server.accept()
                 server.close()
 
@@ -289,7 +405,7 @@ class TestSender(unittest.TestCase):
         # sender's `with` block, to ensure no exceptions get trapped.
         with Server() as server:
             with self.assertRaises(qi.IngressError):
-                with qi.Sender('tcp', 'localhost', server.port) as sender:
+                with self.builder('tcp', 'localhost', server.port) as sender:
                     server.accept()
                     server.close()
                     for _ in range(1000):
@@ -301,13 +417,13 @@ class TestSender(unittest.TestCase):
         # Clearing of the internal buffer is not allowed.
         with Server() as server:
             with self.assertRaises(ValueError):
-                with qi.Sender('tcp', 'localhost', server.port) as sender:
+                with self.builder('tcp', 'localhost', server.port) as sender:
                     server.accept()
                     sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                     sender.flush(buffer=None, clear=False)
 
     def test_two_rows_explicit_buffer(self):
-        with Server() as server, qi.Sender('tcp', 'localhost', server.port) as sender:
+        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
             server.accept()
             self.assertEqual(server.recv(), [])
             buffer = sender.new_buffer()
@@ -338,8 +454,8 @@ class TestSender(unittest.TestCase):
         self.assertEqual(str(buf), exp)
 
         with Server() as server1, Server() as server2:
-            with qi.Sender('tcp', 'localhost', server1.port) as sender1, \
-                 qi.Sender('tcp', 'localhost', server2.port) as sender2:
+            with self.builder('tcp', 'localhost', server1.port) as sender1, \
+                 self.builder('tcp', 'localhost', server2.port) as sender2:
                     server1.accept()
                     server2.accept()
 
@@ -362,7 +478,7 @@ class TestSender(unittest.TestCase):
 
     def test_auto_flush(self):
         with Server() as server:
-            with qi.Sender('tcp', 'localhost', server.port, auto_flush_bytes=4) as sender:
+            with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=4) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -371,7 +487,7 @@ class TestSender(unittest.TestCase):
 
     def test_immediate_auto_flush(self):
         with Server() as server:
-            with qi.Sender('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
+            with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -380,7 +496,7 @@ class TestSender(unittest.TestCase):
 
     def test_auto_flush_on_closed_socket(self):
         with Server() as server:
-            with qi.Sender('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
+            with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
                 server.accept()
                 server.close()
                 exp_err = 'Could not flush buffer.* - See https'
@@ -392,7 +508,7 @@ class TestSender(unittest.TestCase):
     def test_dont_auto_flush(self):
         msg_counter = 0
         with Server() as server:
-            with qi.Sender('tcp', 'localhost', server.port, auto_flush=False) as sender:
+            with self.builder('tcp', 'localhost', server.port, auto_flush=False) as sender:
                 server.accept()
                 while len(sender) < 32768:  # 32KiB
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
@@ -410,7 +526,7 @@ class TestSender(unittest.TestCase):
     def test_dont_flush_on_exception(self):
         with Server() as server:
             with self.assertRaises(RuntimeError):
-                with qi.Sender('tcp', 'localhost', server.port) as sender:
+                with self.builder('tcp', 'localhost', server.port) as sender:
                     server.accept()
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                     self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
@@ -421,7 +537,7 @@ class TestSender(unittest.TestCase):
     @unittest.skipIf(not pd, 'pandas not installed')
     def test_dataframe(self):
         with Server() as server:
-            with qi.Sender('tcp', 'localhost', server.port) as sender:
+            with self.builder('tcp', 'localhost', server.port) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
                 sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -436,7 +552,7 @@ class TestSender(unittest.TestCase):
         with Server() as server:
             # An auto-flush size of 20 bytes is enough to auto-flush the first
             # row, but not the second.
-            with qi.Sender('tcp', 'localhost', server.port, auto_flush_bytes=20) as sender:
+            with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=20) as sender:
                 server.accept()
                 df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
                 sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -468,7 +584,7 @@ class TestSender(unittest.TestCase):
                         sender.dataframe(df.head(1), table_name='tbl1', at=qi.ServerTimestamp)
 
     def test_new_buffer(self):
-        sender = qi.Sender(
+        sender = self.builder(
             protocol='tcp',
             host='localhost',
             port=9009,
@@ -481,7 +597,7 @@ class TestSender(unittest.TestCase):
         self.assertEqual(buffer.max_name_len, sender.max_name_len)
 
     def test_connect_after_close(self):
-        with Server() as server, qi.Sender('tcp', 'localhost', server.port) as sender:
+        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
             server.accept()
             sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             sender.close()
@@ -490,13 +606,13 @@ class TestSender(unittest.TestCase):
 
     def test_bad_init_args(self):
         with self.assertRaises(OverflowError):
-            qi.Sender(protocol='tcp', host='localhost', port=9009, auth_timeout=-1)
+            self.builder(protocol='tcp', host='localhost', port=9009, auth_timeout=-1)
 
         with self.assertRaises(OverflowError):
-            qi.Sender(protocol='tcp', host='localhost', port=9009, init_capacity=-1)
+            self.builder(protocol='tcp', host='localhost', port=9009, init_capacity=-1)
 
         with self.assertRaises(OverflowError):
-            qi.Sender(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
+            self.builder(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
 
 
 class TestBases:

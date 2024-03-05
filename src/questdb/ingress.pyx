@@ -68,6 +68,7 @@ from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
 import pathlib
 
 import sys
+import os
 
 
 cdef bint _has_gil(PyThreadState** gs):
@@ -1245,7 +1246,7 @@ cdef void_int _parse_auto_flush(
         auto_flush = False
     else:
         raise ValueError(
-            f'"auto_flush" must be None, bool, "on" or "off", not {auto_flush}')
+            f'"auto_flush" must be None, bool, "on" or "off", not {auto_flush!r}')
 
     # Validate auto_flush parameters.
     if auto_flush and (auto_flush_rows is None) and (auto_flush_bytes is None) \
@@ -1271,7 +1272,7 @@ cdef void_int _parse_auto_flush(
     if auto_flush_bytes is None:
         c_auto_flush.byte_count = -1
     else:
-        c_auto_flush.byte_count = auto_flush_bytes
+        c_auto_flush.byte_count = int(auto_flush_bytes)
         if c_auto_flush.byte_count < 1:
             raise ValueError(
                 '"auto_flush_bytes" must be >= 1, '
@@ -1285,7 +1286,7 @@ cdef void_int _parse_auto_flush(
             raise ValueError(
                 '"auto_flush_interval" must be >= 1, '
                 f'not {c_auto_flush.interval}')
-    elif isinstance(auto_flush_interval, timedelta):
+    elif isinstance(auto_flush_interval, timedelta):  # TODO: refactor timedelta to millis int
         c_auto_flush.interval = (
             (auto_flush_interval.microseconds // 1000) +
             (auto_flush_interval.seconds * 1000))
@@ -1299,59 +1300,51 @@ cdef void_int _parse_auto_flush(
             f'not {_fqn(type(auto_flush_interval))}')
 
 
-class Protocol(Enum):
+class TaggedEnum(Enum):
+    """
+    Base class for tagged enums.
+    """
+    @property
+    def tag(self):
+        return self.value[0]
+
+    @property
+    def c_value(self):
+        return self.value[1]
+
+    @classmethod
+    def parse(cls, tag):
+        if tag is None:
+            return None
+        elif isinstance(tag, str):
+            for entry in cls:
+                if entry.tag == tag:
+                    return entry
+        elif isinstance(tag, cls):
+            return tag
+        else:
+            raise ValueError(f'Invalid value for {cls.__name__}: {tag!r}')
+
+
+class Protocol(TaggedEnum):
     """
     Protocol to use for sending data to QuestDB.
     """
-    Tcp = 0
-    Tcps = 1
-    Http = 2
-    Https = 3
-
-    @staticmethod
-    def parse(value):
-        if value is None:
-            return None
-        if isinstance(value, str):
-            if value == 'tcp':
-                return Protocol.Tcp
-            if value == 'tcps':
-                return Protocol.Tcps
-            if value == 'http':
-                return Protocol.Http
-            if value == 'https':
-                return Protocol.Https
-        if isinstance(value, Protocol):
-            return value
-        raise ValueError('Invalid value for protocol.')
+    Tcp = ('tcp', 0)
+    Tcps = ('tcps', 1)
+    Http = ('http', 2)
+    Https = ('https', 3)
 
     @property
     def tls_enabled(self):
         return self in (Protocol.Tcps, Protocol.Https)
 
 
-class TlsCa(Enum):
-    WebpkiRoots = line_sender_ca_webpki_roots
-    OsRoots = line_sender_ca_os_roots
-    WebpkiAndOsRoots = line_sender_ca_webpki_and_os_roots
-    PemFile = line_sender_ca_pem_file
-
-    @staticmethod
-    def parse(value):
-        if value is None:
-            return None
-        if isinstance(value, str):
-            if value == 'webpki_roots':
-                return TlsCa.WebpkiRoots
-            if value == 'os_roots':
-                return TlsCa.OsRoots
-            if value == 'webpki_and_os_roots':
-                return TlsCa.WebpkiAndOsRoots
-            if value == 'pem_file':
-                return TlsCa.PemFile
-        if isinstance(value, TlsCa):
-            return value
-        raise ValueError('Invalid value for tls_ca.')
+class TlsCa(TaggedEnum):
+    WebpkiRoots = ('webpki_roots', line_sender_ca_webpki_roots)
+    OsRoots = ('os_roots', line_sender_ca_os_roots)
+    WebpkiAndOsRoots = ('webpki_and_os_roots', line_sender_ca_webpki_and_os_roots)
+    PemFile = ('pem_file', line_sender_ca_pem_file)
 
 
 cdef object c_parse_conf_err_to_py(questdb_conf_str_parse_err* err):
@@ -1400,8 +1393,37 @@ cdef object parse_conf_str(
     questdb_conf_str_iter_free(c_iter)
     questdb_conf_str_free(c_conf_str)
 
+    # We now need to parse the various values in the dict from their
+    # string values to their Python types, as expected by the overrides
+    # API of Sender.from_conf and Sender.from_env.
+    type_mappings = {
+        'bind_interface': str,
+        'username': str,
+        'password': str,
+        'token': str,
+        'token_x': str,
+        'token_y': str,
+        'auth_timeout': str,
+        'tls_verify': str,
+        'tls_ca': str,
+        'tls_roots': str,
+        'max_buf_size': int,
+        'retry_timeout': int,
+        'request_min_throughput': int,
+        'request_timeout': int,
+        'auto_flush': str,
+        'auto_flush_rows': int,
+        'auto_flush_bytes': int,
+        'auto_flush_interval': int,
+        'init_capacity': int,
+        'max_name_len': int,
+    }
+    params = {
+        k: type_mappings.get(k, str)(v)
+        for k, v in params.items()
+    }
     return (Protocol.parse(service), params)
-    
+
 
 cdef class Sender:
     """
@@ -1596,40 +1618,33 @@ cdef class Sender:
     cdef size_t _init_capacity
     cdef size_t _max_name_len
 
-    def __cinit__(
+    cdef void_int _set_sender_fields(
             self,
-            object protocol,
-            str host,
-            object port,
-            *,
-            str bind_interface=None,
-            str username=None,
-            str password=None,
-            str token=None,
-            str token_x=None,
-            str token_y=None,
-            object auth_timeout=None,  # default: 15000 milliseconds
-            object tls_verify=None,  # default: True
-            object tls_ca=None,  # default: TlsCa.WebpkiRoots
-            object tls_roots=None,
-            object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
-            object retry_timeout=None,  # default: 10000 milliseconds
-            object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
-            object request_timeout=None,
-
-            uint64_t init_capacity=65536,  # 64KiB
-            uint64_t max_name_len=127,
-            object auto_flush=None,  # Default True
-            object auto_flush_rows=None,  # Default 75000
-            object auto_flush_bytes=None,  # Default off
-            object auto_flush_interval=None):  # Default 1000 milliseconds
-
+            qdb_pystr_buf* b,
+            str bind_interface,
+            str username,
+            str password,
+            str token,
+            str token_x,
+            str token_y,
+            object auth_timeout,
+            object tls_verify,
+            object tls_ca,
+            object tls_roots,
+            object max_buf_size,
+            object retry_timeout,
+            object request_min_throughput,
+            object request_timeout,
+            object auto_flush,
+            object auto_flush_rows,
+            object auto_flush_bytes,
+            object auto_flush_interval,
+            object init_capacity,
+            object max_name_len) except -1:
+        """
+        Set optional parameters for the sender.
+        """
         cdef line_sender_error* err = NULL
-        cdef line_sender_utf8 c_host
-
-        cdef str port_str
-        cdef line_sender_protocol c_protocol
-        cdef line_sender_utf8 c_port
         cdef line_sender_utf8 c_bind_interface
         cdef line_sender_utf8 c_username
         cdef line_sender_utf8 c_password
@@ -1644,33 +1659,6 @@ cdef class Sender:
         cdef uint64_t c_retry_timeout
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
-        cdef qdb_pystr_buf* b
-
-        self._opts = NULL
-        self._impl = NULL
-
-        self._init_capacity = init_capacity
-        self._max_name_len = max_name_len
-
-        self._buffer = Buffer(
-            init_capacity=init_capacity,
-            max_name_len=max_name_len)
-
-        b = self._buffer._b
-
-        c_protocol = Protocol.parse(protocol).value
-
-        if PyLong_CheckExact(<PyObject*>port):
-            port_str = str(port)
-        elif PyUnicode_CheckExact(<PyObject*>port):
-            port_str = port
-        else:
-            raise TypeError(
-                f'port must be an int or a str, not {_fqn(type(port))}')
-
-        str_to_utf8(b, <PyObject*>host, &c_host)
-        str_to_utf8(b, <PyObject*>port_str, &c_port)
-        self._opts = line_sender_opts_new_service(c_protocol, c_host, c_port)
 
         if bind_interface is not None:
             str_to_utf8(b, <PyObject*>bind_interface, &c_bind_interface)
@@ -1703,7 +1691,7 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if auth_timeout is not None:
-            c_auth_timeout = auth_timeout
+            c_auth_timeout = auth_timeout  # TODO: support timedelta
             if not line_sender_opts_auth_timeout(self._opts, c_auth_timeout, &err):
                 raise c_err_to_py(err)
 
@@ -1720,7 +1708,7 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if tls_ca is not None:
-            c_tls_ca = TlsCa.parse(tls_ca).value
+            c_tls_ca = TlsCa.parse(tls_ca).c_value
             if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
                 raise c_err_to_py(err)
 
@@ -1734,7 +1722,7 @@ cdef class Sender:
             c_max_buf_size = max_buf_size
             if not line_sender_opts_max_buf_size(self._opts, c_max_buf_size, &err):
                 raise c_err_to_py(err)
-    
+
         if retry_timeout is not None:
             if isinstance(retry_timeout, int):
                 c_retry_timeout = retry_timeout
@@ -1767,16 +1755,259 @@ cdef class Sender:
                 raise TypeError(
                     '"request_timeout" must be an int or a timedelta, '
                     f'not {_fqn(type(request_timeout))}')
-    
+
         _parse_auto_flush(
             auto_flush,
             auto_flush_rows,
             auto_flush_bytes,
             auto_flush_interval,
             &self._auto_flush_mode)
+
+        self._init_capacity = init_capacity or 65536
+        self._max_name_len = max_name_len or 127
+        self._buffer = Buffer(
+            init_capacity=self._init_capacity,
+            max_name_len=self._max_name_len)
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
-        qdb_pystr_buf_clear(b)
+    def __cinit__(self):
+        self._opts = NULL
+        self._impl = NULL
+        self._buffer = None
+        self._auto_flush_mode.enabled = False
+        self._last_flush_ms = NULL
+        self._init_capacity = 0
+        self._max_name_len = 0
+
+    def __init__(
+            self,
+            object protocol,
+            str host,
+            object port,
+            *,
+            str bind_interface=None,
+            str username=None,
+            str password=None,
+            str token=None,
+            str token_x=None,
+            str token_y=None,
+            object auth_timeout=None,  # default: 15000 milliseconds
+            object tls_verify=None,  # default: True
+            object tls_ca=None,  # default: TlsCa.WebpkiRoots
+            object tls_roots=None,
+            object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
+            object retry_timeout=None,  # default: 10000 milliseconds
+            object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
+            object request_timeout=None,
+            object auto_flush=None,  # Default True
+            object auto_flush_rows=None,  # Default 75000
+            object auto_flush_bytes=None,  # Default off
+            object auto_flush_interval=None,  # Default 1000 milliseconds
+            object init_capacity=None,  # 64KiB
+            object max_name_len=None):  # 127
+
+        cdef line_sender_utf8 c_host
+        cdef str port_str
+        cdef line_sender_protocol c_protocol
+        cdef line_sender_utf8 c_port
+        cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        try:
+            c_protocol = Protocol.parse(protocol).c_value
+            if PyLong_CheckExact(<PyObject*>port):
+                port_str = str(port)
+            elif PyUnicode_CheckExact(<PyObject*>port):
+                port_str = port
+            else:
+                raise TypeError(
+                    f'port must be an int or a str, not {_fqn(type(port))}')
+            str_to_utf8(b, <PyObject*>host, &c_host)
+            str_to_utf8(b, <PyObject*>port_str, &c_port)
+            self._opts = line_sender_opts_new_service(c_protocol, c_host, c_port)
+
+            self._set_sender_fields(
+                b,
+                bind_interface,
+                username,
+                password,
+                token,
+                token_x,
+                token_y,
+                auth_timeout,
+                tls_verify,
+                tls_ca,
+                tls_roots,
+                max_buf_size,
+                retry_timeout,
+                request_min_throughput,
+                request_timeout,
+                auto_flush,
+                auto_flush_rows,
+                auto_flush_bytes,
+                auto_flush_interval,
+                init_capacity,
+                max_name_len)
+        finally:
+            qdb_pystr_buf_free(b)
+
+    @staticmethod
+    def from_conf(
+            str conf_str,
+            *,
+            str bind_interface=None,
+            str username=None,
+            str password=None,
+            str token=None,
+            str token_x=None,
+            str token_y=None,
+            object auth_timeout=None,  # default: 15000 milliseconds
+            object tls_verify=None,  # default: True
+            object tls_ca=None,  # default: TlsCa.WebpkiRoots
+            object tls_roots=None,
+            object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
+            object retry_timeout=None,  # default: 10000 milliseconds
+            object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
+            object request_timeout=None,
+            object auto_flush=None,  # Default True
+            object auto_flush_rows=None,  # Default 75000
+            object auto_flush_bytes=None,  # Default off
+            object auto_flush_interval=None,  # Default 1000 milliseconds
+            object init_capacity=None,  # 64KiB
+            object max_name_len=None):  # 127
+
+        cdef line_sender_error* err = NULL
+        cdef object protocol
+        cdef Sender sender
+        cdef str synthetic_conf_str
+        cdef line_sender_utf8 c_synthetic_conf_str
+        cdef dict params
+        cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        try:
+            protocol, params = parse_conf_str(b, conf_str)
+
+            addr = params.get('addr')
+            if addr is None:
+                raise IngressError(
+                    IngressErrorCode.ConfigError,
+                    'Missing "addr" parameter in config string')
+
+            # add fields to the dictionary, so long as they aren't already
+            # present in the params dictionary
+            for override_key, override_value in {
+                'bind_interface': bind_interface,
+                'username': username,
+                'password': password,
+                'token': token,
+                'token_x': token_x,
+                'token_y': token_y,
+                'auth_timeout': auth_timeout,
+                'tls_verify': tls_verify,
+                'tls_ca': tls_ca,
+                'tls_roots': tls_roots,
+                'max_buf_size': max_buf_size,
+                'retry_timeout': retry_timeout,
+                'request_min_throughput': request_min_throughput,
+                'request_timeout': request_timeout,
+                'auto_flush': auto_flush,
+                'auto_flush_rows': auto_flush_rows,
+                'auto_flush_bytes': auto_flush_bytes,
+                'auto_flush_interval': auto_flush_interval,
+                'init_capacity': init_capacity,
+                'max_name_len': max_name_len
+            }.items():
+                if override_value is None:
+                    continue
+                if override_key in params:
+                    raise ValueError(
+                        f'"{override_key}" is already present in the conf_str '
+                        'and cannot be overridden.')
+                params[override_key] = override_value
+
+            sender = Sender.__new__(Sender)
+
+            # Forward only the `addr=` parameter to the C API.
+            synthetic_conf_str = f'{protocol.tag}::addr={addr};'
+            str_to_utf8(b, <PyObject*>synthetic_conf_str, &c_synthetic_conf_str)
+            sender._opts = line_sender_opts_from_conf(
+                c_synthetic_conf_str, &err)
+
+            sender._set_sender_fields(
+                b,
+                params.get('bind_interface'),
+                params.get('username'),
+                params.get('password'),
+                params.get('token'),
+                params.get('token_x'),
+                params.get('token_y'),
+                params.get('auth_timeout'),
+                params.get('tls_verify'),
+                params.get('tls_ca'),
+                params.get('tls_roots'),
+                params.get('max_buf_size'),
+                params.get('retry_timeout'),
+                params.get('request_min_throughput'),
+                params.get('request_timeout'),
+                params.get('auto_flush'),
+                params.get('auto_flush_rows'),
+                params.get('auto_flush_bytes'),
+                params.get('auto_flush_interval'),
+                params.get('init_capacity'),
+                params.get('max_name_len'))
+            
+            return sender
+        finally:
+            qdb_pystr_buf_free(b)
+
+    @staticmethod
+    def from_env(
+            *,
+            str bind_interface=None,
+            str username=None,
+            str password=None,
+            str token=None,
+            str token_x=None,
+            str token_y=None,
+            object auth_timeout=None,  # default: 15000 milliseconds
+            object tls_verify=None,  # default: True
+            object tls_ca=None,  # default: TlsCa.WebpkiRoots
+            object tls_roots=None,
+            object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
+            object retry_timeout=None,  # default: 10000 milliseconds
+            object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
+            object request_timeout=None,
+            object auto_flush=None,  # Default True
+            object auto_flush_rows=None,  # Default 75000
+            object auto_flush_bytes=None,  # Default off
+            object auto_flush_interval=None,  # Default 1000 milliseconds
+            object init_capacity=None,  # 64KiB
+            object max_name_len=None):  # 127
+        cdef str conf_str = os.environ.get('QDB_CLIENT_CONF')
+        if conf_str is None:
+            raise IngressError(
+                IngressErrorCode.ConfigError,
+                'Environment variable QDB_CLIENT_CONF is not set.')
+        return Sender.from_conf(
+            conf_str,
+            bind_interface=bind_interface,
+            username=username,
+            password=password,
+            token=token,
+            token_x=token_x,
+            token_y=token_y,
+            auth_timeout=auth_timeout,
+            tls_verify=tls_verify,
+            tls_ca=tls_ca,
+            tls_roots=tls_roots,
+            max_buf_size=max_buf_size,
+            retry_timeout=retry_timeout,
+            request_min_throughput=request_min_throughput,
+            request_timeout=request_timeout,
+            auto_flush=auto_flush,
+            auto_flush_rows=auto_flush_rows,
+            auto_flush_bytes=auto_flush_bytes,
+            auto_flush_interval=auto_flush_interval,
+            init_capacity=init_capacity,
+            max_name_len=max_name_len)
+
 
     def new_buffer(self):
         """
