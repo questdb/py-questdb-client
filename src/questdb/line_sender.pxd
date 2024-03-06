@@ -413,3 +413,11 @@ cdef extern from "questdb/ingress/line_sender.h":
 
     int64_t line_sender_now_micros(
         ) noexcept nogil
+
+
+    # Extra private API, not exposed in header
+    bint line_sender_opts_user_agent(
+        line_sender_opts* opts,
+        line_sender_utf8 user_agent,
+        line_sender_error** err_out
+        ) noexcept nogil

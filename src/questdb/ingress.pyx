@@ -30,6 +30,18 @@
 API for fast data ingestion into QuestDB.
 """
 
+__all__ = [
+    'Buffer',
+    'IngressError',
+    'IngressErrorCode',
+    'Protocol',
+    'Sender',
+    'ServerTimestamp',
+    'TimestampMicros',
+    'TimestampNanos',
+    'TlsCa',
+]
+
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
 from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
     INT64_MAX, INT64_MIN
@@ -69,6 +81,12 @@ import pathlib
 
 import sys
 import os
+
+
+# This value is automatically updated by the `bump2version` tool.
+# If you need to update it, also update the search definition in
+# .bumpversion.cfg. - N.B. the double quotes are INTENTIONAL.
+VERSION = "1.2.0"
 
 
 cdef bint _has_gil(PyThreadState** gs):
@@ -1216,7 +1234,7 @@ cdef class Buffer:
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
-    'v1.2.0'
+    'v' + VERSION +
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
@@ -1647,6 +1665,8 @@ cdef class Sender:
         Set optional parameters for the sender.
         """
         cdef line_sender_error* err = NULL
+        cdef str user_agent = 'questdb/python/' + VERSION
+        cdef line_sender_utf8 c_user_agent
         cdef line_sender_utf8 c_bind_interface
         cdef line_sender_utf8 c_username
         cdef line_sender_utf8 c_password
@@ -1661,6 +1681,11 @@ cdef class Sender:
         cdef uint64_t c_retry_timeout
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
+
+        # It's OK to override this setting.
+        str_to_utf8(b, <PyObject*>user_agent, &c_user_agent)
+        if not line_sender_opts_user_agent(self._opts, c_user_agent, &err):
+            raise c_err_to_py(err)
 
         if bind_interface is not None:
             str_to_utf8(b, <PyObject*>bind_interface, &c_bind_interface)
@@ -1821,7 +1846,8 @@ cdef class Sender:
         cdef line_sender_utf8 c_port
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         try:
-            c_protocol = Protocol.parse(protocol).c_value
+            protocol = Protocol.parse(protocol)
+            c_protocol = protocol.c_value
             if PyLong_CheckExact(<PyObject*>port):
                 port_str = str(port)
             elif PyUnicode_CheckExact(<PyObject*>port):
