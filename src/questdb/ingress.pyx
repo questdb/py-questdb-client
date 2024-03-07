@@ -2252,6 +2252,7 @@ cdef class Sender:
         Refer to the :func:`Buffer.row` documentation for details on arguments.
         """
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
+        return self
 
     def dataframe(
             self,
@@ -2315,6 +2316,7 @@ cdef class Sender:
             table_name_col,
             symbols,
             at)
+        return self
 
     cpdef flush(
             self,

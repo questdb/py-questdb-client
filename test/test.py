@@ -652,9 +652,38 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
                 self.assertIs(txn.row(symbols={'sym2': 'val2'}, at=ts), txn)
-            self.assertEqual(len(server.requests), 1)
+            self.assertEqual(len(server.requests), 1)  # TODO: Wait!
             self.assertEqual(server.requests[0], expected)
 
+    def test_transactions_over_http_no_auto_flush(self):
+        ts = qi.TimestampNanos.now()
+        expected = (
+            f'table_name,sym1=val1 {ts.value}\n' +
+            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+            with sender.transaction('table_name') as txn:
+                txn.row(symbols={'sym1': 'val1'}, at=ts)
+                txn.row(symbols={'sym2': 'val2'}, at=ts)
+            self.assertEqual(len(server.requests), 1)  # TODO: Wait!
+            self.assertEqual(server.requests[0], expected)
+
+    def test_transactions_over_http_auto_flush_pending_buf(self):
+        ts = qi.TimestampNanos.now()
+        expected1 = (
+            f'tbl1,sym1=val1 {ts.value}\n' +
+            f'tbl1,sym2=val2 {ts.value}\n').encode('utf-8')
+        expected2 = (
+            f'tbl2,sym3=val3 {ts.value}\n' +
+            f'tbl2,sym4=val4 {ts.value}\n').encode('utf-8')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=True) as sender:
+            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+            self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
+            with sender.transaction('tbl2') as txn:
+                txn.row(symbols={'sym3': 'val3'}, at=ts)
+                txn.row(symbols={'sym4': 'val4'}, at=ts)
+            self.assertEqual(len(server.requests), 2)  # TODO: Wait!
+            self.assertEqual(server.requests[0], expected1)
+            self.assertEqual(server.requests[1], expected2)
 
 class TestBases:
     class Timestamp(unittest.TestCase):
