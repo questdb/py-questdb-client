@@ -10,7 +10,7 @@ from enum import Enum
 import random
 
 import patch_path
-from mock_server import Server
+from mock_server import Server, HttpServer
 
 
 import questdb.ingress as qi
@@ -221,6 +221,17 @@ class ParametrizedTest(type):
 
     """
     def __new__(cls, name, bases, dict):
+        def make_test_wrapper(param, original_test):
+            def test_wrapper(self):
+                for param_name, param_value in param.items():
+                    setattr(self, param_name, param_value)
+                try:
+                    return original_test(self)
+                finally:
+                    for key in param:
+                        delattr(self, key)
+            return test_wrapper
+        
         params = dict.get('TEST_PARAMETERS')
         to_add = []
         to_scrub = []
@@ -228,14 +239,7 @@ class ParametrizedTest(type):
             if key.startswith('test') and callable(value):
                 to_scrub.append(key)
                 for param in params:
-                    def test_wrapper(self):
-                        for param_name, param_value in param.items():
-                            setattr(self, param_name, param_value)
-                        try:
-                            return value(self)
-                        finally:
-                            for key in param:
-                                delattr(self, key)
+                    test_wrapper = make_test_wrapper(param, value)
                     name = param['name']
                     name_suffix = key[len('test'):]
                     test_wrapper.__name__ = f'test_{name}{name_suffix}'
@@ -629,6 +633,27 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
 
         with self.assertRaises(OverflowError):
             self.builder(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
+
+    def test_transactions_over_tcp(self):
+        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+            server.accept()
+            self.assertRaisesRegex(
+                qi.IngressError,
+                ('Transactions aren\'t supported for ILP/TCP,' +
+                 ' use ILP/HTTP instead.'),
+                sender.transaction, 'table_name')
+
+    def test_transactions_over_http(self):
+        ts = qi.TimestampNanos.now()
+        expected = (
+            f'table_name,sym1=val1 {ts.value}\n' +
+            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+            with sender.transaction('table_name') as txn:
+                self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
+                self.assertIs(txn.row(symbols={'sym2': 'val2'}, at=ts), txn)
+            self.assertEqual(len(server.requests), 1)
+            self.assertEqual(server.requests[0], expected)
 
 
 class TestBases:

@@ -621,7 +621,7 @@ cdef class SenderTransaction:
 
         This will flush the buffer.
         """
-        self._sender.flush()
+        self._sender.flush(transactional=True)
 
     def rollback(self):
         """
@@ -2316,7 +2316,11 @@ cdef class Sender:
             symbols,
             at)
 
-    cpdef flush(self, Buffer buffer=None, bint clear=True):
+    cpdef flush(
+            self,
+            Buffer buffer=None,
+            bint clear=True,
+            bint transactional=False):
         """
         If called with no arguments, immediately flushes the internal buffer.
 
@@ -2335,6 +2339,11 @@ cdef class Sender:
             If ``False``, the flushed buffer is left in the internal buffer.
             Note that ``clear=False`` is only supported if ``buffer`` is also
             specified.
+
+        :param transactional: If ``True`` ensures that the flushed buffer
+            contains row for a single table, ensuring all data can be written
+            transactionally. This feature requires ILP/HTTP and is not available
+            when connecting over TCP. *Default: False.*
 
         The Python GIL is released during the network IO operation.
         """
@@ -2360,7 +2369,15 @@ cdef class Sender:
 
         # We might be blocking on IO, so temporarily release the GIL.
         _ensure_doesnt_have_gil(&gs)
-        if clear:
+        if transactional:
+            ok = line_sender_flush_and_keep_with_flags(
+                    sender,
+                    c_buf,
+                    transactional,
+                    &err)
+            if ok and clear:
+                line_sender_buffer_clear(c_buf)
+        elif clear:
             ok = line_sender_flush(sender, c_buf, &err)
         else:
             ok = line_sender_flush_and_keep(sender, c_buf, &err)

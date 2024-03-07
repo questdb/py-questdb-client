@@ -1,6 +1,8 @@
 import socket
 import select
 import re
+import http.server as hs
+import threading
 
 
 NON_ESCAPED_NEW_LINE_RE = re.compile(rb'(?<!\\)\n')
@@ -57,3 +59,44 @@ class Server:
 
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
         self.close()
+
+class HttpServer:
+    def __init__(self):
+        requests = []
+        self.requests = requests
+        self._ready_event = None
+        self._stop_event = None
+        self._http_server = None
+        self._http_server_thread = None
+
+    def _serve(self):
+        self._http_server.serve_forever()
+        self._stop_event.set()
+    
+    def __enter__(self):
+        requests = self.requests
+        class IlpHttpHandler(hs.BaseHTTPRequestHandler):
+            def do_POST(self):
+                content_length = int(self.headers['Content-Length'])
+                body = self.rfile.read(content_length)
+                requests.append(body)
+                self.send_response(200)
+                self.end_headers()
+
+        self._stop_event = threading.Event()
+        self._http_server = hs.HTTPServer(
+            ('', 0),
+            IlpHttpHandler,
+            bind_and_activate=True)
+        self._http_server_thread = threading.Thread(target=self._serve)
+        self._http_server_thread.start()
+        return self
+    
+    def __exit__(self, _ex_type, _ex_value, _ex_tb):
+        self._http_server.shutdown()
+        self._http_server.server_close()
+        self._stop_event.set()
+
+    @property
+    def port(self):
+        return self._http_server.server_port
