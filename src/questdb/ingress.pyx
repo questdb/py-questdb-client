@@ -531,6 +531,109 @@ cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
         sender.flush(buffer)
 
 
+cdef bint _is_tcp_protocol(line_sender_protocol protocol):
+    return (
+        (protocol == line_sender_protocol_tcp) or
+        (protocol == line_sender_protocol_tcps))
+
+
+cdef class SenderTransaction:
+    cdef Sender _sender
+    cdef str _table_name
+
+    def __cinit__(self, Sender sender, str table_name):
+        if _is_tcp_protocol(sender._c_protocol):
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "Transactions aren't supported for ILP/TCP, " +
+                "use ILP/HTTP instead.")
+        self._sender = sender
+        self._table_name = table_name
+
+    def __enter__(self):
+        if len(self._sender._buffer):
+            if self._sender._auto_flush_mode.enabled:
+                self._sender.flush()
+            else:
+                raise IngressError(
+                    IngressErrorCode.InvalidApiCall,
+                    'Sender buffer must be clear when starting a ' +
+                    'transaction. You must call `.flush()` before this call.')
+        return self
+
+    def __exit__(self, exc_type, _exc_value, _traceback):
+        if exc_type is not None:
+            self.rollback()
+            return False
+        if len(self._sender._buffer):
+            self.commit()
+        return True
+
+    def row(
+            self,
+            *,
+            symbols: Optional[Dict[str, Optional[str]]]=None,
+            columns: Optional[Dict[
+                str,
+                Union[None, bool, int, float, str, TimestampMicros, datetime]]
+                ]=None,
+            at: Union[ServerTimestamp, TimestampNanos, datetime]):
+        """
+        Write a row for the table in the transaction.
+
+        The table name is taken from the transaction.
+        """
+        self._sender._buffer._row(
+            False,  # allow_auto_flush
+            self._table_name,
+            symbols=symbols,
+            columns=columns,
+            at=at)
+        return self
+
+    def dataframe(
+            self,
+            df,  # : pd.DataFrame
+            *,
+            symbols: Union[str, bool, List[int], List[str]] = 'auto',
+            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
+        """
+        Write a dataframe for the table in the transaction.
+
+        The table name is taken from the transaction.
+        """
+        _dataframe(
+            auto_flush_blank(),
+            self._sender._buffer._impl,
+            self._sender._buffer._b,
+            df,
+            self._table_name,
+            None, # table_name_col,
+            symbols,
+            at)
+        return self
+
+    def commit(self):
+        """
+        Commit the transaction.
+        
+        A commit is also automatic at the end of a successful `with` block.
+
+        This will flush the buffer.
+        """
+        self._sender.flush()
+
+    def rollback(self):
+        """
+        Roll back the transaction.
+
+        A rollback is also automatic at the end of a failed `with` block.
+
+        This will clear the buffer.
+        """
+        self._sender._buffer.clear()
+
+
 cdef class Buffer:
     """
     Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
@@ -823,6 +926,7 @@ cdef class Buffer:
 
     cdef void_int _row(
             self,
+            bint allow_auto_flush,
             str table_name,
             dict symbols=None,
             dict columns=None,
@@ -852,7 +956,7 @@ cdef class Buffer:
         except:
             self._rewind_to_marker()
             raise
-        if wrote_fields:
+        if wrote_fields and allow_auto_flush:
             self._may_trigger_row_complete()
 
     def row(
@@ -950,7 +1054,12 @@ cdef class Buffer:
             nanoseconds. A nanosecond unix epoch timestamp can be passed
             explicitly as a ``TimestampNanos`` object.
         """
-        self._row(table_name, symbols, columns, at)
+        self._row(
+            True,  # allow_auto_flush
+            table_name,
+            symbols,
+            columns,
+            at)
         return self
 
     def dataframe(
@@ -1231,6 +1340,7 @@ cdef class Buffer:
             table_name_col,
             symbols,
             at)
+        return self
 
 
 _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
@@ -1630,6 +1740,7 @@ cdef class Sender:
     # This avoids a circular reference that requires the GC to clean up.
     cdef object __weakref__
 
+    cdef line_sender_protocol _c_protocol
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
@@ -1641,6 +1752,7 @@ cdef class Sender:
     cdef void_int _set_sender_fields(
             self,
             qdb_pystr_buf* b,
+            object protocol,
             str bind_interface,
             str username,
             str password,
@@ -1681,6 +1793,8 @@ cdef class Sender:
         cdef uint64_t c_retry_timeout
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
+
+        self._c_protocol = protocol.c_value
 
         # It's OK to override this setting.
         str_to_utf8(b, <PyObject*>user_agent, &c_user_agent)
@@ -1805,6 +1919,7 @@ cdef class Sender:
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
     def __cinit__(self):
+        self._c_protocol = line_sender_protocol_tcp
         self._opts = NULL
         self._impl = NULL
         self._buffer = None
@@ -1861,6 +1976,7 @@ cdef class Sender:
 
             self._set_sender_fields(
                 b,
+                protocol,
                 bind_interface,
                 username,
                 password,
@@ -1967,6 +2083,7 @@ cdef class Sender:
 
             sender._set_sender_fields(
                 b,
+                protocol,
                 params.get('bind_interface'),
                 params.get('username'),
                 params.get('password'),
@@ -2115,6 +2232,9 @@ cdef class Sender:
         """
         return len(self._buffer)
 
+    def transaction(self, table_name: str):
+        return SenderTransaction(self, table_name)
+
     def row(self,
             table_name: str,
             *,
@@ -2252,7 +2372,11 @@ cdef class Sender:
                 # entered an error state following a failed call to `.flush()`.
                 # Note: In this case `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
-            raise c_err_to_py_fmt(err, _FLUSH_FMT)
+            if _is_tcp_protocol(self._c_protocol):
+                # Provide further context pointing to the logs.
+                raise c_err_to_py_fmt(err, _FLUSH_FMT)
+            else:
+                raise c_err_to_py(err)
 
     cdef _close(self):
         self._buffer = None
