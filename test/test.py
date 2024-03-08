@@ -10,7 +10,11 @@ from enum import Enum
 import random
 
 import patch_path
+PROJ_ROOT = patch_path.PROJ_ROOT
+sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
+
 from mock_server import Server, HttpServer
+from fixture import retry
 
 
 import questdb.ingress as qi
@@ -634,7 +638,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
         with self.assertRaises(OverflowError):
             self.builder(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
 
-    def test_transactions_over_tcp(self):
+    def test_transaction_over_tcp(self):
         with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
             server.accept()
             self.assertRaisesRegex(
@@ -643,7 +647,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
                  ' use ILP/HTTP instead.'),
                 sender.transaction, 'table_name')
 
-    def test_transactions_over_http(self):
+    def test_transaction_basic(self):
         ts = qi.TimestampNanos.now()
         expected = (
             f'table_name,sym1=val1 {ts.value}\n' +
@@ -652,10 +656,10 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
                 self.assertIs(txn.row(symbols={'sym2': 'val2'}, at=ts), txn)
-            self.assertEqual(len(server.requests), 1)  # TODO: Wait!
+            retry(lambda: len(server.requests) == 1)
             self.assertEqual(server.requests[0], expected)
 
-    def test_transactions_over_http_no_auto_flush(self):
+    def test_transaction_no_auto_flush(self):
         ts = qi.TimestampNanos.now()
         expected = (
             f'table_name,sym1=val1 {ts.value}\n' +
@@ -664,10 +668,10 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 txn.row(symbols={'sym1': 'val1'}, at=ts)
                 txn.row(symbols={'sym2': 'val2'}, at=ts)
-            self.assertEqual(len(server.requests), 1)  # TODO: Wait!
+            retry(lambda: len(server.requests) == 1)
             self.assertEqual(server.requests[0], expected)
 
-    def test_transactions_over_http_auto_flush_pending_buf(self):
+    def test_transaction_auto_flush_pending_buf(self):
         ts = qi.TimestampNanos.now()
         expected1 = (
             f'tbl1,sym1=val1 {ts.value}\n' +
@@ -681,9 +685,63 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('tbl2') as txn:
                 txn.row(symbols={'sym3': 'val3'}, at=ts)
                 txn.row(symbols={'sym4': 'val4'}, at=ts)
-            self.assertEqual(len(server.requests), 2)  # TODO: Wait!
+            retry(lambda: len(server.requests) == 2)
             self.assertEqual(server.requests[0], expected1)
             self.assertEqual(server.requests[1], expected2)
+
+    def test_transaction_no_auto_flush_pending_buf(self):
+        ts = qi.TimestampNanos.now()
+        exp_err = (
+            'Sender buffer must be clear when starting a transaction. ' +
+            'You must call ..flush... before this call.')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+            self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
+            with self.assertRaisesRegex(qi.IngressError, exp_err):
+                with sender.transaction('tbl2') as _txn:
+                    pass
+
+    def test_transaction_immediate_auto_flush(self):
+        ts = qi.TimestampNanos.now()
+        expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
+        expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
+        expected3 = (
+            f'tbl3,sym3=val3 {ts.value}\n' +
+            f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+            self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
+            with sender.transaction('tbl3') as txn:
+                # The transaction is not broken up by the auto-flush logic.
+                txn.row(symbols={'sym3': 'val3'}, at=ts)
+                txn.row(symbols={'sym4': 'val4'}, at=ts)
+            retry(lambda: len(server.requests) == 3)
+            self.assertEqual(server.requests[0], expected1)
+            self.assertEqual(server.requests[1], expected2)
+            self.assertEqual(server.requests[2], expected3)
+
+    # def test_auto_flush_rows(self):
+    #     auto_flush_rows = 3
+    #     ts = qi.TimestampNanos.now()
+    #     expected = []
+    #     with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=auto_flush_rows) as sender:
+    #         for i in range(10):
+    #             sender.row('tbl1', symbols={'sym1': f'val{i}'}, at=ts)
+    #             expected.append(f'tbl1,sym1=val{i} {ts.value}\n'.encode('utf-8'))
+
+    #         expected = [
+    #             expected[i:i + auto_flush_rows]
+    #             for i in range(0, len(expected), auto_flush_rows)]
+            
+    #         # Before the end of the `with` block we should already have 3 requests.
+    #         retry(lambda: len(server.requests) == 3)
+    #         from pprint import pprint
+    #         pprint(dict(actual=server.requests, expected=expected[:3]))
+    #         self.assertEqual(server.requests, expected[:3])
+
+    #     # Closing the buffer should flush the last remaining row.
+    #     retry(lambda: len(server.requests) == 3)
+    #     self.assertEqual(server.requests, expected)
 
 class TestBases:
     class Timestamp(unittest.TestCase):
