@@ -720,28 +720,27 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             self.assertEqual(server.requests[1], expected2)
             self.assertEqual(server.requests[2], expected3)
 
-    # def test_auto_flush_rows(self):
-    #     auto_flush_rows = 3
-    #     ts = qi.TimestampNanos.now()
-    #     expected = []
-    #     with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=auto_flush_rows) as sender:
-    #         for i in range(10):
-    #             sender.row('tbl1', symbols={'sym1': f'val{i}'}, at=ts)
-    #             expected.append(f'tbl1,sym1=val{i} {ts.value}\n'.encode('utf-8'))
+    def test_auto_flush_rows(self):
+        auto_flush_rows = 3
 
-    #         expected = [
-    #             expected[i:i + auto_flush_rows]
-    #             for i in range(0, len(expected), auto_flush_rows)]
+        def into_requests(xs):
+            return [
+                b''.join(xs[i:i + auto_flush_rows])
+                for i in range(0, len(xs), auto_flush_rows)]
+        
+        expected = []
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=auto_flush_rows) as sender:
+            for i in range(10):
+                sender.row('tbl1', columns={'x': i}, at=qi.ServerTimestamp)
+                expected.append(f'tbl1 x={i}i\n'.encode('utf-8'))
             
-    #         # Before the end of the `with` block we should already have 3 requests.
-    #         retry(lambda: len(server.requests) == 3)
-    #         from pprint import pprint
-    #         pprint(dict(actual=server.requests, expected=expected[:3]))
-    #         self.assertEqual(server.requests, expected[:3])
+            # Before the end of the `with` block we should already have 3 requests.
+            retry(lambda: len(server.requests) == 3)
+            self.assertEqual(server.requests, into_requests(expected)[:3])
 
-    #     # Closing the buffer should flush the last remaining row.
-    #     retry(lambda: len(server.requests) == 3)
-    #     self.assertEqual(server.requests, expected)
+        # Closing the buffer should flush the last remaining row.
+        retry(lambda: len(server.requests) == 4)
+        self.assertEqual(server.requests, into_requests(expected))
 
 class TestBases:
     class Timestamp(unittest.TestCase):
