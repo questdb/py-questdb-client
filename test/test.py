@@ -337,7 +337,12 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
     ]
 
     def test_basic(self):
-        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+        with Server() as server, \
+                self.builder(
+                    'tcp',
+                    'localhost',
+                    server.port,
+                    bind_interface='0.0.0.0') as sender:
             server.accept()
             self.assertEqual(server.recv(), [])
             sender.row(
@@ -754,6 +759,22 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
                 if slept_ms >= 110:  # 10ms grace period.
                     break
             retry(lambda: len(server.requests) == 1)
+
+    def test_http_username_password(self):
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user', password='pass') as sender:
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+        retry(lambda: len(server.requests) == 1)
+        self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
+        self.assertEqual(server.headers[0]['Authorization'], 'Basic dXNlcjpwYXNz')
+
+
+    def test_http_token(self):
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, token='Yogi') as sender:
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+        retry(lambda: len(server.requests) == 1)
+        self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
+        self.assertEqual(server.headers[0]['Authorization'], 'Bearer Yogi')
+
 
 class TestBases:
     class Timestamp(unittest.TestCase):

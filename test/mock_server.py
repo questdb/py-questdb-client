@@ -3,6 +3,7 @@ import select
 import re
 import http.server as hs
 import threading
+import copy
 
 
 NON_ESCAPED_NEW_LINE_RE = re.compile(rb'(?<!\\)\n')
@@ -62,8 +63,8 @@ class Server:
 
 class HttpServer:
     def __init__(self):
-        requests = []
-        self.requests = requests
+        self.requests = []
+        self.headers = []
         self._ready_event = None
         self._stop_event = None
         self._http_server = None
@@ -74,9 +75,13 @@ class HttpServer:
         self._stop_event.set()
     
     def __enter__(self):
+        headers = self.headers
         requests = self.requests
         class IlpHttpHandler(hs.BaseHTTPRequestHandler):
             def do_POST(self):
+                headers.append({
+                    key: value
+                    for key, value in self.headers.items()})
                 content_length = int(self.headers['Content-Length'])
                 body = self.rfile.read(content_length)
                 requests.append(body)

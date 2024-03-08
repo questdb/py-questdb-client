@@ -133,7 +133,7 @@ class TestWithDatabase(unittest.TestCase):
         self._test_scenario(self.qdb_plain, 'tcps', tls_roots=str(CA_PATH))
 
     def test_auth(self):
-        self._test_scenario(self.qdb_auth, 'tcp', **AUTH)
+        self._test_scenario(self.qdb_auth, 'tcp', **AUTH, auth_timeout=5000)
 
     def test_auth_tls_insecure_skip_verify(self):
         self._test_scenario(self.qdb_auth, 'tcps', tls_verify=False, **AUTH)
