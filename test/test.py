@@ -742,6 +742,19 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
         retry(lambda: len(server.requests) == 4)
         self.assertEqual(server.requests, into_requests(expected))
 
+    def test_auto_flush_interval(self):
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_interval=100) as sender:
+            slept_ms = 0
+            while True:
+                sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
+                time.sleep(0.01)
+                slept_ms += 10
+                if slept_ms < 100:
+                    self.assertEqual(len(server.requests), 0)
+                if slept_ms >= 110:  # 10ms grace period.
+                    break
+            retry(lambda: len(server.requests) == 1)
+
 class TestBases:
     class Timestamp(unittest.TestCase):
         def test_from_int(self):
