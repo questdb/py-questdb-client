@@ -671,7 +671,7 @@ cdef class Buffer:
 
 
     Buffer Constructor Arguments:
-      * ``init_capacity`` (``int``): Initial capacity of the buffer in bytes.
+      * ``init_buf_size`` (``int``): Initial capacity of the buffer in bytes.
         Defaults to ``65536`` (64KiB).
       * ``max_name_len`` (``int``): Maximum length of a column name.
         Defaults to ``127`` which is the same default value as QuestDB.
@@ -682,7 +682,7 @@ cdef class Buffer:
 
         # These two buffer constructions are equivalent.
         buf1 = Buffer()
-        buf2 = Buffer(init_capacity=65536, max_name_len=127)
+        buf2 = Buffer(init_buf_size=65536, max_name_len=127)
 
     To avoid having to manually set these arguments every time, you can call
     the sender's ``new_buffer()`` method instead.
@@ -692,31 +692,31 @@ cdef class Buffer:
         from questdb.ingress import Sender, Buffer
 
         sender = Sender(host='localhost', port=9009,
-            init_capacity=16384, max_name_len=64)
+            init_buf_size=16384, max_name_len=64)
         buf = sender.new_buffer()
-        assert buf.init_capacity == 16384
+        assert buf.init_buf_size == 16384
         assert buf.max_name_len == 64
 
     """
     cdef line_sender_buffer* _impl
     cdef qdb_pystr_buf* _b
-    cdef size_t _init_capacity
+    cdef size_t _init_buf_size
     cdef size_t _max_name_len
     cdef object _row_complete_sender
 
-    def __cinit__(self, init_capacity: int=65536, max_name_len: int=127):
+    def __cinit__(self, init_buf_size: int=65536, max_name_len: int=127):
         """
         Create a new buffer with the an initial capacity and max name length.
-        :param int init_capacity: Initial capacity of the buffer in bytes.
+        :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
-        self._cinit_impl(init_capacity, max_name_len)
+        self._cinit_impl(init_buf_size, max_name_len)
 
-    cdef inline _cinit_impl(self, size_t init_capacity, size_t max_name_len):
+    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(max_name_len)
         self._b = qdb_pystr_buf_new()
-        line_sender_buffer_reserve(self._impl, init_capacity)
-        self._init_capacity = init_capacity
+        line_sender_buffer_reserve(self._impl, init_buf_size)
+        self._init_buf_size = init_buf_size
         self._max_name_len = max_name_len
         self._row_complete_sender = None
 
@@ -726,13 +726,13 @@ cdef class Buffer:
         line_sender_buffer_free(self._impl)
 
     @property
-    def init_capacity(self) -> int:
+    def init_buf_size(self) -> int:
         """
         The initial capacity of the buffer when first created.
 
         This may grow over time, see ``capacity()``.
         """
-        return self._init_capacity
+        return self._init_buf_size
 
     @property
     def max_name_len(self) -> int:
@@ -1545,7 +1545,7 @@ cdef object parse_conf_str(
         'auto_flush_rows': int,
         'auto_flush_bytes': int,
         'auto_flush_interval': int,
-        'init_capacity': int,
+        'init_buf_size': int,
         'max_name_len': int,
     }
     params = {
@@ -1694,7 +1694,7 @@ cdef class Sender:
       during the TLS handshake or authentication process.
       This field is expressed in milliseconds. The default is 15 seconds.
 
-    * ``init_capacity`` (``int``): Initial buffer capacity of the internal buffer.
+    * ``init_buf_size`` (``int``): Initial buffer capacity of the internal buffer.
       *Default: 65536 (64KiB).*
       *See Buffer's constructor for more details.*
 
@@ -1746,7 +1746,7 @@ cdef class Sender:
     cdef Buffer _buffer
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
-    cdef size_t _init_capacity
+    cdef size_t _init_buf_size
     cdef size_t _max_name_len
 
     cdef void_int _set_sender_fields(
@@ -1771,7 +1771,7 @@ cdef class Sender:
             object auto_flush_rows,
             object auto_flush_bytes,
             object auto_flush_interval,
-            object init_capacity,
+            object init_buf_size,
             object max_name_len) except -1:
         """
         Set optional parameters for the sender.
@@ -1911,10 +1911,10 @@ cdef class Sender:
             auto_flush_interval,
             &self._auto_flush_mode)
 
-        self._init_capacity = init_capacity or 65536
+        self._init_buf_size = init_buf_size or 65536
         self._max_name_len = max_name_len or 127
         self._buffer = Buffer(
-            init_capacity=self._init_capacity,
+            init_buf_size=self._init_buf_size,
             max_name_len=self._max_name_len)
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
@@ -1925,7 +1925,7 @@ cdef class Sender:
         self._buffer = None
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
-        self._init_capacity = 0
+        self._init_buf_size = 0
         self._max_name_len = 0
 
     def __init__(
@@ -1952,7 +1952,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object init_capacity=None,  # 64KiB
+            object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
 
         cdef line_sender_utf8 c_host
@@ -1995,7 +1995,7 @@ cdef class Sender:
                 auto_flush_rows,
                 auto_flush_bytes,
                 auto_flush_interval,
-                init_capacity,
+                init_buf_size,
                 max_name_len)
         finally:
             qdb_pystr_buf_free(b)
@@ -2022,7 +2022,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object init_capacity=None,  # 64KiB
+            object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
 
         cdef line_sender_error* err = NULL
@@ -2040,6 +2040,11 @@ cdef class Sender:
                 raise IngressError(
                     IngressErrorCode.ConfigError,
                     'Missing "addr" parameter in config string')
+            
+            if 'tls_roots_password' in params:
+                raise IngressError(
+                    IngressErrorCode.ConfigError,
+                    '"tls_roots_password" is not supported in the conf_str.')
 
             # add fields to the dictionary, so long as they aren't already
             # present in the params dictionary
@@ -2062,8 +2067,8 @@ cdef class Sender:
                 'auto_flush_rows': auto_flush_rows,
                 'auto_flush_bytes': auto_flush_bytes,
                 'auto_flush_interval': auto_flush_interval,
-                'init_capacity': init_capacity,
-                'max_name_len': max_name_len
+                'init_buf_size': init_buf_size,
+                'max_name_len': max_name_len,
             }.items():
                 if override_value is None:
                     continue
@@ -2102,7 +2107,7 @@ cdef class Sender:
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
-                params.get('init_capacity'),
+                params.get('init_buf_size'),
                 params.get('max_name_len'))
             
             return sender
@@ -2130,7 +2135,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object init_capacity=None,  # 64KiB
+            object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         cdef str conf_str = os.environ.get('QDB_CLIENT_CONF')
         if conf_str is None:
@@ -2157,7 +2162,7 @@ cdef class Sender:
             auto_flush_rows=auto_flush_rows,
             auto_flush_bytes=auto_flush_bytes,
             auto_flush_interval=auto_flush_interval,
-            init_capacity=init_capacity,
+            init_buf_size=init_buf_size,
             max_name_len=max_name_len)
 
 
@@ -2165,17 +2170,17 @@ cdef class Sender:
         """
         Make a new configured buffer.
 
-        The buffer is set up with the configured `init_capacity` and
+        The buffer is set up with the configured `init_buf_size` and
         `max_name_len`.
         """
         return Buffer(
-            init_capacity=self._init_capacity,
+            init_buf_size=self._init_buf_size,
             max_name_len=self._max_name_len)
 
     @property
-    def init_capacity(self) -> int:
+    def init_buf_size(self) -> int:
         """The initial capacity of the sender's internal buffer."""
-        return self._init_capacity
+        return self._init_buf_size
 
     @property
     def max_name_len(self) -> int:

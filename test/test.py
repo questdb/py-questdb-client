@@ -282,7 +282,7 @@ def _build_conf(protocol, host, port, **kwargs):
         'auto_flush_rows': str,
         'auto_flush_bytes': str,
         'auto_flush_interval': encode_duration,
-        'init_capacity': str,
+        'init_buf_size': str,
         'max_name_len': str,
     }
 
@@ -617,12 +617,12 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             protocol='tcp',
             host='localhost',
             port=9009,
-            init_capacity=1024,
+            init_buf_size=1024,
             max_name_len=10)
         buffer = sender.new_buffer()
-        self.assertEqual(buffer.init_capacity, 1024)
+        self.assertEqual(buffer.init_buf_size, 1024)
         self.assertEqual(buffer.max_name_len, 10)
-        self.assertEqual(buffer.init_capacity, sender.init_capacity)
+        self.assertEqual(buffer.init_buf_size, sender.init_buf_size)
         self.assertEqual(buffer.max_name_len, sender.max_name_len)
 
     def test_connect_after_close(self):
@@ -638,7 +638,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             self.builder(protocol='tcp', host='localhost', port=9009, auth_timeout=-1)
 
         with self.assertRaises(OverflowError):
-            self.builder(protocol='tcp', host='localhost', port=9009, init_capacity=-1)
+            self.builder(protocol='tcp', host='localhost', port=9009, init_buf_size=-1)
 
         with self.assertRaises(OverflowError):
             self.builder(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
