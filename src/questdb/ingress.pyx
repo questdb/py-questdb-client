@@ -1350,6 +1350,16 @@ _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
+cdef uint64_t _timedelta_to_millis(object timedelta):
+    """
+    Convert a timedelta to milliseconds.
+    """
+    cdef uint64_t millis = (
+        (timedelta.microseconds // 1000) +
+        (timedelta.seconds * 1000))
+    return millis
+
+
 cdef void_int _parse_auto_flush(
     object auto_flush,
     object auto_flush_rows,
@@ -1416,10 +1426,8 @@ cdef void_int _parse_auto_flush(
             raise ValueError(
                 '"auto_flush_interval" must be >= 1, '
                 f'not {c_auto_flush.interval}')
-    elif isinstance(auto_flush_interval, timedelta):  # TODO: refactor timedelta to millis int
-        c_auto_flush.interval = (
-            (auto_flush_interval.microseconds // 1000) +
-            (auto_flush_interval.seconds * 1000))
+    elif isinstance(auto_flush_interval, timedelta):
+        c_auto_flush.interval = _timedelta_to_millis(auto_flush_interval)
         if c_auto_flush.interval < 1:
             raise ValueError(
                 '"auto_flush_interval" must be >= 1, '
@@ -1837,7 +1845,7 @@ cdef class Sender:
             if isinstance(auth_timeout, int):
                 c_auth_timeout = auth_timeout
             elif isinstance(auth_timeout, timedelta):
-                c_auth_timeout = auth_timeout.microseconds // 1000 + auth_timeout.seconds * 1000
+                c_auth_timeout = _timedelta_to_millis(auth_timeout)
             else:
                 raise TypeError(
                     '"auth_timeout" must be an int or a timedelta, '
@@ -1879,7 +1887,7 @@ cdef class Sender:
                 if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
                     raise c_err_to_py(err)
             elif isinstance(retry_timeout, timedelta):
-                c_retry_timeout = retry_timeout.microseconds // 1000 + retry_timeout.seconds * 1000
+                c_retry_timeout = _timedelta_to_millis(retry_timeout)
                 if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
                     raise c_err_to_py(err)
             else:
@@ -1898,7 +1906,7 @@ cdef class Sender:
                 if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
                     raise c_err_to_py(err)
             elif isinstance(request_timeout, timedelta):
-                c_request_timeout = request_timeout.microseconds // 1000 + request_timeout.seconds * 1000
+                c_request_timeout = _timedelta_to_millis(request_timeout)
                 if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
                     raise c_err_to_py(err)
             else:
