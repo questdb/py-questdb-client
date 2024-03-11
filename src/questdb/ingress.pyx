@@ -160,6 +160,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.HttpNotSupported
     elif code == line_sender_error_server_flush_error:
         return IngressErrorCode.ServerFlushError
+    elif code == line_sender_error_config_error:
+        return IngressErrorCode.ConfigError
     else:
         raise ValueError('Internal error converting error code.')
 

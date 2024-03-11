@@ -767,13 +767,19 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
         self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
         self.assertEqual(server.headers[0]['Authorization'], 'Basic dXNlcjpwYXNz')
 
-
     def test_http_token(self):
         with HttpServer() as server, self.builder('http', 'localhost', server.port, token='Yogi') as sender:
             sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
         retry(lambda: len(server.requests) == 1)
         self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
         self.assertEqual(server.headers[0]['Authorization'], 'Bearer Yogi')
+
+    def test_max_buf_size(self):
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, max_buf_size=1024, auto_flush=False) as sender:
+            while len(sender) < 1024:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            with self.assertRaisesRegex(qi.IngressError, 'Could not flush .*exceeds maximum'):
+                sender.flush()
 
 
 class TestBases:
