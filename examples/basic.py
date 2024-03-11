@@ -5,7 +5,8 @@ import datetime
 
 def example(host: str = 'localhost', port: int = 9009):
     try:
-        with Sender(host, port) as sender:
+        conf = f'tcp::addr={host}:{port};'
+        with Sender.from_conf(conf) as sender:
             # Record with provided designated timestamp (using the 'at' param)
             # Notice the designated timestamp is expected in Nanoseconds,
             # but timestamps in other columns are expected in Microseconds. 

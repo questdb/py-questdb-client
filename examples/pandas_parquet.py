@@ -30,11 +30,11 @@ def write_parquet_file():
     return filename
 
 
-def example(host: str = 'localhost', port: int = 9009):
+def example(host: str = 'localhost', port: int = 9000):
     filename = write_parquet_file()
 
     df = pd.read_parquet(filename)
-    with Sender(host, port) as sender:
+    with Sender.from_conf(f"http::addr={host}:{port};") as sender:
         # Note: Table name is looked up from the dataframe's index name.
         sender.dataframe(df, at='ts')
 

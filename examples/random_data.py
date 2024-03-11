@@ -6,8 +6,9 @@ import time
 
 def example(host: str = 'localhost', port: int = 9009):
     table_name: str = str(uuid.uuid1())
-    watermark = AutoFlush.ByteCount(1024)  # Flush if the internal buffer exceeds 1KiB
-    with Sender(host=host, port=port, auto_flush=watermark) as sender:
+    # Flush if the internal buffer exceeds 1KiB
+    conf: str = f"tcp::addr={host}:{port};auto_flush_bytes=1024;"
+    with Sender.from_conf(conf) as sender:
         total_rows = 0
         last_flush = time.monotonic()
         try:
