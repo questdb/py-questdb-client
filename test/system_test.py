@@ -142,10 +142,10 @@ class TestWithDatabase(unittest.TestCase):
         self._test_scenario(self.qdb_auth, 'tcps', tls_verify=False, **AUTH)
 
     def test_auth_tls_ca(self):
-        self._test_scenario(self.qdb_auth, 'tcps', tls_roots=CA_PATH, **AUTH)
+        self._test_scenario(self.qdb_auth, 'tcps', tls_verify=True, tls_roots=CA_PATH, **AUTH)
 
     def test_auth_tls_ca_str(self):
-        self._test_scenario(self.qdb_auth, 'tcps', tls_roots=str(CA_PATH), **AUTH)
+        self._test_scenario(self.qdb_auth, 'tcps', tls_verify='on', tls_roots=str(CA_PATH), **AUTH)
 
     @unittest.skipIf(not pd, 'pandas not installed')
     def test_basic_dataframe(self):

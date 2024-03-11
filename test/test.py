@@ -291,7 +291,9 @@ def _build_conf(protocol, host, port, **kwargs):
         return encoder(v)
 
     return f'{protocol.tag}::addr={host}:{port};' + ''.join(
-        f'{k}={encode(k, v)};' for k, v in kwargs.items())
+        f'{k}={encode(k, v)};'
+        for k, v in kwargs.items()
+        if v is not None)
 
 
 def split_dict_randomly(original, seed=None):
@@ -748,15 +750,21 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
         self.assertEqual(server.requests, into_requests(expected))
 
     def test_auto_flush_interval(self):
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_interval=100) as sender:
-            slept_ms = 0
+        with HttpServer() as server, self.builder(
+                'http',
+                'localhost',
+                server.port,
+                auto_flush_interval=10,
+                auto_flush_rows=None,
+                auto_flush_bytes=None) as sender:
+            start_time = time.monotonic()
             while True:
                 sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
                 time.sleep(0.01)
-                slept_ms += 10
-                if slept_ms < 100:
+                elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                if elapsed_ms < 5:
                     self.assertEqual(len(server.requests), 0)
-                if slept_ms >= 110:  # 10ms grace period.
+                if elapsed_ms >= 15:  # 5ms grace period.
                     break
             retry(lambda: len(server.requests) == 1)
 
@@ -779,6 +787,79 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             while len(sender) < 1024:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             with self.assertRaisesRegex(qi.IngressError, 'Could not flush .*exceeds maximum'):
+                sender.flush()
+
+    def test_http_err(self):
+        with HttpServer() as server, self.builder(
+                'http',
+                'localhost',
+                server.port,
+                retry_timeout=datetime.timedelta(milliseconds=1)) as sender:
+            server.responses.append((0, 500, 'text/plain', b'Internal Server Error'))
+            with self.assertRaisesRegex(qi.IngressError, 'Could not flush.*: Internal Server'):
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+            self.assertEqual(len(sender), 0)  # buffer is still cleared after error.
+
+    def test_http_err_retry(self):
+        exp_payload = b'tbl1 x=42i\n'
+        with HttpServer() as server, self.builder(
+                'http',
+                'localhost',
+                server.port,
+                retry_timeout=datetime.timedelta(seconds=1)) as sender:
+            server.responses.append((0, 500, 'text/plain', b'retriable error'))
+            server.responses.append((0, 200, 'text/plain', b'OK'))
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            sender.flush()
+            retry(lambda: len(server.requests) == 2)
+            self.assertEqual(server.requests[0], exp_payload)
+            self.assertEqual(server.requests[1], exp_payload)
+
+    def test_http_request_min_throughput(self):
+        with HttpServer() as server, self.builder(
+                'http',
+                'localhost',
+                server.port,
+                request_timeout=0,
+                request_min_throughput=1) as sender:
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            sender.flush()
+            retry(lambda: len(server.requests) == 1)
+
+    def test_http_request_min_throughput_timeout(self):
+        with HttpServer() as server, self.builder(
+                'http',
+                'localhost',
+                server.port,
+                auto_flush='off',
+                request_timeout=0,
+                retry_timeout=0,
+                request_min_throughput=100000000) as sender:
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+
+            # wait 5ms in the server to simulate a slow response
+            server.responses.append((5, 200, 'text/plain', b'OK'))
+
+            with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
+                sender.flush()
+
+    def test_http_request_timeout(self):
+        with HttpServer() as server, self.builder(
+                'http',
+                'localhost',
+                server.port,
+                retry_timeout=0,
+                request_min_throughput=0,  # disable
+                request_timeout=datetime.timedelta(milliseconds=5)) as sender:
+            # wait for 10ms in the server to simulate a slow response
+            server.responses.append((20, 200, 'text/plain', b'OK'))
+            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
                 sender.flush()
 
 
