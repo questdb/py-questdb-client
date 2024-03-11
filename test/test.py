@@ -666,6 +666,18 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             retry(lambda: len(server.requests) == 1)
             self.assertEqual(server.requests[0], expected)
 
+    def test_transaction_basic_df(self):
+        ts = qi.TimestampNanos.now()
+        expected = (
+            f'table_name,sym1=val1 {ts.value}\n' +
+            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+            with sender.transaction('table_name') as txn:
+                df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
+                self.assertIs(txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts), txn)
+            retry(lambda: len(server.requests) == 1)
+            self.assertEqual(server.requests[0], expected)
+
     def test_transaction_no_auto_flush(self):
         ts = qi.TimestampNanos.now()
         expected = (
@@ -675,6 +687,18 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 txn.row(symbols={'sym1': 'val1'}, at=ts)
                 txn.row(symbols={'sym2': 'val2'}, at=ts)
+            retry(lambda: len(server.requests) == 1)
+            self.assertEqual(server.requests[0], expected)
+
+    def test_transaction_no_auto_flush_df(self):
+        ts = qi.TimestampNanos.now()
+        expected = (
+            f'table_name,sym1=val1 {ts.value}\n' +
+            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+            with sender.transaction('table_name') as txn:
+                df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
+                txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts)
             retry(lambda: len(server.requests) == 1)
             self.assertEqual(server.requests[0], expected)
 
@@ -722,6 +746,24 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
                 # The transaction is not broken up by the auto-flush logic.
                 txn.row(symbols={'sym3': 'val3'}, at=ts)
                 txn.row(symbols={'sym4': 'val4'}, at=ts)
+            retry(lambda: len(server.requests) == 3)
+            self.assertEqual(server.requests[0], expected1)
+            self.assertEqual(server.requests[1], expected2)
+            self.assertEqual(server.requests[2], expected3)
+
+    def test_transaction_immediate_auto_flush_df(self):
+        ts = qi.TimestampNanos.now()
+        expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
+        expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
+        expected3 = (
+            f'tbl3,sym3=val3 {ts.value}\n' +
+            f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+            self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
+            with sender.transaction('tbl3') as txn:
+                df = pd.DataFrame({'sym3': ['val3', None], 'sym4': [None, 'val4']})
+                txn.dataframe(df, symbols=['sym3', 'sym4'], at=ts)
             retry(lambda: len(server.requests) == 3)
             self.assertEqual(server.requests[0], expected1)
             self.assertEqual(server.requests[1], expected2)
