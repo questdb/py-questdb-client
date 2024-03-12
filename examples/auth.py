@@ -33,11 +33,16 @@ def example(host: str = 'localhost', port: int = 9009):
             # You can call `sender.row` multiple times inside the same `with`
             # block. The client will buffer the rows and send them in batches.
 
-            # We recommend flushing periodically, for example every few seconds.
-            # If you don't flush explicitly, the client will flush automatically
-            # once the buffer is reaches 63KiB and just before the connection
-            # is closed.
+            # You can flush manually at any point.
             sender.flush()
+
+            # If you don't flush manually, the client will flush automatically
+            # when a row is added and either:
+            #   * The buffer contains 75000 rows (if HTTP) or 1000 rows (if TCP)
+            #   * The last flush was more than 1000ms ago.
+            # Auto-flushing can be customized via the `auto_flush_..` params.
+
+        # Any remaining pending rows will be sent when the `with` block ends.
 
     except IngressError as e:
         sys.stderr.write(f'Got error: {e}\n')
