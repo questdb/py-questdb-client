@@ -1383,6 +1383,7 @@ cdef uint64_t _timedelta_to_millis(object timedelta):
 
 
 cdef void_int _parse_auto_flush(
+    line_sender_protocol protocol,
     object auto_flush,
     object auto_flush_rows,
     object auto_flush_bytes,
@@ -1393,7 +1394,10 @@ cdef void_int _parse_auto_flush(
     if (auto_flush_rows is None) \
             and (auto_flush_bytes is None) \
             and (auto_flush_interval is None):
-        auto_flush_rows = 75000
+        if protocol == line_sender_protocol_http:
+            auto_flush_rows = 75000
+        else:
+            auto_flush_rows = 600
         auto_flush_bytes = None
         auto_flush_interval = 1000
 
@@ -1938,6 +1942,7 @@ cdef class Sender:
                     f'not {_fqn(type(request_timeout))}')
 
         _parse_auto_flush(
+            self._c_protocol,
             auto_flush,
             auto_flush_rows,
             auto_flush_bytes,
@@ -1983,7 +1988,7 @@ cdef class Sender:
             object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
             object request_timeout=None,
             object auto_flush=None,  # Default True
-            object auto_flush_rows=None,  # Default 75000
+            object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
@@ -2053,7 +2058,7 @@ cdef class Sender:
             object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
             object request_timeout=None,
             object auto_flush=None,  # Default True
-            object auto_flush_rows=None,  # Default 75000
+            object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
@@ -2166,7 +2171,7 @@ cdef class Sender:
             object request_min_throughput=None, # default: 100 * 1024 - 100KiB/s
             object request_timeout=None,
             object auto_flush=None,  # Default True
-            object auto_flush_rows=None,  # Default 75000
+            object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
