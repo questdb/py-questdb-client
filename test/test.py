@@ -772,6 +772,33 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             self.assertEqual(server.requests[1], expected2)
             self.assertEqual(server.requests[2], expected3)
 
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_http_illegal_ops_in_txn(self):
+        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+            with sender.transaction('tbl1') as txn:
+                txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                txn.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+
+                with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
+                    sender.row('tbl2', symbols={'sym3': 'val3'}, at=qi.ServerTimestamp)
+
+                with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
+                    sender.dataframe(None, at=qi.ServerTimestamp)
+
+                with self.assertRaisesRegex(qi.IngressError, 'Cannot flush explicity inside a transaction'):
+                    sender.flush()
+
+                with self.assertRaisesRegex(qi.IngressError, 'Already inside a transaction, can\'t start another.'):
+                    with sender.transaction('tbl2') as _txn2:
+                        pass
+
+                txn.commit()
+                with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t commit'):
+                    txn.commit()
+                with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t rollback.'):
+                    txn.rollback()
+            self.assertEqual(len(server.requests), 1)
+
     def test_auto_flush_rows(self):
         auto_flush_rows = 3
 

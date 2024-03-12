@@ -3,7 +3,7 @@ import pandas as pd
 
 
 def example():
-    conf = f'http::addr=localhost:9000;'
+    conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         # Force a whole dataframe to be written in a single transaction.
         # This temporarily suspends auto-flushing:

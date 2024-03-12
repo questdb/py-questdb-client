@@ -542,6 +542,7 @@ cdef bint _is_tcp_protocol(line_sender_protocol protocol):
 cdef class SenderTransaction:
     cdef Sender _sender
     cdef str _table_name
+    cdef bint _complete
 
     def __cinit__(self, Sender sender, str table_name):
         if _is_tcp_protocol(sender._c_protocol):
@@ -551,8 +552,13 @@ cdef class SenderTransaction:
                 "use ILP/HTTP instead.")
         self._sender = sender
         self._table_name = table_name
+        self._complete = False
 
     def __enter__(self):
+        if self._sender._in_txn:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Already inside a transaction, can\'t start another.')
         if len(self._sender._buffer):
             if self._sender._auto_flush_mode.enabled:
                 self._sender.flush()
@@ -561,15 +567,18 @@ cdef class SenderTransaction:
                     IngressErrorCode.InvalidApiCall,
                     'Sender buffer must be clear when starting a ' +
                     'transaction. You must call `.flush()` before this call.')
+        self._sender._in_txn = True
         return self
 
     def __exit__(self, exc_type, _exc_value, _traceback):
         if exc_type is not None:
-            self.rollback()
+            if not self._complete:
+                self.rollback()
             return False
-        if len(self._sender._buffer):
-            self.commit()
-        return True
+        else:
+            if not self._complete:
+                self.commit()
+            return True
 
     def row(
             self,
@@ -623,7 +632,14 @@ cdef class SenderTransaction:
 
         This will flush the buffer.
         """
-        self._sender.flush(transactional=True)
+        if self._complete:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Transaction already completed, can\'t commit')
+        self._sender._in_txn = False
+        self._complete = True
+        if len(self._sender._buffer):
+            self._sender.flush(transactional=True)
 
     def rollback(self):
         """
@@ -633,7 +649,13 @@ cdef class SenderTransaction:
 
         This will clear the buffer.
         """
+        if self._complete:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Transaction already completed, can\'t rollback.')
         self._sender._buffer.clear()
+        self._sender._in_txn = False
+        self._complete = True
 
 
 cdef class Buffer:
@@ -1758,6 +1780,7 @@ cdef class Sender:
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef size_t _max_name_len
+    cdef bint _in_txn
 
     cdef void_int _set_sender_fields(
             self,
@@ -1937,6 +1960,7 @@ cdef class Sender:
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._max_name_len = 0
+        self._in_txn = False
 
     def __init__(
             self,
@@ -2266,6 +2290,10 @@ cdef class Sender:
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
         """
+        if self._in_txn:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Cannot append rows explicitly inside a transaction')
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
         return self
 
@@ -2318,6 +2346,10 @@ cdef class Sender:
         may have been transmitted to the server already.
         """
         cdef auto_flush_t af = auto_flush_blank()
+        if self._in_txn:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Cannot append rows explicitly inside a transaction')
         if self._auto_flush_mode.enabled:
             af.sender = self._impl
             af.mode = self._auto_flush_mode
@@ -2369,6 +2401,11 @@ cdef class Sender:
         cdef line_sender_buffer* c_buf = NULL
         cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
         cdef bint ok = False
+
+        if self._in_txn:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Cannot flush explicity inside a transaction')
 
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
