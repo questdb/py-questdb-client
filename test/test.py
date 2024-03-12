@@ -665,6 +665,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], expected)
 
+    @unittest.skipIf(not pd, 'pandas not installed')
     def test_transaction_basic_df(self):
         ts = qi.TimestampNanos.now()
         expected = (
@@ -689,6 +690,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], expected)
 
+    @unittest.skipIf(not pd, 'pandas not installed')
     def test_transaction_no_auto_flush_df(self):
         ts = qi.TimestampNanos.now()
         expected = (
@@ -750,6 +752,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             self.assertEqual(server.requests[1], expected2)
             self.assertEqual(server.requests[2], expected3)
 
+    @unittest.skipIf(not pd, 'pandas not installed')
     def test_transaction_immediate_auto_flush_df(self):
         ts = qi.TimestampNanos.now()
         expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
