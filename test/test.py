@@ -14,7 +14,6 @@ PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
 from mock_server import Server, HttpServer
-from fixture import retry
 
 
 import questdb.ingress as qi
@@ -663,7 +662,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
                 self.assertIs(txn.row(symbols={'sym2': 'val2'}, at=ts), txn)
-            retry(lambda: len(server.requests) == 1)
+            self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], expected)
 
     def test_transaction_basic_df(self):
@@ -675,7 +674,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
                 self.assertIs(txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts), txn)
-            retry(lambda: len(server.requests) == 1)
+            self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], expected)
 
     def test_transaction_no_auto_flush(self):
@@ -687,7 +686,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 txn.row(symbols={'sym1': 'val1'}, at=ts)
                 txn.row(symbols={'sym2': 'val2'}, at=ts)
-            retry(lambda: len(server.requests) == 1)
+            self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], expected)
 
     def test_transaction_no_auto_flush_df(self):
@@ -699,7 +698,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('table_name') as txn:
                 df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
                 txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts)
-            retry(lambda: len(server.requests) == 1)
+            self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], expected)
 
     def test_transaction_auto_flush_pending_buf(self):
@@ -716,7 +715,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('tbl2') as txn:
                 txn.row(symbols={'sym3': 'val3'}, at=ts)
                 txn.row(symbols={'sym4': 'val4'}, at=ts)
-            retry(lambda: len(server.requests) == 2)
+            self.assertEqual(len(server.requests), 2)
             self.assertEqual(server.requests[0], expected1)
             self.assertEqual(server.requests[1], expected2)
 
@@ -746,7 +745,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
                 # The transaction is not broken up by the auto-flush logic.
                 txn.row(symbols={'sym3': 'val3'}, at=ts)
                 txn.row(symbols={'sym4': 'val4'}, at=ts)
-            retry(lambda: len(server.requests) == 3)
+            self.assertEqual(len(server.requests), 3)
             self.assertEqual(server.requests[0], expected1)
             self.assertEqual(server.requests[1], expected2)
             self.assertEqual(server.requests[2], expected3)
@@ -764,7 +763,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             with sender.transaction('tbl3') as txn:
                 df = pd.DataFrame({'sym3': ['val3', None], 'sym4': [None, 'val4']})
                 txn.dataframe(df, symbols=['sym3', 'sym4'], at=ts)
-            retry(lambda: len(server.requests) == 3)
+            self.assertEqual(len(server.requests), 3)
             self.assertEqual(server.requests[0], expected1)
             self.assertEqual(server.requests[1], expected2)
             self.assertEqual(server.requests[2], expected3)
@@ -784,11 +783,11 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
                 expected.append(f'tbl1 x={i}i\n'.encode('utf-8'))
             
             # Before the end of the `with` block we should already have 3 requests.
-            retry(lambda: len(server.requests) == 3)
+            self.assertEqual(len(server.requests), 3)
             self.assertEqual(server.requests, into_requests(expected)[:3])
 
         # Closing the buffer should flush the last remaining row.
-        retry(lambda: len(server.requests) == 4)
+        self.assertEqual(len(server.requests), 4)
         self.assertEqual(server.requests, into_requests(expected))
 
     def test_auto_flush_interval(self):
@@ -808,19 +807,21 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
                     self.assertEqual(len(server.requests), 0)
                 if elapsed_ms >= 15:  # 5ms grace period.
                     break
-            retry(lambda: len(server.requests) == 1)
+
+            # Due to CI timing delays there may have been multiple flushes.
+            self.assertGreaterEqual(len(server.requests), 1)
 
     def test_http_username_password(self):
         with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user', password='pass') as sender:
             sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-        retry(lambda: len(server.requests) == 1)
+        self.assertEqual(len(server.requests), 1)
         self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
         self.assertEqual(server.headers[0]['Authorization'], 'Basic dXNlcjpwYXNz')
 
     def test_http_token(self):
         with HttpServer() as server, self.builder('http', 'localhost', server.port, token='Yogi') as sender:
             sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-        retry(lambda: len(server.requests) == 1)
+        self.assertEqual(len(server.requests), 1)
         self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
         self.assertEqual(server.headers[0]['Authorization'], 'Bearer Yogi')
 
@@ -854,7 +855,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             server.responses.append((0, 200, 'text/plain', b'OK'))
             sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             sender.flush()
-            retry(lambda: len(server.requests) == 2)
+            self.assertEqual(len(server.requests), 2)
             self.assertEqual(server.requests[0], exp_payload)
             self.assertEqual(server.requests[1], exp_payload)
 
@@ -867,7 +868,7 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
                 request_min_throughput=1) as sender:
             sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             sender.flush()
-            retry(lambda: len(server.requests) == 1)
+            self.assertEqual(len(server.requests), 1)
 
     def test_http_request_min_throughput_timeout(self):
         with HttpServer() as server, self.builder(
