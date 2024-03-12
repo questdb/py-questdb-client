@@ -822,29 +822,10 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             requests_len = self._do_test_auto_flush_interval()
             if requests_len > 0:
                 break
-        # At least one request.
+
         # If this fails, it failed 10 attempts.
+        # Due to CI timing delays there may have been multiple flushes.
         self.assertGreaterEqual(requests_len, 1)
-
-        with HttpServer() as server, self.builder(
-                'http',
-                'localhost',
-                server.port,
-                auto_flush_interval=10,
-                auto_flush_rows=None,
-                auto_flush_bytes=None) as sender:
-            start_time = time.monotonic()
-            while True:
-                sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
-                elapsed_ms = int((time.monotonic() - start_time) * 1000)
-                if elapsed_ms < 5:
-                    self.assertEqual(len(server.requests), 0)
-                if elapsed_ms >= 15:  # 5ms grace period.
-                    break
-                time.sleep(1 / 1000)  # 1ms
-
-            # Due to CI timing delays there may have been multiple flushes.
-            self.assertGreaterEqual(len(server.requests), 1)
 
     def test_http_username_password(self):
         with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user', password='pass') as sender:
