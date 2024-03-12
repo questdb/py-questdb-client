@@ -540,6 +540,21 @@ cdef bint _is_tcp_protocol(line_sender_protocol protocol):
 
 
 cdef class SenderTransaction:
+    """
+    A transaction for a specific table.
+
+    Transactions are not supported with ILP/TCP, only ILP/HTTP.
+
+    The sender API can only operate on one transaction at a time.
+
+    To create a transaction:
+
+    .. code_block:: python
+
+        with sender.transaction('table_name') as txn:
+            txn.row(..)
+            txn.dataframe(..)
+    """
     cdef Sender _sender
     cdef str _table_name
     cdef bint _complete
@@ -1061,6 +1076,8 @@ cdef class Buffer:
         will be cast to the types of the existing columns whenever possible
         (Refer to the QuestDB documentation pages linked above).
 
+        Adding a row can trigger auto-flushing behaviour.
+
         :param table_name: The name of the table to which the row belongs.
         :param symbols: A dictionary of symbol column names to ``str`` values.
             As a convenience, you can also pass a ``None`` value which will
@@ -1103,6 +1120,10 @@ cdef class Buffer:
 
         This feature requires the ``pandas``, ``numpy`` and ``pyarrow``
         package to be installed.
+
+        Adding a dataframe can trigger auto-flushing behaviour,
+        even between rows of the same dataframe. To avoid this, you can
+        use HTTP and transactions (see :func:`Sender.transaction`).
 
         :param df: The pandas DataFrame to serialize to the buffer.
         :type df: pandas.DataFrame
@@ -1468,8 +1489,12 @@ class TaggedEnum(Enum):
     """
     Base class for tagged enums.
     """
+
     @property
     def tag(self):
+        """
+        Short name.
+        """
         return self.value[0]
 
     @property
@@ -1478,6 +1503,9 @@ class TaggedEnum(Enum):
 
     @classmethod
     def parse(cls, tag):
+        """
+        Parse from the tag name.
+        """
         if tag is None:
             return None
         elif isinstance(tag, str):
@@ -1505,6 +1533,14 @@ class Protocol(TaggedEnum):
 
 
 class TlsCa(TaggedEnum):
+    """
+    Verification mechanism for the server's certificate.
+
+    Here ``webpki`` refers to the WebPKI library and ``os`` refers to the
+    operating system's certificate store.
+
+    See https://github.com/rustls/webpki-roots
+    """
     WebpkiRoots = ('webpki_roots', line_sender_ca_webpki_roots)
     OsRoots = ('os_roots', line_sender_ca_os_roots)
     WebpkiAndOsRoots = ('webpki_and_os_roots', line_sender_ca_webpki_and_os_roots)
@@ -1602,7 +1638,8 @@ cdef class Sender:
 
     .. code-block:: python
 
-        with Sender('localhost', 9009) as sender:
+        conf = 'tcp::addr=localhost:9009;'
+        with Sender(conf) as sender:
             sender.row(
                 'weather_sensor',
                 symbols={'id': 'toronto1'},
