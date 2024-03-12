@@ -793,7 +793,39 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
         self.assertEqual(len(server.requests), 4)
         self.assertEqual(server.requests, into_requests(expected))
 
+    def _do_test_auto_flush_interval(self):
+        with HttpServer() as server, self.builder(
+                'http',
+                'localhost',
+                server.port,
+                auto_flush_interval=10,
+                auto_flush_rows=None,
+                auto_flush_bytes=None) as sender:
+            start_time = time.monotonic()
+            while True:
+                sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
+                elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                if elapsed_ms < 5:
+                    self.assertEqual(len(server.requests), 0)
+                if elapsed_ms >= 15:  # 5ms grace period.
+                    break
+                time.sleep(1 / 1000)  # 1ms
+
+            return len(server.requests)
+
     def test_auto_flush_interval(self):
+        # This test is timing-sensitive,
+        # so it has a tendency to go wrong in CI.
+        # To work around this we'll repeat the test up to 10 times
+        # until it passes.
+        for _ in range(10):
+            requests_len = self._do_test_auto_flush_interval()
+            if requests_len > 0:
+                break
+        # At least one request.
+        # If this fails, it failed 10 attempts.
+        self.assertGreaterEqual(requests_len, 1)
+
         with HttpServer() as server, self.builder(
                 'http',
                 'localhost',
