@@ -8,6 +8,7 @@ import datetime
 import time
 from enum import Enum
 import random
+import pathlib
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
@@ -920,6 +921,17 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
                 sender.flush()
+
+
+class TestManifest(unittest.TestCase):
+    def test_valid_yaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest('Python version does not support yaml')
+        examples_manifest_file = pathlib.Path(__file__).parent.parent / 'examples.manifest.yaml'
+        with open(examples_manifest_file, 'r') as f:
+            yaml.safe_load(f)
 
 
 class TestBases:
