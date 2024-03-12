@@ -801,12 +801,12 @@ class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
             start_time = time.monotonic()
             while True:
                 sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
-                time.sleep(0.01)
                 elapsed_ms = int((time.monotonic() - start_time) * 1000)
                 if elapsed_ms < 5:
                     self.assertEqual(len(server.requests), 0)
                 if elapsed_ms >= 15:  # 5ms grace period.
                     break
+                time.sleep(1 / 1000)  # 1ms
 
             # Due to CI timing delays there may have been multiple flushes.
             self.assertGreaterEqual(len(server.requests), 1)
