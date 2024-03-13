@@ -201,61 +201,686 @@ class TestBuffer(unittest.TestCase):
             buf.row('tbl1', columns={'num': -2**63-1}, at=qi.ServerTimestamp)
 
 
-class ParametrizedTest(type):
-    """
-    Metaclass to generate parameterized tests.
+class TestManifest(unittest.TestCase):
+    def test_valid_yaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest('Python version does not support yaml')
+        examples_manifest_file = pathlib.Path(__file__).parent.parent / 'examples.manifest.yaml'
+        with open(examples_manifest_file, 'r') as f:
+            yaml.safe_load(f)
 
-    Each test method will be exploded into multiple test methods, one for each
-    entry in the `TEST_PARAMETERS` list of dicts. The new test methods will have
-    the original name prefix with the parameter's `name` value, right after
-    the `test_` prefix.
 
-    Each test body will be able to access each of the parameters in each entry
-    of `TEST_PARAMETERS` as attributes of `self`.
+class TestBases:
+    class TestSender(unittest.TestCase):
+        def test_basic(self):
+            with Server() as server, \
+                    self.builder(
+                        'tcp',
+                        'localhost',
+                        server.port,
+                        bind_interface='0.0.0.0') as sender:
+                server.accept()
+                self.assertEqual(server.recv(), [])
+                sender.row(
+                    'tab1',
+                    symbols={
+                        't1': 'val1',
+                        't2': 'val2'},
+                    columns={
+                        'f1': True,
+                        'f2': 12345,
+                        'f3': 10.75,
+                        'f4': 'val3'},
+                    at=qi.TimestampNanos(111222233333))
+                sender.row(
+                    'tab1',
+                    symbols={
+                        'tag3': 'value 3',
+                        'tag4': 'value:4'},
+                    columns={
+                        'field5': False},
+                    at=qi.ServerTimestamp)
+                sender.flush()
+                msgs = server.recv()
+                self.assertEqual(msgs, [
+                    (b'tab1,t1=val1,t2=val2 '
+                    b'f1=t,f2=12345i,f3=10.75,f4="val3" '
+                    b'111222233333'),
+                    b'tab1,tag3=value\\ 3,tag4=value:4 field5=f'])
 
-    E.g.
-
-    TEST_PARAMETERS = [
-        dict(name='init', builder=Builder.INIT),
-        ...
-    ]
-
-    def test_basic(self):
-        self.builder.build(..)
-
-    """
-    def __new__(cls, name, bases, dict):
-        def make_test_wrapper(param, original_test):
-            def test_wrapper(self):
-                for param_name, param_value in param.items():
-                    setattr(self, param_name, param_value)
+        def test_connect_close(self):
+            with Server() as server:
+                sender = None
                 try:
-                    return original_test(self)
+                    sender = self.builder('tcp', 'localhost', server.port)
+                    sender.connect()
+                    server.accept()
+                    self.assertEqual(server.recv(), [])
+                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                    sender.flush()
+                    msgs = server.recv()
+                    self.assertEqual(msgs, [b'tbl1,sym1=val1'])
                 finally:
-                    for key in param:
-                        delattr(self, key)
-            return test_wrapper
-        
-        params = dict.get('TEST_PARAMETERS')
-        to_add = []
-        to_scrub = []
-        for key, value in dict.items():
-            if key.startswith('test') and callable(value):
-                to_scrub.append(key)
-                for param in params:
-                    test_wrapper = make_test_wrapper(param, value)
-                    name = param['name']
-                    name_suffix = key[len('test'):]
-                    test_wrapper.__name__ = f'test_{name}{name_suffix}'
-                    to_add.append((test_wrapper.__name__, test_wrapper))
-        for key in to_scrub:
-            del dict[key]
-        for name, test in to_add:
-            dict[name] = test
-        return super().__new__(cls, name, bases, dict)
+                    sender.close()
+
+        def test_row_before_connect(self):
+            try:
+                sender = self.builder('tcp', 'localhost', 12345)
+                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
+                    sender.flush()
+            finally:
+                sender.close()
+
+        def test_flush_1(self):
+            with Server() as server:
+                with self.builder('tcp', 'localhost', server.port) as sender:
+                    server.accept()
+                    with self.assertRaisesRegex(qi.IngressError, 'Column names'):
+                        sender.row('tbl1', symbols={'...bad name..': 'val1'}, at=qi.ServerTimestamp)
+                    self.assertEqual(str(sender), '')
+                    sender.flush()
+                    self.assertEqual(str(sender), '')
+                msgs = server.recv()
+                self.assertEqual(msgs, [])
+
+        def test_flush_2(self):
+            with Server() as server:
+                with self.builder('tcp', 'localhost', server.port) as sender:
+                    server.accept()
+                    server.close()
+
+                    # We enter a bad state where we can't flush again.
+                    with self.assertRaises(qi.IngressError):
+                        for _ in range(1000):
+                            time.sleep(0.01)
+                            sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
+                            sender.flush()
+
+                    # We should still be in a bad state.
+                    with self.assertRaises(qi.IngressError):
+                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
+                        sender.flush()
+
+                # Leaving the `with` scope will call __exit__ and here we test
+                # that a prior exception will not cause subsequent problems.
+
+        def test_flush_3(self):
+            # Same as test_flush_2, but we catch the exception _outside_ the
+            # sender's `with` block, to ensure no exceptions get trapped.
+            with Server() as server:
+                with self.assertRaises(qi.IngressError):
+                    with self.builder('tcp', 'localhost', server.port) as sender:
+                        server.accept()
+                        server.close()
+                        for _ in range(1000):
+                            time.sleep(0.01)
+                            sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
+                            sender.flush()
+
+        def test_flush_4(self):
+            # Clearing of the internal buffer is not allowed.
+            with Server() as server:
+                with self.assertRaises(ValueError):
+                    with self.builder('tcp', 'localhost', server.port) as sender:
+                        server.accept()
+                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
+                        sender.flush(buffer=None, clear=False)
+
+        def test_two_rows_explicit_buffer(self):
+            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+                server.accept()
+                self.assertEqual(server.recv(), [])
+                buffer = sender.new_buffer()
+                buffer.row(
+                    'line_sender_buffer_example2',
+                    symbols={'id': 'Hola'},
+                    columns={'price': '111222233333i', 'qty': 3.5},
+                    at=qi.TimestampNanos(111222233333))
+                buffer.row(
+                    'line_sender_example',
+                    symbols={'id': 'Adios'},
+                    columns={'price': '111222233343i', 'qty': 2.5},
+                    at=qi.TimestampNanos(111222233343))
+                exp = (
+                    'line_sender_buffer_example2,id=Hola price="111222233333i",qty=3.5 111222233333\n'
+                    'line_sender_example,id=Adios price="111222233343i",qty=2.5 111222233343\n')
+                self.assertEqual(str(buffer), exp)
+                sender.flush(buffer)
+                msgs = server.recv()
+                bexp = [msg.encode('utf-8') for msg in exp.rstrip().split('\n')]
+                self.assertEqual(msgs, bexp)
+
+        def test_independent_buffer(self):
+            buf = qi.Buffer()
+            buf.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+            exp = 'tbl1,sym1=val1\n'
+            bexp = exp[:-1].encode('utf-8')
+            self.assertEqual(str(buf), exp)
+
+            with Server() as server1, Server() as server2:
+                with self.builder('tcp', 'localhost', server1.port) as sender1, \
+                    self.builder('tcp', 'localhost', server2.port) as sender2:
+                        server1.accept()
+                        server2.accept()
+
+                        sender1.flush(buf, clear=False)
+                        self.assertEqual(str(buf), exp)
+
+                        sender2.flush(buf, clear=False)
+                        self.assertEqual(str(buf), exp)
+
+                        msgs1 = server1.recv()
+                        msgs2 = server2.recv()
+                        self.assertEqual(msgs1, [bexp])
+                        self.assertEqual(msgs2, [bexp])
+
+                        sender1.flush(buf)
+                        self.assertEqual(server1.recv(), [bexp])
+
+                        # The buffer is now auto-cleared.
+                        self.assertEqual(str(buf), '')
+
+        def test_auto_flush(self):
+            with Server() as server:
+                with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=4) as sender:
+                    server.accept()
+                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 0)  # auto-flushed buffer.
+                    msgs = server.recv()
+                    self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+
+        def test_immediate_auto_flush(self):
+            with Server() as server:
+                with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
+                    server.accept()
+                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 0)  # auto-flushed buffer.
+                    msgs = server.recv()
+                    self.assertEqual(msgs, [b'tbl1,sym1=val1'])
+
+        def test_auto_flush_on_closed_socket(self):
+            with Server() as server:
+                with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
+                    server.accept()
+                    server.close()
+                    exp_err = 'Could not flush buffer.* - See https'
+                    with self.assertRaisesRegex(qi.IngressError, exp_err):
+                        for _ in range(1000):
+                            time.sleep(0.01)
+                            sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
+
+        def test_dont_auto_flush(self):
+            msg_counter = 0
+            with Server() as server:
+                with self.builder('tcp', 'localhost', server.port, auto_flush=False) as sender:
+                    server.accept()
+                    while len(sender) < 32768:  # 32KiB
+                        sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                        msg_counter += 1
+                    msgs = server.recv()
+                    self.assertEqual(msgs, [])
+                start = time.monotonic()
+                msgs = []
+                while len(msgs) < msg_counter:
+                    msgs += server.recv()
+                    elapsed = time.monotonic() - start
+                    if elapsed > 30.0:
+                        raise TimeoutError()
+
+        def test_dont_flush_on_exception(self):
+            with Server() as server:
+                with self.assertRaises(RuntimeError):
+                    with self.builder('tcp', 'localhost', server.port) as sender:
+                        server.accept()
+                        sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                        self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
+                        raise RuntimeError('Test exception')
+                msgs = server.recv()
+                self.assertEqual(msgs, [])
+
+        @unittest.skipIf(not pd, 'pandas not installed')
+        def test_dataframe(self):
+            with Server() as server:
+                with self.builder('tcp', 'localhost', server.port) as sender:
+                    server.accept()
+                    df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
+                    sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
+                msgs = server.recv()
+                self.assertEqual(
+                    msgs,
+                    [b'tbl1 a=1i,b=3.0',
+                        b'tbl1 a=2i,b=4.0'])
+
+        @unittest.skipIf(not pd, 'pandas not installed')
+        def test_dataframe_auto_flush(self):
+            with Server() as server:
+                # An auto-flush size of 20 bytes is enough to auto-flush the first
+                # row, but not the second.
+                with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=20) as sender:
+                    server.accept()
+                    df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
+                    sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
+                    msgs = server.recv()
+                    self.assertEqual(
+                        msgs,
+                        [b'tbl1 a=100000i,b=3.0'])
+
+                    # The second row is still pending send.
+                    self.assertEqual(len(sender), 16)
+
+                    # So we give it some more data and we should see it flush.
+                    sender.row('tbl1', columns={'a': 3, 'b': 5.0}, at=qi.ServerTimestamp)
+                    msgs = server.recv()
+                    self.assertEqual(
+                        msgs,
+                        [b'tbl1 a=2i,b=4.0',
+                        b'tbl1 a=3i,b=5.0'])
+
+                    self.assertEqual(len(sender), 0)
+
+                    # We can now disconnect the server and see auto flush failing.
+                    server.close()
+
+                    exp_err = 'Could not flush buffer.* - See https'
+                    with self.assertRaisesRegex(qi.IngressError, exp_err):
+                        for _ in range(1000):
+                            time.sleep(0.01)
+                            sender.dataframe(df.head(1), table_name='tbl1', at=qi.ServerTimestamp)
+
+        def test_new_buffer(self):
+            sender = self.builder(
+                protocol='tcp',
+                host='localhost',
+                port=9009,
+                init_buf_size=1024,
+                max_name_len=10)
+            buffer = sender.new_buffer()
+            self.assertEqual(buffer.init_buf_size, 1024)
+            self.assertEqual(buffer.max_name_len, 10)
+            self.assertEqual(buffer.init_buf_size, sender.init_buf_size)
+            self.assertEqual(buffer.max_name_len, sender.max_name_len)
+
+        def test_connect_after_close(self):
+            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+                server.accept()
+                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                sender.close()
+                with self.assertRaises(qi.IngressError):
+                    sender.connect()
+
+        def test_bad_init_args(self):
+            with self.assertRaises(OverflowError):
+                self.builder(protocol='tcp', host='localhost', port=9009, auth_timeout=-1)
+
+            with self.assertRaises(OverflowError):
+                self.builder(protocol='tcp', host='localhost', port=9009, init_buf_size=-1)
+
+            with self.assertRaises(OverflowError):
+                self.builder(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
+
+        def test_transaction_over_tcp(self):
+            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+                server.accept()
+                self.assertRaisesRegex(
+                    qi.IngressError,
+                    ('Transactions aren\'t supported for ILP/TCP,' +
+                    ' use ILP/HTTP instead.'),
+                    sender.transaction, 'table_name')
+
+        def test_transaction_basic(self):
+            ts = qi.TimestampNanos.now()
+            expected = (
+                f'table_name,sym1=val1 {ts.value}\n' +
+                f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                with sender.transaction('table_name') as txn:
+                    self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
+                    self.assertIs(txn.row(symbols={'sym2': 'val2'}, at=ts), txn)
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], expected)
+
+        @unittest.skipIf(not pd, 'pandas not installed')
+        def test_transaction_basic_df(self):
+            ts = qi.TimestampNanos.now()
+            expected = (
+                f'table_name,sym1=val1 {ts.value}\n' +
+                f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                with sender.transaction('table_name') as txn:
+                    df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
+                    self.assertIs(txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts), txn)
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], expected)
+
+        def test_transaction_no_auto_flush(self):
+            ts = qi.TimestampNanos.now()
+            expected = (
+                f'table_name,sym1=val1 {ts.value}\n' +
+                f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+                with sender.transaction('table_name') as txn:
+                    txn.row(symbols={'sym1': 'val1'}, at=ts)
+                    txn.row(symbols={'sym2': 'val2'}, at=ts)
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], expected)
+
+        @unittest.skipIf(not pd, 'pandas not installed')
+        def test_transaction_no_auto_flush_df(self):
+            ts = qi.TimestampNanos.now()
+            expected = (
+                f'table_name,sym1=val1 {ts.value}\n' +
+                f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+                with sender.transaction('table_name') as txn:
+                    df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
+                    txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts)
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], expected)
+
+        def test_transaction_auto_flush_pending_buf(self):
+            ts = qi.TimestampNanos.now()
+            expected1 = (
+                f'tbl1,sym1=val1 {ts.value}\n' +
+                f'tbl1,sym2=val2 {ts.value}\n').encode('utf-8')
+            expected2 = (
+                f'tbl2,sym3=val3 {ts.value}\n' +
+                f'tbl2,sym4=val4 {ts.value}\n').encode('utf-8')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=True) as sender:
+                self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+                self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
+                with sender.transaction('tbl2') as txn:
+                    txn.row(symbols={'sym3': 'val3'}, at=ts)
+                    txn.row(symbols={'sym4': 'val4'}, at=ts)
+                self.assertEqual(len(server.requests), 2)
+                self.assertEqual(server.requests[0], expected1)
+                self.assertEqual(server.requests[1], expected2)
+
+        def test_transaction_no_auto_flush_pending_buf(self):
+            ts = qi.TimestampNanos.now()
+            exp_err = (
+                'Sender buffer must be clear when starting a transaction. ' +
+                'You must call ..flush... before this call.')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+                self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+                self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
+                with self.assertRaisesRegex(qi.IngressError, exp_err):
+                    with sender.transaction('tbl2') as _txn:
+                        pass
+
+        def test_transaction_immediate_auto_flush(self):
+            ts = qi.TimestampNanos.now()
+            expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
+            expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
+            expected3 = (
+                f'tbl3,sym3=val3 {ts.value}\n' +
+                f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+                self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+                self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
+                with sender.transaction('tbl3') as txn:
+                    # The transaction is not broken up by the auto-flush logic.
+                    txn.row(symbols={'sym3': 'val3'}, at=ts)
+                    txn.row(symbols={'sym4': 'val4'}, at=ts)
+                self.assertEqual(len(server.requests), 3)
+                self.assertEqual(server.requests[0], expected1)
+                self.assertEqual(server.requests[1], expected2)
+                self.assertEqual(server.requests[2], expected3)
+
+        @unittest.skipIf(not pd, 'pandas not installed')
+        def test_transaction_immediate_auto_flush_df(self):
+            ts = qi.TimestampNanos.now()
+            expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
+            expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
+            expected3 = (
+                f'tbl3,sym3=val3 {ts.value}\n' +
+                f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+                self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
+                self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
+                with sender.transaction('tbl3') as txn:
+                    df = pd.DataFrame({'sym3': ['val3', None], 'sym4': [None, 'val4']})
+                    txn.dataframe(df, symbols=['sym3', 'sym4'], at=ts)
+                self.assertEqual(len(server.requests), 3)
+                self.assertEqual(server.requests[0], expected1)
+                self.assertEqual(server.requests[1], expected2)
+                self.assertEqual(server.requests[2], expected3)
+
+        @unittest.skipIf(not pd, 'pandas not installed')
+        def test_http_illegal_ops_in_txn(self):
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+                with sender.transaction('tbl1') as txn:
+                    txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                    txn.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+
+                    with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
+                        sender.row('tbl2', symbols={'sym3': 'val3'}, at=qi.ServerTimestamp)
+
+                    with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
+                        sender.dataframe(None, at=qi.ServerTimestamp)
+
+                    with self.assertRaisesRegex(qi.IngressError, 'Cannot flush explicity inside a transaction'):
+                        sender.flush()
+
+                    with self.assertRaisesRegex(qi.IngressError, 'Already inside a transaction, can\'t start another.'):
+                        with sender.transaction('tbl2') as _txn2:
+                            pass
+
+                    txn.commit()
+                    with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t commit'):
+                        txn.commit()
+                    with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t rollback.'):
+                        txn.rollback()
+                self.assertEqual(len(server.requests), 1)
+
+        def test_auto_flush_rows(self):
+            auto_flush_rows = 3
+
+            def into_requests(xs):
+                return [
+                    b''.join(xs[i:i + auto_flush_rows])
+                    for i in range(0, len(xs), auto_flush_rows)]
+            
+            expected = []
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=auto_flush_rows) as sender:
+                for i in range(10):
+                    sender.row('tbl1', columns={'x': i}, at=qi.ServerTimestamp)
+                    expected.append(f'tbl1 x={i}i\n'.encode('utf-8'))
+                
+                # Before the end of the `with` block we should already have 3 requests.
+                self.assertEqual(len(server.requests), 3)
+                self.assertEqual(server.requests, into_requests(expected)[:3])
+
+            # Closing the buffer should flush the last remaining row.
+            self.assertEqual(len(server.requests), 4)
+            self.assertEqual(server.requests, into_requests(expected))
+
+        def _do_test_auto_flush_interval(self):
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    auto_flush_interval=10,
+                    auto_flush_rows=None,
+                    auto_flush_bytes=None) as sender:
+                start_time = time.monotonic()
+                while True:
+                    sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
+                    elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                    if elapsed_ms < 5:
+                        self.assertEqual(len(server.requests), 0)
+                    if elapsed_ms >= 15:  # 5ms grace period.
+                        break
+                    time.sleep(1 / 1000)  # 1ms
+
+                return len(server.requests)
+
+        def test_auto_flush_interval(self):
+            # This test is timing-sensitive,
+            # so it has a tendency to go wrong in CI.
+            # To work around this we'll repeat the test up to 10 times
+            # until it passes.
+            for _ in range(10):
+                requests_len = self._do_test_auto_flush_interval()
+                if requests_len > 0:
+                    break
+
+            # If this fails, it failed 10 attempts.
+            # Due to CI timing delays there may have been multiple flushes.
+            self.assertGreaterEqual(requests_len, 1)
+
+        def test_http_username_password(self):
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user', password='pass') as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            self.assertEqual(len(server.requests), 1)
+            self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
+            self.assertEqual(server.headers[0]['Authorization'], 'Basic dXNlcjpwYXNz')
+
+        def test_http_token(self):
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, token='Yogi') as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+            self.assertEqual(len(server.requests), 1)
+            self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
+            self.assertEqual(server.headers[0]['Authorization'], 'Bearer Yogi')
+
+        def test_max_buf_size(self):
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, max_buf_size=1024, auto_flush=False) as sender:
+                while len(sender) < 1024:
+                    sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                with self.assertRaisesRegex(qi.IngressError, 'Could not flush .*exceeds maximum'):
+                    sender.flush()
+
+        def test_http_err(self):
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    retry_timeout=datetime.timedelta(milliseconds=1)) as sender:
+                server.responses.append((0, 500, 'text/plain', b'Internal Server Error'))
+                with self.assertRaisesRegex(qi.IngressError, 'Could not flush.*: Internal Server'):
+                    sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                    sender.flush()
+                self.assertEqual(len(sender), 0)  # buffer is still cleared after error.
+
+        def test_http_err_retry(self):
+            exp_payload = b'tbl1 x=42i\n'
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    retry_timeout=datetime.timedelta(seconds=1)) as sender:
+                server.responses.append((0, 500, 'text/plain', b'retriable error'))
+                server.responses.append((0, 200, 'text/plain', b'OK'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server.requests), 2)
+                self.assertEqual(server.requests[0], exp_payload)
+                self.assertEqual(server.requests[1], exp_payload)
+
+        def test_http_request_min_throughput(self):
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    request_timeout=0,
+                    request_min_throughput=1) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server.requests), 1)
+
+        def test_http_request_min_throughput_timeout(self):
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    auto_flush='off',
+                    request_timeout=0,
+                    retry_timeout=0,
+                    request_min_throughput=100000000) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+
+                # wait 5ms in the server to simulate a slow response
+                server.responses.append((5, 200, 'text/plain', b'OK'))
+
+                with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
+                    sender.flush()
+
+        def test_http_request_timeout(self):
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    retry_timeout=0,
+                    request_min_throughput=0,  # disable
+                    request_timeout=datetime.timedelta(milliseconds=5)) as sender:
+                # wait for 10ms in the server to simulate a slow response
+                server.responses.append((20, 200, 'text/plain', b'OK'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
+                    sender.flush()
 
 
-def _build_conf(protocol, host, port, **kwargs):
+    class Timestamp(unittest.TestCase):
+        def test_from_int(self):
+            ns = 1670857929778202000
+            num = ns // self.ns_scale
+            ts = self.timestamp_cls(num)
+            self.assertEqual(ts.value, num)
+
+            ts0 = self.timestamp_cls(0)
+            self.assertEqual(ts0.value, 0)
+
+            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+                self.timestamp_cls(-1)
+
+        def test_from_datetime(self):
+            utc = datetime.timezone.utc
+
+            dt1 = datetime.datetime(2022, 1, 1, 12, 0, 0, 0, tzinfo=utc)
+            ts1 = self.timestamp_cls.from_datetime(dt1)
+            self.assertEqual(ts1.value, 1641038400000000000 // self.ns_scale)
+            self.assertEqual(
+                ts1.value,
+                int(dt1.timestamp() * 1000000000 // self.ns_scale))
+
+            dt2 = datetime.datetime(1970, 1, 1, tzinfo=utc)
+            ts2 = self.timestamp_cls.from_datetime(dt2)
+            self.assertEqual(ts2.value, 0)
+
+            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+                self.timestamp_cls.from_datetime(
+                    datetime.datetime(1969, 12, 31, tzinfo=utc))
+
+            dt_naive = datetime.datetime(2022, 1, 1, 12, 0, 0, 0,
+                tzinfo=utc).astimezone(None).replace(tzinfo=None)
+            ts3 = self.timestamp_cls.from_datetime(dt_naive)
+            self.assertEqual(ts3.value, 1641038400000000000 // self.ns_scale)
+
+        def test_now(self):
+            expected = time.time_ns() // self.ns_scale
+            actual = self.timestamp_cls.now().value
+            delta = abs(expected - actual)
+            one_sec = 1000000000 // self.ns_scale
+            self.assertLess(delta, one_sec)
+
+
+class TestTimestampMicros(TestBases.Timestamp):
+    timestamp_cls = qi.TimestampMicros
+    ns_scale = 1000
+
+
+class TestTimestampNanos(TestBases.Timestamp):
+    timestamp_cls = qi.TimestampNanos
+    ns_scale = 1
+
+
+def build_conf(protocol, host, port, **kwargs):
     protocol = qi.Protocol.parse(protocol)
 
     def encode_duration(v):
@@ -321,7 +946,7 @@ class Builder(Enum):
             # Specify some of the params via the conf string,
             # and the rest via the API.
             via_conf, via_params = split_dict_randomly(kwargs)
-            conf = _build_conf(protocol, host, port, **via_conf)
+            conf = build_conf(protocol, host, port, **via_conf)
             if self is Builder.CONF:
                 return qi.Sender.from_conf(conf, **via_params)
             elif self is Builder.ENV:
@@ -331,689 +956,19 @@ class Builder(Enum):
                 return sender
 
 
-class TestSender(unittest.TestCase, metaclass=ParametrizedTest):
-    TEST_PARAMETERS = [
-        dict(name='init', builder=Builder.INIT),
-        dict(name='conf', builder=Builder.CONF),
-        dict(name='env', builder=Builder.ENV)
-    ]
+class TestSenderInit(TestBases.TestSender):
+    name = 'init'
+    builder = Builder.INIT
 
-    def test_basic(self):
-        with Server() as server, \
-                self.builder(
-                    'tcp',
-                    'localhost',
-                    server.port,
-                    bind_interface='0.0.0.0') as sender:
-            server.accept()
-            self.assertEqual(server.recv(), [])
-            sender.row(
-                'tab1',
-                symbols={
-                    't1': 'val1',
-                    't2': 'val2'},
-                columns={
-                    'f1': True,
-                    'f2': 12345,
-                    'f3': 10.75,
-                    'f4': 'val3'},
-                at=qi.TimestampNanos(111222233333))
-            sender.row(
-                'tab1',
-                symbols={
-                    'tag3': 'value 3',
-                    'tag4': 'value:4'},
-                columns={
-                    'field5': False},
-                at=qi.ServerTimestamp)
-            sender.flush()
-            msgs = server.recv()
-            self.assertEqual(msgs, [
-                (b'tab1,t1=val1,t2=val2 '
-                 b'f1=t,f2=12345i,f3=10.75,f4="val3" '
-                 b'111222233333'),
-                b'tab1,tag3=value\\ 3,tag4=value:4 field5=f'])
 
-    def test_connect_close(self):
-        with Server() as server:
-            sender = None
-            try:
-                sender = self.builder('tcp', 'localhost', server.port)
-                sender.connect()
-                server.accept()
-                self.assertEqual(server.recv(), [])
-                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                sender.flush()
-                msgs = server.recv()
-                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
-            finally:
-                sender.close()
+class TestSenderConf(TestBases.TestSender):
+    name = 'conf'
+    builder = Builder.CONF
 
-    def test_row_before_connect(self):
-        try:
-            sender = self.builder('tcp', 'localhost', 12345)
-            sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
-                sender.flush()
-        finally:
-            sender.close()
 
-    def test_flush_1(self):
-        with Server() as server:
-            with self.builder('tcp', 'localhost', server.port) as sender:
-                server.accept()
-                with self.assertRaisesRegex(qi.IngressError, 'Column names'):
-                    sender.row('tbl1', symbols={'...bad name..': 'val1'}, at=qi.ServerTimestamp)
-                self.assertEqual(str(sender), '')
-                sender.flush()
-                self.assertEqual(str(sender), '')
-            msgs = server.recv()
-            self.assertEqual(msgs, [])
-
-    def test_flush_2(self):
-        with Server() as server:
-            with self.builder('tcp', 'localhost', server.port) as sender:
-                server.accept()
-                server.close()
-
-                # We enter a bad state where we can't flush again.
-                with self.assertRaises(qi.IngressError):
-                    for _ in range(1000):
-                        time.sleep(0.01)
-                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
-                        sender.flush()
-
-                # We should still be in a bad state.
-                with self.assertRaises(qi.IngressError):
-                    sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
-                    sender.flush()
-
-            # Leaving the `with` scope will call __exit__ and here we test
-            # that a prior exception will not cause subsequent problems.
-
-    def test_flush_3(self):
-        # Same as test_flush_2, but we catch the exception _outside_ the
-        # sender's `with` block, to ensure no exceptions get trapped.
-        with Server() as server:
-            with self.assertRaises(qi.IngressError):
-                with self.builder('tcp', 'localhost', server.port) as sender:
-                    server.accept()
-                    server.close()
-                    for _ in range(1000):
-                        time.sleep(0.01)
-                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
-                        sender.flush()
-
-    def test_flush_4(self):
-        # Clearing of the internal buffer is not allowed.
-        with Server() as server:
-            with self.assertRaises(ValueError):
-                with self.builder('tcp', 'localhost', server.port) as sender:
-                    server.accept()
-                    sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
-                    sender.flush(buffer=None, clear=False)
-
-    def test_two_rows_explicit_buffer(self):
-        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
-            server.accept()
-            self.assertEqual(server.recv(), [])
-            buffer = sender.new_buffer()
-            buffer.row(
-                'line_sender_buffer_example2',
-                symbols={'id': 'Hola'},
-                columns={'price': '111222233333i', 'qty': 3.5},
-                at=qi.TimestampNanos(111222233333))
-            buffer.row(
-                'line_sender_example',
-                symbols={'id': 'Adios'},
-                columns={'price': '111222233343i', 'qty': 2.5},
-                at=qi.TimestampNanos(111222233343))
-            exp = (
-                'line_sender_buffer_example2,id=Hola price="111222233333i",qty=3.5 111222233333\n'
-                'line_sender_example,id=Adios price="111222233343i",qty=2.5 111222233343\n')
-            self.assertEqual(str(buffer), exp)
-            sender.flush(buffer)
-            msgs = server.recv()
-            bexp = [msg.encode('utf-8') for msg in exp.rstrip().split('\n')]
-            self.assertEqual(msgs, bexp)
-
-    def test_independent_buffer(self):
-        buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-        exp = 'tbl1,sym1=val1\n'
-        bexp = exp[:-1].encode('utf-8')
-        self.assertEqual(str(buf), exp)
-
-        with Server() as server1, Server() as server2:
-            with self.builder('tcp', 'localhost', server1.port) as sender1, \
-                 self.builder('tcp', 'localhost', server2.port) as sender2:
-                    server1.accept()
-                    server2.accept()
-
-                    sender1.flush(buf, clear=False)
-                    self.assertEqual(str(buf), exp)
-
-                    sender2.flush(buf, clear=False)
-                    self.assertEqual(str(buf), exp)
-
-                    msgs1 = server1.recv()
-                    msgs2 = server2.recv()
-                    self.assertEqual(msgs1, [bexp])
-                    self.assertEqual(msgs2, [bexp])
-
-                    sender1.flush(buf)
-                    self.assertEqual(server1.recv(), [bexp])
-
-                    # The buffer is now auto-cleared.
-                    self.assertEqual(str(buf), '')
-
-    def test_auto_flush(self):
-        with Server() as server:
-            with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=4) as sender:
-                server.accept()
-                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                self.assertEqual(len(sender), 0)  # auto-flushed buffer.
-                msgs = server.recv()
-                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
-
-    def test_immediate_auto_flush(self):
-        with Server() as server:
-            with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
-                server.accept()
-                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                self.assertEqual(len(sender), 0)  # auto-flushed buffer.
-                msgs = server.recv()
-                self.assertEqual(msgs, [b'tbl1,sym1=val1'])
-
-    def test_auto_flush_on_closed_socket(self):
-        with Server() as server:
-            with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
-                server.accept()
-                server.close()
-                exp_err = 'Could not flush buffer.* - See https'
-                with self.assertRaisesRegex(qi.IngressError, exp_err):
-                    for _ in range(1000):
-                        time.sleep(0.01)
-                        sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
-
-    def test_dont_auto_flush(self):
-        msg_counter = 0
-        with Server() as server:
-            with self.builder('tcp', 'localhost', server.port, auto_flush=False) as sender:
-                server.accept()
-                while len(sender) < 32768:  # 32KiB
-                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                    msg_counter += 1
-                msgs = server.recv()
-                self.assertEqual(msgs, [])
-            start = time.monotonic()
-            msgs = []
-            while len(msgs) < msg_counter:
-                msgs += server.recv()
-                elapsed = time.monotonic() - start
-                if elapsed > 30.0:
-                    raise TimeoutError()
-
-    def test_dont_flush_on_exception(self):
-        with Server() as server:
-            with self.assertRaises(RuntimeError):
-                with self.builder('tcp', 'localhost', server.port) as sender:
-                    server.accept()
-                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                    self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
-                    raise RuntimeError('Test exception')
-            msgs = server.recv()
-            self.assertEqual(msgs, [])
-
-    @unittest.skipIf(not pd, 'pandas not installed')
-    def test_dataframe(self):
-        with Server() as server:
-            with self.builder('tcp', 'localhost', server.port) as sender:
-                server.accept()
-                df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
-                sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
-            msgs = server.recv()
-            self.assertEqual(
-                msgs,
-                [b'tbl1 a=1i,b=3.0',
-                    b'tbl1 a=2i,b=4.0'])
-
-    @unittest.skipIf(not pd, 'pandas not installed')
-    def test_dataframe_auto_flush(self):
-        with Server() as server:
-            # An auto-flush size of 20 bytes is enough to auto-flush the first
-            # row, but not the second.
-            with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=20) as sender:
-                server.accept()
-                df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
-                sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
-                msgs = server.recv()
-                self.assertEqual(
-                    msgs,
-                    [b'tbl1 a=100000i,b=3.0'])
-
-                # The second row is still pending send.
-                self.assertEqual(len(sender), 16)
-
-                # So we give it some more data and we should see it flush.
-                sender.row('tbl1', columns={'a': 3, 'b': 5.0}, at=qi.ServerTimestamp)
-                msgs = server.recv()
-                self.assertEqual(
-                    msgs,
-                    [b'tbl1 a=2i,b=4.0',
-                     b'tbl1 a=3i,b=5.0'])
-
-                self.assertEqual(len(sender), 0)
-
-                # We can now disconnect the server and see auto flush failing.
-                server.close()
-
-                exp_err = 'Could not flush buffer.* - See https'
-                with self.assertRaisesRegex(qi.IngressError, exp_err):
-                    for _ in range(1000):
-                        time.sleep(0.01)
-                        sender.dataframe(df.head(1), table_name='tbl1', at=qi.ServerTimestamp)
-
-    def test_new_buffer(self):
-        sender = self.builder(
-            protocol='tcp',
-            host='localhost',
-            port=9009,
-            init_buf_size=1024,
-            max_name_len=10)
-        buffer = sender.new_buffer()
-        self.assertEqual(buffer.init_buf_size, 1024)
-        self.assertEqual(buffer.max_name_len, 10)
-        self.assertEqual(buffer.init_buf_size, sender.init_buf_size)
-        self.assertEqual(buffer.max_name_len, sender.max_name_len)
-
-    def test_connect_after_close(self):
-        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
-            server.accept()
-            sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-            sender.close()
-            with self.assertRaises(qi.IngressError):
-                sender.connect()
-
-    def test_bad_init_args(self):
-        with self.assertRaises(OverflowError):
-            self.builder(protocol='tcp', host='localhost', port=9009, auth_timeout=-1)
-
-        with self.assertRaises(OverflowError):
-            self.builder(protocol='tcp', host='localhost', port=9009, init_buf_size=-1)
-
-        with self.assertRaises(OverflowError):
-            self.builder(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
-
-    def test_transaction_over_tcp(self):
-        with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
-            server.accept()
-            self.assertRaisesRegex(
-                qi.IngressError,
-                ('Transactions aren\'t supported for ILP/TCP,' +
-                 ' use ILP/HTTP instead.'),
-                sender.transaction, 'table_name')
-
-    def test_transaction_basic(self):
-        ts = qi.TimestampNanos.now()
-        expected = (
-            f'table_name,sym1=val1 {ts.value}\n' +
-            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
-            with sender.transaction('table_name') as txn:
-                self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
-                self.assertIs(txn.row(symbols={'sym2': 'val2'}, at=ts), txn)
-            self.assertEqual(len(server.requests), 1)
-            self.assertEqual(server.requests[0], expected)
-
-    @unittest.skipIf(not pd, 'pandas not installed')
-    def test_transaction_basic_df(self):
-        ts = qi.TimestampNanos.now()
-        expected = (
-            f'table_name,sym1=val1 {ts.value}\n' +
-            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
-            with sender.transaction('table_name') as txn:
-                df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
-                self.assertIs(txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts), txn)
-            self.assertEqual(len(server.requests), 1)
-            self.assertEqual(server.requests[0], expected)
-
-    def test_transaction_no_auto_flush(self):
-        ts = qi.TimestampNanos.now()
-        expected = (
-            f'table_name,sym1=val1 {ts.value}\n' +
-            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
-            with sender.transaction('table_name') as txn:
-                txn.row(symbols={'sym1': 'val1'}, at=ts)
-                txn.row(symbols={'sym2': 'val2'}, at=ts)
-            self.assertEqual(len(server.requests), 1)
-            self.assertEqual(server.requests[0], expected)
-
-    @unittest.skipIf(not pd, 'pandas not installed')
-    def test_transaction_no_auto_flush_df(self):
-        ts = qi.TimestampNanos.now()
-        expected = (
-            f'table_name,sym1=val1 {ts.value}\n' +
-            f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
-            with sender.transaction('table_name') as txn:
-                df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
-                txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts)
-            self.assertEqual(len(server.requests), 1)
-            self.assertEqual(server.requests[0], expected)
-
-    def test_transaction_auto_flush_pending_buf(self):
-        ts = qi.TimestampNanos.now()
-        expected1 = (
-            f'tbl1,sym1=val1 {ts.value}\n' +
-            f'tbl1,sym2=val2 {ts.value}\n').encode('utf-8')
-        expected2 = (
-            f'tbl2,sym3=val3 {ts.value}\n' +
-            f'tbl2,sym4=val4 {ts.value}\n').encode('utf-8')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=True) as sender:
-            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
-            self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
-            with sender.transaction('tbl2') as txn:
-                txn.row(symbols={'sym3': 'val3'}, at=ts)
-                txn.row(symbols={'sym4': 'val4'}, at=ts)
-            self.assertEqual(len(server.requests), 2)
-            self.assertEqual(server.requests[0], expected1)
-            self.assertEqual(server.requests[1], expected2)
-
-    def test_transaction_no_auto_flush_pending_buf(self):
-        ts = qi.TimestampNanos.now()
-        exp_err = (
-            'Sender buffer must be clear when starting a transaction. ' +
-            'You must call ..flush... before this call.')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
-            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
-            self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
-            with self.assertRaisesRegex(qi.IngressError, exp_err):
-                with sender.transaction('tbl2') as _txn:
-                    pass
-
-    def test_transaction_immediate_auto_flush(self):
-        ts = qi.TimestampNanos.now()
-        expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
-        expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
-        expected3 = (
-            f'tbl3,sym3=val3 {ts.value}\n' +
-            f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
-            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
-            self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
-            with sender.transaction('tbl3') as txn:
-                # The transaction is not broken up by the auto-flush logic.
-                txn.row(symbols={'sym3': 'val3'}, at=ts)
-                txn.row(symbols={'sym4': 'val4'}, at=ts)
-            self.assertEqual(len(server.requests), 3)
-            self.assertEqual(server.requests[0], expected1)
-            self.assertEqual(server.requests[1], expected2)
-            self.assertEqual(server.requests[2], expected3)
-
-    @unittest.skipIf(not pd, 'pandas not installed')
-    def test_transaction_immediate_auto_flush_df(self):
-        ts = qi.TimestampNanos.now()
-        expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
-        expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
-        expected3 = (
-            f'tbl3,sym3=val3 {ts.value}\n' +
-            f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
-            self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
-            self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
-            with sender.transaction('tbl3') as txn:
-                df = pd.DataFrame({'sym3': ['val3', None], 'sym4': [None, 'val4']})
-                txn.dataframe(df, symbols=['sym3', 'sym4'], at=ts)
-            self.assertEqual(len(server.requests), 3)
-            self.assertEqual(server.requests[0], expected1)
-            self.assertEqual(server.requests[1], expected2)
-            self.assertEqual(server.requests[2], expected3)
-
-    @unittest.skipIf(not pd, 'pandas not installed')
-    def test_http_illegal_ops_in_txn(self):
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
-            with sender.transaction('tbl1') as txn:
-                txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                txn.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
-
-                with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
-                    sender.row('tbl2', symbols={'sym3': 'val3'}, at=qi.ServerTimestamp)
-
-                with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
-                    sender.dataframe(None, at=qi.ServerTimestamp)
-
-                with self.assertRaisesRegex(qi.IngressError, 'Cannot flush explicity inside a transaction'):
-                    sender.flush()
-
-                with self.assertRaisesRegex(qi.IngressError, 'Already inside a transaction, can\'t start another.'):
-                    with sender.transaction('tbl2') as _txn2:
-                        pass
-
-                txn.commit()
-                with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t commit'):
-                    txn.commit()
-                with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t rollback.'):
-                    txn.rollback()
-            self.assertEqual(len(server.requests), 1)
-
-    def test_auto_flush_rows(self):
-        auto_flush_rows = 3
-
-        def into_requests(xs):
-            return [
-                b''.join(xs[i:i + auto_flush_rows])
-                for i in range(0, len(xs), auto_flush_rows)]
-        
-        expected = []
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=auto_flush_rows) as sender:
-            for i in range(10):
-                sender.row('tbl1', columns={'x': i}, at=qi.ServerTimestamp)
-                expected.append(f'tbl1 x={i}i\n'.encode('utf-8'))
-            
-            # Before the end of the `with` block we should already have 3 requests.
-            self.assertEqual(len(server.requests), 3)
-            self.assertEqual(server.requests, into_requests(expected)[:3])
-
-        # Closing the buffer should flush the last remaining row.
-        self.assertEqual(len(server.requests), 4)
-        self.assertEqual(server.requests, into_requests(expected))
-
-    def _do_test_auto_flush_interval(self):
-        with HttpServer() as server, self.builder(
-                'http',
-                'localhost',
-                server.port,
-                auto_flush_interval=10,
-                auto_flush_rows=None,
-                auto_flush_bytes=None) as sender:
-            start_time = time.monotonic()
-            while True:
-                sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
-                elapsed_ms = int((time.monotonic() - start_time) * 1000)
-                if elapsed_ms < 5:
-                    self.assertEqual(len(server.requests), 0)
-                if elapsed_ms >= 15:  # 5ms grace period.
-                    break
-                time.sleep(1 / 1000)  # 1ms
-
-            return len(server.requests)
-
-    def test_auto_flush_interval(self):
-        # This test is timing-sensitive,
-        # so it has a tendency to go wrong in CI.
-        # To work around this we'll repeat the test up to 10 times
-        # until it passes.
-        for _ in range(10):
-            requests_len = self._do_test_auto_flush_interval()
-            if requests_len > 0:
-                break
-
-        # If this fails, it failed 10 attempts.
-        # Due to CI timing delays there may have been multiple flushes.
-        self.assertGreaterEqual(requests_len, 1)
-
-    def test_http_username_password(self):
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user', password='pass') as sender:
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-        self.assertEqual(len(server.requests), 1)
-        self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
-        self.assertEqual(server.headers[0]['Authorization'], 'Basic dXNlcjpwYXNz')
-
-    def test_http_token(self):
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, token='Yogi') as sender:
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-        self.assertEqual(len(server.requests), 1)
-        self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
-        self.assertEqual(server.headers[0]['Authorization'], 'Bearer Yogi')
-
-    def test_max_buf_size(self):
-        with HttpServer() as server, self.builder('http', 'localhost', server.port, max_buf_size=1024, auto_flush=False) as sender:
-            while len(sender) < 1024:
-                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError, 'Could not flush .*exceeds maximum'):
-                sender.flush()
-
-    def test_http_err(self):
-        with HttpServer() as server, self.builder(
-                'http',
-                'localhost',
-                server.port,
-                retry_timeout=datetime.timedelta(milliseconds=1)) as sender:
-            server.responses.append((0, 500, 'text/plain', b'Internal Server Error'))
-            with self.assertRaisesRegex(qi.IngressError, 'Could not flush.*: Internal Server'):
-                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                sender.flush()
-            self.assertEqual(len(sender), 0)  # buffer is still cleared after error.
-
-    def test_http_err_retry(self):
-        exp_payload = b'tbl1 x=42i\n'
-        with HttpServer() as server, self.builder(
-                'http',
-                'localhost',
-                server.port,
-                retry_timeout=datetime.timedelta(seconds=1)) as sender:
-            server.responses.append((0, 500, 'text/plain', b'retriable error'))
-            server.responses.append((0, 200, 'text/plain', b'OK'))
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            sender.flush()
-            self.assertEqual(len(server.requests), 2)
-            self.assertEqual(server.requests[0], exp_payload)
-            self.assertEqual(server.requests[1], exp_payload)
-
-    def test_http_request_min_throughput(self):
-        with HttpServer() as server, self.builder(
-                'http',
-                'localhost',
-                server.port,
-                request_timeout=0,
-                request_min_throughput=1) as sender:
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            sender.flush()
-            self.assertEqual(len(server.requests), 1)
-
-    def test_http_request_min_throughput_timeout(self):
-        with HttpServer() as server, self.builder(
-                'http',
-                'localhost',
-                server.port,
-                auto_flush='off',
-                request_timeout=0,
-                retry_timeout=0,
-                request_min_throughput=100000000) as sender:
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-
-            # wait 5ms in the server to simulate a slow response
-            server.responses.append((5, 200, 'text/plain', b'OK'))
-
-            with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
-                sender.flush()
-
-    def test_http_request_timeout(self):
-        with HttpServer() as server, self.builder(
-                'http',
-                'localhost',
-                server.port,
-                retry_timeout=0,
-                request_min_throughput=0,  # disable
-                request_timeout=datetime.timedelta(milliseconds=5)) as sender:
-            # wait for 10ms in the server to simulate a slow response
-            server.responses.append((20, 200, 'text/plain', b'OK'))
-            sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
-                sender.flush()
-
-
-class TestManifest(unittest.TestCase):
-    def test_valid_yaml(self):
-        try:
-            import yaml
-        except ImportError:
-            self.skipTest('Python version does not support yaml')
-        examples_manifest_file = pathlib.Path(__file__).parent.parent / 'examples.manifest.yaml'
-        with open(examples_manifest_file, 'r') as f:
-            yaml.safe_load(f)
-
-
-class TestBases:
-    class Timestamp(unittest.TestCase):
-        def test_from_int(self):
-            ns = 1670857929778202000
-            num = ns // self.ns_scale
-            ts = self.timestamp_cls(num)
-            self.assertEqual(ts.value, num)
-
-            ts0 = self.timestamp_cls(0)
-            self.assertEqual(ts0.value, 0)
-
-            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
-                self.timestamp_cls(-1)
-
-        def test_from_datetime(self):
-            utc = datetime.timezone.utc
-
-            dt1 = datetime.datetime(2022, 1, 1, 12, 0, 0, 0, tzinfo=utc)
-            ts1 = self.timestamp_cls.from_datetime(dt1)
-            self.assertEqual(ts1.value, 1641038400000000000 // self.ns_scale)
-            self.assertEqual(
-                ts1.value,
-                int(dt1.timestamp() * 1000000000 // self.ns_scale))
-
-            dt2 = datetime.datetime(1970, 1, 1, tzinfo=utc)
-            ts2 = self.timestamp_cls.from_datetime(dt2)
-            self.assertEqual(ts2.value, 0)
-
-            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
-                self.timestamp_cls.from_datetime(
-                    datetime.datetime(1969, 12, 31, tzinfo=utc))
-
-            dt_naive = datetime.datetime(2022, 1, 1, 12, 0, 0, 0,
-                tzinfo=utc).astimezone(None).replace(tzinfo=None)
-            ts3 = self.timestamp_cls.from_datetime(dt_naive)
-            self.assertEqual(ts3.value, 1641038400000000000 // self.ns_scale)
-
-        def test_now(self):
-            expected = time.time_ns() // self.ns_scale
-            actual = self.timestamp_cls.now().value
-            delta = abs(expected - actual)
-            one_sec = 1000000000 // self.ns_scale
-            self.assertLess(delta, one_sec)
-
-
-class TestTimestampMicros(TestBases.Timestamp):
-    timestamp_cls = qi.TimestampMicros
-    ns_scale = 1000
-
-
-class TestTimestampNanos(TestBases.Timestamp):
-    timestamp_cls = qi.TimestampNanos
-    ns_scale = 1
+class TestSenderEnv(TestBases.TestSender):
+    name = 'env'
+    builder = Builder.ENV
 
 
 if __name__ == '__main__':
