@@ -385,7 +385,13 @@ class TestBases:
 
         def test_auto_flush(self):
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=4) as sender:
+                with self.builder(
+                        'tcp',
+                        'localhost',
+                        server.port,
+                        auto_flush_bytes=4,
+                        auto_flush_rows=False,
+                        auto_flush_interval=False) as sender:
                     server.accept()
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                     self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -459,7 +465,13 @@ class TestBases:
             with Server() as server:
                 # An auto-flush size of 20 bytes is enough to auto-flush the first
                 # row, but not the second.
-                with self.builder('tcp', 'localhost', server.port, auto_flush_bytes=20) as sender:
+                with self.builder(
+                        'tcp',
+                        'localhost',
+                        server.port,
+                        auto_flush_bytes=20,
+                        auto_flush_rows=False,
+                        auto_flush_interval=False) as sender:
                     server.accept()
                     df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
                     sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -684,7 +696,13 @@ class TestBases:
                     for i in range(0, len(xs), auto_flush_rows)]
             
             expected = []
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=auto_flush_rows) as sender:
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    auto_flush_rows=auto_flush_rows,
+                    auto_flush_interval=False,
+                    auto_flush_bytes=False) as sender:
                 for i in range(10):
                     sender.row('tbl1', columns={'x': i}, at=qi.ServerTimestamp)
                     expected.append(f'tbl1 x={i}i\n'.encode('utf-8'))
@@ -703,8 +721,8 @@ class TestBases:
                     'localhost',
                     server.port,
                     auto_flush_interval=10,
-                    auto_flush_rows=None,
-                    auto_flush_bytes=None) as sender:
+                    auto_flush_rows=False,
+                    auto_flush_bytes=False) as sender:
                 start_time = time.monotonic()
                 while True:
                     sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
