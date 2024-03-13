@@ -905,6 +905,16 @@ def build_conf(protocol, host, port, **kwargs):
         if isinstance(v, datetime.timedelta):
             return str(v.seconds * 1000 + v.microseconds // 1000)
         return str(v)
+    
+    def encode_duration_or_off(v):
+        if v is False:
+            return 'off'
+        return encode_duration(v)
+
+    def encode_int_or_off(v):
+        if v is False:
+            return 'off'
+        return str(v)
 
     encoders = {
         'bind_interface': str,
@@ -922,9 +932,9 @@ def build_conf(protocol, host, port, **kwargs):
         'request_min_throughput': str,
         'request_timeout': encode_duration,
         'auto_flush': lambda v: 'on' if v else 'off',
-        'auto_flush_rows': str,
-        'auto_flush_bytes': str,
-        'auto_flush_interval': encode_duration,
+        'auto_flush_rows': encode_int_or_off,
+        'auto_flush_bytes': encode_int_or_off,
+        'auto_flush_interval': encode_duration_or_off,
         'init_buf_size': str,
         'max_name_len': str,
     }

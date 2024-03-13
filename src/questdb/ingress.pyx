@@ -1678,9 +1678,9 @@ cdef object parse_conf_str(
         'request_min_throughput': int,
         'request_timeout': int,
         'auto_flush': str,
-        'auto_flush_rows': int,
-        'auto_flush_bytes': int,
-        'auto_flush_interval': int,
+        'auto_flush_rows': str,
+        'auto_flush_bytes': str,
+        'auto_flush_interval': str,
         'init_buf_size': int,
         'max_name_len': int,
     }
