@@ -12,12 +12,16 @@ You can install it (or update it) globally by running::
 
 Or, from within a virtual environment::
 
-    pip install questdb
+    pip install -U questdb
 
 
 If you're using poetry, you can add ``questdb`` as a dependency::
 
     poetry add questdb
+
+or to update the dependency::
+
+    poetry update questdb
 
 
 Note that the :func:`questdb.ingress.Buffer.dataframe` and the

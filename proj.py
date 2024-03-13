@@ -158,6 +158,16 @@ def rr_test(*args):
                 (rr) continue  # or step, next, etc.{reset}\n\n''')
     
 
+def open_browser(port):
+    import time
+    time.sleep(1)
+    # attempt to open the browser
+    try:
+        import webbrowser
+        webbrowser.open(f'http://127.0.0.1:{port}/')
+    except Exception as e:
+        sys.stderr.write(f'WARNING: {e}\n')
+
 
 @command
 def doc(http_serve=False, port=None):
@@ -171,6 +181,8 @@ def doc(http_serve=False, port=None):
 @command
 def serve(port=None):
     port = port or 8000
+    import threading
+    threading.Thread(target=open_browser, args=[port]).start()
     docs_dir = PROJ_ROOT / 'build' / 'docs'
     _run('python3', '-m', 'http.server', port, cwd=docs_dir)
 

@@ -20,6 +20,8 @@ Here the :class:`questdb.ingress.Sender` is constructed with just ``host`` and
    :language: python
 
 
+.. _auth_and_tls_example:
+
 Authentication and TLS
 ----------------------
 

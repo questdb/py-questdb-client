@@ -21,7 +21,7 @@ The latest version of the library is 1.2.0.
 
 ::
 
-    python3 -m pip install questdb
+    python3 -m pip install -U questdb
 
 .. code-block:: python
 

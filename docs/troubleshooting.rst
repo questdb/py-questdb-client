@@ -38,6 +38,7 @@ You may not see data appear in a timely manner because you're not calling
 The :class:`questdb.ingress.Sender` class only  provides auto-flushing based on
 a buffer size and *not on a timer*.
 
+.. _troubleshooting-flushing:
 
 Errors during flushing
 ----------------------
@@ -71,7 +72,7 @@ Here's an example if you append rows to the ``Sender`` object:
 
     import textwrap
 
-    with Sender(...) as sender:
+    with Sender.from_conf(...) as sender:
         # sender.row(...)
         # sender.row(...)
         # ...
