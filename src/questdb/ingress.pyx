@@ -1631,6 +1631,13 @@ cdef class Sender:
     """
     A sender is a client that inserts rows into QuestDB via the ILP protocol.
 
+    It supports both TCP and HTTP protocols, authentication and TLS.
+
+    You should prefer to use HTTP over TCP in most cases as it provides better
+    feedback on errors and transaction control.
+
+    TCP is useful for high-throughput scenarios in higher latency networks.
+
     **Inserting two rows**
 
     In this example, data will be flushed and sent at the end of the ``with``
@@ -1638,7 +1645,7 @@ cdef class Sender:
 
     .. code-block:: python
 
-        conf = 'tcp::addr=localhost:9009;'
+        conf = 'http::addr=localhost:9000;'
         with Sender(conf) as sender:
             sender.row(
                 'weather_sensor',
