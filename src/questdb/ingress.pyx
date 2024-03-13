@@ -1397,10 +1397,20 @@ cdef uint64_t _timedelta_to_millis(object timedelta):
     """
     Convert a timedelta to milliseconds.
     """
-    cdef uint64_t millis = (
+    cdef int64_t millis = (
         (timedelta.microseconds // 1000) +
-        (timedelta.seconds * 1000))
+        (int(timedelta.total_seconds()) * 1000))
+    if millis < 0:
+        raise ValueError(
+            f'Negative timedelta not allowed: {timedelta!r}.')
     return millis
+
+
+cdef int64_t auto_flush_rows_default(line_sender_protocol protocol):
+    if protocol == line_sender_protocol_http:
+        return 75000
+    else:
+        return 600
 
 
 cdef void_int _parse_auto_flush(
@@ -1411,78 +1421,132 @@ cdef void_int _parse_auto_flush(
     object auto_flush_interval,
     auto_flush_mode_t* c_auto_flush
 ) except -1:
-    # Set defaults if none of the auto_flush parameters are set.
-    if (auto_flush_rows is None) \
-            and (auto_flush_bytes is None) \
-            and (auto_flush_interval is None):
-        if protocol == line_sender_protocol_http:
-            auto_flush_rows = 75000
-        else:
-            auto_flush_rows = 600
-        auto_flush_bytes = None
+    # Set defaults.
+    if auto_flush_rows is None:
+        auto_flush_rows = auto_flush_rows_default(protocol)
+
+    if auto_flush_bytes is None:
+        auto_flush_bytes = False
+
+    if auto_flush_interval is None:
         auto_flush_interval = 1000
 
-    # Determine if to enable auto-flush based on the parameters.
-    if auto_flush is None:
-        auto_flush = ((auto_flush_rows is not None) or
-            (auto_flush_bytes is not None) or
-            (auto_flush_interval is not None))
-    elif (auto_flush is True) or (auto_flush == 'on'):
-        auto_flush = True
-    elif (auto_flush is False) or (auto_flush == 'off'):
-        auto_flush = False
+    if isinstance(auto_flush, str):
+        if auto_flush == 'off':
+            auto_flush = False
+        elif auto_flush == 'on':
+            auto_flush = True
+        else:
+            raise IngressError(
+                IngressErrorCode.ConfigError,
+                '"auto_flush" must be None, bool, "on" or "off", ' +
+                f'not {auto_flush!r}')
+
+    # Normalise auto_flush parameters to ints or False.
+    if isinstance(auto_flush_rows, str):
+        if auto_flush_rows == 'on':
+            raise IngressError(
+                IngressErrorCode.ConfigError,
+                '"auto_flush_rows" cannot be "on"')
+        elif auto_flush_rows == 'off':
+            auto_flush_rows = False
+        else:
+            auto_flush_rows = int(auto_flush_rows)
+    elif auto_flush_rows is False or isinstance(auto_flush_rows, int):
+        pass
     else:
+        raise TypeError(
+            '"auto_flush_rows" must be an int, False or "off", ' +
+            f'not {auto_flush_rows!r}')
+
+    if isinstance(auto_flush_bytes, str):
+        if auto_flush_bytes == 'on':
+            raise IngressError(
+                IngressErrorCode.ConfigError,
+                '"auto_flush_bytes" cannot be "on"')
+        elif auto_flush_bytes == 'off':
+            auto_flush_bytes = False
+        else:
+            auto_flush_bytes = int(auto_flush_bytes)
+    elif auto_flush_bytes is False or isinstance(auto_flush_bytes, int):
+        pass
+    else:
+        raise TypeError(
+            '"auto_flush_bytes" must be an int, False or "off", ' +
+            f'not {auto_flush_bytes!r}')
+
+    if isinstance(auto_flush_interval, str):
+        if auto_flush_interval == 'on':
+            raise IngressError(
+                IngressErrorCode.ConfigError,
+                '"auto_flush_interval" cannot be "on"')
+        elif auto_flush_interval == 'off':
+            auto_flush_interval = False
+        else:
+            auto_flush_interval = int(auto_flush_interval)
+    elif auto_flush_interval is False or isinstance(auto_flush_interval, int):
+        pass
+    elif isinstance(auto_flush_interval, timedelta):
+        auto_flush_interval = _timedelta_to_millis(auto_flush_interval)
+    else:
+        raise TypeError(
+            '"auto_flush_interval" must be an int, timedelta, False or "off", ' +
+            f'not {auto_flush_interval!r}')
+
+    # Coerce auto_flush to bool if None.
+    if auto_flush is None:
+        auto_flush = (
+            (auto_flush_rows is not False) or
+            (auto_flush_bytes is not False) or
+            (auto_flush_interval is not False))
+    elif not isinstance(auto_flush, bool):
         raise ValueError(
-            f'"auto_flush" must be None, bool, "on" or "off", not {auto_flush!r}')
+            '"auto_flush" must be None, bool, "on" or "off", ' +
+            f'not {auto_flush!r}')
 
     # Validate auto_flush parameters.
-    if auto_flush and (auto_flush_rows is None) and (auto_flush_bytes is None) \
-            and (auto_flush_interval is None):
+    if auto_flush and \
+            (auto_flush_rows is False) and \
+            (auto_flush_bytes is False) and \
+            (auto_flush_interval is False):
         raise ValueError(
             '"auto_flush" is enabled but no other auto-flush '
             'parameters are enabled. Please set at least one of '
             '"auto_flush_rows", "auto_flush_bytes" or '
             '"auto_flush_interval".')
 
+    if auto_flush_rows is not False and auto_flush_rows < 1:
+        raise ValueError(
+            '"auto_flush_rows" must be >= 1, '
+            f'not {auto_flush_rows}')
+
+    if auto_flush_bytes is not False and auto_flush_bytes < 1:
+        raise ValueError(
+            '"auto_flush_bytes" must be >= 1, '
+            f'not {auto_flush_bytes}')
+
+    if auto_flush_interval is not False and auto_flush_interval < 1:
+        raise ValueError(
+            '"auto_flush_interval" must be >= 1, '
+            f'not {auto_flush_interval}')
+
     # Parse individual auto_flush parameters to C struct.
     c_auto_flush.enabled = auto_flush
 
-    if auto_flush_rows is None:
+    if auto_flush_rows is False:
         c_auto_flush.row_count = -1
     else:
         c_auto_flush.row_count = auto_flush_rows
-        if c_auto_flush.row_count < 1:
-            raise ValueError(
-                '"auto_flush_rows" must be >= 1, '
-                f'not {c_auto_flush.row_count}')
 
-    if auto_flush_bytes is None:
+    if auto_flush_bytes is False:
         c_auto_flush.byte_count = -1
     else:
-        c_auto_flush.byte_count = int(auto_flush_bytes)
-        if c_auto_flush.byte_count < 1:
-            raise ValueError(
-                '"auto_flush_bytes" must be >= 1, '
-                f'not {c_auto_flush.byte_count}')
+        c_auto_flush.byte_count = auto_flush_bytes
 
-    if auto_flush_interval is None:
+    if auto_flush_interval is False:
         c_auto_flush.interval = -1
-    elif isinstance(auto_flush_interval, int):
-        c_auto_flush.interval = auto_flush_interval
-        if c_auto_flush.interval < 1:
-            raise ValueError(
-                '"auto_flush_interval" must be >= 1, '
-                f'not {c_auto_flush.interval}')
-    elif isinstance(auto_flush_interval, timedelta):
-        c_auto_flush.interval = _timedelta_to_millis(auto_flush_interval)
-        if c_auto_flush.interval < 1:
-            raise ValueError(
-                '"auto_flush_interval" must be >= 1, '
-                f'not {c_auto_flush.interval}')
     else:
-        raise TypeError(
-            '"auto_flush_interval" must be an int or a timedelta, '
-            f'not {_fqn(type(auto_flush_interval))}')
+        c_auto_flush.interval = auto_flush_interval
 
 
 class TaggedEnum(Enum):
