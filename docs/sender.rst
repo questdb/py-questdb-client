@@ -176,7 +176,7 @@ server.
 
 When using the HTTP protocol, the server will send back an error message if
 the data is invalid or if there is a problem with the server. This will be
-raised as an class:`questdb.ingress.IngressError` exception.
+raised as an :class:`questdb.ingress.IngressError` exception.
 
 The HTTP layer will also attempt retries, configurable via the 
 :ref:`retry_timeout <configuring-sender-request>` parameter.`
