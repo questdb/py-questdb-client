@@ -62,7 +62,7 @@ class TestBuffer(unittest.TestCase):
                 TypeError,
                 'needs keyword-only argument at'):
             buffer = qi.Buffer()
-            buffer.dataframe(pd.DataFrame(), at=None)
+            buffer.dataframe(pd.DataFrame())
 
     def test_new(self):
         buf = qi.Buffer()
@@ -248,7 +248,7 @@ class TestBases:
                         TypeError,
                         'needs keyword-only argument at'):
                     with sender.transaction("foo") as txn:
-                        txn.row(symbols={'sym1': 'val1'}, at=None)
+                        txn.row(symbols={'sym1': 'val1'})
 
         def test_transaction_dataframe_at_disallows_none(self):
             with Server() as server, self.builder('http', 'localhost', server.port) as sender:
