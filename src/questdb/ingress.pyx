@@ -609,6 +609,11 @@ cdef class SenderTransaction:
 
         The table name is taken from the transaction.
         """
+        if at is None:
+            raise IngressError(
+                IngressErrorCode.InvalidTimestamp,
+                "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
         self._sender._buffer._row(
             False,  # allow_auto_flush
             self._table_name,
@@ -628,6 +633,11 @@ cdef class SenderTransaction:
 
         The table name is taken from the transaction.
         """
+        if at is None:
+            raise IngressError(
+                IngressErrorCode.InvalidTimestamp,
+                "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
         _dataframe(
             auto_flush_blank(),
             self._sender._buffer._impl,
@@ -1030,7 +1040,7 @@ cdef class Buffer:
             # Only symbols specified. Designated timestamp assigned by the db.
             buffer.row(
                 'table_name',
-                symbols={'sym1': 'abc', 'sym2': 'def'})
+                symbols={'sym1': 'abc', 'sym2': 'def'}, at=Server.Timestamp)
 
             # Float columns and timestamp specified as `datetime.datetime`.
             # Pay special attention to the timezone, which if unspecified is
@@ -1090,11 +1100,17 @@ cdef class Buffer:
             have the same effect as skipping the key: If the column already
             existed, it will be recorded as ``NULL``, otherwise it will not be
             created.
-        :param at: The timestamp of the row. If ``None``, timestamp is assigned
-            by the server. If ``datetime``, the timestamp is converted to
-            nanoseconds. A nanosecond unix epoch timestamp can be passed
+        :param at: The timestamp of the row. This is required!
+            If ``ServerTimestamp``, timestamp is assigned by QuestDB.
+            If ``datetime``, the timestamp is converted to nanoseconds.
+            A nanosecond unix epoch timestamp can be passed
             explicitly as a ``TimestampNanos`` object.
         """
+        if at is None:
+            raise IngressError(
+                IngressErrorCode.InvalidTimestamp,
+                "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
         self._row(
             True,  # allow_auto_flush
             table_name,
@@ -1169,8 +1185,8 @@ cdef class Buffer:
         :param at: The designated timestamp of the rows.
         
             You can specify a single value for all rows or column name or index.
-            If ``None``, timestamp is assigned by the server for all rows.
-            To pass in a timestamp explicity as an integer use the
+            If ``ServerTimestamp``, timestamp is assigned by the server for all rows.
+            To pass in a timestamp explicitly as an integer use the
             ``TimestampNanos`` wrapper type. To get the current timestamp,
             use ``TimestampNanos.now()``.
             When passing a ``datetime.datetime`` object, the timestamp is
@@ -1376,6 +1392,11 @@ cdef class Buffer:
         * Columns of ``str``, ``float`` or ``int`` or ``float`` Python objects.
         * The ``'string[python]'`` dtype.
         """
+        if at is None:
+            raise IngressError(
+                IngressErrorCode.InvalidTimestamp,
+                "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
         _dataframe(
             auto_flush_blank(),
             self._impl,
@@ -2225,6 +2246,11 @@ cdef class Sender:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Cannot append rows explicitly inside a transaction')
+        if at is None:
+            raise IngressError(
+                IngressErrorCode.InvalidTimestamp,
+                "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
         return self
 
@@ -2281,6 +2307,11 @@ cdef class Sender:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Cannot append rows explicitly inside a transaction')
+        if at is None:
+            raise IngressError(
+                IngressErrorCode.InvalidTimestamp,
+                "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
         if self._auto_flush_mode.enabled:
             af.sender = self._impl
             af.mode = self._auto_flush_mode
@@ -2336,7 +2367,7 @@ cdef class Sender:
         if self._in_txn:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'Cannot flush explicity inside a transaction')
+                'Cannot flush explicitly inside a transaction')
 
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
