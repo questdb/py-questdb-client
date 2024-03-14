@@ -52,6 +52,7 @@ class TestBuffer(unittest.TestCase):
             buffer = qi.Buffer()
             buffer.row('tbl1', symbols={'sym1': 'val1'})
 
+    @unittest.skipIf(not pd, 'pandas not installed')
     def test_buffer_dataframe_at_disallows_none(self):
         with self.assertRaisesRegex(
                 qi.IngressError,
@@ -250,6 +251,7 @@ class TestBases:
                     with sender.transaction("foo") as txn:
                         txn.row(symbols={'sym1': 'val1'})
 
+        @unittest.skipIf(not pd, 'pandas not installed')
         def test_transaction_dataframe_at_disallows_none(self):
             with Server() as server, self.builder('http', 'localhost', server.port) as sender:
                 with self.assertRaisesRegex(
@@ -274,6 +276,7 @@ class TestBases:
                         'needs keyword-only argument at'):
                     sender.row('tbl1', symbols={'sym1': 'val1'})
 
+        @unittest.skipIf(not pd, 'pandas not installed')
         def test_sender_dataframe_at_disallows_none(self):
             with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
                 with self.assertRaisesRegex(
