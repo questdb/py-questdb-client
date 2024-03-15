@@ -329,7 +329,7 @@ class TestBases:
                 sender = None
                 try:
                     sender = self.builder('tcp', 'localhost', server.port)
-                    sender.connect()
+                    sender.establish()
                     server.accept()
                     self.assertEqual(server.recv(), [])
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
@@ -595,7 +595,7 @@ class TestBases:
                 sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 sender.close()
                 with self.assertRaises(qi.IngressError):
-                    sender.connect()
+                    sender.establish()
 
         def test_bad_init_args(self):
             with self.assertRaises(OverflowError):

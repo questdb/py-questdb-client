@@ -281,6 +281,8 @@ When using the TCP protocol errors are *not* sent back from the server and
 must be searched for in the logs. See the :ref:`troubleshooting-flushing`
 section for more details.
 
+.. _sender_transaction:
+
 HTTP Transactions
 =================
 
@@ -507,6 +509,26 @@ sender objects in parallel.
 
 For maxium performance you should also cache the sender objects and reuse them
 across multiple requests, since internally they maintain a connection pool.
+
+Sender Lifetime Control
+-----------------------
+
+Instead of using a ``with Sender .. as sender:`` block you can also manually
+control the lifetime of the sender object.
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    conf = 'http::addr=localhost:9000;'
+    sender = Sender.from_conf(conf)
+    sender.establish()
+    # ...
+    sender.close()
+
+The :func:`establish <questdb.ingress.Sender.establish>` method is needs to be
+called exactly once, but the :func:`close <questdb.ingress.Sender.close>` method
+is idempotent and can be called multiple times.
 
 
 Table and Column Names

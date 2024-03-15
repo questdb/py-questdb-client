@@ -2184,21 +2184,23 @@ cdef class Sender:
         """Maximum length of a table or column name."""
         return self._max_name_len
 
-    def connect(self):
+    def establish(self):
         """
-        Connect to the QuestDB server.
+        Prepare the sender for use.
 
-        This method is synchronous and will block until the connection is
-        established.
+        If using ILP/HTTP this will initialize the HTTP connection pool.
 
-        If the connection is set up with authentication and/or TLS, this
+        If using ILP/TCP this will cause connection to the server and 
+        block until the connection is established.
+
+        If the TCP connection is set up with authentication and/or TLS, this
         method will return only *after* the handshake(s) is/are complete.
         """
         cdef line_sender_error* err = NULL
         if self._opts == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'connect() can\'t be called after close().')
+                'establish() can\'t be called after close().')
         self._impl = line_sender_build(self._opts, &err)
         if self._impl == NULL:
             raise c_err_to_py(err)
@@ -2212,8 +2214,8 @@ cdef class Sender:
         self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
     def __enter__(self) -> Sender:
-        """Call :func:`Sender.connect` at the start of a ``with`` block."""
-        self.connect()
+        """Call :func:`Sender.establish` at the start of a ``with`` block."""
+        self.establish()
         return self
 
     def __str__(self) -> str:
@@ -2235,6 +2237,9 @@ cdef class Sender:
         return len(self._buffer)
 
     def transaction(self, table_name: str):
+        """
+        Start a :ref:`sender_transaction` block.
+        """
         return SenderTransaction(self, table_name)
 
     def row(self,
