@@ -56,6 +56,10 @@ Connection
 Authentication
 ==============
 
+If you're using QuestDB enterprise you can read up on creating and permissioning
+users in the `Enterprise quickstart <https://questdb.io/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
+and the `role-based access control <https://questdb.io/docs/operations/rbac/>`_ guides.
+
 HTTP Bearer Token
 -----------------
 * ``token`` - ``str``: Bearer token for HTTP authentication.

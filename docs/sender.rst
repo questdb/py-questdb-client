@@ -153,11 +153,27 @@ Populating Timestamps
 The ``at`` parameter of the ``row`` and ``dataframe`` methods is used to specify
 the timestamp of the rows.
 
-It can be either a ``TimestampNanos`` object or a ``datetime.datetime`` object.
-In case of dataframes you can also specify the timestamp column name or index.
+Set by client
+~~~~~~~~~~~~~
 
-If you prefer the server to set the timestamp for you (not recommended),
-you can use the ``at=ServerTimestamp`` singleton.
+It can be either a :class:`TimestampNanos <questdb.ingress.TimestampNanos>`
+object or a
+`datetime.datetime <https://docs.python.org/3/library/datetime.html>`_ object.
+
+In case of dataframes you can also specify the timestamp column name or index.
+If so, the column type should be a Pandas ``datetime64``, with or without
+timezone information.
+
+Note that all timestamps in QuestDB are stored as microseconds since the epoch,
+without timezone information. Any timezone information is dropped when the data
+is appended to the ILP buffer.
+
+Set by server
+~~~~~~~~~~~~~
+
+If you prefer, you can specify ``at=ServerTimestamp`` which will instruct
+QuestDB to set the timestamp on your behalf for each row as soon as it's
+received by the server.
 
 .. code-block:: python
 
@@ -169,10 +185,13 @@ you can use the ``at=ServerTimestamp`` singleton.
             'weather_sensor',
             symbols={'id': 'toronto1'},
             columns={'temperature': 23.5, 'humidity': 0.49},
-            at=ServerTimestamp)
+            at=ServerTimestamp)  # Legacy feature, not recommended.
 
-This removes the ability for QuestDB to deduplicate rows and is considered a
-legacy feature.
+.. warning::
+
+    Using ``ServerTimestamp`` is not recommended as it removes the ability
+    for QuestDB to deduplicate rows and is considered a *legacy feature*.
+
 
 .. _sender_flushing:
 
@@ -322,6 +341,21 @@ The server will use the first row of data to determine the column types.
 
 If the table already exists, the server will validate that the columns match
 the existing table.
+
+If you're using QuestDB enterprise you might need to grant further permissions
+to the authenticated user.
+
+.. code-block:: sql
+
+    CREATE SERVICE ACCOUNT ingest;
+    GRANT ilp, create table TO ingest;
+    GRANT add column, insert ON all tables TO ingest;
+    --  OR
+    GRANT add column, insert ON table1, table2 TO ingest;
+
+Read more setup details in the
+`Enterprise quickstart <https://questdb.io/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
+and the `role-based access control <https://questdb.io/docs/operations/rbac/>`_ guides.
 
 .. _sender_advanced:
 
