@@ -199,7 +199,7 @@ Flushing
 ========
 
 The sender accumulates data into an internal buffer. Calling
-:func`:`Sender.flush <questdb.ingress.Sender.flush>` will send the buffered data
+:func:`Sender.flush <questdb.ingress.Sender.flush>` will send the buffered data
 to QuestDB, and clear the buffer.
 
 Flushing can be done explicitly or automatically.
