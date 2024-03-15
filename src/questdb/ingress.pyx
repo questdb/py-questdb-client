@@ -1842,20 +1842,21 @@ cdef class Sender:
             if not line_sender_opts_tls_verify(self._opts, c_tls_verify, &err):
                 raise c_err_to_py(err)
 
-        if tls_ca is not None:
-            c_tls_ca = TlsCa.parse(tls_ca).c_value
-            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
-                raise c_err_to_py(err)
-        elif protocol.tls_enabled:
-            # Set different default for Python than the the Rust default.
-            c_tls_ca = line_sender_ca_webpki_and_os_roots
-            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
-                raise c_err_to_py(err)
-
         if tls_roots is not None:
             tls_roots = str(tls_roots)
             str_to_utf8(b, <PyObject*>tls_roots, &c_tls_roots)
             if not line_sender_opts_tls_roots(self._opts, c_tls_roots, &err):
+                raise c_err_to_py(err)
+
+        if tls_ca is not None:
+            c_tls_ca = TlsCa.parse(tls_ca).c_value
+            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
+                raise c_err_to_py(err)
+        elif protocol.tls_enabled and tls_roots is None:
+            # Set different default for Python than the the Rust default.
+            # We don't set it if `tls_roots` is set, as it would override it.
+            c_tls_ca = line_sender_ca_webpki_and_os_roots
+            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
                 raise c_err_to_py(err)
 
         if max_buf_size is not None:
@@ -1948,6 +1949,7 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
+        print('Sender.__init__')
 
         cdef line_sender_utf8 c_host
         cdef str port_str
@@ -2026,6 +2028,7 @@ cdef class Sender:
         cdef line_sender_utf8 c_synthetic_conf_str
         cdef dict params
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        print('Sender.from_conf')
         try:
             protocol, params = parse_conf_str(b, conf_str)
 
