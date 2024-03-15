@@ -11,7 +11,7 @@ arg_parser = argparse.ArgumentParser(
     description='installs dependencies'
 )
 
-arg_parser.add_argument('--pandasVersion')
+arg_parser.add_argument('--pandas-version')
 
 class UnsupportedDependency(Exception):
     pass
@@ -67,10 +67,10 @@ def main(args):
     pip_install('setuptools')
     try_pip_install('fastparquet>=2023.10.1')
 
-    print(f"DEBUG: {args}, pandas: {args.pandasVersion}")
+    print(f"DEBUG: {args}, pandas: {args.pandas_version}")
 
-    if args.pandasVersion is not None and args.pandasVersion != '':
-        try_pip_install('pandas', args.pandasVersion)
+    if args.pandas_version is not None and args.pandas_version != '':
+        try_pip_install('pandas', args.pandas_version)
     else:
         try_pip_install('pandas')
     try_pip_install('numpy')

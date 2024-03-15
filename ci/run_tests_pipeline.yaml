@@ -42,7 +42,7 @@ stages:
           - script: python3 ci/pip_install_deps.py
             displayName: "Install pandas latest"
             condition: eq(variables.pandasVersion, '')
-          - script:  python3 ci/pip_install_deps.py --pandasVersion==$(pandasVersion)
+          - script:  python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
             displayName: "Install pandas older"
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
