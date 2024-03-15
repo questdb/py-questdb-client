@@ -4,76 +4,110 @@
 Sending Data over ILP
 =====================
 
+Overview
+========
+
 The :class:`questdb.ingress.Sender` class is a client that inserts rows into
-QuestDB via the ILP protocol.
-
-It supports both TCP and HTTP protocols, authentication and TLS.
-
-You should prefer to use HTTP over TCP in most cases as it provides better
-feedback on errors and transaction control.
-
-TCP is useful for high-throughput scenarios in higher latency networks.
-
-Basic Usage
-===========
-
-In this example, data will be flushed and sent at the end of the ``with``
-block.
+QuestDB via the
+`ILP protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_, with
+support for both ILP over TCP and the newer and recommended ILP over HTTP.
+The sender also supports TLS and authentication.
 
 .. code-block:: python
 
     from questdb.ingress import Sender, TimestampNanos
+    import pandas as pd
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
+        # One row at a time
         sender.row(
             'weather_sensor',
             symbols={'id': 'toronto1'},
             columns={'temperature': 23.5, 'humidity': 0.49},
             at=TimestampNanos.now())
-        sensor.row(
-            'weather_sensor',
-            symbols={'id': 'dubai2'},
-            columns={'temperature': 41.2, 'humidity': 0.34},
-            at=TimestampNanos.now())
 
-The ``Sender`` object holds an internal buffer. The call to ``.row()``
-simply forwards all arguments to the :func:`Buffer.row` method.
+        # Whole dataframes at once - MUCH FASTER
+        df = pd.DataFrame({
+            'id': ['dubai2', 'memphis7'],
+            'temperature': [41.2, 33.3],
+            'humidity': [0.34, 0.55],
+            'timestamp': [
+                pd.Timestamp('2021-01-01 12:00:00'),
+                pd.Timestamp('2021-01-01 12:00:01')
+            ]
+        })
+        sensor.dataframe('weather_sensor', df, at='timestamp')
 
-The ``Sender`` class is generally initialised with a configuration string.
+The ``Sender`` object holds an internal buffer which will be flushed and sent
+at when the ``with`` block ends.
 
-The format of the configuration string is::
+You can read more on :ref:`sender_preparing_data` and :ref:`sender_flushing`.
 
-    <protocol>::<key>=<value>;<key>=<value>;...;
+Constructing the Sender
+=======================
 
-The valid protocols are:
+From Configuration
+------------------
 
-* ``tcp``: ILP/TCP
-* ``tcps``: ILP/TCP with TLS
-* ``http``: ILP/HTTP
-* ``https``: ILP/HTTP with TLS
+The ``Sender`` class is generally initialized from a
+:ref:`configuration string <sender_conf>`.
 
-Only the ``addr=host:port`` key is mandatory. It specifies the hostname and port
-of the QuestDB server. If omitted, the port will be defaulted to 9009 for TCP(s)
-and 9000 for HTTP(s).
+.. code-block:: python
 
-The full set of possible ``key=value;`` settings is documented in the
-:ref:`configuring-sender` section.
+    from questdb.ingress import Sender
+
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        ...
+
+See the :ref:`sender_conf` guide for more details.
+
+From Env Variable
+-----------------
+
+You can also initialize the sender from an environment variable::
+
+    export QDB_CLIENT_CONF='http::addr=localhost:9000;'
+
+The content of the environment variable is the same
+:ref:`configuration string <sender_conf>` as taken by the
+:func:`questdb.ingress.Sender.from_conf` method, but moving it to an environment
+variable is more secure and allows you to avoid hardcoding
+sensitive information such as passwords and tokens in your code.
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    with Sender.from_env() as sender:
+        ...
+
+Programmatic Construction
+-------------------------
+
+If you prefer, you can also construct the sender programmatically.
+See :ref:`sender_programmatic_construction`.
+
+.. _sender_preparing_data:
 
 Preparing Data
 ==============
 
-Sending Rows
-------------
+Appending Rows
+--------------
 
-You can send as many rows as you like by calling the
+You can append as many rows as you like by calling the
 :func:`questdb.ingress.Sender.row` method. The full method arguments are
 documented in the :func:`questdb.ingress.Buffer.row` method.
 
-Sending Pandas Dataframes
--------------------------
+Appending Pandas Dataframes
+---------------------------
 
-The sender can also send data from a Pandas dataframe.
+The sender can also append data from a Pandas dataframe.
+
+This is `orders of magnitude <https://github.com/questdb/py-tsbs-benchmark/blob/main/README.md>`_
+faster than appending rows one by one.
 
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python
@@ -81,13 +115,45 @@ The sender can also send data from a Pandas dataframe.
 For more details see :func:`questdb.ingress.Sender.dataframe`
 and for full argument options see :func:`questdb.ingress.Buffer.dataframe`.
 
+String vs Symbol Columns
+------------------------
+QuestDB has a concept of symbols which are a more efficient way of storing
+categorical data (identifiers). Internally, symbols are deduplicated and
+stored as integers.
+
+When sending data, you can specify a column as a symbol by using the
+``symbols`` parameter of the ``row`` or ``dataframe`` methods.
+
+Alternatively, if a column is expected to hold a collection of one-off strings,
+you can use the ``strings`` parameter.
+
+Here is an example of sending a row with a symbol and a string:
+
+.. code-block:: python
+
+    from questdb.ingress import Sender, TimestampNanos
+    import datetime
+
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        sender.row(
+            'news',
+            symbols={
+                'category': 'sport'},
+            columns={
+                'headline': 'The big game',
+                'url': 'https://dailynews.com/sport/the-big-game',
+                'views': 1000},
+            at=datetime.datetime(2021, 1, 1, 12, 0, 0))
+
 Populating Timestamps
 ---------------------
 
-The ``at`` parameter is used to specify the timestamp of the row. It can be
-either a ``TimestampNanos`` object or a ``datetime.datetime`` object.
+The ``at`` parameter of the ``row`` and ``dataframe`` methods is used to specify
+the timestamp of the rows.
 
-In case of dataframes you can also specify the timestamp column name.
+It can be either a ``TimestampNanos`` object or a ``datetime.datetime`` object.
+In case of dataframes you can also specify the timestamp column name or index.
 
 If you prefer the server to set the timestamp for you (not recommended),
 you can use the ``at=ServerTimestamp`` singleton.
@@ -107,6 +173,8 @@ you can use the ``at=ServerTimestamp`` singleton.
 This removes the ability for QuestDB to deduplicate rows and is considered a
 legacy feature.
 
+.. _sender_flushing:
+
 Flushing
 ========
 
@@ -115,7 +183,7 @@ sends the data to the server over the network and clears the buffer.
 
 Flushing can be done explicitly or automatically.
 
-Explicit flushing
+Explicit Flushing
 -----------------
 
 An explicit call to :func:`questdb.ingress.Sender.flush` will send any pending
@@ -141,30 +209,37 @@ data immediately.
 Note that the last `sender.flush()` is entirely optional as flushing
 also happens at the end of the ``with`` block.
 
-.. _sender-auto-flushing:
+.. _sender_auto_flush:
 
 Auto-flushing
 -------------
 
 To avoid accumulating very large buffers, the sender will - by default -
-flush the buffer automatically.
+occasionally flush the buffer automatically.
 
-Auto-flushing is triggered when appending a row to the internal sender
-buffer and the buffer either:
+Auto-flushing is triggered when:
 
-* Reaches 75'000 rows (for HTTP) or 600 rows (for TCP).
-* Hasn't been flushed for 1 second.
+* appending a row to the internal sender buffer
 
-Here is an example that auto-flushes every 10 rows and disables
+* and the buffer either:
+
+    * Reaches 75'000 rows (for HTTP) or 600 rows (for TCP).
+
+    * Hasn't been flushed for 1 second (there are no timers).
+
+Here is an example :ref:`configuration string <sender_conf>` that auto-flushes
+sets up a sender to flush every 10 rows and disables
 the interval-based auto-flushing logic.
 
 ``http::addr=localhost:9000;auto_flush_rows=10;auto_flush_interval=off;``
 
-Here is auto-flushing disabled:
+Here is a configuration string with auto-flushing
+completely disabled:
 
 ``http::addr=localhost:9000;auto_flush=off;``
 
-See the :ref:`configuring-sender-auto-flushing` section for more details.
+See the :ref:`sender_conf_auto_flush` section for more details. and note that
+``auto_flush_interval`` :ref:`does NOT start a timer <sender_conf_auto_flush_interval>`.
 
 Error Reporting
 ===============
@@ -179,26 +254,19 @@ the data is invalid or if there is a problem with the server. This will be
 raised as an :class:`questdb.ingress.IngressError` exception.
 
 The HTTP layer will also attempt retries, configurable via the 
-:ref:`retry_timeout <configuring-sender-request>` parameter.`
+:ref:`retry_timeout <sender_conf_request>` parameter.`
 
 When using the TCP protocol errors are *not* sent back from the server and
 must be searched for in the logs. See the :ref:`troubleshooting-flushing`
 section for more details.
 
-HTTP transactions
+HTTP Transactions
 =================
 
 When using the HTTP protocol, the sender can be configured to send a batch of
 rows as a single transaction.
 
 **Transactions are limited to a single table.**
-
-If auto-flusing is enabled, any pending data will be flushed before the
-transaction is started.
-
-Auto-flushing is disabled during the scope of the transaction.
-
-The transaction is automatically committed when the ``with`` block is exited.
 
 .. code-block:: python
 
@@ -214,6 +282,14 @@ The transaction is automatically committed when the ``with`` block is exited.
                 columns={'temperature': 41.2, 'humidity': 0.34},
                 at=TimestampNanos.now())
 
+If auto-flushing is enabled, any pending data will be flushed before the
+transaction is started.
+
+Auto-flushing is disabled during the scope of the transaction.
+
+The transaction is automatically completed a the end
+of the ``with`` block.
+
 You can complete a transaction explicity by calling the
 :func:`questdb.ingress.SenderTransaction.commit` or the
 :func:`questdb.ingress.SenderTransaction.rollback` methods.
@@ -221,165 +297,212 @@ You can complete a transaction explicity by calling the
 Raising an exception from within the transaction ``with`` block will also cause
 the transaction to be rolled back.
 
+.. _sender_auto_creation:
 
-.. _configuring-sender:
+Table and Column Auto-creation
+==============================
 
-Full configuration options
-==========================
+When sending data to a table that does not exist, the server will
+create the table automatically.
 
-The configuration options are common between QuestDB clients and can also be
-found in the core QuestDB `client library documentation <https://questdb.io/docs/reference/clients/overview/>`_.
+This also applies to columns that do not exist.
 
-Authentication
---------------
+The server will use the first row of data to determine the column types.
 
-TCP Auth
-~~~~~~~~
+If the table already exists, the server will validate that the columns match
+the existing table.
 
-* ``username`` - ``str``: Username for TCP authentication (A.K.A. *kid*).
-* ``token`` - ``str``: Token for TCP authentication (A.K.A. *d*).
-* ``token_x`` - ``str``: Token X for TCP authentication (A.K.A. *x*).
-* ``token_y`` - ``str``: Token Y for TCP authentication (A.K.A. *y*).
+.. _sender_advanced:
 
-You can additionally set the ``auth_timeout`` parameter (milliseconds) to
-control how long the client will wait for a response from the server during
-the authentication process. The default is 15 seconds.
+Advanced Usage
+==============
 
-See the :ref:`auth_and_tls_example` example for more details.
+Independent Buffers
+-------------------
 
-HTTP Basic Auth
-~~~~~~~~~~~~~~~
+All examples so far have shown appending data to the sender's internal buffer.
 
-* ``username`` - ``str``: Username for HTTP basic authentication.
-* ``password`` - ``str``: Password for HTTP basic authentication.
+You can also create independent buffers and send them independently.
 
-HTTP Bearer Token
-~~~~~~~~~~~~~~~~~
-* ``token`` - ``str``: Bearer token for HTTP authentication.
+This is useful for more complex applications whishing to decouple the
+serialisation logic from the sending logic.
 
-TLS
----
+Note that the sender's auto-flushing logic will not apply to independent
+buffers.
 
-TLS in enabled by selecting the ``tcps`` or ``https`` protocol.
+.. code-block:: python
 
-* ``tls_ca`` - The remote server's certificate authority verification mechamism.
+    from questdb.ingress import Buffer, Sender, TimestampNanos
 
-  * ``'webpki_roots'``: Use the
-    `webpki-roots <https://crates.io/crates/webpki-roots>`_ Rust crate to
-    recognize certificates.
+    buf = Buffer()
+    buf.row(
+        'weather_sensor',
+        symbols={'id': 'toronto1'},
+        columns={'temperature': 23.5, 'humidity': 0.49},
+        at=TimestampNanos.now())
+    buf.row(
+        'weather_sensor',
+        symbols={'id': 'dubai2'},
+        columns={'temperature': 41.2, 'humidity': 0.34},
+        at=TimestampNanos.now())
 
-  * ``'os_roots'``: Use the OS-provided certificate store.
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        sender.flush(buf, transaction=True)
 
-  * ``'webpki_and_os_roots'``: Use both the
-    `webpki-roots <https://crates.io/crates/webpki-roots>`_ Rust crate and
-    the OS-provided certificate store to recognize certificates.
+The ``transaction`` parameter is optional and defaults to ``False``.
+When set to ``True``, the buffer is guaranteed to be committed as a single
+transaction, but must only contain rows for a single table.
 
-  * ``pem_file``: Path to a PEM-encoded certificate authority file.
-    This is useful for testing with self-signed certificates.
+Multiple Databases
+------------------
 
-  The default is: ``'webpki_roots'``.
+Handling buffers explicitly is also useful when sending data to multiple
+databases via the `.flush(buf, clear=False)` option.
 
-* ``tls_roots`` - ``str``: Path to a PEM-encoded certificate authority file.
-  When used it defaults the ``tls_ca`` to ``'pem_file'``.
+.. code-block:: python
 
-* ``tls_verify`` - ``'on'`` | ``'unsafe_off'``: Whether to verify the server's
-  certificate. This should only be used for testing as a last resort and never
-  used in production as it makes the connection vulnerable to man-in-the-middle
-  attacks.
-  
-  The default is: ``'on'``.
+    from questdb.ingress import Buffer, Sender, TimestampNanos
 
-.. _configuring-sender-auto-flushing:
+    buf = Buffer()
+    buf.row(
+        'weather_sensor',
+        symbols={'id': 'toronto1'},
+        columns={'temperature': 23.5, 'humidity': 0.49},
+        at=TimestampNanos.now())
 
-Auto-flushing
--------------
+    conf1 = 'http::addr=db1.host.com:9000;'
+    conf2 = 'http::addr=db2.host.com:9000;'
+    with Sender.from_conf(conf1) as sender1, Sender.from_conf(conf2) as sender2:
+        sender1.flush(buf1, clear=False)
+        sender2.flush(buf2, clear=False)
 
-The following paramers control the :ref:`sender-auto-flushing` behavior.
+    buf.clear()
 
-* ``auto_flush`` - ``'on'`` | ``'off'``: Global switch for the auto-flushing
-  behavior.
+This uses the ``clear=False`` parameter which otherwise defaults to ``True``.
 
-  *Default: ``'on'``.*
+Threading Considerations
+------------------------
 
-* ``auto_flush_rows`` - ``int > 0`` | ``'off'``: The number of rows that will
-  trigger a flush. Set to ``'off'`` to disable.
-    
-  *Default: 75000 (HTTP) | 600 (TCP).*
+Neither buffer API nor the sender object are thread-safe, but can be shared
+between threads if you take care of exclusive access (such as using a lock)
+yourself.
 
-* ``auto_flush_bytes`` - ``int > 0`` | ``'off'``: The number of bytes that will
-  trigger a flush. Set to ``'off'`` to disable.
-        
-  *Default: ``'off'``.*
+Independent buffers also allows you to prepare separate buffers in different
+threads and then send them later through a single exclusively locked sender.
 
-* ``auto_flush_interval`` - ``int > 0`` | ``'off'``: The time in milliseconds
-  that will trigger a flush. Set to ``'off'`` to disable.
-    
-  *Default: 1000 (millis).*
+Alternatively you can also create multiple senders, one per thread.
 
-.. _configuring-sender-buffer:
+Notice that the ``questdb`` python module is mostly implemented in Cython and
+Rust and is designed to release the GIL as much as possible, so you can expect
+good performance in multi-threaded scenarios.
 
-Buffer
-------
+As an example, appending a dataframe to a buffer releases the GIL (unless any
+of the columns reference python objects).
 
-* ``init_buf_size`` - ``int > 0``: Initial buffer capacity.
-    
-  *Default: 65536 (64KiB).*
+All network activity also fully releases the GIL.
 
-* ``max_buf_size`` - ``int > 0``: Maximum flushable buffer capacity.
-    
-  *Default: 104857600 (100MiB).*
+.. _sender_http_performance:
 
-* ``max_name_len`` - ``int > 0``: Maximum length of a table or column name.
+Optimising HTTP Performance
+---------------------------
 
-  *Default: 127.*
+The sender's network communication is implemented in native Rust and thus does
+not require access to the GIL.
 
-.. _configuring-sender-request:
+For simplicity of design and best error feedback, the `.flush()` method blocks
+until the server has acknowledged the data.
 
-HTTP Request
+If you need to send a large number of smaller requests (in other words, if you
+need to flush very frequently) or are in a high-latency network, you
+can significantly improve performance by creating and sending using multiple
+sender objects in parallel.
+
+.. code-block:: python
+
+    from questdb.ingress import Sender, TimestampNanos
+    import pandas as pd
+    from concurrent.futures import ThreadPoolExecutor
+    import datetime
+
+    def send_data(df):
+        conf_string = 'http::addr=localhost:9000;'
+        with Sender.from_conf(conf_string) as sender:
+            sender.dataframe(
+                df,
+                table_name='weather_sensor',
+                symbols=['id'],
+                at='timestamp')
+
+    dfs = [
+        pd.DataFrame({
+            'id': ['sensor1', 'sensor2'],
+            'temperature': [22.5, 24.7],
+            'humidity': [0.45, 0.47],
+            'timestamp': [
+                pd.Timestamp('2017-01-01T12:00:00'),
+                pd.Timestamp('2017-01-01T12:00:01')
+            ]}),
+        pd.DataFrame({
+            'id': ['sensor3', 'sensor4'],
+            'temperature': [23.1, 25.3],
+            'humidity': [0.48, 0.50],
+            'timestamp': [
+                pd.Timestamp('2017-01-01T12:00:02'),
+                pd.Timestamp('2017-01-01T12:00:03')
+            ]})
+    ]
+
+    with ThreadPoolExecutor() as executor:
+        futures = [executor.submit(send_data, df)
+            for df in dfs]
+        for future in futures:
+            future.result()
+
+For maxium performance you should also cache the sender objects and reuse them
+across multiple requests, since internally they maintain a connection pool.
+
+
+Table and Column Names
+======================
+
+The client will validate table and column names while constructing the buffer.
+
+Table names and column names must not be empty and must adhere to the following:
+
+Table Names
+-----------
+
+Cannot contain the following characters: ``?``, ``,``, ``'``, ``"``, ``\``,
+``/``, ``:``, ``)``, ``(``, ``+``, ``*``, ``%``, ``~``, carriage return
+(``\r``), newline (``\n``), null character (``\0``), and Unicode characters from
+``\u{0001}`` to ``\u{000F}`` and ``\u{007F}``.
+Additionally, the Unicode character for zero-width no-break space (UTF-8 BOM,
+``\u{FEFF}``) is not allowed.
+
+A dot (``.``) is allowed except at the start or end of the name,
+and cannot be consecutive (e.g., ``valid.name`` is valid, but ``.invalid``,
+``invalid.``, and ``in..valid`` are not).
+
+Column Names
 ------------
 
-The following parameters control the HTTP request behavior.
+Cannot contain the following characters: ``?``, ``.``, ``,``, ``'``, ``"``,
+``\``, ``/``, ``:``, ``)``, ``(``, ``+``, ``-``, ``*``, ``%``, ``~``,
+carriage return (``\r``), newline (``\n``), null character (``\0``),
+and Unicode characters from ``\u{0001}`` to ``\u{000F}`` and ``\u{007F}``.
+Like table names, the Unicode character for zero-width no-break space
+(UTF-8 BOM, ``\u{FEFF}``) is not allowed.
 
-* ``retry_timeout`` - ``int > 0``: The time in milliseconds to continue retrying
-  after a failed HTTP request. The interval between retries is an exponential
-  backoff starting at 10ms and doubling after each failed attempt up to a
-  maximum of 1 second.
-    
-  *Default: 10000 (10 seconds).*
+Unlike table names, a dot (``.``) is not allowed in column names at all.
 
-* ``request_timeout`` - ``int > 0``: The time in milliseconds to wait for a
-  response from the server. This is in addition to the calculation derived from
-  the ``request_min_throughput`` parameter.
-    
-  *Default: 10000 (10 seconds).*
+.. _sender_programmatic_construction:
 
-* ``request_min_throughput`` - ``int > 0``: Minimum expected throughput in
-  bytes per second for HTTP requests. If the throughput is lower than this
-  value, the connection will time out.
-  This is used to calculate an additional timeout on top of ``request_timeout``.
-  This is useful for large requests.
-  You can set this value to ``0`` to disable this logic.
-    
-  *Default: 102400 (100 KiB/s).*
+Programmatic Construction
+=========================
 
-
-The final request timeout calculation is::
-
-    request_timeout + (buffer_size / request_min_throughput)
-
-
-Connection
-----------
-
-* ``bind_interface`` - TCP-only, ``str``: Network interface to bind from.
-  Useful if you have an accelerated network interface (e.g. Solarflare) and
-  want to use it.
-  
-  The default is ``0.0.0.0``.
-
-
-Programmatic configuration
-==========================
+Sender Constructor
+------------------
 
 You can also specify the configuration parameters programmatically:
 
@@ -407,3 +530,54 @@ Python type mappings:
 
 * Paths can also be specified as a ``pathlib.Path``.
 
+Customising `.from_conf()` and `.from_env()`
+--------------------------------------------
+
+If you want to further customise the behaviour of the ``.from_conf()`` or
+``.from_env()`` methods, you can pass additional parameters to these methods.
+The parameters are the same as the ones for the `Sender` constructor above.
+
+For example, here is a :ref:`configuration string <sender_conf>` that is loaded
+from an environment variable and then customised to specify custom
+flushing behaviour::
+
+    export QDB_CLIENT='http::addr=localhost:9000;'
+
+.. code-block:: python
+
+    from questdb.ingress import Sender, Protocol
+    from datetime import timedelta
+
+    with Sender.from_env(auto_flush_interval=timedelta(seconds=10)) as sender:
+        ...
+
+
+.. _sender_which_protocol:
+
+ILP/TCP or ILP/HTTP
+===================
+
+The sender supports ``tcp``, ``tcps``, ``http``, and ``https`` protocols.
+
+You should prefer to use the new ILP/HTTP instead of ILP/TCP in most cases as it
+provides better feedback on errors and transaction control.
+
+ILP/HTTP is available from:
+
+* QuestDB 7.3.10 and later.
+* QuestDB Enterprise 1.2.7 and later.
+
+Since TCP does not block for a response it is useful for high-throughput
+scenarios in higher latency networks or on older versions of QuestDB which do
+not support ILP/HTTP quite yet.
+
+It should be noted that HTTP performance equivalent to TCP can be achieved by
+:ref:`using multiple sender objects in parallel <sender_http_performance>`.
+
+Either way, you can easily switch between the two protocols by changing:
+
+* The ``<protocol>`` part of the :ref:`configuration string <sender_conf>`.
+
+* The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000).
+
+* Any authentication parameters such as ``username``, ``token``, et cetera.

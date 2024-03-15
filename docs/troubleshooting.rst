@@ -35,8 +35,8 @@ Infrequent Flushing
 You may not see data appear in a timely manner because you're not calling
 :func:`questdb.ingress.Sender.flush` often enough.
 
-The :class:`questdb.ingress.Sender` class only  provides auto-flushing based on
-a buffer size and *not on a timer*.
+You might be having issues with the :class:`questdb.ingress.Sender`'s
+:ref:`sender_auto_flush` feature.
 
 .. _troubleshooting-flushing:
 

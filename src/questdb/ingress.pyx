@@ -6,7 +6,7 @@
 ##    \__\_\\__,_|\___||___/\__|____/|____/
 ##
 ##  Copyright (c) 2014-2019 Appsicle
-##  Copyright (c) 2019-2022 QuestDB
+##  Copyright (c) 2019-2024 QuestDB
 ##
 ##  Licensed under the Apache License, Version 2.0 (the "License");
 ##  you may not use this file except in compliance with the License.
@@ -1606,6 +1606,8 @@ class TaggedEnum(Enum):
 class Protocol(TaggedEnum):
     """
     Protocol to use for sending data to QuestDB.
+
+    See :ref:`sender_which_protocol` for more information.
     """
     Tcp = ('tcp', 0)
     Tcps = ('tcps', 1)
@@ -1621,10 +1623,11 @@ class TlsCa(TaggedEnum):
     """
     Verification mechanism for the server's certificate.
 
-    Here ``webpki`` refers to the WebPKI library and ``os`` refers to the
-    operating system's certificate store.
+    Here ``webpki`` refers to the
+    `WebPKI library <https://github.com/rustls/webpki-roots>`_ and
+    ``os`` refers to the operating system's certificate store.
 
-    See https://github.com/rustls/webpki-roots
+    See :ref:`sender_conf_tls` for more information.
     """
     WebpkiRoots = ('webpki_roots', line_sender_ca_webpki_roots)
     OsRoots = ('os_roots', line_sender_ca_os_roots)
@@ -1841,6 +1844,11 @@ cdef class Sender:
 
         if tls_ca is not None:
             c_tls_ca = TlsCa.parse(tls_ca).c_value
+            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
+                raise c_err_to_py(err)
+        elif protocol.tls_enabled:
+            # Set different default for Python than the the Rust default.
+            c_tls_ca = line_sender_ca_webpki_and_os_roots
             if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
                 raise c_err_to_py(err)
 

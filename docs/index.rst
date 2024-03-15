@@ -13,10 +13,11 @@ Contents
 
    installation
    sender
+   conf
    examples
    api
    troubleshooting
-   contributing
+   community
    changelog
 
 Indices and tables

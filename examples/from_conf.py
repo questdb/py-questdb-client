@@ -33,7 +33,7 @@ def example():
 
             # If you don't flush manually, the client will flush automatically
             # when a row is added and either:
-            #   * The buffer contains 75000 rows (if HTTP) or 1000 rows (if TCP)
+            #   * The buffer contains 75000 rows (if HTTP) or 600 rows (if TCP)
             #   * The last flush was more than 1000ms ago.
             # Auto-flushing can be customized via the `auto_flush_..` params.
 

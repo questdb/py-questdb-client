@@ -27,7 +27,7 @@ The latest version of the library is 1.2.0.
 
     from questdb.ingress import Sender, TimestampNanos
 
-    conf = f'tcp::addr=localhost:9009;'
+    conf = f'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         sender.row(
             'sensors',
@@ -49,18 +49,24 @@ You can also send Pandas dataframes:
         'humidity': [0.5, 0.6],
         'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
-    conf = f'tcp::addr=localhost:9009;'
+    conf = f'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         sender.dataframe(df, table_name='sensors', at='timestamp')
 
 
-To connect via HTTP, set the configuration string to:
+To connect via TCP, set the
+`configuration string <https://py-questdb-client.readthedocs.io/en/latest/conf.html>`_ to:
 
 .. code-block:: python
 
-    conf = f'http::addr=http://localhost:9000;'
+    conf = f'tcp::addr=localhost:9009;'
     with Sender.from_conf(conf) as sender:
         ...
+
+
+You can continue by reading the
+`Sending Data Over ILP <https://py-questdb-client.readthedocs.io/en/latest/sender.html>`_
+guide.
 
 Docs
 ====

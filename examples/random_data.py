@@ -1,4 +1,4 @@
-from questdb.ingress import Sender, TimestampNanos, AutoFlush
+from questdb.ingress import Sender, TimestampNanos
 import random
 import uuid
 import time
