@@ -5,7 +5,7 @@ Configuration
 =============
 
 When constructing a :ref:`sender <sender>` you can pass a configuration string
-to the :func:`questdb.ingress.Sender.from_conf` method.
+to the :func:`Sender.from_conf <questdb.ingress.Sender.from_conf>` method.
 
 .. code-block:: python
 
@@ -169,37 +169,39 @@ The following parameters control the :ref:`sender_auto_flush` behavior.
 ``auto_flush_interval``
 -----------------------
 
-It should be noted that the ``auto_flush_interval`` does not start a timer
-from the point that a row is added. In fact, the client does not internally
-rely on any timers at all.
+The `auto_flush_interval` parameter controls how long the sender's buffer can be
+left unflushed for after appending a new row via the
+:func:`Sender.row <questdb.ingress.Sender.row>` or the
+:func:`Sender.dataframe <questdb.ingress.Sender.dataframe>` methods.
+It is defined in milliseconds.
 
-Instead after a row is added (either via the ``row`` method or the ``dataframe``
-method), the client checks if the interval has passed since the last flush. If
-it has, the client will flush the buffer.
+Note that this parameter does *not* create a timer that counts down
+each time data is added. Instead, the client checks the time elapsed since the
+last flush each time new data is added. If the elapsed time exceeds the
+specified ``auto_flush_interval``, the client automatically flushes the current
+buffer to the database.
 
-To make this point clearer, consider the following example.
+Consider the following example:
 
 .. code-block:: python
 
     from questdb.ingress import Sender, TimestampNanos
     import time
-
     conf = "http::addr=localhost:9009;auto_flush_interval=1000;"
     with Sender.from_conf(conf) as sender:
         # row 1
-        sender.row('table1', symbols={'sym': 'AAPL'}, at=TimestampNanos.now())
-
+        sender.row('table1', columns={'val': 1}, at=TimestampNanos.now())
         time.sleep(60)  # sleep for 1 minute
-
         # row 2
-        sender.row('table1', symbols={'sym': 'AAPL'}, at=TimestampNanos.now())
+        sender.row('table2', columns={'val': 2}, at=TimestampNanos.now())
 
 In this example above, "row 1" will not be flushed for a whole minute, until
 "row 2" is added and the ``auto_flush_interval`` limit of 1 second is exceeded,
-causing both "row 1" and "row 2" to be flushed.
+causing both "row 1" and "row 2" to be flushed together.
 
-If you need consistent flushing at specific intervals, you should implement your
-own timer-based logic. The :ref:`sender_advanced` documentation should help you.
+If you need consistent flushing at specific intervals, you should set
+``auto_flush_interval=off`` and implement your own timer-based logic.
+The :ref:`sender_advanced` documentation should help you.
 
 .. _sender_conf_buffer:
 
