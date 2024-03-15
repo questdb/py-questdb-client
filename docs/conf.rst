@@ -91,7 +91,7 @@ TLS
 
 TLS in enabled by selecting the ``tcps`` or ``https`` protocol.
 
-See the `QuestDB enterprise TLS documentation <https://questdb.io/docs/operations/tls/>`
+See the `QuestDB enterprise TLS documentation <https://questdb.io/docs/operations/tls/>`_
 on how to enable this feature in the server.
 
 Open source QuestDB does not offer TLS support out of the box, but you can

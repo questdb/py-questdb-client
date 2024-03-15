@@ -581,11 +581,12 @@ Customising `.from_conf()` and `.from_env()`
 
 If you want to further customise the behaviour of the ``.from_conf()`` or
 ``.from_env()`` methods, you can pass additional parameters to these methods.
-The parameters are the same as the ones for the `Sender` constructor above.
+The parameters are the same as the ones for the ``Sender`` constructor, as
+documented above.
 
 For example, here is a :ref:`configuration string <sender_conf>` that is loaded
-from an environment variable and then customised to specify custom
-flushing behaviour::
+from an environment variable and then customised to specify a 10 second
+auto-flush interval::
 
     export QDB_CLIENT_CONF='http::addr=localhost:9000;'
 
@@ -605,8 +606,8 @@ ILP/TCP or ILP/HTTP
 
 The sender supports ``tcp``, ``tcps``, ``http``, and ``https`` protocols.
 
-You should prefer to use the new ILP/HTTP instead of ILP/TCP in most cases as it
-provides better feedback on errors and transaction control.
+You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
+cases as it provides better feedback on errors and transaction control.
 
 ILP/HTTP is available from:
 
