@@ -7,8 +7,8 @@ Sending Data over ILP
 Overview
 ========
 
-The :class:`questdb.ingress.Sender` class is a client that inserts rows into
-QuestDB via the
+The :class:`Sender <questdb.ingress.Sender>` class is a client that inserts
+rows into QuestDB via the
 `ILP protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_, with
 support for both ILP over TCP and the newer and recommended ILP over HTTP.
 The sender also supports TLS and authentication.
@@ -72,9 +72,9 @@ You can also initialize the sender from an environment variable::
 
 The content of the environment variable is the same
 :ref:`configuration string <sender_conf>` as taken by the
-:func:`questdb.ingress.Sender.from_conf` method, but moving it to an environment
-variable is more secure and allows you to avoid hardcoding
-sensitive information such as passwords and tokens in your code.
+:func:`Sender.from_conf <questdb.ingress.Sender.from_conf>` method,
+but moving it to an environment variable is more secure and allows you to avoid
+hardcoding sensitive information such as passwords and tokens in your code.
 
 .. code-block:: python
 
@@ -98,8 +98,8 @@ Appending Rows
 --------------
 
 You can append as many rows as you like by calling the
-:func:`questdb.ingress.Sender.row` method. The full method arguments are
-documented in the :func:`questdb.ingress.Buffer.row` method.
+:func:`Sender.row <questdb.ingress.Sender.row>` method. The full method arguments are
+documented in the :func:`Buffer.row <questdb.ingress.Buffer.row>` method.
 
 Appending Pandas Dataframes
 ---------------------------
@@ -112,8 +112,9 @@ faster than appending rows one by one.
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python
 
-For more details see :func:`questdb.ingress.Sender.dataframe`
-and for full argument options see :func:`questdb.ingress.Buffer.dataframe`.
+For more details see :func:`Sender.dataframe <questdb.ingress.Sender.dataframe>`
+and for full argument options see
+:func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>`.
 
 String vs Symbol Columns
 ------------------------
@@ -152,11 +153,27 @@ Populating Timestamps
 The ``at`` parameter of the ``row`` and ``dataframe`` methods is used to specify
 the timestamp of the rows.
 
-It can be either a ``TimestampNanos`` object or a ``datetime.datetime`` object.
-In case of dataframes you can also specify the timestamp column name or index.
+Set by client
+~~~~~~~~~~~~~
 
-If you prefer the server to set the timestamp for you (not recommended),
-you can use the ``at=ServerTimestamp`` singleton.
+It can be either a :class:`TimestampNanos <questdb.ingress.TimestampNanos>`
+object or a
+`datetime.datetime <https://docs.python.org/3/library/datetime.html>`_ object.
+
+In case of dataframes you can also specify the timestamp column name or index.
+If so, the column type should be a Pandas ``datetime64``, with or without
+timezone information.
+
+Note that all timestamps in QuestDB are stored as microseconds since the epoch,
+without timezone information. Any timezone information is dropped when the data
+is appended to the ILP buffer.
+
+Set by server
+~~~~~~~~~~~~~
+
+If you prefer, you can specify ``at=ServerTimestamp`` which will instruct
+QuestDB to set the timestamp on your behalf for each row as soon as it's
+received by the server.
 
 .. code-block:: python
 
@@ -168,26 +185,30 @@ you can use the ``at=ServerTimestamp`` singleton.
             'weather_sensor',
             symbols={'id': 'toronto1'},
             columns={'temperature': 23.5, 'humidity': 0.49},
-            at=ServerTimestamp)
+            at=ServerTimestamp)  # Legacy feature, not recommended.
 
-This removes the ability for QuestDB to deduplicate rows and is considered a
-legacy feature.
+.. warning::
+
+    Using ``ServerTimestamp`` is not recommended as it removes the ability
+    for QuestDB to deduplicate rows and is considered a *legacy feature*.
+
 
 .. _sender_flushing:
 
 Flushing
 ========
 
-The sender accumulates data into an internal buffer. Flushing the buffer
-sends the data to the server over the network and clears the buffer.
+The sender accumulates data into an internal buffer. Calling
+:func:`Sender.flush <questdb.ingress.Sender.flush>` will send the buffered data
+to QuestDB, and clear the buffer.
 
 Flushing can be done explicitly or automatically.
 
 Explicit Flushing
 -----------------
 
-An explicit call to :func:`questdb.ingress.Sender.flush` will send any pending
-data immediately.
+An explicit call to :func:`Sender.flush <questdb.ingress.Sender.flush>` will
+send any pending data immediately.
 
 .. code-block:: python
 
@@ -251,7 +272,7 @@ server.
 
 When using the HTTP protocol, the server will send back an error message if
 the data is invalid or if there is a problem with the server. This will be
-raised as an :class:`questdb.ingress.IngressError` exception.
+raised as an :class:`IngressError <questdb.ingress.IngressError>` exception.
 
 The HTTP layer will also attempt retries, configurable via the 
 :ref:`retry_timeout <sender_conf_request>` parameter.`
@@ -259,6 +280,8 @@ The HTTP layer will also attempt retries, configurable via the
 When using the TCP protocol errors are *not* sent back from the server and
 must be searched for in the logs. See the :ref:`troubleshooting-flushing`
 section for more details.
+
+.. _sender_transaction:
 
 HTTP Transactions
 =================
@@ -290,12 +313,21 @@ Auto-flushing is disabled during the scope of the transaction.
 The transaction is automatically completed a the end
 of the ``with`` block.
 
-You can complete a transaction explicity by calling the
-:func:`questdb.ingress.SenderTransaction.commit` or the
-:func:`questdb.ingress.SenderTransaction.rollback` methods.
+* If the there are no errors, the transaction is committed and sent to the
+  server without delays.
 
-Raising an exception from within the transaction ``with`` block will also cause
-the transaction to be rolled back.
+* If an exception is raised with the block, the transaction is rolled back and
+  the exception is propagated.
+
+You can also terminate a transaction explicity by calling the
+:func:`commit <questdb.ingress.SenderTransaction.commit>` or the
+:func:`rollback <questdb.ingress.SenderTransaction.rollback>` methods.
+
+While transactions that span multiple tables are not supported by QuestDB, you
+can reuse the same sender for mutliple tables.
+
+You can also create parallel transactions by creating multiple sender objects
+across multiple threads.
 
 .. _sender_auto_creation:
 
@@ -311,6 +343,21 @@ The server will use the first row of data to determine the column types.
 
 If the table already exists, the server will validate that the columns match
 the existing table.
+
+If you're using QuestDB enterprise you might need to grant further permissions
+to the authenticated user.
+
+.. code-block:: sql
+
+    CREATE SERVICE ACCOUNT ingest;
+    GRANT ilp, create table TO ingest;
+    GRANT add column, insert ON all tables TO ingest;
+    --  OR
+    GRANT add column, insert ON table1, table2 TO ingest;
+
+Read more setup details in the
+`Enterprise quickstart <https://questdb.io/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
+and the `role-based access control <https://questdb.io/docs/operations/rbac/>`_ guides.
 
 .. _sender_advanced:
 
@@ -358,7 +405,7 @@ Multiple Databases
 ------------------
 
 Handling buffers explicitly is also useful when sending data to multiple
-databases via the `.flush(buf, clear=False)` option.
+databases via the ``.flush(buf, clear=False)`` option.
 
 .. code-block:: python
 
@@ -393,8 +440,8 @@ threads and then send them later through a single exclusively locked sender.
 
 Alternatively you can also create multiple senders, one per thread.
 
-Notice that the ``questdb`` python module is mostly implemented in Cython and
-Rust and is designed to release the GIL as much as possible, so you can expect
+Notice that the ``questdb`` python module is mostly implemented in native code
+and is designed to release the Python GIL whenever possible, so you can expect
 good performance in multi-threaded scenarios.
 
 As an example, appending a dataframe to a buffer releases the GIL (unless any
@@ -407,8 +454,9 @@ All network activity also fully releases the GIL.
 Optimising HTTP Performance
 ---------------------------
 
-The sender's network communication is implemented in native Rust and thus does
-not require access to the GIL.
+The sender's network communication is implemented in native code and thus does
+not require access to the GIL, allowing for true parallelism when used using
+multiple threads.
 
 For simplicity of design and best error feedback, the `.flush()` method blocks
 until the server has acknowledged the data.
@@ -461,6 +509,26 @@ sender objects in parallel.
 
 For maxium performance you should also cache the sender objects and reuse them
 across multiple requests, since internally they maintain a connection pool.
+
+Sender Lifetime Control
+-----------------------
+
+Instead of using a ``with Sender .. as sender:`` block you can also manually
+control the lifetime of the sender object.
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    conf = 'http::addr=localhost:9000;'
+    sender = Sender.from_conf(conf)
+    sender.establish()
+    # ...
+    sender.close()
+
+The :func:`establish <questdb.ingress.Sender.establish>` method is needs to be
+called exactly once, but the :func:`close <questdb.ingress.Sender.close>` method
+is idempotent and can be called multiple times.
 
 
 Table and Column Names
@@ -535,13 +603,14 @@ Customising `.from_conf()` and `.from_env()`
 
 If you want to further customise the behaviour of the ``.from_conf()`` or
 ``.from_env()`` methods, you can pass additional parameters to these methods.
-The parameters are the same as the ones for the `Sender` constructor above.
+The parameters are the same as the ones for the ``Sender`` constructor, as
+documented above.
 
 For example, here is a :ref:`configuration string <sender_conf>` that is loaded
-from an environment variable and then customised to specify custom
-flushing behaviour::
+from an environment variable and then customised to specify a 10 second
+auto-flush interval::
 
-    export QDB_CLIENT='http::addr=localhost:9000;'
+    export QDB_CLIENT_CONF='http::addr=localhost:9000;'
 
 .. code-block:: python
 
@@ -559,8 +628,8 @@ ILP/TCP or ILP/HTTP
 
 The sender supports ``tcp``, ``tcps``, ``http``, and ``https`` protocols.
 
-You should prefer to use the new ILP/HTTP instead of ILP/TCP in most cases as it
-provides better feedback on errors and transaction control.
+You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
+cases as it provides better feedback on errors and transaction control.
 
 ILP/HTTP is available from:
 

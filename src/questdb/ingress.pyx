@@ -1842,20 +1842,21 @@ cdef class Sender:
             if not line_sender_opts_tls_verify(self._opts, c_tls_verify, &err):
                 raise c_err_to_py(err)
 
-        if tls_ca is not None:
-            c_tls_ca = TlsCa.parse(tls_ca).c_value
-            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
-                raise c_err_to_py(err)
-        elif protocol.tls_enabled:
-            # Set different default for Python than the the Rust default.
-            c_tls_ca = line_sender_ca_webpki_and_os_roots
-            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
-                raise c_err_to_py(err)
-
         if tls_roots is not None:
             tls_roots = str(tls_roots)
             str_to_utf8(b, <PyObject*>tls_roots, &c_tls_roots)
             if not line_sender_opts_tls_roots(self._opts, c_tls_roots, &err):
+                raise c_err_to_py(err)
+
+        if tls_ca is not None:
+            c_tls_ca = TlsCa.parse(tls_ca).c_value
+            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
+                raise c_err_to_py(err)
+        elif protocol.tls_enabled and tls_roots is None:
+            # Set different default for Python than the the Rust default.
+            # We don't set it if `tls_roots` is set, as it would override it.
+            c_tls_ca = line_sender_ca_webpki_and_os_roots
+            if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
                 raise c_err_to_py(err)
 
         if max_buf_size is not None:
@@ -1948,6 +1949,7 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
+        print('Sender.__init__')
 
         cdef line_sender_utf8 c_host
         cdef str port_str
@@ -2026,6 +2028,7 @@ cdef class Sender:
         cdef line_sender_utf8 c_synthetic_conf_str
         cdef dict params
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        print('Sender.from_conf')
         try:
             protocol, params = parse_conf_str(b, conf_str)
 
@@ -2181,21 +2184,23 @@ cdef class Sender:
         """Maximum length of a table or column name."""
         return self._max_name_len
 
-    def connect(self):
+    def establish(self):
         """
-        Connect to the QuestDB server.
+        Prepare the sender for use.
 
-        This method is synchronous and will block until the connection is
-        established.
+        If using ILP/HTTP this will initialize the HTTP connection pool.
 
-        If the connection is set up with authentication and/or TLS, this
+        If using ILP/TCP this will cause connection to the server and 
+        block until the connection is established.
+
+        If the TCP connection is set up with authentication and/or TLS, this
         method will return only *after* the handshake(s) is/are complete.
         """
         cdef line_sender_error* err = NULL
         if self._opts == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'connect() can\'t be called after close().')
+                'establish() can\'t be called after close().')
         self._impl = line_sender_build(self._opts, &err)
         if self._impl == NULL:
             raise c_err_to_py(err)
@@ -2209,8 +2214,8 @@ cdef class Sender:
         self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
     def __enter__(self) -> Sender:
-        """Call :func:`Sender.connect` at the start of a ``with`` block."""
-        self.connect()
+        """Call :func:`Sender.establish` at the start of a ``with`` block."""
+        self.establish()
         return self
 
     def __str__(self) -> str:
@@ -2232,6 +2237,9 @@ cdef class Sender:
         return len(self._buffer)
 
     def transaction(self, table_name: str):
+        """
+        Start a :ref:`sender_transaction` block.
+        """
         return SenderTransaction(self, table_name)
 
     def row(self,

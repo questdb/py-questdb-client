@@ -24,8 +24,7 @@ or to update the dependency::
     poetry update questdb
 
 
-Note that the :func:`questdb.ingress.Buffer.dataframe` and the
-:func:`questdb.ingress.Sender.dataframe` methods also require the following
+Note that ingesting dataframes also require the following
 dependencies to be installed:
 
 * ``pandas``
