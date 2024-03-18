@@ -85,8 +85,8 @@ import os
 
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
-# .bumpversion.cfg. - N.B. the double quotes are INTENTIONAL.
-VERSION = "1.2.0"
+# .bumpversion.cfg.
+VERSION = '1.2.0'
 
 
 cdef bint _has_gil(PyThreadState** gs):
