@@ -77,8 +77,9 @@ Breaking Changes
 
 * The ``at=..`` argument of :func:`row <questdb.ingress.Sender.row>` and
   :func:`dataframe <questdb.ingress.Sender.dataframe>` methods is now mandatory.
-  The old behavior is available behind the :ref:`ServerTimestamp <sender_server_timestamp>`
-  singleton. _The ``ServerTimestamp`` behavior is considered legacy._
+  Omitting it would previously use a server-generated timestamp for the row.
+  Now if you want a server generated timestamp, you can pass the :ref:`ServerTimestamp <sender_server_timestamp>`
+  singleton to this parameter. _The ``ServerTimestamp`` behaviour is considered legacy._
 
 * The ``auth=(u, t, x, y)`` argument of the ``Sender`` constructor has now been
   broken up into multiple arguments: ``username``, ``token``, ``token_x``, ``token_y``.
