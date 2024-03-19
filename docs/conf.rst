@@ -36,6 +36,21 @@ If you're unsure which protocol to use, see :ref:`sender_which_protocol`.
 Only the ``addr=host:port`` key is mandatory. It specifies the hostname and port
 of the QuestDB server.
 
+The same configuration string can also be loaded from the ``QDB_CLIENT_CONF``
+environment variable. This is useful for keeping sensitive information out of
+your code.
+
+.. code-block:: bash
+
+    export QDB_CLIENT_CONF="http::addr=localhost:9009;username=admin;password=quest;"
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    with Sender.from_env() as sender:
+        ...
+
 Connection
 ==========
 

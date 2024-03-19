@@ -86,7 +86,7 @@ import os
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '1.2.0'
+VERSION = '2.0.0'
 
 
 cdef bint _has_gil(PyThreadState** gs):
@@ -740,7 +740,7 @@ cdef class Buffer:
 
         from questdb.ingress import Sender, Buffer
 
-        sender = Sender(host='localhost', port=9009,
+        sender = Sender('http', 'localhost', 9009,
             init_buf_size=16384, max_name_len=64)
         buf = sender.new_buffer()
         assert buf.init_buf_size == 16384
@@ -2020,6 +2020,15 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
+        """
+        Construct a sender from a :ref:`configuration string <sender_conf>`.
+
+        The additional arguments are used to specify additional parameters
+        which are not present in the configuration string.
+
+        Note that any parameters already present in the configuration string
+        cannot be overridden.
+        """
 
         cdef line_sender_error* err = NULL
         cdef object protocol
@@ -2134,6 +2143,18 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
+        """
+        Construct a sender from the ``QDB_CLIENT_CONF`` environment variable.
+
+        The environment variable must be set to a valid
+        :ref:`configuration string <sender_conf>`.
+
+        The additional arguments are used to specify additional parameters
+        which are not present in the configuration string.
+
+        Note that any parameters already present in the configuration string
+        cannot be overridden.
+        """
         cdef str conf_str = os.environ.get('QDB_CLIENT_CONF')
         if conf_str is None:
             raise IngressError(
@@ -2301,7 +2322,7 @@ cdef class Sender:
                     pd.Timestamp('2022-08-09 13:56:02'),
                     pd.Timestamp('2022-08-09 13:56:03')]})
 
-            with qi.Sender('localhost', 9000) as sender:
+            with qi.Sender.from_env() as sender:
                 sender.dataframe(df, table_name='race_metrics', at='ts')
 
         This method builds on top of the :func:`Buffer.dataframe` method.

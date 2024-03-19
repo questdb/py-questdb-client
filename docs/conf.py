@@ -17,10 +17,10 @@ extensions = [
 source_suffix = '.rst'
 master_doc = 'index'
 project = 'questdb'
-year = '2023'
+year = '2024'
 author = 'QuestDB'
 copyright = '{0}, {1}'.format(year, author)
-version = release = '1.2.0'
+version = release = '2.0.0'
 
 github_repo_url = 'https://github.com/questdb/py-questdb-client'
 

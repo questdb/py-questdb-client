@@ -2,6 +2,171 @@
 Changelog
 =========
 
+2.0.0 (2024-03-19)
+------------------
+
+This is a major release with new features and breaking changes.
+
+Features
+~~~~~~~~
+
+* Support for ILP over HTTP. The sender can now send data to QuestDB via HTTP
+  instead of TCP. This provides error feedback from the server and new features.
+
+  .. code-block:: python
+
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        sender.row(...)
+        sender.dataframe(...)
+
+        # Will raise `IngressError` if there is an error from the server.
+        sender.flush()
+
+* New configuration string construction. The sender can now be also constructed
+  from a :ref:`configuration string <sender_conf>` in addition to the
+  constructor arguments.
+  This allows for more flexible configuration and is the recommended way to
+  construct a sender.
+  The same string can also be loaded from the ``QDB_CLIENT_CONF`` environment
+  variable.
+  The constructor arguments have been updated and some options have changed.
+
+* Explicit transaction support over HTTP. A set of rows for a single table can
+  now be committed via the sender transactionally. You can do this using a
+  ``with sender.transaction('table_name') as txn:`` block.
+
+  .. code-block:: python
+
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        with sender.transaction('test_table') as txn:
+            # Same arguments as the sender methods, minus the table name.
+            txn.row(...)
+            txn.dataframe(...)
+
+* A number of documentation improvements.
+
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+
+* New ``protocol`` parameter in the
+  :ref:`Sender <sender_programmatic_construction>` constructor.
+
+  In previous version the protocol was always TCP.
+  In this new version you must specify the protocol explicitly.
+
+* New auto-flush defaults. In previous versions
+  :ref:`auto-flushing <sender_auto_flush>` was enabled by
+  default and triggered by a maximum buffer size. In this new version
+  auto-flushing is enabled by row count (600 rows by default) and interval
+  (1 second by default), while auto-flushing by buffer size is disabled by
+  default.
+
+  The old behaviour can be still be achieved by tweaking the auto-flush
+  settings.
+  
+  .. list-table::
+    :header-rows: 1
+
+    * - Setting
+      - Old default
+      - New default
+    * - **auto_flush_rows**
+      - off
+      - 600
+    * - **auto_flush_interval**
+      - off
+      - 1000
+    * - **auto_flush_bytes**
+      - 64512
+      - off
+
+* The ``at=..`` argument of :func:`row <questdb.ingress.Sender.row>` and
+  :func:`dataframe <questdb.ingress.Sender.dataframe>` methods is now mandatory.
+  Omitting it would previously use a server-generated timestamp for the row.
+  Now if you want a server generated timestamp, you can pass the :ref:`ServerTimestamp <sender_server_timestamp>`
+  singleton to this parameter. _The ``ServerTimestamp`` behaviour is considered legacy._
+
+* The ``auth=(u, t, x, y)`` argument of the ``Sender`` constructor has now been
+  broken up into multiple arguments: ``username``, ``token``, ``token_x``, ``token_y``.
+
+* The ``tls`` argument of the ``Sender`` constructor has been removed and
+  replaced with the ``protocol`` argument. Use ``Protocol.Tcps``
+  (or ``Protocol.Https``) to enable TLS.
+  The ``tls`` values have been moved to new ``tls_ca`` and ``tls_roots``
+  :ref:`configuration settings <sender_conf_tls>`.
+
+* The ``net_interface`` argument of the ``Sender`` constructor has been renamed
+  to ``bind_interface`` and is now only available for TCP connections.
+
+The following example shows how to migrate to the new API.
+
+**Old questdb 1.x code**
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    auth = (
+        'testUser1', 
+        '5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48',
+        'token_x=fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU',
+        'token_y=Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac')
+    with Sender('localhost', 9009, auth=auth, tls=True) as sender:
+        sender.row(
+            'test_table',
+            symbols={'sym': 'AAPL'},
+            columns={'price': 100.0})  # `at=None` was defaulted for server time
+
+**Equivalent questdb 2.x code**
+
+.. code-block:: python
+
+    from questdb.ingress import Sender, Protocol, ServerTimestamp
+
+    sender = Sender(
+        Protocol.Tcps,
+        'localhost',
+        9009,
+        username='testUser1',
+        token='5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48',
+        token_x='token_x=fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU',
+        token_y='token_y=Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac',
+        auto_flush_rows='off',
+        auto_flush_interval='off',
+        auto_flush_bytes=64512)
+    with sender:
+        sender.row(
+            'test_table',
+            symbols={'sym': 'AAPL'},
+            columns={'price': 100.0},
+            at=ServerTimestamp)  
+
+**Equivalent questdb 2.x code with configuration string**
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    conf = (
+        'tcp::addr=localhost:9009;' +
+        'username=testUser1;' +
+        'token=5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48;' +
+        'token_x=token_x=fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU;' +
+        'token_y=token_y=Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac;' +
+        'auto_flush_rows=off;' +
+        'auto_flush_interval=off;' +
+        'auto_flush_bytes=64512')
+    with Sender.from_conf(conf) as sender:
+        sender.row(
+            'test_table',
+            symbols={'sym': 'AAPL'},
+            columns={'price': 100.0},
+            at=ServerTimestamp)
+
+
 1.2.0 (2023-11-23)
 ------------------
 

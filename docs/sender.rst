@@ -168,6 +168,8 @@ Note that all timestamps in QuestDB are stored as microseconds since the epoch,
 without timezone information. Any timezone information is dropped when the data
 is appended to the ILP buffer.
 
+.. _sender_server_timestamp:
+
 Set by server
 ~~~~~~~~~~~~~
 
@@ -591,15 +593,15 @@ Python type mappings:
 
 * Parameters that require numbers can also take an ``int``.
 
-* Millisecond durations can take an ``int`` or a ```datetime.timedelta``.
+* Millisecond durations can take an ``int`` or a ``datetime.timedelta``.
 
 * Any ``'on'`` / ``'off'`` / ``'unsafe_off'`` parameters can also be specified
   as a ``bool``.
 
 * Paths can also be specified as a ``pathlib.Path``.
 
-Customising `.from_conf()` and `.from_env()`
---------------------------------------------
+Customising ``.from_conf()`` and ``.from_env()``
+------------------------------------------------
 
 If you want to further customise the behaviour of the ``.from_conf()`` or
 ``.from_env()`` methods, you can pass additional parameters to these methods.

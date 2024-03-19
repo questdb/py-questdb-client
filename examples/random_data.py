@@ -6,11 +6,13 @@ import time
 
 def example(host: str = 'localhost', port: int = 9009):
     table_name: str = str(uuid.uuid1())
-    # Flush if the internal buffer exceeds 1KiB
-    conf: str = f"tcp::addr={host}:{port};auto_flush_bytes=1024;"
+    conf: str = (
+        f"tcp::addr={host}:{port};" +
+        "auto_flush_bytes=1024;" +   # Flush if the internal buffer exceeds 1KiB
+        "auto_flush_rows=off;"       # Disable auto-flushing based on row count
+        "auto_flush_interval=5000;") # Flush if last flushed more than 5s ago
     with Sender.from_conf(conf) as sender:
         total_rows = 0
-        last_flush = time.monotonic()
         try:
             print("Ctrl^C to terminate...")
             while True:
@@ -31,17 +33,9 @@ def example(host: str = 'localhost', port: int = 9009):
                 # If the internal buffer is empty, then auto-flush triggered.
                 if len(sender) == 0:
                     print('Auto-flush triggered.')
-                    last_flush = time.monotonic()
-
-                # Flush at least once every five seconds.
-                if time.monotonic() - last_flush > 5:
-                    print('Timer-flushing triggered.')
-                    sender.flush()
-                    last_flush = time.monotonic()
 
         except KeyboardInterrupt:
             print(f"table: {table_name}, total rows sent: {total_rows}")
-            print("(wait commitLag for all rows to be available)")
             print("bye!")
 
 
