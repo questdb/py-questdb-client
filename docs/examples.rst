@@ -5,22 +5,23 @@ Examples
 Basics
 ======
 
-Row-by-row Insertion
+HTTP with Token Auth
 --------------------
 
 The following example connects to the database and sends two rows (lines).
 
-The connection is unauthenticated and the data is sent at the end of the
-``with`` block.
+The connection is made via HTTPS and uses token based authentication.
 
-.. literalinclude:: ../examples/basic.py
+The data is sent at the end of the ``with`` block.
+
+.. literalinclude:: ../examples/http.py
    :language: python
 
 
 .. _auth_and_tls_example:
 
-Authentication and TLS
-----------------------
+TCP Authentication and TLS
+--------------------------
 
 Continuing from the previous example, the connection is authenticated
 and also uses TLS.
@@ -44,13 +45,13 @@ Note that this bypasses :ref:`auto-flushing <sender_auto_flush>`.
    :language: python
 
 
-Ticking Random Data and Timer-based Flush
------------------------------------------
+Ticking Data and Auto-Flush
+---------------------------
 
 The following example somewhat mimics the behavior of a loop in an application.
 
-It creates random ticking data at a random interval and flushes it explicitly
-based on a timer if the auto-flushing logic was not triggered recently.
+It creates random ticking data at a random interval and uses non-default
+auto-flush settings.
 
 .. literalinclude:: ../examples/random_data.py
    :language: python
