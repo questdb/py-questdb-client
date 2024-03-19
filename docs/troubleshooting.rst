@@ -33,30 +33,38 @@ Infrequent Flushing
 -------------------
 
 You may not see data appear in a timely manner because you're not calling
-:func:`questdb.ingress.Sender.flush` often enough.
+:func:`flush <questdb.ingress.Sender.flush>` often enough.
 
-The :class:`questdb.ingress.Sender` class only  provides auto-flushing based on
-a buffer size and *not on a timer*.
+You might be having issues with the :class:`Sender <questdb.ingress.Sender>`'s
+:ref:`auto-flush <sender_auto_flush>` feature.
 
+.. _troubleshooting-flushing:
 
 Errors during flushing
 ----------------------
 
-Server disconnects
-~~~~~~~~~~~~~~~~~~
+ILP/TCP Server disconnects
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A failure in :func:`questdb.ingress.Sender.flush` generally indicates that the
-network connection was dropped.
+If you're using TCP instead of HTTP, you may see a server disconnect after
+flushing.
 
-The ILP protocol does not send errors back to the client. Instead, by design,
-it will disconnect a client if it encounters any insertion errors. This is to
-avoid errors going unnoticed.
+If the server receives invalid data over ILP/TCP it will drop the connection.
+
+The ILP/TCP protocol does not send errors back to the client. Instead,
+by design, it will disconnect a client if it encounters any insertion errors.
+This is to avoid errors going unnoticed.
 
 As an example, if a client were to insert a ``STRING`` value into a ``BOOLEAN``
 column, the QuestDB server would disconnect the client.
 
 To determine the root cause of a disconnect, inspect the `server logs
 <https://questdb.io/docs/concept/root-directory-structure#log-directory>`_.
+
+.. note::
+
+    For a better developer experience consider using
+    :ref:`HTTP instead of TCP <sender_which_protocol>`.
 
 
 Logging outgoing messages
@@ -71,7 +79,7 @@ Here's an example if you append rows to the ``Sender`` object:
 
     import textwrap
 
-    with Sender(...) as sender:
+    with Sender.from_conf(...) as sender:
         # sender.row(...)
         # sender.row(...)
         # ...

@@ -4,7 +4,7 @@ import sys
 import pandas as pd
 
 
-def example(host: str = 'localhost', port: int = 9009):
+def example(host: str = 'localhost', port: int = 9000):
     df = pd.DataFrame({
             'pair': ['USDGBP', 'EURJPY'],
             'traded_price': [0.83, 142.62],
@@ -14,7 +14,7 @@ def example(host: str = 'localhost', port: int = 9009):
                 pd.Timestamp('2022-08-06 07:35:23.189062', tz='UTC'),
                 pd.Timestamp('2022-08-06 07:35:23.189062', tz='UTC')]})
     try:
-        with Sender(host, port) as sender:
+        with Sender.from_conf(f"http::addr={host}:{port};") as sender:
             sender.dataframe(
                 df,
                 table_name='trades',  # Table name to insert into.

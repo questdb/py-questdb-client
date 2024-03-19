@@ -9,7 +9,7 @@
     including ingesting data from Pandas dataframes.
 
     ```
-    python3 -m pip install questdb
+    python3 -m pip install -U questdb
     ```
 - name: ilp-auth
   lang: python
@@ -22,7 +22,7 @@
     including ingesting data from Pandas dataframes.
 
     ```
-    python3 -m pip install questdb
+    python3 -m pip install -U questdb
     ```
   auth:
     kid: testUser1
@@ -40,7 +40,7 @@
     and [repo](https://github.com/questdb/py-questdb-client).
 
     ```
-    python3 -m pip install questdb
+    python3 -m pip install -U questdb
     ```
   auth:
     kid: testUser1
@@ -50,3 +50,15 @@
   addr:
     host: localhost
     port: 9009
+- name: ilp-from-conf
+  lang: python
+  path: examples/from_conf.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  conf: http::addr=localhost:9000;
+

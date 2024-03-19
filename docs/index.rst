@@ -12,10 +12,12 @@ Contents
    :maxdepth: 2
 
    installation
+   sender
+   conf
    examples
    api
    troubleshooting
-   contributing
+   community
    changelog
 
 Indices and tables

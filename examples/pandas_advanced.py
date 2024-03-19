@@ -4,7 +4,7 @@ import sys
 import pandas as pd
 
 
-def example(host: str = 'localhost', port: int = 9009):
+def example(host: str = 'localhost', port: int = 9000):
     df = pd.DataFrame({
             'metric': pd.Categorical(
                 ['humidity', 'temp_c', 'voc_index', 'temp_c']),
@@ -18,7 +18,7 @@ def example(host: str = 'localhost', port: int = 9009):
                 pd.Timestamp('2022-08-06 07:35:23.189062'),
                 pd.Timestamp('2022-08-06 07:35:23.189062')]})
     try:
-        with Sender(host, port) as sender:
+        with Sender.from_conf(f"http::addr={host}:{port};") as sender:
             sender.dataframe(
                 df,
                 table_name_col='metric',  # Table name from 'metric' column.

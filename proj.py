@@ -158,6 +158,16 @@ def rr_test(*args):
                 (rr) continue  # or step, next, etc.{reset}\n\n''')
     
 
+def open_browser(port):
+    import time
+    time.sleep(1)
+    # attempt to open the browser
+    try:
+        import webbrowser
+        webbrowser.open(f'http://127.0.0.1:{port}/')
+    except Exception as e:
+        sys.stderr.write(f'WARNING: {e}\n')
+
 
 @command
 def doc(http_serve=False, port=None):
@@ -171,6 +181,8 @@ def doc(http_serve=False, port=None):
 @command
 def serve(port=None):
     port = port or 8000
+    import threading
+    threading.Thread(target=open_browser, args=[port]).start()
     docs_dir = PROJ_ROOT / 'build' / 'docs'
     _run('python3', '-m', 'http.server', port, cwd=docs_dir)
 
@@ -187,6 +199,8 @@ def cibuildwheel(*args):
         # fail saying the 3.8 wheel is unsupported.
         # This is because the 3.8 wheel ends up getting loaded with another
         # Python version.
+        #
+        # NB: Make sure to update `cibuildwheel` on py3.8 too before running!
         python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
     _run(python, '-m',
          'cibuildwheel',
