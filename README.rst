@@ -24,8 +24,7 @@ The latest version of the library is 2.0.0.
 
     python3 -m pip install -U questdb
 
-Once you've `set up QuestDB <https://questdb.io/docs/quick-start/>`_ you can use
-this library to send data to it.
+Please start by `setting up QuestDB <https://questdb.io/docs/quick-start/>`_ . Once set up, you can use this library to insert data.
 
 .. code-block:: python
 
