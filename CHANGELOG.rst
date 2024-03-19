@@ -33,7 +33,7 @@ Features
   The constructor arguments have been updated and some options have changed.
 
 * Explicit transaction support over HTTP. A set of rows for a single table can
-  now be comitted via the sender transactionally. You can do this using a
+  now be committed via the sender transactionally. You can do this using a
   ``with sender.transaction('table_name') as txn:`` block.
 
   .. code-block:: python
