@@ -64,16 +64,24 @@ Breaking Changes
   (1 second by default), while auto-flushing by buffer size is disabled by
   default.
 
-  The old behaviour can be still be achieved by setting:
+  The old behaviour can be still be achieved by tweaking the auto-flush
+  settings.
   
   .. list-table::
+    :header-rows: 1
 
+    * - Setting
+      - Old default
+      - New default
     * - **auto_flush_rows**
       - off
+      - 600
     * - **auto_flush_interval**
       - off
+      - 1000
     * - **auto_flush_bytes**
       - 64512
+      - off
 
 * The ``at=..`` argument of :func:`row <questdb.ingress.Sender.row>` and
   :func:`dataframe <questdb.ingress.Sender.dataframe>` methods is now mandatory.
