@@ -2146,7 +2146,7 @@ cdef class Sender:
         """
         Construct a sender from the ``QDB_CLIENT_CONF`` environment variable.
 
-        The environemnt variable must be set to a valid
+        The environment variable must be set to a valid
         :ref:`configuration string <sender_conf>`.
 
         The additional arguments are used to specify additional parameters
