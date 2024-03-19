@@ -17,7 +17,7 @@ extensions = [
 source_suffix = '.rst'
 master_doc = 'index'
 project = 'questdb'
-year = '2023'
+year = '2024'
 author = 'QuestDB'
 copyright = '{0}, {1}'.format(year, author)
 version = release = '2.0.0'
