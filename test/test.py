@@ -1074,6 +1074,83 @@ class TestSenderEnv(TestBases.TestSender):
     builder = Builder.ENV
 
 
+class TestSenderPool(unittest.IsolatedAsyncioTestCase):
+    def test_future(self):
+        with HttpServer() as server:
+            with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
+                buf1 = pool.next_buffer('tbl1')
+                buf2 = pool.next_buffer('tbl2')
+                self.assertIsNot(buf1, buf2)
+                self.assertIsInstance(buf1, qi.TransactionalBuffer)
+                self.assertIsInstance(buf2, qi.TransactionalBuffer)
+                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = pool.flush_to_future(buf1)
+                fut2 = pool.flush_to_future(buf2)
+                fut1.result()
+                fut2.result()
+    
+    def test_future_error(self):
+        with HttpServer() as server:
+            server.responses.append((0, 403, 'text/plain', b'Forbidden'))
+            server.responses.append((0, 403, 'text/plain', b'Forbidden'))
+            with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
+                buf1 = pool.next_buffer('tbl1')
+                buf2 = pool.next_buffer('tbl2')
+                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = pool.flush_to_future(buf1)
+                fut2 = pool.flush_to_future(buf2)
+                with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
+                    fut1.result()
+                with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
+                    fut2.result()
+
+    async def test_async(self):
+        with HttpServer() as server:
+            with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
+                buf1 = pool.next_buffer('tbl1')
+                buf2 = pool.next_buffer('tbl2')
+                self.assertIsNot(buf1, buf2)
+                self.assertIsInstance(buf1, qi.TransactionalBuffer)
+                self.assertIsInstance(buf2, qi.TransactionalBuffer)
+                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = pool.flush(buf1)
+                fut2 = pool.flush(buf2)
+                await fut1
+                await fut2
+
+    async def test_async_error(self):
+        with HttpServer() as server:
+            server.responses.append((0, 403, 'text/plain', b'Forbidden'))
+            server.responses.append((0, 403, 'text/plain', b'Forbidden'))
+            with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
+                buf1 = pool.next_buffer('tbl1')
+                buf2 = pool.next_buffer('tbl2')
+                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = pool.flush(buf1)
+                fut2 = pool.flush(buf2)
+                with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
+                    await fut1
+                with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
+                    await fut2
+
+    def test_not_http(self):
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'SenderPool only supports "http" and "https" protocols'):
+            with qi.SenderPool('tcp::addr=localhost:1;') as _:
+                pass
+
+    def test_no_addr(self):
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'Missing "addr" parameter in config string'):
+            with qi.SenderPool('http::') as _:
+                pass
+
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile
