@@ -18,7 +18,7 @@ and full-connection encryption with
 Quickstart
 ==========
 
-The latest version of the library is 2.0.0.
+The latest version of the library is 2.0.1.
 
 ::
 
