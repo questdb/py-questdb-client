@@ -1949,7 +1949,6 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
-        print('Sender.__init__')
 
         cdef line_sender_utf8 c_host
         cdef str port_str
@@ -2037,7 +2036,6 @@ cdef class Sender:
         cdef line_sender_utf8 c_synthetic_conf_str
         cdef dict params
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
-        print('Sender.from_conf')
         try:
             protocol, params = parse_conf_str(b, conf_str)
 
