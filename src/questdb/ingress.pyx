@@ -2678,11 +2678,14 @@ class SenderPool:
             sender = Sender.from_conf(self._conf)
             sender.establish()  # will be closed by __del__
             self._executor_thread_local.sender = sender
-        sender.flush(buffer, transactional=True)
         try:
-            self._buffer_free_list.put_nowait(buffer)
-        except Full:
-            pass  # drop the buffer, too many in free list
+            sender.flush(buffer, clear=False, transactional=True)
+        finally:
+            buffer.clear()
+            try:
+                self._buffer_free_list.put_nowait(buffer)
+            except Full:
+                pass  # drop the buffer, too many in free list
 
     def flush_to_future(self, buffer: TransactionalBuffer) -> concurrent.future.Future[None]:
         """
