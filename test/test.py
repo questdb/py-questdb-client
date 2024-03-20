@@ -1089,6 +1089,21 @@ class TestSenderPool(unittest.IsolatedAsyncioTestCase):
                 fut2 = pool.flush_to_future(buf2)
                 fut1.result()
                 fut2.result()
+
+    def test_buffer_free_list(self):
+        with HttpServer() as server:
+            with qi.SenderPool(
+                    f'http::addr=localhost:{server.port};',
+                    max_workers=4,
+                    max_free_buffers=8) as pool:
+                futures = []
+                for _ in range(100):
+                    buf = pool.next_buffer('tbl1')
+                    buf.row(columns={'a': 1.5}, at=qi.TimestampNanos.now())
+                    futures.append(pool.flush_to_future(buf))
+                    time.sleep(0.001)
+                for fut in futures:
+                    fut.result()
     
     def test_future_error(self):
         with HttpServer() as server:

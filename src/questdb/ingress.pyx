@@ -2592,13 +2592,13 @@ class SenderPool:
             self,
             conf: str,
             max_workers: Optional[int] = None,
-            max_cached_buffers: Optional[int] = None):
+            max_free_buffers: Optional[int] = None):
         """
         Create a pool of Senders that can be used asynchronously to send data to QuestDB.
 
         :param conf: the configuration string for each Sender in the pool
         :param max_workers: the maximum number of workers in the pool, if None defaults to min(32, os.cpu_count() + 4)
-        :param max_cached_buffers: the maximum number of buffers to keep in the pool for reuse, if None defaults to 2 * max_workers
+        :param max_free_buffers: the maximum number of buffers to keep in the pool for reuse, if None defaults to 2 * max_workers
         """
         self._conf = conf
         if max_workers is None:
@@ -2609,13 +2609,13 @@ class SenderPool:
             if self._max_workers < 1:
                 raise ValueError(
                     'SenderPool requires at least one worker')
-        if max_cached_buffers is None:
-            self._max_cached_buffers = 2 * self._max_workers
+        if max_free_buffers is None:
+            self._max_free_buffers = 2 * self._max_workers
         else:
-            self._max_cached_buffers = int(max_cached_buffers)
-            if self._max_cached_buffers < 0:
+            self._max_free_buffers = int(max_free_buffers)
+            if self._max_free_buffers < 0:
                 raise ValueError(
-                    'SenderPool max_cached_buffers can\'t be negative')
+                    'SenderPool max_free_buffers can\'t be negative')
 
         if not conf.startswith("http"):
             raise IngressError(
@@ -2639,7 +2639,7 @@ class SenderPool:
             self._buffer_provisioner_sender.close()
             self._buffer_provisioner_sender = None
             raise
-        self._buffer_free_list = Queue(self._max_cached_buffers)
+        self._buffer_free_list = Queue(self._max_free_buffers)
         self._executor_thread_local = threading.local()
 
     def __enter__(self):
@@ -2665,11 +2665,10 @@ class SenderPool:
         Buffers are reused.
         """
         try:
-            return self._buffer_free_list.get_nowait()
+            buf = self._buffer_free_list.get_nowait()
         except Empty:
-            return TransactionalBuffer(
-                table_name,
-                self._buffer_provisioner_sender.new_buffer())
+            buf = self._buffer_provisioner_sender.new_buffer()
+        return TransactionalBuffer(table_name, buf)
 
     def _flush(self, buffer):
         try:
