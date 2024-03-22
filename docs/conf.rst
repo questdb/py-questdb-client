@@ -67,6 +67,7 @@ Connection
   
   The default is ``0.0.0.0``.
 
+.. _sender_conf_auth:
 
 Authentication
 ==============
@@ -128,7 +129,7 @@ still use TLS by setting up a proxy in front of QuestDB, such as
   * ``pem_file``: Path to a PEM-encoded certificate authority file.
     This is useful for testing with self-signed certificates.
 
-  The default is: ``'webpki_roots'``.
+  The default is: ``'webpki_and_os_roots'``.
 
 * ``tls_roots`` - ``str``: Path to a PEM-encoded certificate authority file.
   When used it defaults the ``tls_ca`` to ``'pem_file'``.
@@ -166,7 +167,7 @@ The following parameters control the :ref:`sender_auto_flush` behavior.
 * ``auto_flush`` - ``'on'`` | ``'off'``: Global switch for the auto-flushing
   behavior.
 
-  *Default: ``'on'``.*
+  Default: ``'on'``.
 
 * ``auto_flush_rows`` - ``int > 0`` | ``'off'``: The number of rows that will
   trigger a flush. Set to ``'off'`` to disable.
@@ -176,12 +177,12 @@ The following parameters control the :ref:`sender_auto_flush` behavior.
 * ``auto_flush_bytes`` - ``int > 0`` | ``'off'``: The number of bytes that will
   trigger a flush. Set to ``'off'`` to disable.
         
-  *Default: ``'off'``.*
+  Default: ``'off'``.
 
 * ``auto_flush_interval`` - ``int > 0`` | ``'off'``: The time in milliseconds
   that will trigger a flush. Set to ``'off'`` to disable.
     
-  *Default: 1000 (millis).*
+  Default: 1000 (millis).
 
 .. _sender_conf_auto_flush_interval:
 
@@ -229,15 +230,15 @@ Buffer
 
 * ``init_buf_size`` - ``int > 0``: Initial buffer capacity.
     
-  *Default: 65536 (64KiB).*
+  Default: 65536 (64KiB).
 
 * ``max_buf_size`` - ``int > 0``: Maximum flushable buffer capacity.
     
-  *Default: 104857600 (100MiB).*
+  Default: 104857600 (100MiB).
 
 * ``max_name_len`` - ``int > 0``: Maximum length of a table or column name.
 
-  *Default: 127.*
+  Default: 127.
 
 .. _sender_conf_request:
 
@@ -251,13 +252,13 @@ The following parameters control the HTTP request behavior.
   backoff starting at 10ms and doubling after each failed attempt up to a
   maximum of 1 second.
     
-  *Default: 10000 (10 seconds).*
+  Default: 10000 (10 seconds).
 
 * ``request_timeout`` - ``int > 0``: The time in milliseconds to wait for a
   response from the server. This is in addition to the calculation derived from
   the ``request_min_throughput`` parameter.
     
-  *Default: 10000 (10 seconds).*
+  Default: 10000 (10 seconds).
 
 * ``request_min_throughput`` - ``int > 0``: Minimum expected throughput in
   bytes per second for HTTP requests. If the throughput is lower than this
@@ -266,7 +267,7 @@ The following parameters control the HTTP request behavior.
   This is useful for large requests.
   You can set this value to ``0`` to disable this logic.
     
-  *Default: 102400 (100 KiB/s).*
+  Default: 102400 (100 KiB/s).
 
 
 The final request timeout calculation is::
