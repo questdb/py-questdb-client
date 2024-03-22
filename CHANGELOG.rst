@@ -176,7 +176,7 @@ The following example shows how to migrate to the new API.
         'token_y=token_y=Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac;' +
         'auto_flush_rows=off;' +
         'auto_flush_interval=off;' +
-        'auto_flush_bytes=64512')
+        'auto_flush_bytes=64512;')
     with Sender.from_conf(conf) as sender:
         sender.row(
             'test_table',
