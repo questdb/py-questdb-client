@@ -587,6 +587,9 @@ You can also specify the configuration parameters programmatically:
         ...
 
 
+See the :ref:`sender_conf` section for a full list of configuration parameters:
+each configuration parameter can be passed as named arguments to the constructor.
+
 Python type mappings:
 
 * Parameters that require strings take a ``str``.
@@ -599,6 +602,11 @@ Python type mappings:
   as a ``bool``.
 
 * Paths can also be specified as a ``pathlib.Path``.
+
+.. note::
+
+    The constructor arguments have changed between 1.x and 2.x.
+    If you are upgrading, take a look at the :ref:`changelog <changelog>`.
 
 Customising ``.from_conf()`` and ``.from_env()``
 ------------------------------------------------
