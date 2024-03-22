@@ -2,6 +2,23 @@
 Changelog
 =========
 
+2.0.1 (2024-03-22)
+------------------
+
+Patch release with minor bug fixes, no API changes and some documentation tweaks.
+
+Bug fixes
+~~~~~~~~~
+* Removed two unnecessary debugging ``print()`` statements that were
+  accidentally left in the code.
+
+Documentation
+~~~~~~~~~~~~~
+* Introduced the ability to optionally install ``pandas`` and ``pyarrow`` via
+  ``python3 -m pip install -U questdb[dataframe]`` and updated the documentation
+  to reflect this.
+
+
 2.0.0 (2024-03-19)
 ------------------
 

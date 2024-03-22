@@ -642,8 +642,8 @@ Since TCP does not block for a response it is useful for high-throughput
 scenarios in higher latency networks or on older versions of QuestDB which do
 not support ILP/HTTP quite yet.
 
-It should be noted that HTTP performance equivalent to TCP can be achieved by
-:ref:`using multiple sender objects in parallel <sender_http_performance>`.
+It should be noted that you can achieve equivalent or better performance to TCP
+with HTTP by :ref:`using multiple sender objects in parallel <sender_http_performance>`.
 
 Either way, you can easily switch between the two protocols by changing:
 
@@ -651,4 +651,4 @@ Either way, you can easily switch between the two protocols by changing:
 
 * The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000).
 
-* Any authentication parameters such as ``username``, ``token``, et cetera.
+* Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.

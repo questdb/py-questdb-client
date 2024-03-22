@@ -22,24 +22,11 @@ The latest version of the library is 2.0.1.
 
 ::
 
-    python3 -m pip install -U questdb
+    python3 -m pip install -U questdb[dataframe]
 
 Please start by `setting up QuestDB <https://questdb.io/docs/quick-start/>`_ . Once set up, you can use this library to insert data.
 
-.. code-block:: python
-
-    from questdb.ingress import Sender, TimestampNanos
-
-    conf = f'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'sensors',
-            symbols={'id': 'toronto1'},
-            columns={'temperature': 20.0, 'humidity': 0.5},
-            at=TimestampNanos.now())
-        sender.flush()
-
-You can also send Pandas dataframes:
+The most common way to insert data is from a Pandas dataframe.
 
 .. code-block:: python
 
@@ -56,8 +43,25 @@ You can also send Pandas dataframes:
     with Sender.from_conf(conf) as sender:
         sender.dataframe(df, table_name='sensors', at='timestamp')
 
+You can also send individual rows. This only requires a more minimal installation::
 
-To connect via TCP, set the
+    python3 -m pip install -U questdb
+
+.. code-block:: python
+
+    from questdb.ingress import Sender, TimestampNanos
+
+    conf = f'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        sender.row(
+            'sensors',
+            symbols={'id': 'toronto1'},
+            columns={'temperature': 20.0, 'humidity': 0.5},
+            at=TimestampNanos.now())
+        sender.flush()
+
+
+To connect via the `older TCP protocol <https://py-questdb-client.readthedocs.io/en/latest/sender.html#ilp-tcp-or-ilp-http>`_, set the
 `configuration string <https://py-questdb-client.readthedocs.io/en/latest/conf.html>`_ to:
 
 .. code-block:: python
