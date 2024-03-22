@@ -18,7 +18,7 @@ and full-connection encryption with
 Quickstart
 ==========
 
-The latest version of the library is 2.0.1.
+The latest version of the library is 2.0.1 (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
 
 ::
 
