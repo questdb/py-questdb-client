@@ -36,14 +36,26 @@ extlinks = {
 on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
 
 if not on_rtd:  # only set the theme if we're building docs locally
-    html_theme = 'sphinx_rtd_theme'
+    html_theme = 'alabaster'
 
 html_use_smartypants = True
 html_last_updated_fmt = '%b %d, %Y'
 html_split_index = False
 html_sidebars = {
-    '**': ['searchbox.html', 'globaltoc.html', 'sourcelink.html'],
+    '**': [
+        'about.html',
+        'searchbox.html',
+        'globaltoc.html',
+        'sourcelink.html'
+    ],
 }
+html_theme_options = {
+    'description': 'Python client for QuestDB',
+    'github_button': True,
+    'github_user': 'questdb',
+    'github_repo': 'py-questdb-client',
+}
+
 html_short_title = '%s-%s' % (project, version)
 
 napoleon_use_ivar = True
