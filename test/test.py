@@ -1078,15 +1078,15 @@ class TestSenderPool(unittest.IsolatedAsyncioTestCase):
     def test_future(self):
         with HttpServer() as server:
             with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
-                buf1 = pool.next_buffer('tbl1')
-                buf2 = pool.next_buffer('tbl2')
-                self.assertIsNot(buf1, buf2)
-                self.assertIsInstance(buf1, qi.TransactionalBuffer)
-                self.assertIsInstance(buf2, qi.TransactionalBuffer)
-                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
-                fut1 = pool.flush_to_future(buf1)
-                fut2 = pool.flush_to_future(buf2)
+                txn1 = pool.transaction('tbl1')
+                txn2 = pool.transaction('tbl2')
+                self.assertIsNot(txn1, txn2)
+                self.assertIsInstance(txn1, qi.AsyncTransaction)
+                self.assertIsInstance(txn2, qi.AsyncTransaction)
+                txn1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                txn2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = txn1.commit_fut()
+                fut2 = txn2.commit_fut()
                 fut1.result()
                 fut2.result()
 
@@ -1098,9 +1098,9 @@ class TestSenderPool(unittest.IsolatedAsyncioTestCase):
                     max_free_buffers=8) as pool:
                 futures = []
                 for _ in range(100):
-                    buf = pool.next_buffer('tbl1')
-                    buf.row(columns={'a': 1.5}, at=qi.TimestampNanos.now())
-                    futures.append(pool.flush_to_future(buf))
+                    txn = pool.transaction('tbl1')
+                    txn.row(columns={'a': 1.5}, at=qi.TimestampNanos.now())
+                    futures.append(txn.commit_fut())
                     time.sleep(0.001)
                 for fut in futures:
                     fut.result()
@@ -1110,12 +1110,12 @@ class TestSenderPool(unittest.IsolatedAsyncioTestCase):
             server.responses.append((0, 403, 'text/plain', b'Forbidden'))
             server.responses.append((0, 403, 'text/plain', b'Forbidden'))
             with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
-                buf1 = pool.next_buffer('tbl1')
-                buf2 = pool.next_buffer('tbl2')
-                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
-                fut1 = pool.flush_to_future(buf1)
-                fut2 = pool.flush_to_future(buf2)
+                txn1 = pool.transaction('tbl1')
+                txn2 = pool.transaction('tbl2')
+                txn1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                txn2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = txn1.commit_fut()
+                fut2 = txn2.commit_fut()
                 with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
                     fut1.result()
                 with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
@@ -1124,15 +1124,15 @@ class TestSenderPool(unittest.IsolatedAsyncioTestCase):
     async def test_async(self):
         with HttpServer() as server:
             with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
-                buf1 = pool.next_buffer('tbl1')
-                buf2 = pool.next_buffer('tbl2')
-                self.assertIsNot(buf1, buf2)
-                self.assertIsInstance(buf1, qi.TransactionalBuffer)
-                self.assertIsInstance(buf2, qi.TransactionalBuffer)
-                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
-                fut1 = pool.flush(buf1)
-                fut2 = pool.flush(buf2)
+                txn1 = pool.transaction('tbl1')
+                txn2 = pool.transaction('tbl2')
+                self.assertIsNot(txn1, txn2)
+                self.assertIsInstance(txn1, qi.AsyncTransaction)
+                self.assertIsInstance(txn2, qi.AsyncTransaction)
+                txn1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                txn2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = txn1.commit()
+                fut2 = txn2.commit()
                 await fut1
                 await fut2
 
@@ -1141,16 +1141,52 @@ class TestSenderPool(unittest.IsolatedAsyncioTestCase):
             server.responses.append((0, 403, 'text/plain', b'Forbidden'))
             server.responses.append((0, 403, 'text/plain', b'Forbidden'))
             with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
-                buf1 = pool.next_buffer('tbl1')
-                buf2 = pool.next_buffer('tbl2')
-                buf1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                buf2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
-                fut1 = pool.flush(buf1)
-                fut2 = pool.flush(buf2)
+                txn1 = pool.transaction('tbl1')
+                txn2 = pool.transaction('tbl2')
+                txn1.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                txn2.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                fut1 = txn1.commit()
+                fut2 = txn2.commit()
                 with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
                     await fut1
                 with self.assertRaisesRegex(qi.IngressError, 'Forbidden'):
                     await fut2
+
+    async def test_async_txn(self):
+        with HttpServer() as server:
+            with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
+                async with pool.transaction('tbl1') as txn:
+                    txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                    buf1 = str(txn)
+                async with pool.transaction('tbl2') as txn:
+                    txn.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+                    buf2 = str(txn)
+            self.assertEqual(buf1, 'tbl1,sym1=val1\n')
+            self.assertEqual(buf2, 'tbl2,sym2=val2\n')
+        self.assertEqual(len(server.requests), 2)
+        self.assertEqual(server.requests[0], buf1.encode('utf-8'))
+        self.assertEqual(server.requests[1], buf2.encode('utf-8'))
+
+    async def test_async_txn_error(self):
+        with HttpServer() as server:
+            server.responses.append((0, 403, 'text/plain', b'Forbidden1'))
+            server.responses.append((0, 403, 'text/plain', b'Forbidden2'))
+            with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
+                with self.assertRaisesRegex(qi.IngressError, 'Forbidden1'):
+                    async with pool.transaction('tbl1') as txn:
+                        txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                with self.assertRaisesRegex(qi.IngressError, 'Forbidden2'):
+                    async with pool.transaction('tbl2') as txn:
+                        txn.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
+
+    async def test_bad_reentrant_txn(self):
+        with HttpServer() as server:
+            with qi.SenderPool(f'http::addr=localhost:{server.port};') as pool:
+                async with pool.transaction('tbl1') as txn:
+                    txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+                    with self.assertRaisesRegex(qi.IngressError, 'transaction already entered'):
+                        async with txn:
+                            pass
 
     def test_not_http(self):
         with self.assertRaisesRegex(

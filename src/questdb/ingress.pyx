@@ -41,7 +41,7 @@ __all__ = [
     'TimestampNanos',
     'TlsCa',
     'SenderPool',
-    'TransactionalBuffer',
+    'AsyncTransaction',
 ]
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
@@ -2492,7 +2492,8 @@ cdef class Sender:
         self._close()
         free(self._last_flush_ms)
 
-class TransactionalBuffer:
+
+class AsyncTransaction:
     """
     A :class:`buffer <questdb.ingress.Buffer>` restricted to a single table,
     ensuring it can be flushed transactionally.
@@ -2500,13 +2501,15 @@ class TransactionalBuffer:
     Use in conjunction with :class:`SenderPool` to send data to QuestDB
     asynchronously.
     """
-    def __init__(self, table_name: str, buffer: Buffer):
+    def __init__(self, pool: SenderPool, buffer: Buffer, table_name: str):
+        self._pool = pool  # TODO: weakref
         self._table_name = table_name
         self._buffer = buffer
         if self._buffer is None:
             raise ValueError('buffer cannot be None')
         if len(self._buffer) > 0:
             raise ValueError('buffer must be cleared')
+        self._entered = False
     
     def dataframe(
             self,
@@ -2524,7 +2527,7 @@ class TransactionalBuffer:
             *,
             symbols: Dict[str, str] | None = None,
             columns: Dict[str, bool | int | float | str | TimestampMicros | datetime] | None = None,
-            at: TimestampNanos | datetime | ServerTimestamp) -> 'TransactionalBuffer':
+            at: TimestampNanos | datetime | ServerTimestamp) -> 'AsyncTransaction':
         if self._buffer is None:
             raise ValueError('buffer has already been flushed, obtain a new one from the pool')
         self._buffer.row(self._table_name, symbols=symbols, columns=columns, at=at)
@@ -2533,22 +2536,54 @@ class TransactionalBuffer:
     def __str__(self) -> str:
         return str(self._buffer)
 
-    def capacity(self) -> int:
-        return self._buffer.capacity()
-    
-    def clear(self):
-        self._buffer.clear()
+    def __len__(self) -> int:
+        return len(self._buffer)
 
-    def reserve(self, additional: int):
-        self._buffer.reserve(additional)
+    def commit_fut(self) -> concurrent.future.Future[None]:
+        pool = self._pool
+        self._pool = None
+        buffer = self._buffer
+        self._buffer = None
+        if pool is None:
+            raise ValueError('transaction has already been committed')
+        return pool._thread_pool.submit(pool._flush, buffer)
 
-    @property
-    def init_buf_size(self) -> int:
-        return self._buffer.init_buf_size
+    # async - despite `async lacking in signature`
+    def commit(self) -> asyncio.Future[None]:
+        return asyncio.wrap_future(
+            self.commit_fut(),
+            loop=asyncio.get_event_loop())
 
-    @property
-    def max_name_len(self) -> int:
-        return self._buffer.max_name_len
+    def rollback(self):
+        pool = self._pool
+        self._pool = None
+        buffer = self._buffer
+        self._buffer = None
+        if pool is not None:
+            pool._add_buffer_to_free_list(buffer)
+
+    async def __aenter__(self):
+        if self._entered:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'transaction already entered')
+        self._entered = True
+        return self
+
+    def __aexit__(self, exc_type, exc_val, _exc_tb):
+        if not self._entered:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'transaction not entered')
+        if exc_type is None:
+            return self.commit()
+        else:
+            self.rollback()
+            loop = asyncio.get_event_loop()
+            future = loop.create_future()
+            future.set_exception(exc_val)
+            return future
+
 
 
 class SenderPool:
@@ -2561,21 +2596,21 @@ class SenderPool:
         from questdb.ingress.pool import SenderPool, TimestampNanos
 
         with SenderPool('http::addr=localhost:9000;') as pool:
-            buffer1 = pool.next_buffer('my_table')
-            buffer1.row(columns={'a': 1, 'b': 2}, at=TimestampNanos.now())
-            buffer1.row(columns={'a': 3, 'b': 4}, at=TimestampNanos.now())
+            txn1 = pool.transaction('my_table')
+            txn1.row(columns={'a': 1, 'b': 2}, at=TimestampNanos.now())
+            txn1.row(columns={'a': 3, 'b': 4}, at=TimestampNanos.now())
 
             df = pd.DataFrame({
                 'timestamp': pd.to_datetime([
                     '2021-01-01T00:00:00', '2021-01-01T00:00:01']),
                 'a': [1, 3],
                 'b': [2, 4]})
-            buffer2 = pool.next_buffer('another_table')
-            buffer2.dataframe(df, timestamp='timestamp')
+            txn2 = pool.transaction('another_table')
+            txn2.dataframe(df, timestamp='timestamp')
 
             # Send the buffers asynchronously in parallel
-            f1 = pool.flush(buffer1)
-            f2 = pool.flush(buffer2)
+            f1 = txn1.commit()
+            f2 = txn2.commit()
 
             # Wait for both to complete, raising any exceptions on error
             try:
@@ -2584,9 +2619,17 @@ class SenderPool:
             except IngressError as e:
                 ...
 
-    If you don't have an async context, use :func:`SenderPool.flush_to_future`
-    instead.
+    If you don't have an async context, use `txn.commit_fut()` to get a
+    `concurrent.futures.Future` instead of an `asyncio.Future`.
 
+    Alternatively, the transaction itself can be an async context manager:
+
+    .. code-block:: python
+
+        with SenderPool('http::addr=localhost:9000;') as pool:
+            async with pool.transaction('my_table') as txn:
+                txn.row(columns={'a': 1, 'b': 2}, at=TimestampNanos.now())
+                txn.row(columns={'a': 3, 'b': 4}, at=TimestampNanos.now())
     """
     def __init__(
             self,
@@ -2658,17 +2701,25 @@ class SenderPool:
     def __exit__(self, _exc_type, _exc_val, _exc_tb):
         self.close()
 
-    def next_buffer(self, table_name: str):
-        """
-        Get the next buffer for the specified table.
-        
-        Buffers are reused.
-        """
+    def transaction(self, table_name: str):
+        # TODO: Work out the thread safety details of this method.
         try:
             buf = self._buffer_free_list.get_nowait()
         except Empty:
             buf = self._buffer_provisioner_sender.new_buffer()
-        return TransactionalBuffer(table_name, buf)
+        return AsyncTransaction(self, buf, table_name)
+
+    def _add_buffer_to_free_list(self, buffer):
+        if buffer is None:
+            return
+        buffer.clear()
+        free_list = self._buffer_free_list
+        if free_list is None:
+            return
+        try:
+            free_list.put_nowait(buffer)
+        except Full:
+            pass  # drop the buffer, too many in free list
 
     def _flush(self, buffer):
         try:
@@ -2680,70 +2731,4 @@ class SenderPool:
         try:
             sender.flush(buffer, clear=False, transactional=True)
         finally:
-            buffer.clear()
-            try:
-                self._buffer_free_list.put_nowait(buffer)
-            except Full:
-                pass  # drop the buffer, too many in free list
-
-    def flush_to_future(self, buffer: TransactionalBuffer) -> concurrent.future.Future[None]:
-        """
-        Flush the buffer to QuestDB asynchronously, returning
-        a future that completes when the buffer has been flushed.
-
-        The buffer is handed off to the thread pool and can't be used after
-        this method is called.
-
-        This method is equivalent to :func:`SenderPool.flush` but
-        is usable outside of an async context.
-
-        .. code-block:: python
-
-            fut = pool.flush_to_future(buffer)
-            # possibly do other work here
-
-            # Be ready to handle exceptions
-            try:
-                fut.result()
-            except IngressError as e:
-                ...
-
-        :param buffer: the buffer to flush to QuestDB
-        :return: a future that completes when the buffer has been flushed
-        """
-        inner_buffer = buffer._buffer
-        buffer._buffer = None
-        return self._thread_pool.submit(self._flush, inner_buffer)
-    
-    def flush(self, buffer: TransactionalBuffer) -> asyncio.Future[None]:
-        """
-        Flush the buffer to QuestDB asynchronously.
-
-        The buffer is handed off to the thread pool and can't be used after
-        this method is called.
-
-        This method requires an async context.
-        If you don't have one, use :func:`SenderPool.flush_to_future` instead.
-
-        Despite this method not being an ``async def`` function, it can be
-        awaited in an async context:
-
-        .. code-block:: python
-
-            fut = pool.flush(buffer)
-            # possibly do other work here
-            
-            # Be ready to handle exceptions
-            try:
-                await fut
-            except IngressError as e:
-                ...
-
-        :param buffer: the buffer to flush to QuestDB
-        """
-        # This logic should _not_ be wrapped inside an `async def` function
-        # or it would introduce a blocking point and prevent parallel flushing.
-        loop = asyncio.get_event_loop()
-        inner_buffer = buffer._buffer
-        buffer._buffer = None
-        return loop.run_in_executor(self._thread_pool, self._flush, inner_buffer)
+            self._add_buffer_to_free_list(buffer)
