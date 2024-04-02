@@ -158,7 +158,7 @@ stages:
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: wheelhouse}
 
-      - job: windows_x64
+      - job: windows_i686
         pool: {vmImage: 'windows-2019'}
         timeoutInMinutes: 60
         steps:
@@ -170,5 +170,24 @@ stages:
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
+            env:
+              CIBW_BUILD: "*win32*"
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: 'wheelhouse'}
+
+      - job: windows_x86_64
+        pool: {vmImage: 'windows-2019'}
+        timeoutInMinutes: 60
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              python3 -m pip install cibuildwheel
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: "*win_amd64*"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
