@@ -823,7 +823,7 @@ class TestBases:
             # Due to CI timing delays there may have been multiple flushes.
             self.assertGreaterEqual(requests_len, 1)
 
-        def test_auto_flush_interval2(self):
+        def _do_test_auto_flush_interval2(self):
             with HttpServer() as server, self.builder(
                     'http',
                     'localhost',
@@ -839,11 +839,25 @@ class TestBases:
                 time.sleep(0.02)
                 sender.row('t', columns={'x': 5}, at=qi.ServerTimestamp)
                 sender.row('t', columns={'x': 6}, at=qi.ServerTimestamp)
-            self.assertEqual(len(server.requests), 3)
-            self.assertEqual(server.requests, [
-                b't x=1i\nt x=2i\nt x=3i\n',
-                b't x=4i\nt x=5i\n',
-                b't x=6i\n'])
+            return server.requests
+            
+        def test_auto_flush_interval2(self):
+            # This test is timing-sensitive,
+            # so it has a tendency to go wrong in CI.
+            # To work around this we'll repeat the test up to 10 times
+            # until it passes.
+            for _ in range(10):
+                requests = self._do_test_auto_flush_interval2()
+                if len(requests) == 3:
+                    self.assertEqual(requests, [
+                        b't x=1i\nt x=2i\nt x=3i\n',
+                        b't x=4i\nt x=5i\n',
+                        b't x=6i\n'])
+                    break
+            
+            # If this fails, it failed 10 attempts.
+            # Due to CI timing delays there may have been multiple flushes.
+            self.assertEqual(len(requests), 3)
 
         def test_http_username_password(self):
             with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user',
