@@ -823,6 +823,28 @@ class TestBases:
             # Due to CI timing delays there may have been multiple flushes.
             self.assertGreaterEqual(requests_len, 1)
 
+        def test_auto_flush_interval2(self):
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    auto_flush_interval=10,
+                    auto_flush_rows=False,
+                    auto_flush_bytes=False) as sender:
+                sender.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
+                sender.row('t', columns={'x': 2}, at=qi.ServerTimestamp)
+                time.sleep(0.02)
+                sender.row('t', columns={'x': 3}, at=qi.ServerTimestamp)
+                sender.row('t', columns={'x': 4}, at=qi.ServerTimestamp)
+                time.sleep(0.02)
+                sender.row('t', columns={'x': 5}, at=qi.ServerTimestamp)
+                sender.row('t', columns={'x': 6}, at=qi.ServerTimestamp)
+            self.assertEqual(len(server.requests), 3)
+            self.assertEqual(server.requests, [
+                b't x=1i\nt x=2i\nt x=3i\n',
+                b't x=4i\nt x=5i\n',
+                b't x=6i\n'])
+
         def test_http_username_password(self):
             with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user',
                                                       password='pass') as sender:

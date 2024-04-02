@@ -2432,6 +2432,8 @@ cdef class Sender:
             ok = line_sender_flush(sender, c_buf, &err)
         else:
             ok = line_sender_flush_and_keep(sender, c_buf, &err)
+        if ok and c_buf == self._buffer._impl:
+            self._last_flush_ms[0] = line_sender_now_micros() // 1000
         _ensure_has_gil(&gs)
         if not ok:
             if c_buf == self._buffer._impl:
