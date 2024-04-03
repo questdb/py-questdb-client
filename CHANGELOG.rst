@@ -6,12 +6,17 @@ Changelog
 2.0.1 (2024-03-22)
 ------------------
 
-Patch release with minor bug fixes, no API changes and some documentation tweaks.
+Patch release with bug fixes, no API changes and some documentation tweaks.
 
 Bug fixes
 ~~~~~~~~~
+* Fixed a bug where an internal "last flushed" timestamp used
+  by ``auto_flush_interval`` wasn't updated correctly causing the auto-flush
+  logic to trigger after each row.
+
 * Removed two unnecessary debugging ``print()`` statements that were
-  accidentally left in the code.
+  accidentally left in the code in ``Sender.from_conf()`` and
+  ``Sender.from_env()``.
 
 Documentation
 ~~~~~~~~~~~~~
