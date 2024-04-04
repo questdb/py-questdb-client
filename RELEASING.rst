@@ -58,9 +58,10 @@ From a MacOS ARM computer install UTM.
 * Install Xcode from the App Store
 * Install Rust from https://rustup.rs/
 * Install Firefox
-* Install *all* OFFICIAL Python eleases from Python 3.8 onwards.
+* Install *all* OFFICIAL Python Releases from Python 3.8 onwards. Use the latest patch version for each minor release. 
     * https://www.python.org/downloads/macos/
     * Do NOT use Homebrew to install Python.
+    * Python 3.8.10 requires Rosetta, install it when prompted to do so. 
 
 * Optionally install VS Code
 
