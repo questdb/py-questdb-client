@@ -16,7 +16,7 @@ upload to PyPI.
 Bumping Version and updating Changelog
 --------------------------------------
 
-Create a new PR with the new changes in ``src/CHANGELOG.md``.
+Create a new PR with the new changes in ``CHANGELOG.rst``.
 
 Make a commit and push the changes to a new branch.
 
@@ -40,6 +40,12 @@ Now merge the PR with the title "Bump version: V.V.V → W.W.W".
 
 Note that CI will run all the ``cibuildwheel`` jobs which will in turn 
 generate the binaries for all the platforms, except for MacOS ARM.
+
+Double-check the date in the CHANGELOG
+--------------------------------------
+
+Open ``CHANGELOG.rst`` and ensure that the date next to the version you are releasing matches today's date. 
+If the CHANGELOG was created earlier, it might have an older date. If so, update it.
 
 Preparing the MacOS VM
 ----------------------
