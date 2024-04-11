@@ -3,7 +3,25 @@
 Changelog
 =========
 
-2.0.1 (2024-03-22)
+2.0.2 (2024-04-11)
+------------------
+
+Patch release with performance bug fix. No breaking changes.
+
+Bug fixes
+~~~~~~~~~
+* Fixed the defaulting logic for ``auto_flush_rows`` parameter for HTTPS.
+  It is now correctly set to 75000 rows by default. The old incorrect default
+  of 600 rows was causing the sender to flush too often, impacting performance.
+  Note that TCP, TCPS and HTTP were not affected.
+
+Features
+~~~~~~~~
+* The sender now exposes the ``auto_flush`` settings as read-only properties.
+  You can inspect the values in use with ``.auto_flush``, ``.auto_flush_rows``,
+  ``.auto_flush_interval`` and ``.auto_flush_bytes``.
+
+2.0.1 (2024-04-03)
 ------------------
 
 Patch release with bug fixes, no API changes and some documentation tweaks.
