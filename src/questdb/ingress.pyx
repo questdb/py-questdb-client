@@ -2243,6 +2243,9 @@ cdef class Sender:
     
     @property
     def auto_flush_interval(self) -> Optional[timedelta]:
+        """
+        Time interval threshold for the auto-flush logic, or None if disabled.
+        """
         if not self._auto_flush_mode.enabled:
             return None
         if self._auto_flush_mode.interval == -1:
