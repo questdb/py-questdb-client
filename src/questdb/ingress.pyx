@@ -86,7 +86,7 @@ import os
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '2.0.1'
+VERSION = '2.0.2'
 
 
 cdef bint _has_gil(PyThreadState** gs):
