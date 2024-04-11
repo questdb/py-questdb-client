@@ -539,6 +539,12 @@ cdef bint _is_tcp_protocol(line_sender_protocol protocol):
         (protocol == line_sender_protocol_tcps))
 
 
+cdef bint _is_http_protocol(line_sender_protocol protocol):
+    return (
+        (protocol == line_sender_protocol_http) or
+        (protocol == line_sender_protocol_https))
+
+
 cdef class SenderTransaction:
     """
     A transaction for a specific table.
@@ -1428,7 +1434,7 @@ cdef uint64_t _timedelta_to_millis(object timedelta):
 
 
 cdef int64_t auto_flush_rows_default(line_sender_protocol protocol):
-    if protocol == line_sender_protocol_http:
+    if _is_http_protocol(protocol):
         return 75000
     else:
         return 600
@@ -2202,6 +2208,46 @@ cdef class Sender:
     def max_name_len(self) -> int:
         """Maximum length of a table or column name."""
         return self._max_name_len
+
+    @property
+    def auto_flush(self) -> bint:
+        """
+        Auto-flushing is enabled.
+        
+        Consult the `.auto_flush_rows`, `.auto_flush_bytes` and
+        `.auto_flush_interval` properties for the current active thresholds.
+        """
+        return self._auto_flush_mode.enabled
+
+    @property
+    def auto_flush_rows(self) -> Optional[int]:
+        """
+        Row count threshold for the auto-flush logic, or None if disabled.
+        """
+        if not self._auto_flush_mode.enabled:
+            return None
+        if self._auto_flush_mode.row_count == -1:
+            return None
+        return self._auto_flush_mode.row_count
+
+    @property
+    def auto_flush_bytes(self) -> Optional[int]:
+        """
+        Byte-count threshold for the auto-flush logic, or None if disabled.
+        """
+        if not self._auto_flush_mode.enabled:
+            return None
+        if self._auto_flush_mode.byte_count == -1:
+            return None
+        return self._auto_flush_mode.byte_count
+    
+    @property
+    def auto_flush_interval(self) -> Optional[timedelta]:
+        if not self._auto_flush_mode.enabled:
+            return None
+        if self._auto_flush_mode.interval == -1:
+            return None
+        return timedelta(milliseconds=self._auto_flush_mode.interval)
 
     def establish(self):
         """

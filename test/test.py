@@ -457,6 +457,48 @@ class TestBases:
                     # The buffer is now auto-cleared.
                     self.assertEqual(str(buf), '')
 
+        def test_auto_flush_settings_defaults(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(protocol, 'localhost', 9009)
+                self.assertTrue(sender.auto_flush)
+                self.assertEqual(sender.auto_flush_bytes, None)
+                self.assertEqual(
+                    sender.auto_flush_rows,
+                    75000 if protocol.startswith('http') else 600)
+                self.assertEqual(sender.auto_flush_interval, datetime.timedelta(seconds=1))
+
+        def test_auto_flush_settings_off(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(protocol, 'localhost', 9009, auto_flush=False)
+                self.assertFalse(sender.auto_flush)
+                self.assertEqual(sender.auto_flush_bytes, None)
+                self.assertEqual(sender.auto_flush_rows, None)
+                self.assertEqual(sender.auto_flush_interval, None)
+
+        def test_auto_flush_settings_on(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(protocol, 'localhost', 9009, auto_flush=True)
+                # Same as default.
+                self.assertEqual(sender.auto_flush_bytes, None)
+                self.assertEqual(
+                    sender.auto_flush_rows,
+                    75000 if protocol.startswith('http') else 600)
+                self.assertEqual(sender.auto_flush_interval, datetime.timedelta(seconds=1))
+
+        def test_auto_flush_settings_specified(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(
+                    protocol,
+                    'localhost',
+                    9009,
+                    auto_flush_bytes=1024,
+                    auto_flush_rows=100,
+                    auto_flush_interval=datetime.timedelta(milliseconds=50))
+                self.assertTrue(sender.auto_flush)
+                self.assertEqual(sender.auto_flush_bytes, 1024)
+                self.assertEqual(sender.auto_flush_rows, 100)
+                self.assertEqual(sender.auto_flush_interval, datetime.timedelta(milliseconds=50))
+
         def test_auto_flush(self):
             with Server() as server:
                 with self.builder(
