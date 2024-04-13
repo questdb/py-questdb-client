@@ -5,12 +5,14 @@ import sys
 import os
 import shutil
 import platform
+import shlex
 
 from setuptools import setup, find_packages
 from setuptools.extension import Extension
 from setuptools.command.build_ext import build_ext
 import subprocess
 from Cython.Build import cythonize
+import sysconfig
 
 from install_rust import cargo_path, install_rust, export_cargo_to_path
 
@@ -91,6 +93,35 @@ def ingress_extension():
         extra_objects=extra_objects)
 
 
+def egress_extension():
+    if PLATFORM == 'darwin':
+        lib_prefix, lib_suffix = 'lib', '.dylib'
+    elif PLATFORM == 'win32':
+        lib_prefix, lib_suffix = '', '.dll'
+    else:    
+        lib_prefix, lib_suffix = 'lib', '.so'
+    lib_name = f'{lib_prefix}questdb_egress{lib_suffix}'
+    questdb_egress_lib_dir = PROJ_ROOT / 'egress' / 'target' / 'release'
+    extra_objects = [str(questdb_egress_lib_dir / lib_name)]
+
+    return Extension(
+        "questdb.egress",
+        sources=[],
+        include_dirs=[],
+        extra_objects=extra_objects)
+
+
+def env_with_python(env):
+    env = env.copy()
+    lib_dir = sysconfig.get_config_var('LIBDIR')
+    python_version = sysconfig.get_config_var('VERSION')
+    python_lib = f"python{python_version}"
+    rust_flags = f"-C link-arg=-L{lib_dir} -C link-arg=-l{python_lib}"
+    env['RUSTFLAGS'] = rust_flags
+    print(f"RUSTFLAGS={shlex.quote(rust_flags)}")
+    return env
+
+
 def cargo_build():
     if not (PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi').exists():
         if os.environ.get('SETUP_DO_GIT_SUBMODULE_INIT') == '1':
@@ -147,6 +178,12 @@ def cargo_build():
         cwd=str(PROJ_ROOT / 'pystr-to-utf8'),
         env=env)
 
+    py_env = env_with_python(env)
+    subprocess.check_call(
+        cargo_args,
+        cwd=str(PROJ_ROOT / 'egress'),
+        env=py_env)
+
 
 class questdb_build_ext(build_ext):
     """
@@ -163,15 +200,22 @@ def readme():
         return readme.read()
 
 
+def ext_modules():
+    ext_modules = []
+    ext_modules.extend(cythonize([ingress_extension()], annotate=True))
+    ext_modules.append(egress_extension())
+    return ext_modules
+
+
 setup(
     name='questdb',
     version='2.0.2',
     platforms=['any'],
     python_requires='>=3.8',
     install_requires=[],
-    ext_modules = cythonize([ingress_extension()], annotate=True),
+    ext_modules=ext_modules(),
     cmdclass={'build_ext': questdb_build_ext},
-    zip_safe = False,
+    zip_safe=False,
     package_dir={'': 'src'},
     test_suite="tests",
     packages=find_packages('src', exclude=['test']))

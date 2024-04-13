@@ -16,6 +16,11 @@ sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
 from mock_server import Server, HttpServer
 
+sys.stderr.write('<questdb.egress>\n')
+import questdb.egress as qe
+sys.stderr.write('</questdb.egress>\n')
+
+
 import questdb.ingress as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
