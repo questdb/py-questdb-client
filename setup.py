@@ -39,18 +39,12 @@ def ingress_extension():
     extra_link_args = []
     extra_objects = []
 
-    questdb_rs_ffi_dir = PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'
-    pystr_to_utf8_dir = PROJ_ROOT / 'pystr-to-utf8'
-    questdb_client_lib_dir = None
-    pystr_to_utf8_lib_dir = None
+    lib_dir = None
     if PLATFORM == 'win32' and MODE == '32bit':
-        questdb_client_lib_dir = \
-            questdb_rs_ffi_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
-        pystr_to_utf8_lib_dir = \
-            pystr_to_utf8_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
+        lib_dir = \
+            PROJ_ROOT / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
     else:
-        questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
-        pystr_to_utf8_lib_dir = pystr_to_utf8_dir / 'target' / 'release'
+        lib_dir = PROJ_ROOT / 'target' / 'release'
         if INSTRUMENT_FUZZING:
             extra_compile_args.append('-fsanitize=fuzzer-no-link')
             extra_link_args.append('-fsanitize=fuzzer-no-link')
@@ -75,8 +69,8 @@ def ingress_extension():
     extra_objects = [
         str(loc / f'{lib_prefix}{name}{lib_suffix}')
         for loc, name in (
-            (questdb_client_lib_dir, 'questdb_client'),
-            (pystr_to_utf8_lib_dir, 'pystr_to_utf8'))]
+            (lib_dir, 'questdb_client'),
+            (lib_dir, 'pystr_to_utf8'))]
 
     return Extension(
         "questdb.ingress",
@@ -99,8 +93,8 @@ def egress_extension():
     else:    
         lib_prefix, lib_suffix = 'lib', '.so'
     lib_name = f'{lib_prefix}questdb_egress{lib_suffix}'
-    questdb_egress_lib_dir = PROJ_ROOT / 'egress' / 'target' / 'release'
-    extra_objects = [str(questdb_egress_lib_dir / lib_name)]
+    lib_dir = PROJ_ROOT / 'target' / 'release'
+    extra_objects = [str(lib_dir / lib_name)]
 
     return Extension(
         "questdb.egress",
@@ -155,19 +149,10 @@ def cargo_build():
             env['CXX'] = ORIG_CXX
         else:
             del env['CXX']
-    subprocess.check_call(
-        cargo_args + ['--features', 'confstr-ffi'],
-        cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'),
-        env=env)
 
     subprocess.check_call(
-        cargo_args,
-        cwd=str(PROJ_ROOT / 'pystr-to-utf8'),
-        env=env)
-
-    subprocess.check_call(
-        cargo_args,
-        cwd=str(PROJ_ROOT / 'egress'),
+        cargo_args + ['--features', 'questdb-rs-ffi/confstr-ffi'],
+        cwd=str(PROJ_ROOT),
         env=env)
 
 

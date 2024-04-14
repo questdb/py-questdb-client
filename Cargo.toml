@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "c-questdb-client/questdb-rs-ffi",
+    "pystr-to-utf8",
+    "egress"
+]
+resolver = "2"

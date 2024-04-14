@@ -233,6 +233,7 @@ def sdist():
 
 @command
 def clean():
+    _rmtree(PROJ_ROOT / 'target')
     _rmtree(PROJ_ROOT / 'build')
     _rmtree(PROJ_ROOT / 'dist')
     _rmtree(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi' / 'target')
