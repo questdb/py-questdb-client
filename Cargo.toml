@@ -4,4 +4,7 @@ members = [
     "pystr-to-utf8",
     "egress"
 ]
+exclude = [
+    "c-questdb-client/system_test/tls_proxy"
+]
 resolver = "2"
