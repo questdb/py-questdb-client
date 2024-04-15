@@ -6,6 +6,7 @@ import os
 import shutil
 import platform
 
+from setuptools_rust import RustExtension
 from setuptools import setup, find_packages
 from setuptools.extension import Extension
 from setuptools.command.build_ext import build_ext
@@ -85,24 +86,6 @@ def ingress_extension():
         extra_objects=extra_objects)
 
 
-def egress_extension():
-    if PLATFORM == 'darwin':
-        lib_prefix, lib_suffix = 'lib', '.dylib'
-    elif PLATFORM == 'win32':
-        lib_prefix, lib_suffix = '', '.dll'
-    else:    
-        lib_prefix, lib_suffix = 'lib', '.so'
-    lib_name = f'{lib_prefix}questdb_egress{lib_suffix}'
-    lib_dir = PROJ_ROOT / 'target' / 'release'
-    extra_objects = [str(lib_dir / lib_name)]
-
-    return Extension(
-        "questdb.egress",
-        sources=[],
-        include_dirs=[],
-        extra_objects=extra_objects)
-
-
 def cargo_build():
     if not (PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi').exists():
         if os.environ.get('SETUP_DO_GIT_SUBMODULE_INIT') == '1':
@@ -151,7 +134,10 @@ def cargo_build():
             del env['CXX']
 
     subprocess.check_call(
-        cargo_args + ['--features', 'questdb-rs-ffi/confstr-ffi'],
+        cargo_args + [
+            '--package', 'pystr-to-utf8',
+            '--package', 'questdb-rs-ffi',
+            '--features', 'questdb-rs-ffi/confstr-ffi'],
         cwd=str(PROJ_ROOT),
         env=env)
 
@@ -171,20 +157,15 @@ def readme():
         return readme.read()
 
 
-def ext_modules():
-    ext_modules = []
-    ext_modules.extend(cythonize([ingress_extension()], annotate=True))
-    ext_modules.append(egress_extension())
-    return ext_modules
-
-
 setup(
     name='questdb',
     version='2.0.2',
     platforms=['any'],
     python_requires='>=3.8',
     install_requires=[],
-    ext_modules=ext_modules(),
+    ext_modules=cythonize([ingress_extension()], annotate=True),
+    rust_extensions=[
+        RustExtension("questdb.egress", path="egress/Cargo.toml")],
     cmdclass={'build_ext': questdb_build_ext},
     zip_safe=False,
     package_dir={'': 'src'},

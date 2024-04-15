@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import shlex
 import pathlib
-import glob
 import platform
 
 PROJ_ROOT = pathlib.Path(__file__).parent
