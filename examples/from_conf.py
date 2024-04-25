@@ -12,7 +12,7 @@ def example():
             # but timestamps in other columns are expected in Microseconds. 
             # The API provides convenient functions
             sender.row(
-                'trades',
+                'trades_python',
                 symbols={
                     'pair': 'USDGBP',
                     'type': 'buy'},

@@ -17,7 +17,7 @@ def example(host: str = 'localhost', port: int = 9000):
         with Sender.from_conf(f"http::addr={host}:{port};") as sender:
             sender.dataframe(
                 df,
-                table_name='trades',  # Table name to insert into.
+                table_name='trades_python',  # Table name to insert into.
                 symbols=['pair'],  # Columns to be inserted as SYMBOL types.
                 at='timestamp')  # Column containing the designated timestamps.
 

@@ -64,7 +64,7 @@ Pandas Basics
 -------------
 
 The following example shows how to insert data from a Pandas DataFrame to the
-``'trades'`` table.
+``'trades_python'`` table.
 
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python

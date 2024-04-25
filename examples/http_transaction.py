@@ -8,7 +8,7 @@ def example():
         # Force a whole dataframe to be written in a single transaction.
         # This temporarily suspends auto-flushing:
         # The dataframe-generated buffer must thus fit in memory.
-        with sender.transaction('trades') as txn:
+        with sender.transaction('trades_python') as txn:
             df = pd.DataFrame({
                 'pair': ['USDGBP', 'EURJPY'],
                 'traded_price': [0.83, 142.62],
