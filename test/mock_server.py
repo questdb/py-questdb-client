@@ -5,9 +5,7 @@ import http.server as hs
 import threading
 import time
 
-
 NON_ESCAPED_NEW_LINE_RE = re.compile(rb'(?<!\\)\n')
-
 
 class Server:
     def __init__(self):
@@ -62,7 +60,8 @@ class Server:
         self.close()
 
 class HttpServer:
-    def __init__(self):
+    def __init__(self, delay_seconds=0):
+        self.delay_seconds = delay_seconds
         self.requests = []
         self.responses = []
         self.headers = []
@@ -74,18 +73,19 @@ class HttpServer:
     def _serve(self):
         self._http_server.serve_forever()
         self._stop_event.set()
-    
-    def __enter__(self):
-        headers = self.headers
+
+    def create_handler(self):
+        delay_seconds = self.delay_seconds
         requests = self.requests
+        headers = self.headers
         responses = self.responses
 
         class IlpHttpHandler(hs.BaseHTTPRequestHandler):
             def do_POST(self):
+                time.sleep(delay_seconds)
+
                 try:
-                    headers.append({
-                        key: value
-                        for key, value in self.headers.items()})
+                    headers.append({key: value for key, value in self.headers.items()})
                     content_length = int(self.headers['Content-Length'])
                     body = self.rfile.read(content_length)
                     requests.append(body)
@@ -103,17 +103,18 @@ class HttpServer:
                     if body:
                         self.wfile.write(body)
                 except BrokenPipeError:
-                    pass  # Client disconnected early, no biggie.
+                    pass
 
+        return IlpHttpHandler
+
+    def __enter__(self):
         self._stop_event = threading.Event()
-        self._http_server = hs.HTTPServer(
-            ('', 0),
-            IlpHttpHandler,
-            bind_and_activate=True)
+        handler_class = self.create_handler()
+        self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()
         return self
-    
+
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
         self._http_server.shutdown()
         self._http_server.server_close()
