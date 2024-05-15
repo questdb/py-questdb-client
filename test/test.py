@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+
 sys.dont_write_bytecode = True
 import os
 import unittest
@@ -11,6 +12,7 @@ import random
 import pathlib
 
 import patch_path
+
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
@@ -882,7 +884,7 @@ class TestBases:
                 sender.row('t', columns={'x': 5}, at=qi.ServerTimestamp)
                 sender.row('t', columns={'x': 6}, at=qi.ServerTimestamp)
             return server.requests
-            
+
         def test_auto_flush_interval2(self):
             # This test is timing-sensitive,
             # so it has a tendency to go wrong in CI.
@@ -896,7 +898,7 @@ class TestBases:
                         b't x=4i\nt x=5i\n',
                         b't x=6i\n'])
                     break
-            
+
             # If this fails, it failed 10 attempts.
             # Due to CI timing delays there may have been multiple flushes.
             self.assertEqual(len(requests), 3)
@@ -952,11 +954,14 @@ class TestBases:
                 self.assertEqual(server.requests[1], exp_payload)
 
         def test_http_request_min_throughput(self):
-            with HttpServer() as server, self.builder(
+            with HttpServer(delay_seconds=2) as server, self.builder(
                     'http',
                     'localhost',
                     server.port,
-                    request_timeout=0,
+                    request_timeout=1000,
+                    # request_timeout is sufficiently high since it's also used as a connect timeout and we want to
+                    # survive hiccups on CI. it should be lower than the server delay though to actually test the
+                    # effect of request_min_throughput.
                     request_min_throughput=1) as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.flush()
@@ -968,7 +973,7 @@ class TestBases:
                     'localhost',
                     server.port,
                     auto_flush='off',
-                    request_timeout=0,
+                    request_timeout=1,
                     retry_timeout=0,
                     request_min_throughput=100000000) as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
