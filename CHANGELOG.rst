@@ -19,7 +19,6 @@ Features
   You can inspect the values in use with ``.auto_flush``, ``.auto_flush_rows``,
   ``.auto_flush_interval`` and ``.auto_flush_bytes``.
 
-
 2.0.2 (2024-04-11)
 ------------------
 
