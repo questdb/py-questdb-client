@@ -106,7 +106,7 @@ class TestWithDatabase(unittest.TestCase):
             {'name': 'name_b', 'type': 'BOOLEAN'},
             {'name': 'name_c', 'type': 'LONG'},
             {'name': 'name_d', 'type': 'DOUBLE'},
-            {'name': 'name_e', 'type': 'STRING'},
+            {'name': 'name_e', 'type': 'VARCHAR'},
             {'name': 'timestamp', 'type': 'TIMESTAMP'}]
         self.assertEqual(resp['columns'], exp_columns)
 
