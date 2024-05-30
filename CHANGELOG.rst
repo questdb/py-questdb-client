@@ -3,6 +3,23 @@
 Changelog
 =========
 
+2.0.2 (2024-05-30)
+------------------
+
+Patch release with bug fix.
+
+Bug fixes
+~~~~~~~~~
+* HTTP timeout wasn't always being correctly applied in the downstream `c-questdb-client` dependency.
+* `request_timeout > 0` will now be enforced. This was always required, but would not error.
+
+Features
+~~~~~~~~
+* The sender now exposes the ``auto_flush`` settings as read-only properties.
+  You can inspect the values in use with ``.auto_flush``, ``.auto_flush_rows``,
+  ``.auto_flush_interval`` and ``.auto_flush_bytes``.
+
+
 2.0.2 (2024-04-11)
 ------------------
 
