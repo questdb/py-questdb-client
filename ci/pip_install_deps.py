@@ -73,10 +73,10 @@ def main(args):
     else:
         try_pip_install('pandas')
     try_pip_install('numpy')
-    if sys.version_info < (3, 10):
+    if (sys.platform == 'darwin') and (platform.processor() == 'i386'):
         # Workaround for https://github.com/apache/arrow/issues/41696
         # Remove if/once resolved.
-        # We only seem to get this on older Python versions.
+        # We only seem to get this issue on intel mac.
         try_pip_install('pyarrow==16.0.0')
     else:
         try_pip_install('pyarrow')
