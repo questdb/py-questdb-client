@@ -68,8 +68,8 @@ skip = [
 # # build for aarch64.
 # archs = "auto aarch64"
 
-[tool.cibuildwheel.macos]
-before-test = "{project}/ci/pip_install_deps_wrapper.sh"
+# [tool.cibuildwheel.macos]
+# before-test = "{project}/ci/pip_install_deps_wrapper.sh"
 
 [tool.cibuildwheel.environment]
 SETUP_DO_GIT_SUBMODULE_INIT = "1"

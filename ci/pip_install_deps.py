@@ -4,6 +4,7 @@ import shlex
 import textwrap
 import platform
 import argparse
+import os
 
 
 arg_parser = argparse.ArgumentParser(
@@ -26,11 +27,16 @@ def pip_install(package, version=None):
         package if version is None else f'{package}=={version}'
     ]
     args_s = ' '.join(shlex.quote(arg) for arg in args)
+    env = os.environ.copy()
+    if sys.version_info < (3, 9):
+        env['SYSTEM_VERSION_COMPAT'] = '0'
+        args_s += f' [SYSTEM_VERSION_COMPAT=0]'
     sys.stderr.write(args_s + '\n')
     res = subprocess.run(
         args,
         stderr=subprocess.STDOUT,
-        stdout=subprocess.PIPE)
+        stdout=subprocess.PIPE,
+        env=env)
     if res.returncode == 0:
         return
     output = res.stdout.decode('utf-8')
