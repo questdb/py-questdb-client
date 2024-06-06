@@ -27,16 +27,11 @@ def pip_install(package, version=None):
         package if version is None else f'{package}=={version}'
     ]
     args_s = ' '.join(shlex.quote(arg) for arg in args)
-    env = os.environ.copy()
-    if sys.version_info < (3, 9):
-        env['SYSTEM_VERSION_COMPAT'] = '0'
-        args_s += f' [SYSTEM_VERSION_COMPAT=0]'
     sys.stderr.write(args_s + '\n')
     res = subprocess.run(
         args,
         stderr=subprocess.STDOUT,
-        stdout=subprocess.PIPE,
-        env=env)
+        stdout=subprocess.PIPE)
     if res.returncode == 0:
         return
     output = res.stdout.decode('utf-8')
@@ -78,7 +73,10 @@ def main(args):
     else:
         try_pip_install('pandas')
     try_pip_install('numpy')
-    try_pip_install('pyarrow')
+    if sys.version_info < (3, 9):
+        try_pip_install('pyarrow==16.0.0')
+    else:
+        try_pip_install('pyarrow')
 
     on_linux_is_glibc = (
         (not platform.system() == 'Linux') or
