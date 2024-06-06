@@ -108,6 +108,23 @@ As this is very time-consuming, instead download all targets
 (except for Apple Silicon) from the CI.
 
 
+The "sdist" source distribution
+-------------------------------
+
+This is a tarball containing all the sources necessary to build the package
+locally.
+
+Its contents are controlled by the ``MANIFEST.in`` file.
+
+To test it:
+
+.. code-block:: bash
+
+    ./proj clean
+    ./proj sdist
+    python3 -m pip install dist/*.tar.gz --user -v
+
+
 Checking `pip install` works
 ----------------------------
 

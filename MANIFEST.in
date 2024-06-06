@@ -9,6 +9,13 @@ include proj
 recursive-include src *.html
 recursive-include src *.pxd
 recursive-include src *.pyx
+recursive-include src *.h
+recursive-include src *.inc
+recursive-include src *.py
+recursive-include src *.md
+recursive-include src *.pxi
+recursive-include src *.c
+graft pystr-to-utf8
 graft c-questdb-client
 prune c-questdb-client/src/tests/json_tests.rs
 prune c-questdb-client/.git

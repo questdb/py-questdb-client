@@ -3,26 +3,22 @@
 Changelog
 =========
 
-2.0.3 (2024-05-30)
+2.0.3 (2024-06-06)
 ------------------
 
-Patch release with bug fix.
+Patch release with bug fixes. No breaking changes.
 
 Bug fixes
 ~~~~~~~~~
-* HTTP timeout wasn't always being correctly applied in the downstream `c-questdb-client` dependency.
-* `request_timeout > 0` will now be enforced. This was always required, but would not error.
-
-Features
-~~~~~~~~
-* The sender now exposes the ``auto_flush`` settings as read-only properties.
-  You can inspect the values in use with ``.auto_flush``, ``.auto_flush_rows``,
-  ``.auto_flush_interval`` and ``.auto_flush_bytes``.
+* HTTP timeout wasn't always being correctly applied in the downstream ``c-questdb-client`` dependency.
+* ``request_timeout > 0`` will now be enforced. This was always required, but would not error.
+* Fixed the source distribution "sdist" package: This allows the package to be installed from source
+  via "pip install" on previously unsupported platforms (YMMV).
 
 2.0.2 (2024-04-11)
 ------------------
 
-Patch release with performance bug fix. No breaking changes.
+Patch release with a performance bug fix. No breaking changes.
 
 Bug fixes
 ~~~~~~~~~
