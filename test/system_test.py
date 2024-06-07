@@ -26,7 +26,7 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '7.3.7'
+QUESTDB_VERSION = '8.0.0'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 
@@ -106,7 +106,7 @@ class TestWithDatabase(unittest.TestCase):
             {'name': 'name_b', 'type': 'BOOLEAN'},
             {'name': 'name_c', 'type': 'LONG'},
             {'name': 'name_d', 'type': 'DOUBLE'},
-            {'name': 'name_e', 'type': 'STRING'},
+            {'name': 'name_e', 'type': 'VARCHAR'},
             {'name': 'timestamp', 'type': 'TIMESTAMP'}]
         self.assertEqual(resp['columns'], exp_columns)
 
@@ -172,7 +172,7 @@ class TestWithDatabase(unittest.TestCase):
         exp_columns = [
             {'name': 'col_e', 'type': 'SYMBOL'},
             {'name': 'col_a', 'type': 'LONG'},
-            {'name': 'col_b', 'type': 'STRING'},
+            {'name': 'col_b', 'type': 'VARCHAR'},
             {'name': 'col_c', 'type': 'BOOLEAN'},
             {'name': 'col_d', 'type': 'DOUBLE'},
             {'name': 'col_f', 'type': 'TIMESTAMP'},
@@ -215,7 +215,7 @@ class TestWithDatabase(unittest.TestCase):
             {'name': 'name_b', 'type': 'BOOLEAN'},
             {'name': 'name_c', 'type': 'LONG'},
             {'name': 'name_d', 'type': 'DOUBLE'},
-            {'name': 'name_e', 'type': 'STRING'},
+            {'name': 'name_e', 'type': 'VARCHAR'},
             {'name': 'timestamp', 'type': 'TIMESTAMP'}]
         self.assertEqual(resp['columns'], exp_columns)
 

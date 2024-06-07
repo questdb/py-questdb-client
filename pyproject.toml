@@ -2,7 +2,7 @@
 # See: https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
 name = "questdb"
 requires-python = ">=3.8"
-version = "2.0.2"
+version = "2.0.3"
 description = "QuestDB client library for Python"
 readme = "README.rst"
 classifiers = [

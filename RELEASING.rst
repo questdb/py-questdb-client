@@ -61,7 +61,6 @@ From a MacOS ARM computer install UTM.
 
 * Download from https://mac.getutm.app/
 * Install MacOS X 12.4 (Monterey). See https://docs.getutm.app/guest-support/macos/
-* Install Xcode from the App Store
 * Install Rust from https://rustup.rs/
 * Install Firefox
 * Install *all* OFFICIAL Python Releases from Python 3.8 onwards. Use the latest patch version for each minor release. 
