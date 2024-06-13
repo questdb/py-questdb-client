@@ -19,6 +19,7 @@ sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from mock_server import Server, HttpServer
 
 import questdb.ingress as qi
+import questdb.egress as qe
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import TestWithDatabase
@@ -1155,6 +1156,13 @@ class TestSenderConf(TestBases.TestSender):
 class TestSenderEnv(TestBases.TestSender):
     name = 'env'
     builder = Builder.ENV
+
+
+class TestEgress(unittest.TestCase):
+    def test_sum_as_string(self):
+        exp = '1234'
+        act = qe.sum_as_string(1030, 204)
+        self.assertEqual(act, exp)
 
 
 if __name__ == '__main__':

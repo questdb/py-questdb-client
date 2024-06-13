@@ -6,6 +6,7 @@ import os
 import shutil
 import platform
 
+from setuptools_rust import RustExtension
 from setuptools import setup, find_packages
 from setuptools.extension import Extension
 from setuptools.command.build_ext import build_ext
@@ -39,18 +40,12 @@ def ingress_extension():
     extra_link_args = []
     extra_objects = []
 
-    questdb_rs_ffi_dir = PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'
-    pystr_to_utf8_dir = PROJ_ROOT / 'pystr-to-utf8'
-    questdb_client_lib_dir = None
-    pystr_to_utf8_lib_dir = None
+    lib_dir = None
     if PLATFORM == 'win32' and MODE == '32bit':
-        questdb_client_lib_dir = \
-            questdb_rs_ffi_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
-        pystr_to_utf8_lib_dir = \
-            pystr_to_utf8_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
+        lib_dir = \
+            PROJ_ROOT / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
     else:
-        questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
-        pystr_to_utf8_lib_dir = pystr_to_utf8_dir / 'target' / 'release'
+        lib_dir = PROJ_ROOT / 'target' / 'release'
         if INSTRUMENT_FUZZING:
             extra_compile_args.append('-fsanitize=fuzzer-no-link')
             extra_link_args.append('-fsanitize=fuzzer-no-link')
@@ -75,8 +70,8 @@ def ingress_extension():
     extra_objects = [
         str(loc / f'{lib_prefix}{name}{lib_suffix}')
         for loc, name in (
-            (questdb_client_lib_dir, 'questdb_client'),
-            (pystr_to_utf8_lib_dir, 'pystr_to_utf8'))]
+            (lib_dir, 'questdb_client'),
+            (lib_dir, 'pystr_to_utf8'))]
 
     return Extension(
         "questdb.ingress",
@@ -137,14 +132,13 @@ def cargo_build():
             env['CXX'] = ORIG_CXX
         else:
             del env['CXX']
-    subprocess.check_call(
-        cargo_args + ['--features', 'confstr-ffi'],
-        cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'),
-        env=env)
 
     subprocess.check_call(
-        cargo_args,
-        cwd=str(PROJ_ROOT / 'pystr-to-utf8'),
+        cargo_args + [
+            '--package', 'pystr-to-utf8',
+            '--package', 'questdb-rs-ffi',
+            '--features', 'questdb-rs-ffi/confstr-ffi'],
+        cwd=str(PROJ_ROOT),
         env=env)
 
 
@@ -169,9 +163,11 @@ setup(
     platforms=['any'],
     python_requires='>=3.8',
     install_requires=[],
-    ext_modules = cythonize([ingress_extension()], annotate=True),
+    ext_modules=cythonize([ingress_extension()], annotate=True),
+    rust_extensions=[
+        RustExtension("questdb.egress", path="egress/Cargo.toml")],
     cmdclass={'build_ext': questdb_build_ext},
-    zip_safe = False,
+    zip_safe=False,
     package_dir={'': 'src'},
     test_suite="tests",
     packages=find_packages('src', exclude=['test']))
