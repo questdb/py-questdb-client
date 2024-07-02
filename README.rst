@@ -92,7 +92,7 @@ Community
 Stop by our `Community Forum <https://community.questdb.io>`_ to 
 chat with the QuestDB team.
 
-You can also `sign up to our mailing list <https://questdb.io/community/>`_
+You can also `sign up to our mailing list <https://questdb.io/contributors/>`_
 to get notified of new releases.
 
 
