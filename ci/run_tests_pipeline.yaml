@@ -15,6 +15,7 @@ stages:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pandasVersion: "2.1.4"
+              numpyVersion: "1.26.4"
             linux-qdb-master:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
@@ -40,11 +41,11 @@ stages:
               python3 -m pip install cython
             displayName: "Install cython"
           - script: python3 ci/pip_install_deps.py
-            displayName: "Install pandas latest"
-            condition: eq(variables.pandasVersion, '')
-          - script:  python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
-            displayName: "Install pandas older"
-            condition: ne(variables.pandasVersion, '')
+            displayName: "Install pandas/numpy latest"
+            condition: and(eq(variables.pandasVersion, ''), eq(variables.numpyVersion, ''))
+          - script:  python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion) --numpy-version==$(numpyVersion)
+            displayName: "Install pandas/numpy older"
+            condition: and(ne(variables.pandasVersion, ''), ne(variables.numpyVersion, ''))
           - script: python3 proj.py build
             displayName: "Build"
           - script: |

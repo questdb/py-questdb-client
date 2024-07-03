@@ -13,6 +13,7 @@ arg_parser = argparse.ArgumentParser(
 )
 
 arg_parser.add_argument('--pandas-version')
+arg_parser.add_argument('--numpy-version')
 
 class UnsupportedDependency(Exception):
     pass
@@ -72,6 +73,10 @@ def main(args):
         try_pip_install('pandas', args.pandas_version)
     else:
         try_pip_install('pandas')
+    if args.numpy_version is not None and args.numpy_version != '':
+        try_pip_install('numpy', args.numpy_version)
+    else:
+        try_pip_install('numpy')
     try_pip_install('numpy')
     if (sys.platform == 'darwin') and (platform.processor() == 'i386'):
         # Workaround for https://github.com/apache/arrow/issues/41696
