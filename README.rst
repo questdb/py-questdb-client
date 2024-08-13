@@ -104,4 +104,4 @@ License
 =======
 
 The code is released under the `Apache License 2.0
-<https://github.com/questdb/py-questdb-client/blob/main/LICENSE.txt>`_.
+<https://github.com/questdb/py-questdb-client/blob/main/LICENSE.txt>`_. 
