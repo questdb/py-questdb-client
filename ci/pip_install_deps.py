@@ -71,7 +71,7 @@ def main(args):
         try_pip_install('pandas', args.pandas_version)
     else:
         try_pip_install('pandas')
-    try_pip_install('numpy<2')
+    try_pip_install('numpy')
     if (sys.platform == 'darwin') and (platform.processor() == 'i386'):
         # Workaround for https://github.com/apache/arrow/issues/41696
         # Remove if/once resolved.
