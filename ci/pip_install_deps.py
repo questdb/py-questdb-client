@@ -61,6 +61,14 @@ def ensure_timezone():
         pip_install('pytz')
 
 
+def install_old_pandas_and_numpy(args):
+    try_pip_install('pandas', args.pandas_version)
+    try_pip_install('numpy<2')
+
+def install_new_pandas_and_numpy():
+    try_pip_install('pandas')
+    try_pip_install('numpy')
+
 def main(args):
     ensure_timezone()
     pip_install('pip')
@@ -68,10 +76,10 @@ def main(args):
     try_pip_install('fastparquet>=2023.10.1')
 
     if args.pandas_version is not None and args.pandas_version != '':
-        try_pip_install('pandas', args.pandas_version)
+        install_old_pandas_and_numpy(args)
     else:
-        try_pip_install('pandas')
-    try_pip_install('numpy')
+        install_new_pandas_and_numpy()
+
     if (sys.platform == 'darwin') and (platform.processor() == 'i386'):
         # Workaround for https://github.com/apache/arrow/issues/41696
         # Remove if/once resolved.
