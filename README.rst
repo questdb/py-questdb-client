@@ -34,14 +34,15 @@ The most common way to insert data is from a Pandas dataframe.
     from questdb.ingress import Sender
 
     df = pd.DataFrame({
-        'id': pd.Categorical(['toronto1', 'paris3']),
-        'temperature': [20.0, 21.0],
-        'humidity': [0.5, 0.6],
+        'symbol': pd.Categorical(['ETH-USD', 'BTC-USD']),
+        'side': pd.Categorical(['sell', 'sell']),
+        'price': [2615.54, 39269.98],
+        'amount': [0.00044, 0.001],
         'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
     conf = f'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
-        sender.dataframe(df, table_name='sensors', at='timestamp')
+        sender.dataframe(df, table_name='trades', at='timestamp')
 
 You can also send individual rows. This only requires a more minimal installation::
 
@@ -54,9 +55,9 @@ You can also send individual rows. This only requires a more minimal installatio
     conf = f'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         sender.row(
-            'sensors',
-            symbols={'id': 'toronto1'},
-            columns={'temperature': 20.0, 'humidity': 0.5},
+            'trades',
+            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+            columns={'price': 2615.54, 'amount': 0.00044},
             at=TimestampNanos.now())
         sender.flush()
 
@@ -103,4 +104,4 @@ License
 =======
 
 The code is released under the `Apache License 2.0
-<https://github.com/questdb/py-questdb-client/blob/main/LICENSE.txt>`_.
+<https://github.com/questdb/py-questdb-client/blob/main/LICENSE.txt>`_. 

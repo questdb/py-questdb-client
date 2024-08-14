@@ -20,24 +20,25 @@ The sender also supports TLS and authentication.
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
-        # One row at a time
+        # Adding by rows
         sender.row(
-            'weather_sensor',
-            symbols={'id': 'toronto1'},
-            columns={'temperature': 23.5, 'humidity': 0.49},
+            'trades',
+            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+            columns={'price': 2615.54, 'amount': 0.00044},
             at=TimestampNanos.now())
+        # It is highly recommended to auto-flush or to flush in batches,
+        # rather than for every row
+        sender.flush()
 
-        # Whole dataframes at once - MUCH FASTER
+        # Whole dataframes at once
         df = pd.DataFrame({
-            'id': ['dubai2', 'memphis7'],
-            'temperature': [41.2, 33.3],
-            'humidity': [0.34, 0.55],
-            'timestamp': [
-                pd.Timestamp('2021-01-01 12:00:00'),
-                pd.Timestamp('2021-01-01 12:00:01')
-            ]
-        })
-        sensor.dataframe('weather_sensor', df, at='timestamp')
+            'symbol': pd.Categorical(['ETH-USD', 'BTC-USD']),
+            'side': pd.Categorical(['sell', 'sell']),
+            'price': [2615.54, 39269.98],
+            'amount': [0.00044, 0.001],
+            'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
+
+        sensor.dataframe('trades', df, at='timestamp')
 
 The ``Sender`` object holds an internal buffer which will be flushed and sent
 at when the ``with`` block ends.
@@ -138,13 +139,12 @@ Here is an example of sending a row with a symbol and a string:
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         sender.row(
-            'news',
+            'trades',
             symbols={
-                'category': 'sport'},
+                'symbol': 'ETH-USD', 'side': 'sell'},
             columns={
-                'headline': 'The big game',
-                'url': 'https://dailynews.com/sport/the-big-game',
-                'views': 1000},
+                'price': 2615.54,
+                'amount': 0.00044}
             at=datetime.datetime(2021, 1, 1, 12, 0, 0))
 
 Populating Timestamps
@@ -184,9 +184,9 @@ received by the server.
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         sender.row(
-            'weather_sensor',
-            symbols={'id': 'toronto1'},
-            columns={'temperature': 23.5, 'humidity': 0.49},
+            'trades',
+            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+            columns={'price': 2615.54, 'amount': 0.00044},
             at=ServerTimestamp)  # Legacy feature, not recommended.
 
 .. warning::
@@ -217,15 +217,15 @@ send any pending data immediately.
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         sender.row(
-            'weather_sensor',
-            symbols={'id': 'toronto1'},
-            columns={'temperature': 23.5, 'humidity': 0.49},
+            'trades',
+            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+            columns={'price': 2615.54, 'amount': 0.00044},
             at=TimestampNanos.now())
         sender.flush()
         sender.row(
-            'weather_sensor',
-            symbols={'id': 'dubai2'},
-            columns={'temperature': 41.2, 'humidity': 0.34},
+            'trades',
+            symbols={'symbol': 'BTC-USD', 'side': 'sell'},
+            columns={'price': 39269.98, 'amount': 0.001},
             at=TimestampNanos.now())
         sender.flush()
 
@@ -276,7 +276,7 @@ When using the HTTP protocol, the server will send back an error message if
 the data is invalid or if there is a problem with the server. This will be
 raised as an :class:`IngressError <questdb.ingress.IngressError>` exception.
 
-The HTTP layer will also attempt retries, configurable via the 
+The HTTP layer will also attempt retries, configurable via the
 :ref:`retry_timeout <sender_conf_request>` parameter.`
 
 When using the TCP protocol errors are *not* sent back from the server and
@@ -299,12 +299,14 @@ rows as a single transaction.
     with Sender.from_conf(conf) as sender:
         with sender.transaction('weather_sensor') as txn:
             txn.row(
-                symbols={'id': 'toronto1'},
-                columns={'temperature': 23.5, 'humidity': 0.49},
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={'price': 2615.54, 'amount': 0.00044},
                 at=TimestampNanos.now())
             txn.row(
-                symbols={'id': 'dubai2'},
-                columns={'temperature': 41.2, 'humidity': 0.34},
+                'trades',
+                symbols={'symbol': 'BTC-USD', 'side': 'sell'},
+                columns={'price': 39269.98, 'amount': 0.001},
                 at=TimestampNanos.now())
 
 If auto-flushing is enabled, any pending data will be flushed before the
@@ -385,14 +387,14 @@ buffers.
 
     buf = Buffer()
     buf.row(
-        'weather_sensor',
-        symbols={'id': 'toronto1'},
-        columns={'temperature': 23.5, 'humidity': 0.49},
+        'trades',
+        symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+        columns={'price': 2615.54, 'amount': 0.00044},
         at=TimestampNanos.now())
     buf.row(
-        'weather_sensor',
-        symbols={'id': 'dubai2'},
-        columns={'temperature': 41.2, 'humidity': 0.34},
+        'trades',
+        symbols={'symbol': 'BTC-USD', 'side': 'sell'},
+        columns={'price': 39269.98, 'amount': 0.001},
         at=TimestampNanos.now())
 
     conf = 'http::addr=localhost:9000;'
@@ -415,9 +417,9 @@ databases via the ``.flush(buf, clear=False)`` option.
 
     buf = Buffer()
     buf.row(
-        'weather_sensor',
-        symbols={'id': 'toronto1'},
-        columns={'temperature': 23.5, 'humidity': 0.49},
+        'trades',
+        symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+        columns={'price': 2615.54, 'amount': 0.00044},
         at=TimestampNanos.now())
 
     conf1 = 'http::addr=db1.host.com:9000;'
@@ -480,27 +482,25 @@ sender objects in parallel.
         with Sender.from_conf(conf_string) as sender:
             sender.dataframe(
                 df,
-                table_name='weather_sensor',
-                symbols=['id'],
+                table_name='trades',
+                symbols=['symbol', 'side'],
                 at='timestamp')
 
     dfs = [
-        pd.DataFrame({
-            'id': ['sensor1', 'sensor2'],
-            'temperature': [22.5, 24.7],
-            'humidity': [0.45, 0.47],
-            'timestamp': [
-                pd.Timestamp('2017-01-01T12:00:00'),
-                pd.Timestamp('2017-01-01T12:00:01')
-            ]}),
-        pd.DataFrame({
-            'id': ['sensor3', 'sensor4'],
-            'temperature': [23.1, 25.3],
-            'humidity': [0.48, 0.50],
-            'timestamp': [
-                pd.Timestamp('2017-01-01T12:00:02'),
-                pd.Timestamp('2017-01-01T12:00:03')
-            ]})
+            pd.DataFrame({
+            'symbol': pd.Categorical(['ETH-USD', 'BTC-USD']),
+            'side': pd.Categorical(['sell', 'sell']),
+            'price': [2615.54, 39269.98],
+            'amount': [0.00044, 0.001],
+            'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])}
+            ),
+            pd.DataFrame({
+            'symbol': pd.Categorical(['BTC-USD', 'BTC-USD']),
+            'side': pd.Categorical(['buy', 'sell']),
+            'price': [39268.76, 39270.02],
+            'amount': [0.003, 0.010],
+            'timestamp': pd.to_datetime(['2021-01-03', '2021-01-03'])}
+            ),
     ]
 
     with ThreadPoolExecutor() as executor:
