@@ -42,10 +42,10 @@ Slack = "http://slack.questdb.io"
 
 [build-system]
 requires = [
-    # Setuptools 18.0 and above properly handles Cython extensions.
-    "setuptools>=45.2.0",
-    "wheel>=0.34.2",
-    "cython>=0.29.24"]
+    "setuptools>=69.5.1",
+    "wheel>=0.43.0",
+    "cython>=3.0.10",
+    "setuptools-rust>=1.9.0"]
 
 
 [tool.cibuildwheel]

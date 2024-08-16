@@ -73,6 +73,7 @@ def main(args):
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')
+    pip_install('setuptools-rust')
     try_pip_install('fastparquet>=2023.10.1')
 
     if args.pandas_version is not None and args.pandas_version != '':

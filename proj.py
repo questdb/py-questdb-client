@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import shlex
 import pathlib
-import glob
 import platform
 
 PROJ_ROOT = pathlib.Path(__file__).parent
@@ -233,11 +232,13 @@ def sdist():
 
 @command
 def clean():
+    _rmtree(PROJ_ROOT / 'target')
     _rmtree(PROJ_ROOT / 'build')
     _rmtree(PROJ_ROOT / 'dist')
     _rmtree(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi' / 'target')
     _rmtree(PROJ_ROOT / 'c-questdb-client' / 'build')
     _rmtree(PROJ_ROOT / 'pystr-to-utf8' / 'target')
+    _rmtree(PROJ_ROOT / 'egress' / 'target')
     _rmtree(PROJ_ROOT / 'src' / 'questdb.egg-info')
     _rmtree(PROJ_ROOT / 'venv')
     _rmtree(PROJ_ROOT / 'wheelhouse')

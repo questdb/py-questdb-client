@@ -96,7 +96,7 @@ Inside the VM, open a terminal (or use the terminal Window in VSCode) and run th
     /Library/Frameworks/Python.framework/Versions/3.8/bin/python3 \
         -m pip install -U pip
     /Library/Frameworks/Python.framework/Versions/3.8/bin/python3 \
-        -m pip install -U setuptools wheel twine Cython cibuildwheel pandas numpy pyarrow
+        -m pip install -U setuptools setuptools-rust wheel twine Cython cibuildwheel pandas numpy pyarrow
 
 Smoke-testing the build
 -----------------------
