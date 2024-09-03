@@ -422,7 +422,7 @@ class TestPandas(unittest.TestCase):
             dtype='uint64')})
         with self.assertRaisesRegex(
                 qi.IngressError,
-                '.*serialize .* column .a. .* 4 .*9223372036854775808.*int64 .*'):
+                'serialize .* column .a. .* 4 .9223372036854775808.*int64'):
             buf.dataframe(df2, table_name='tbl1', at=qi.ServerTimestamp)
 
         self.assertEqual(
@@ -634,7 +634,7 @@ class TestPandas(unittest.TestCase):
             dtype=pd.UInt64Dtype())})
         with self.assertRaisesRegex(
                 qi.IngressError,
-                '.*serialize .* column .a. .* 4 .*9223372036854775808.*int64 .*'):
+                'serialize .* column .a. .* 4 .9223372036854775808.*int64'):
             _dataframe(df2, table_name='tbl1', at=qi.ServerTimestamp)
 
     def test_i64_arrow_col(self):
