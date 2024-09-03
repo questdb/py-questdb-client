@@ -14,20 +14,17 @@ def example(host: str = 'localhost', port: int = 9009):
         with Sender.from_conf(conf) as sender:
             # Record with provided designated timestamp (using the 'at' param)
             # Notice the designated timestamp is expected in Nanoseconds,
-            # but timestamps in other columns are expected in Microseconds. 
+            # but timestamps in other columns are expected in Microseconds.
             # The API provides convenient functions
             sender.row(
                 'trades',
                 symbols={
-                    'pair': 'USDGBP',
-                    'type': 'buy'},
+                    'symbol': 'ETH-USD',
+                    'side': 'sell'},
                 columns={
-                    'traded_price': 0.83,
-                    'limit_price': 0.84,
-                    'qty': 100,
-                    'traded_ts': datetime.datetime(
-                        2022, 8, 6, 7, 35, 23, 189062,
-                        tzinfo=datetime.timezone.utc)},
+                    'price': 2615.54,
+                    'amount': 0.00044,
+                   },
                 at=TimestampNanos.now())
 
             # You can call `sender.row` multiple times inside the same `with`

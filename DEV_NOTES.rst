@@ -108,6 +108,23 @@ As this is very time-consuming, instead download all targets
 (except for Apple Silicon) from the CI.
 
 
+The "sdist" source distribution
+-------------------------------
+
+This is a tarball containing all the sources necessary to build the package
+locally.
+
+Its contents are controlled by the ``MANIFEST.in`` file.
+
+To test it:
+
+.. code-block:: bash
+
+    ./proj clean
+    ./proj sdist
+    python3 -m pip install dist/*.tar.gz --user -v
+
+
 Checking `pip install` works
 ----------------------------
 
@@ -125,41 +142,10 @@ The `-e` flag links to the current directory rather than copying.
     $ python3  sdist
 
 
-Uploading to PyPI
+Cutting a release
 -----------------
 
-Update the change log file that describes the latest changes in aggregate.
-
-.. code-block:: bash
-
-    vim CHANGELOG.rst
-
-
-Create a tag, update versions etc using ``bump2version``.
-
-For more command line options, see: https://pypi.org/project/bump2version/
-
-Note that here ``patch`` would bump from (for example) ``0.1.0`` to
-``0.1.1``. ``minor`` would bump from ``0.1.0`` to ``0.2.0`` and ``major``
-would bump from ``0.1.0`` to ``1.0.0``.
-
-.. code-block:: bash
-
-    bump2version --config-file .bumpversion.cfg patch
-
-
-Now make sure you push the tag or it will not show up in GitHub:
-
-.. code-block:: bash
-
-    git push --tags
-
-
-Once you've triple-checked everything is in ``dist/``, you can upload to PyPI.
-
-.. code-block:: bash
-
-    python3 -m twine upload dist/*
+This is a semi-automated process, covered in ``RELEASING.rst``.
 
 
 Debugging with on Linux
