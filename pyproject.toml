@@ -17,7 +17,8 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Networking",
     "Topic :: Database :: Front-Ends",
-    "Topic :: Scientific/Engineering"]
+    "Topic :: Scientific/Engineering",
+]
 
 [project.license]
 text = "Apache License 2.0"
@@ -37,7 +38,7 @@ Changelog = "https://py-questdb-client.readthedocs.io/en/latest/changelog.html"
 Documentation = "https://py-questdb-client.readthedocs.io/en/latest/index.html"
 Source = "https://github.com/questdb/py-questdb-client/"
 Tracker = "https://github.com/questdb/py-questdb-client/issues"
-Slack = "http://slack.questdb.io"
+Community = "http://community.questdb.io"
 
 
 [build-system]
@@ -45,7 +46,8 @@ requires = [
     # Setuptools 18.0 and above properly handles Cython extensions.
     "setuptools>=45.2.0",
     "wheel>=0.34.2",
-    "cython>=0.29.24"]
+    "cython>=0.29.24",
+]
 
 
 [tool.cibuildwheel]
@@ -57,7 +59,8 @@ test-command = "python {project}/test/test.py -v"
 skip = [
     # No 32-bit musl C native tool chain for Rust.
     # There's a tier 2 target for it, but it would need cross-compiling.
-    "*-musllinux_i686"]
+    "*-musllinux_i686",
+]
 
 # [tool.cibuildwheel.windows]
 # # This doens't work yet. Windows/ARM64 support is experimental.
