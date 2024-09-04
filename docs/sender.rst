@@ -399,11 +399,13 @@ buffers.
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
-        sender.flush(buf, transaction=True)
+        sender.flush(buf, transactional=True)
 
-The ``transaction`` parameter is optional and defaults to ``False``.
+The ``transactional`` parameter is optional and defaults to ``False``.
 When set to ``True``, the buffer is guaranteed to be committed as a single
 transaction, but must only contain rows for a single table.
+
+You should not mix using a transaction block with flushing an independent buffer transactionally.
 
 Multiple Databases
 ------------------
