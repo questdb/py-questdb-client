@@ -57,7 +57,7 @@ stages:
             - Agent.Name -equals arm64-clients-$(Build.BuildId)
         dependsOn:
           - start_linux_arm64_agent_aws
-        timeoutInMinutes: 60
+        timeoutInMinutes: 90
         condition: eq(variables['System.PullRequest.IsFork'], 'false')
         steps:
           - checkout: self
@@ -77,7 +77,7 @@ stages:
 
       - job: linux_x64_cpython_manylinux_x86_64
         pool: {vmImage: 'ubuntu-latest'}
-        timeoutInMinutes: 60
+        timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -94,7 +94,7 @@ stages:
 
       - job: linux_x64_cpython_manylinux_i686
         pool: {vmImage: 'ubuntu-latest'}
-        timeoutInMinutes: 60
+        timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -111,7 +111,7 @@ stages:
 
       - job: linux_x64_cpython_musllinux
         pool: {vmImage: 'ubuntu-latest'}
-        timeoutInMinutes: 60
+        timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -128,7 +128,7 @@ stages:
 
       - job: linux_x64_pypy
         pool: {vmImage: 'ubuntu-latest'}
-        timeoutInMinutes: 60
+        timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -144,8 +144,8 @@ stages:
             inputs: {pathtoPublish: 'wheelhouse'}
 
       - job: macos_x64
-        pool: {vmImage: 'macOS-11'}
-        timeoutInMinutes: 60
+        pool: {vmImage: 'macOS-12'}
+        timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -160,7 +160,7 @@ stages:
 
       - job: windows_i686
         pool: {vmImage: 'windows-2019'}
-        timeoutInMinutes: 60
+        timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -177,7 +177,7 @@ stages:
 
       - job: windows_x86_64
         pool: {vmImage: 'windows-2019'}
-        timeoutInMinutes: 60
+        timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
           - bash: |

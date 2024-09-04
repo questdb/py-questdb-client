@@ -90,13 +90,10 @@ Links
 Community
 =========
 
-If you need help, you can ask on `Stack Overflow
-<https://stackoverflow.com/questions/ask?tags=questdb&tags=py-questdb-client>`_:
-We monitor the ``#questdb`` and ``#py-questdb-client`` tags.
+Stop by our `Community Forum <https://community.questdb.io>`_ to 
+chat with the QuestDB team.
 
-Alternatively, you may find us on `Slack <https://slack.questdb.io>`_.
-
-You can also `sign up to our mailing list <https://questdb.io/community/>`_
+You can also `sign up to our mailing list <https://questdb.io/contributors/>`_
 to get notified of new releases.
 
 
