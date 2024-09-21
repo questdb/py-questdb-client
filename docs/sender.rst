@@ -38,7 +38,7 @@ The sender also supports TLS and authentication.
             'amount': [0.00044, 0.001],
             'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
-        sensor.dataframe('trades', df, at='timestamp')
+        sender.dataframe(df, table_name='trades', at='timestamp')
 
 The ``Sender`` object holds an internal buffer which will be flushed and sent
 at when the ``with`` block ends.
