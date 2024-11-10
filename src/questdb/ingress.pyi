@@ -1,6 +1,8 @@
-from enum import Enum
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Dict, List, Optional, Union
+
+import pandas as pd
 
 class IngressErrorCode(Enum):
     """Category of Error."""
@@ -162,7 +164,7 @@ class SenderTransaction:
 
     def dataframe(
         self,
-        df,  # : pd.DataFrame
+        df: pd.DataFrame,
         *,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestamp, int, str, TimestampNanos, datetime],
@@ -408,7 +410,7 @@ class Buffer:
 
     def dataframe(
         self,
-        df,  # : pd.DataFrame
+        df: pd.DataFrame,
         *,
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
@@ -754,12 +756,12 @@ class Sender:
         tls_verify: bool = True,
         tls_ca: TlsCa = TlsCa.WebpkiRoots,
         tls_roots=None,
-        max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
-        retry_timeout=10000,
-        request_min_throughput=None,  # default: 100 * 1024 - 100KiB/s
+        max_buf_size: int = 104857600,
+        retry_timeout: int = 10000,
+        request_min_throughput: int = 102400,
         request_timeout=None,
-        auto_flush=True,  # Default True
-        auto_flush_rows: Optional[int] = None,  # Default 75000 (HTTP) or 600 (TCP)
+        auto_flush: bool = True,
+        auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
         init_buf_size: int = 65536,
@@ -775,20 +777,20 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,  # default: 15000 milliseconds
-        tls_verify=True,  # default: True
-        tls_ca: TlsCa = TlsCa.WebpkiRoots,  # default: TlsCa.WebpkiRoots
+        auth_timeout: int = 15000,
+        tls_verify: bool = True,
+        tls_ca: TlsCa = TlsCa.WebpkiRoots,
         tls_roots=None,
-        max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
-        retry_timeout: int = 10000,  # default: 10000 milliseconds
-        request_min_throughput=None,  # default: 100 * 1024 - 100KiB/s
+        max_buf_size: int = 104857600,
+        retry_timeout: int = 10000,
+        request_min_throughput: int = 102400,
         request_timeout=None,
-        auto_flush: bool = True,  # Default True
-        auto_flush_rows: Optional[int] = None,  # Default 75000 (HTTP) or 600 (TCP)
-        auto_flush_bytes: bool = False,  # Default off
-        auto_flush_interval: int = 1000,  # Default 1000 milliseconds
-        init_buf_size: int = 65536,  # 64KiB
-        max_name_len: int = 127,  # 127
+        auto_flush: bool = True,
+        auto_flush_rows: Optional[int] = None,
+        auto_flush_bytes: bool = False,
+        auto_flush_interval: int = 1000,
+        init_buf_size: int = 65536,
+        max_name_len: int = 127,
     ) -> Sender:
         """
         Construct a sender from a :ref:`configuration string <sender_conf>`.
@@ -810,20 +812,20 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,  # default: 15000 milliseconds
-        tls_verify: bool = True,  # default: True
-        tls_ca: TlsCa = TlsCa.WebpkiRoots,  # default: TlsCa.WebpkiRoots
+        auth_timeout: int = 15000,
+        tls_verify: bool = True,
+        tls_ca: TlsCa = TlsCa.WebpkiRoots,
         tls_roots=None,
-        max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
-        retry_timeout: int = 10000,  # default: 10000 milliseconds
-        request_min_throughput=None,  # default: 100 * 1024 - 100KiB/s
+        max_buf_size: int = 104857600,
+        retry_timeout: int = 10000,
+        request_min_throughput: int = 102400,
         request_timeout=None,
-        auto_flush: bool = True,  # Default True
-        auto_flush_rows: Optional[int] = None,  # Default 75000 (HTTP) or 600 (TCP)
-        auto_flush_bytes: bool = False,  # Default off
-        auto_flush_interval: int = 1000,  # Default 1000 milliseconds
-        init_buf_size: int = 65536,  # 64KiB
-        max_name_len: int = 127,  # 127
+        auto_flush: bool = True,
+        auto_flush_rows: Optional[int] = None,
+        auto_flush_bytes: bool = False,
+        auto_flush_interval: int = 1000,
+        init_buf_size: int = 65536,
+        max_name_len: int = 127,
     ) -> Sender:
         """
         Construct a sender from the ``QDB_CLIENT_CONF`` environment variable.
@@ -939,7 +941,7 @@ class Sender:
 
     def dataframe(
         self,
-        df,  # : pd.DataFrame
+        df: pd.DataFrame,
         *,
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
