@@ -794,11 +794,6 @@ cdef class Buffer:
         """Maximum length of a table or column name."""
         return self._max_name_len
 
-    @property
-    def max_name_len(self) -> int:
-        """Maximum length of a table or column name."""
-        return self._max_name_len
-
     def reserve(self, additional: int):
         """
         Ensure the buffer has at least `additional` bytes of future capacity.
