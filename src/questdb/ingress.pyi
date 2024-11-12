@@ -1,6 +1,42 @@
+################################################################################
+##     ___                  _   ____  ____
+##    / _ \ _   _  ___  ___| |_|  _ \| __ )
+##   | | | | | | |/ _ \/ __| __| | | |  _ \
+##   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+##    \__\_\\__,_|\___||___/\__|____/|____/
+##
+##  Copyright (c) 2014-2019 Appsicle
+##  Copyright (c) 2019-2024 QuestDB
+##
+##  Licensed under the Apache License, Version 2.0 (the "License");
+##  you may not use this file except in compliance with the License.
+##  You may obtain a copy of the License at
+##
+##  http://www.apache.org/licenses/LICENSE-2.0
+##
+##  Unless required by applicable law or agreed to in writing, software
+##  distributed under the License is distributed on an "AS IS" BASIS,
+##  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+##  See the License for the specific language governing permissions and
+##  limitations under the License.
+##
+################################################################################
+
+__all__ = [
+    "Buffer",
+    "IngressError",
+    "IngressErrorCode",
+    "Protocol",
+    "Sender",
+    "ServerTimestamp",
+    "TimestampMicros",
+    "TimestampNanos",
+    "TlsCa",
+]
+
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 
@@ -22,6 +58,10 @@ class IngressErrorCode(Enum):
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
+
+    @property
+    def code(self) -> IngressErrorCode:
+        """Return the error code."""
 
 class ServerTimestamp:
     """
@@ -147,6 +187,8 @@ class SenderTransaction:
     """
 
     def __init__(self, sender: Sender, table_name: str): ...
+    def __enter__(self) -> SenderTransaction: ...
+    def __exit__(self, exc_type, _exc_value, _traceback) -> bool: ...
     def row(
         self,
         *,
@@ -689,15 +731,15 @@ class TaggedEnum(Enum):
     """
 
     @property
-    def tag(self):
+    def tag(self) -> str:
         """
         Short name.
         """
 
     @property
-    def c_value(self): ...
+    def c_value(self) -> Any: ...
     @classmethod
-    def parse(cls, tag):
+    def parse(cls, tag) -> TaggedEnum:
         """
         Parse from the tag name.
         """
