@@ -93,7 +93,8 @@ def main(args):
         import pandas
         import numpy
         import pyarrow
-        if (sys.version_info >= (3, 8)):
+        if (sys.version_info >= (3, 8) and sys.version_info < (3, 13)):
+            # As of this commit, fastparquet does not have a binary built for 3.13
             import fastparquet
 
 
