@@ -80,13 +80,7 @@ def main(args):
     else:
         install_new_pandas_and_numpy()
 
-    if (sys.platform == 'darwin') and (platform.processor() == 'i386'):
-        # Workaround for https://github.com/apache/arrow/issues/41696
-        # Remove if/once resolved.
-        # We only seem to get this issue on intel mac.
-        try_pip_install('pyarrow==16.0.0')
-    else:
-        try_pip_install('pyarrow')
+    try_pip_install('pyarrow')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or
@@ -99,7 +93,8 @@ def main(args):
         import pandas
         import numpy
         import pyarrow
-        if (sys.version_info >= (3, 8)):
+        if (sys.version_info >= (3, 8) and sys.version_info < (3, 13)):
+            # As of this commit, fastparquet does not have a binary built for 3.13
             import fastparquet
 
 
