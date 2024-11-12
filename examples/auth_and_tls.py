@@ -1,6 +1,5 @@
 from questdb.ingress import Sender, IngressError, TimestampNanos
 import sys
-import datetime
 
 
 def example(host: str = 'localhost', port: int = 9009):
