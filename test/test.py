@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+
 sys.dont_write_bytecode = True
 import os
 import unittest
@@ -11,6 +12,7 @@ import random
 import pathlib
 
 import patch_path
+
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
@@ -457,6 +459,48 @@ class TestBases:
                     # The buffer is now auto-cleared.
                     self.assertEqual(str(buf), '')
 
+        def test_auto_flush_settings_defaults(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(protocol, 'localhost', 9009)
+                self.assertTrue(sender.auto_flush)
+                self.assertEqual(sender.auto_flush_bytes, None)
+                self.assertEqual(
+                    sender.auto_flush_rows,
+                    75000 if protocol.startswith('http') else 600)
+                self.assertEqual(sender.auto_flush_interval, datetime.timedelta(seconds=1))
+
+        def test_auto_flush_settings_off(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(protocol, 'localhost', 9009, auto_flush=False)
+                self.assertFalse(sender.auto_flush)
+                self.assertEqual(sender.auto_flush_bytes, None)
+                self.assertEqual(sender.auto_flush_rows, None)
+                self.assertEqual(sender.auto_flush_interval, None)
+
+        def test_auto_flush_settings_on(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(protocol, 'localhost', 9009, auto_flush=True)
+                # Same as default.
+                self.assertEqual(sender.auto_flush_bytes, None)
+                self.assertEqual(
+                    sender.auto_flush_rows,
+                    75000 if protocol.startswith('http') else 600)
+                self.assertEqual(sender.auto_flush_interval, datetime.timedelta(seconds=1))
+
+        def test_auto_flush_settings_specified(self):
+            for protocol in ('tcp', 'tcps', 'http', 'https'):
+                sender = self.builder(
+                    protocol,
+                    'localhost',
+                    9009,
+                    auto_flush_bytes=1024,
+                    auto_flush_rows=100,
+                    auto_flush_interval=datetime.timedelta(milliseconds=50))
+                self.assertTrue(sender.auto_flush)
+                self.assertEqual(sender.auto_flush_bytes, 1024)
+                self.assertEqual(sender.auto_flush_rows, 100)
+                self.assertEqual(sender.auto_flush_interval, datetime.timedelta(milliseconds=50))
+
         def test_auto_flush(self):
             with Server() as server:
                 with self.builder(
@@ -823,6 +867,42 @@ class TestBases:
             # Due to CI timing delays there may have been multiple flushes.
             self.assertGreaterEqual(requests_len, 1)
 
+        def _do_test_auto_flush_interval2(self):
+            with HttpServer() as server, self.builder(
+                    'http',
+                    'localhost',
+                    server.port,
+                    auto_flush_interval=10,
+                    auto_flush_rows=False,
+                    auto_flush_bytes=False) as sender:
+                sender.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
+                sender.row('t', columns={'x': 2}, at=qi.ServerTimestamp)
+                time.sleep(0.02)
+                sender.row('t', columns={'x': 3}, at=qi.ServerTimestamp)
+                sender.row('t', columns={'x': 4}, at=qi.ServerTimestamp)
+                time.sleep(0.02)
+                sender.row('t', columns={'x': 5}, at=qi.ServerTimestamp)
+                sender.row('t', columns={'x': 6}, at=qi.ServerTimestamp)
+            return server.requests
+
+        def test_auto_flush_interval2(self):
+            # This test is timing-sensitive,
+            # so it has a tendency to go wrong in CI.
+            # To work around this we'll repeat the test up to 10 times
+            # until it passes.
+            for _ in range(10):
+                requests = self._do_test_auto_flush_interval2()
+                if len(requests) == 3:
+                    self.assertEqual(requests, [
+                        b't x=1i\nt x=2i\nt x=3i\n',
+                        b't x=4i\nt x=5i\n',
+                        b't x=6i\n'])
+                    break
+
+            # If this fails, it failed 10 attempts.
+            # Due to CI timing delays there may have been multiple flushes.
+            self.assertEqual(len(requests), 3)
+
         def test_http_username_password(self):
             with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user',
                                                       password='pass') as sender:
@@ -874,11 +954,14 @@ class TestBases:
                 self.assertEqual(server.requests[1], exp_payload)
 
         def test_http_request_min_throughput(self):
-            with HttpServer() as server, self.builder(
+            with HttpServer(delay_seconds=2) as server, self.builder(
                     'http',
                     'localhost',
                     server.port,
-                    request_timeout=0,
+                    request_timeout=1000,
+                    # request_timeout is sufficiently high since it's also used as a connect timeout and we want to
+                    # survive hiccups on CI. it should be lower than the server delay though to actually test the
+                    # effect of request_min_throughput.
                     request_min_throughput=1) as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.flush()
@@ -890,7 +973,7 @@ class TestBases:
                     'localhost',
                     server.port,
                     auto_flush='off',
-                    request_timeout=0,
+                    request_timeout=1,
                     retry_timeout=0,
                     request_min_throughput=100000000) as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)

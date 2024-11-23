@@ -112,4 +112,4 @@ Due to this commit lag, the line that caused the error may not be the last line.
 Asking for help
 ===============
 
-The best way to get help is through `Slack <https://slack.questdb.io>`_.
+The best way to get help is through our `Community Forum <https://community.questdb.io>`_.

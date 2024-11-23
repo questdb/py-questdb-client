@@ -5,13 +5,13 @@ import textwrap
 import platform
 import argparse
 
-
 arg_parser = argparse.ArgumentParser(
     prog='pip_install_deps.py',
     description='installs dependencies'
 )
 
 arg_parser.add_argument('--pandas-version')
+
 
 class UnsupportedDependency(Exception):
     pass
@@ -35,8 +35,8 @@ def pip_install(package, version=None):
         return
     output = res.stdout.decode('utf-8')
     is_unsupported = (
-        ('Could not find a version that satisfies the requirement' in output) or
-        ('The conflict is caused by' in output))
+            ('Could not find a version that satisfies the requirement' in output) or
+            ('The conflict is caused by' in output))
     if is_unsupported:
         raise UnsupportedDependency(output)
     else:
@@ -61,6 +61,14 @@ def ensure_timezone():
         pip_install('pytz')
 
 
+def install_old_pandas_and_numpy(args):
+    try_pip_install('pandas', args.pandas_version)
+    try_pip_install('numpy<2')
+
+def install_new_pandas_and_numpy():
+    try_pip_install('pandas')
+    try_pip_install('numpy')
+
 def main(args):
     ensure_timezone()
     pip_install('pip')
@@ -68,27 +76,25 @@ def main(args):
     try_pip_install('fastparquet>=2023.10.1')
 
     if args.pandas_version is not None and args.pandas_version != '':
-        try_pip_install('pandas', args.pandas_version)
+        install_old_pandas_and_numpy(args)
     else:
-        try_pip_install('pandas')
-    try_pip_install('numpy')
+        install_new_pandas_and_numpy()
+
     try_pip_install('pyarrow')
 
     on_linux_is_glibc = (
-        (not platform.system() == 'Linux') or
-        (platform.libc_ver()[0] == 'glibc'))
-    is_64bits = sys.maxsize > 2**32
+            (not platform.system() == 'Linux') or
+            (platform.libc_ver()[0] == 'glibc'))
+    is_64bits = sys.maxsize > 2 ** 32
     is_cpython = platform.python_implementation() == 'CPython'
-    is_windows_py3_12 = (
-        # https://github.com/dask/fastparquet/issues/892
-        platform.system() == 'Windows' and
-        sys.version_info >= (3, 12))
-    if on_linux_is_glibc and is_64bits and is_cpython:
+    is_final = sys.version_info.releaselevel == 'final'
+    if on_linux_is_glibc and is_64bits and is_cpython and is_final:
         # Ensure that we've managed to install the expected dependencies.
         import pandas
         import numpy
         import pyarrow
-        if (sys.version_info >= (3, 8)) and (not is_windows_py3_12):
+        if (sys.version_info >= (3, 8) and sys.version_info < (3, 13)):
+            # As of this commit, fastparquet does not have a binary built for 3.13
             import fastparquet
 
 
