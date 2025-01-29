@@ -93,8 +93,7 @@ def main(args):
         import pandas
         import numpy
         import pyarrow
-        if sys.version_info >= (3, 8):
-            import fastparquet
+        import fastparquet
 
 
 if __name__ == "__main__":
