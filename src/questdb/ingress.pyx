@@ -825,7 +825,7 @@ cdef class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(buffer.peek())``.
         """
         return line_sender_buffer_size(self._impl)
 
@@ -2297,7 +2297,7 @@ cdef class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(sender.peek)``.
+        Equivalent (but cheaper) to ``len(sender.peek())``.
         """
         return len(self._buffer)
 

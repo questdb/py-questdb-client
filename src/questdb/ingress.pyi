@@ -345,7 +345,7 @@ class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(buffer.peek())``.
         """
 
     def peek(self) -> bytes:
@@ -945,7 +945,7 @@ class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(sender.peek())``.
         """
 
     def peek(self) -> bytes:
