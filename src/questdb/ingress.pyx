@@ -78,6 +78,7 @@ from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
     Iterable
 import pathlib
+from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import sys
 import os
@@ -825,18 +826,17 @@ cdef class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(buffer))``.
         """
         return line_sender_buffer_size(self._impl)
 
-    def __str__(self) -> str:
-        """Return the constructed buffer as a string. Use for debugging."""
-        return self._to_str()
+    def __bytes__(self) -> bytes:
+        """Return the constructed buffer as bytes. Use for debugging."""
+        return self._to_bytes()
 
-    cdef inline object _to_str(self):
-        cdef size_t size = 0
-        cdef const char* utf8 = line_sender_buffer_peek(self._impl, &size)
-        return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)
+    cdef inline object _to_bytes(self):
+        cdef line_sender_buffer_view view = line_sender_buffer_peek(self._impl)
+        return PyBytes_FromStringAndSize(<const char *> view.buf, <Py_ssize_t> view.len)
 
     cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
@@ -2281,21 +2281,21 @@ cdef class Sender:
         self.establish()
         return self
 
-    def __str__(self) -> str:
+    def __bytes__(self) -> bytes:
         """
         Inspect the contents of the internal buffer.
 
-        The ``str`` value returned represents the unsent data.
+        The ``bytes`` value returned represents the unsent data.
 
         Also see :func:`Sender.__len__`.
         """
-        return str(self._buffer)
+        return bytes(self._buffer)
 
     def __len__(self) -> int:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))``.
         """
         return len(self._buffer)
 
