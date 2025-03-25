@@ -829,14 +829,16 @@ cdef class Buffer:
         """
         return line_sender_buffer_size(self._impl)
 
-    def __str__(self) -> str:
+    def peek(self) -> bytes:
         """Return the constructed buffer as a string. Use for debugging."""
-        return self._to_str()
+        return self._to_bytes()
 
-    cdef inline object _to_str(self):
-        cdef size_t size = 0
-        cdef const char* utf8 = line_sender_buffer_peek(self._impl, &size)
-        return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)
+    cdef inline object _to_bytes(self):
+        cdef line_sender_buffer_view view = line_sender_buffer_peek(self._impl)
+        if view.len:
+            return PyBytes_FromStringAndSize(<const char*> view.buf, <Py_ssize_t> view.len)
+        else:
+            return b''
 
     cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
@@ -2281,21 +2283,21 @@ cdef class Sender:
         self.establish()
         return self
 
-    def __str__(self) -> str:
+    def peek(self) -> bytes:
         """
         Inspect the contents of the internal buffer.
 
-        The ``str`` value returned represents the unsent data.
+        The ``bytes`` value returned represents the unsent data.
 
         Also see :func:`Sender.__len__`.
         """
-        return str(self._buffer)
+        return self._buffer.peek()
 
     def __len__(self) -> int:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(sender.peek)``.
         """
         return len(self._buffer)
 

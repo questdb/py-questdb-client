@@ -76,7 +76,7 @@ class TestBuffer(unittest.TestCase):
         buf = qi.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
         self.assertEqual(len(buf), 25)
-        self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
+        self.assertEqual(buf.peek(), b'tbl1,sym1=val1,sym2=val2\n')
 
     def test_bad_table(self):
         buf = qi.Buffer()
@@ -92,7 +92,7 @@ class TestBuffer(unittest.TestCase):
     def test_symbol(self):
         buf = qi.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), 'tbl1,sym1=val1,sym2=val2\n')
+        self.assertEqual(buf.peek(), b'tbl1,sym1=val1,sym2=val2\n')
 
     def test_bad_symbol_column_name(self):
         buf = qi.Buffer()
@@ -121,38 +121,38 @@ class TestBuffer(unittest.TestCase):
             'col7': two_h_after_epoch,
             'col8': None}, at=qi.ServerTimestamp)
         exp = (
-            'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
-            'col5="val",col6=12345t,col7=7200000000t\n')
-        self.assertEqual(str(buf), exp)
+            b'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
+            b'col5="val",col6=12345t,col7=7200000000t\n')
+        self.assertEqual(buf.peek(), exp)
 
     def test_none_symbol(self):
         buf = qi.Buffer()
         buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None}, at=qi.ServerTimestamp)
-        exp = 'tbl1,sym1=val1\n'
-        self.assertEqual(str(buf), exp)
+        exp = b'tbl1,sym1=val1\n'
+        self.assertEqual(buf.peek(), exp)
         self.assertEqual(len(buf), len(exp))
 
         # No fields to write, no fields written, therefore a no-op.
         buf.row('tbl1', symbols={'sym1': None, 'sym2': None}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), exp)
+        self.assertEqual(buf.peek(), exp)
         self.assertEqual(len(buf), len(exp))
 
     def test_none_column(self):
         buf = qi.Buffer()
         buf.row('tbl1', columns={'col1': 1}, at=qi.ServerTimestamp)
-        exp = 'tbl1 col1=1i\n'
-        self.assertEqual(str(buf), exp)
+        exp = b'tbl1 col1=1i\n'
+        self.assertEqual(buf.peek(), exp)
         self.assertEqual(len(buf), len(exp))
 
         # No fields to write, no fields written, therefore a no-op.
         buf.row('tbl1', columns={'col1': None, 'col2': None}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), exp)
+        self.assertEqual(buf.peek(), exp)
         self.assertEqual(len(buf), len(exp))
 
     def test_no_symbol_or_col_args(self):
         buf = qi.Buffer()
         buf.row('table_name', at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), '')
+        self.assertEqual(buf.peek(), b'')
 
     def test_unicode(self):
         buf = qi.Buffer()
@@ -171,15 +171,15 @@ class TestBuffer(unittest.TestCase):
                 'questdb2': '嚜꓂',  # UCS-2, 3 bytes for UTF-8.
                 'questdb3': '💩🦞'},
             at=qi.ServerTimestamp)  # UCS-4, 4 bytes for UTF-8.
-        self.assertEqual(str(buf),
-                         f'tbl1,questdb1=q❤️p questdb2="{"❤️" * 1200}"\n' +
+        self.assertEqual(buf.peek(),
+                         (f'tbl1,questdb1=q❤️p questdb2="{"❤️" * 1200}"\n' +
                          'tbl1,Questo\\ è\\ il\\ nome\\ di\\ una\\ colonna=' +
                          'Це\\ символьне\\ значення ' +
-                         'questdb1="",questdb2="嚜꓂",questdb3="💩🦞"\n')
+                         'questdb1="",questdb2="嚜꓂",questdb3="💩🦞"\n').encode('utf-8'))
 
         buf.clear()
         buf.row('tbl1', symbols={'questdb1': 'q❤️p'}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), 'tbl1,questdb1=q❤️p\n')
+        self.assertEqual(buf.peek(), 'tbl1,questdb1=q❤️p\n'.encode('utf-8'))
 
         # A bad char in Python.
         with self.assertRaisesRegex(
@@ -191,30 +191,30 @@ class TestBuffer(unittest.TestCase):
         # Ensure we can continue using the buffer after an error.
         buf.row('tbl1', symbols={'questdb1': 'another line of input'}, at=qi.ServerTimestamp)
         self.assertEqual(
-            str(buf),
-            'tbl1,questdb1=q❤️p\n' +
+            buf.peek(),
+            ('tbl1,questdb1=q❤️p\n' +
             # Note: No partially written failed line here.
-            'tbl1,questdb1=another\\ line\\ of\\ input\n')
+            'tbl1,questdb1=another\\ line\\ of\\ input\n').encode('utf-8'))
 
     def test_float(self):
         buf = qi.Buffer()
         buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), f'tbl1 num=1.2345678901234567\n')
+        self.assertEqual(buf.peek(), f'tbl1 num=1.2345678901234567\n'.encode('utf-8'))
 
     def test_int_range(self):
         buf = qi.Buffer()
         buf.row('tbl1', columns={'num': 0}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), f'tbl1 num=0i\n')
+        self.assertEqual(buf.peek(), f'tbl1 num=0i\n'.encode('utf-8'))
         buf.clear()
 
         # 32-bit int range.
         buf.row('tbl1', columns={'min': -2 ** 31, 'max': 2 ** 31 - 1}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), f'tbl1 min=-2147483648i,max=2147483647i\n')
+        self.assertEqual(buf.peek(), f'tbl1 min=-2147483648i,max=2147483647i\n'.encode('utf-8'))
         buf.clear()
 
         # 64-bit int range.
         buf.row('tbl1', columns={'min': -2 ** 63, 'max': 2 ** 63 - 1}, at=qi.ServerTimestamp)
-        self.assertEqual(str(buf), f'tbl1 min=-9223372036854775808i,max=9223372036854775807i\n')
+        self.assertEqual(buf.peek(), f'tbl1 min=-9223372036854775808i,max=9223372036854775807i\n'.encode('utf-8'))
         buf.clear()
 
         # Overflow.
@@ -356,9 +356,9 @@ class TestBases:
                     server.accept()
                     with self.assertRaisesRegex(qi.IngressError, 'Column names'):
                         sender.row('tbl1', symbols={'...bad name..': 'val1'}, at=qi.ServerTimestamp)
-                    self.assertEqual(str(sender), '')
+                    self.assertEqual(sender.peek(), b'')
                     sender.flush()
-                    self.assertEqual(str(sender), '')
+                    self.assertEqual(sender.peek(), b'')
                 msgs = server.recv()
                 self.assertEqual(msgs, [])
 
@@ -423,7 +423,7 @@ class TestBases:
                 exp = (
                     'line_sender_buffer_example2,id=Hola price="111222233333i",qty=3.5 111222233333\n'
                     'line_sender_example,id=Adios price="111222233343i",qty=2.5 111222233343\n')
-                self.assertEqual(str(buffer), exp)
+                self.assertEqual(buffer.peek(), exp.encode('utf-8'))
                 sender.flush(buffer)
                 msgs = server.recv()
                 bexp = [msg.encode('utf-8') for msg in exp.rstrip().split('\n')]
@@ -432,9 +432,8 @@ class TestBases:
         def test_independent_buffer(self):
             buf = qi.Buffer()
             buf.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-            exp = 'tbl1,sym1=val1\n'
-            bexp = exp[:-1].encode('utf-8')
-            self.assertEqual(str(buf), exp)
+            exp = b'tbl1,sym1=val1\n'
+            self.assertEqual(buf.peek(), exp)
 
             with Server() as server1, Server() as server2:
                 with self.builder('tcp', 'localhost', server1.port) as sender1, \
@@ -443,21 +442,21 @@ class TestBases:
                     server2.accept()
 
                     sender1.flush(buf, clear=False)
-                    self.assertEqual(str(buf), exp)
+                    self.assertEqual(buf.peek(), exp)
 
                     sender2.flush(buf, clear=False)
-                    self.assertEqual(str(buf), exp)
+                    self.assertEqual(buf.peek(), exp)
 
                     msgs1 = server1.recv()
                     msgs2 = server2.recv()
-                    self.assertEqual(msgs1, [bexp])
-                    self.assertEqual(msgs2, [bexp])
+                    self.assertEqual(msgs1, [exp[:-1]])
+                    self.assertEqual(msgs2, [exp[:-1]])
 
                     sender1.flush(buf)
-                    self.assertEqual(server1.recv(), [bexp])
+                    self.assertEqual(server1.recv(), [exp[:-1]])
 
                     # The buffer is now auto-cleared.
-                    self.assertEqual(str(buf), '')
+                    self.assertEqual(buf.peek(), b'')
 
         def test_auto_flush_settings_defaults(self):
             for protocol in ('tcp', 'tcps', 'http', 'https'):
@@ -560,7 +559,7 @@ class TestBases:
                     with self.builder('tcp', 'localhost', server.port) as sender:
                         server.accept()
                         sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-                        self.assertEqual(str(sender), 'tbl1,sym1=val1\n')
+                        self.assertEqual(sender.peek(), b'tbl1,sym1=val1\n')
                         raise RuntimeError('Test exception')
                 msgs = server.recv()
                 self.assertEqual(msgs, [])

@@ -348,8 +348,8 @@ class Buffer:
         Equivalent (but cheaper) to ``len(str(sender))``.
         """
 
-    def __str__(self) -> str:
-        """Return the constructed buffer as a string. Use for debugging."""
+    def peek(self) -> bytes:
+        """Return the constructed buffer as bytes. Use for debugging."""
 
     def row(
         self,
@@ -941,20 +941,20 @@ class Sender:
     def __enter__(self) -> Sender:
         """Call :func:`Sender.establish` at the start of a ``with`` block."""
 
-    def __str__(self) -> str:
-        """
-        Inspect the contents of the internal buffer.
-
-        The ``str`` value returned represents the unsent data.
-
-        Also see :func:`Sender.__len__`.
-        """
-
     def __len__(self) -> int:
         """
         Number of bytes of unsent data in the internal buffer.
 
         Equivalent (but cheaper) to ``len(str(sender))``.
+        """
+
+    def peek(self) -> bytes:
+        """
+        Inspect the contents of the internal buffer.
+
+        The ``bytes`` value returned represents the unsent data.
+
+        Also see :func:`Sender.__len__`.
         """
 
     def transaction(self, table_name: str) -> SenderTransaction:

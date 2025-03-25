@@ -27,6 +27,10 @@ cdef extern from "Python.h":
     str PyUnicode_FromStringAndSize(
         const char* u, Py_ssize_t size)
 
+    # Ditto, see comment on why not returning a `PyObject` above.
+    object PyBytes_FromStringAndSize(
+        const char* u, Py_ssize_t size)
+
     # Must be called before accessing data or is compact check.
     int PyUnicode_READY(PyObject* o) except -1
 

@@ -22,7 +22,7 @@
 ##
 ################################################################################
 
-from libc.stdint cimport int64_t, uint16_t, uint64_t
+from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t
 
 cdef extern from "questdb/ingress/line_sender.h":
     cdef struct line_sender_error:
@@ -102,6 +102,10 @@ cdef extern from "questdb/ingress/line_sender.h":
         size_t len
         const char* buf
 
+    cdef struct line_sender_buffer_view:
+        size_t len
+        const uint8_t* buf
+
     bint line_sender_column_name_init(
         line_sender_column_name* name,
         size_t len,
@@ -171,9 +175,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         const line_sender_buffer* buffer
         ) noexcept nogil
 
-    const char* line_sender_buffer_peek(
-        const line_sender_buffer* buffer,
-        size_t* len_out
+    line_sender_buffer_view line_sender_buffer_peek(
+        const line_sender_buffer* buffer
         ) noexcept nogil
 
     bint line_sender_buffer_table(

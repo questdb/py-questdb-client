@@ -35,7 +35,7 @@ except ImportError:
 def _dataframe(*args, **kwargs):
     buf = qi.Buffer()
     buf.dataframe(*args, **kwargs)
-    return str(buf)
+    return buf.peek()
 
 DF1 = pd.DataFrame({
     'A': [1.0, 2.0, 3.0],
@@ -165,17 +165,17 @@ class TestPandas(unittest.TestCase):
 
     def test_empty_dataframe(self):
         buf = _dataframe(pd.DataFrame(), table_name='tbl1', at=qi.ServerTimestamp)
-        self.assertEqual(buf, '')
+        self.assertEqual(buf, b'')
 
     def test_zero_row_dataframe(self):
         buf = _dataframe(pd.DataFrame(columns=['A', 'B']), table_name='tbl1', at=qi.ServerTimestamp)
-        self.assertEqual(buf, '')
+        self.assertEqual(buf, b'')
 
     def test_zero_column_dataframe(self):
         df = pd.DataFrame(index=[0, 1, 2])
         self.assertEqual(len(df), 3)
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
-        self.assertEqual(buf, '')
+        self.assertEqual(buf, b'')
 
     def test_basic(self):
         buf = _dataframe(
@@ -185,9 +185,9 @@ class TestPandas(unittest.TestCase):
             at=-1)
         self.assertEqual(
             buf,
-            't1,A=a1,B=b1,C=b1,D=a1 E=1.0,F=1i 1520640000000000000\n' +
-            't2,A=a2,D=a2 E=2.0,F=2i 1520726400000000000\n' +
-            't1,A=a3,B=b3,C=b3,D=a3 E=3.0,F=3i 1520812800000000000\n')
+            b't1,A=a1,B=b1,C=b1,D=a1 E=1.0,F=1i 1520640000000000000\n' +
+            b't2,A=a2,D=a2 E=2.0,F=2i 1520726400000000000\n' +
+            b't1,A=a3,B=b3,C=b3,D=a3 E=3.0,F=3i 1520812800000000000\n')
 
     def test_named_dataframe(self):
         df = pd.DataFrame({
@@ -197,23 +197,23 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'table_name a=1i,b="a"\n' +
-            'table_name a=2i,b="b"\n' +
-            'table_name a=3i,b="c"\n')
+            b'table_name a=1i,b="a"\n' +
+            b'table_name a=2i,b="b"\n' +
+            b'table_name a=3i,b="c"\n')
 
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n')
 
         buf = _dataframe(df, table_name_col='b', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'a a=1i\n' +
-            'b a=2i\n' +
-            'c a=3i\n')
+            b'a a=1i\n' +
+            b'b a=2i\n' +
+            b'c a=3i\n')
 
         df.index.name = 42  # bad type, not str
         with self.assertRaisesRegex(qi.IngressError,
@@ -244,9 +244,9 @@ class TestPandas(unittest.TestCase):
             buf = _dataframe(df, table_name='tbl1', at=ts)
             self.assertEqual(
                 buf,
-                'tbl1 a=1i,b="a" 1520640000000000000\n' +
-                'tbl1 a=2i,b="b" 1520640000000000000\n' +
-                'tbl1 a=3i,b="c" 1520640000000000000\n')
+                b'tbl1 a=1i,b="a" 1520640000000000000\n' +
+                b'tbl1 a=2i,b="b" 1520640000000000000\n' +
+                b'tbl1 a=3i,b="c" 1520640000000000000\n')
 
     @unittest.skipIf(BROKEN_TIMEZONES, 'requires accurate timezones')
     def test_at_neg(self):
@@ -281,9 +281,9 @@ class TestPandas(unittest.TestCase):
             buf = _dataframe(df, table_name='tbl1', at=ts)
             self.assertEqual(
                 buf,
-                'tbl1 a=1i,b="a" 0\n' +
-                'tbl1 a=2i,b="b" 0\n' +
-                'tbl1 a=3i,b="c" 0\n')
+                b'tbl1 a=1i,b="a" 0\n' +
+                b'tbl1 a=2i,b="b" 0\n' +
+                b'tbl1 a=3i,b="c" 0\n')
 
     def test_single_at_col(self):
         df = pd.DataFrame({'timestamp': pd.to_datetime(['2023-01-01'])})
@@ -306,11 +306,11 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=0i\n' +
-            'tbl1 a=255i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=0i\n' +
+            b'tbl1 a=255i\n')
 
     def test_i8_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -321,12 +321,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=-128i\n' +
-            'tbl1 a=127i\n' +
-            'tbl1 a=0i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=-128i\n' +
+            b'tbl1 a=127i\n' +
+            b'tbl1 a=0i\n')
 
     def test_u16_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -337,11 +337,11 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=0i\n' +
-            'tbl1 a=65535i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=0i\n' +
+            b'tbl1 a=65535i\n')
 
     def test_i16_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -352,12 +352,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=-32768i\n' +
-            'tbl1 a=32767i\n' +
-            'tbl1 a=0i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=-32768i\n' +
+            b'tbl1 a=32767i\n' +
+            b'tbl1 a=0i\n')
 
     def test_u32_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -368,11 +368,11 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=0i\n' +
-            'tbl1 a=4294967295i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=0i\n' +
+            b'tbl1 a=4294967295i\n')
 
     def test_i32_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -384,12 +384,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=-2147483648i\n' +
-            'tbl1 a=0i\n' +
-            'tbl1 a=2147483647i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=-2147483648i\n' +
+            b'tbl1 a=0i\n' +
+            b'tbl1 a=2147483647i\n')
 
     def test_u64_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -400,20 +400,20 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=0i\n' +
-            'tbl1 a=9223372036854775807i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=0i\n' +
+            b'tbl1 a=9223372036854775807i\n')
 
         buf = qi.Buffer()
         buf.dataframe(pd.DataFrame({'b': [.5, 1.0, 1.5]}), table_name='tbl2', at=qi.ServerTimestamp)
         exp1 = (
-            'tbl2 b=0.5\n' +
-            'tbl2 b=1.0\n' +
-            'tbl2 b=1.5\n')
+            b'tbl2 b=0.5\n' +
+            b'tbl2 b=1.0\n' +
+            b'tbl2 b=1.5\n')
         self.assertEqual(
-            str(buf),
+            buf.peek(),
             exp1)
         df2 = pd.DataFrame({'a': pd.Series([
                 1, 2, 3,
@@ -426,7 +426,7 @@ class TestPandas(unittest.TestCase):
             buf.dataframe(df2, table_name='tbl1', at=qi.ServerTimestamp)
 
         self.assertEqual(
-            str(buf),
+            buf.peek(),
             exp1)  # No partial write of `df2`.
 
     def test_i64_numpy_col(self):
@@ -439,12 +439,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i\n' +
-            'tbl1 a=2i\n' +
-            'tbl1 a=3i\n' +
-            'tbl1 a=-9223372036854775808i\n' +
-            'tbl1 a=0i\n' +
-            'tbl1 a=9223372036854775807i\n')
+            b'tbl1 a=1i\n' +
+            b'tbl1 a=2i\n' +
+            b'tbl1 a=3i\n' +
+            b'tbl1 a=-9223372036854775808i\n' +
+            b'tbl1 a=0i\n' +
+            b'tbl1 a=9223372036854775807i\n')
 
     def test_f32_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -458,14 +458,14 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1.0\n' +
-            'tbl1 a=2.0\n' +
-            'tbl1 a=3.0\n' +
-            'tbl1 a=0.0\n' +
-            'tbl1 a=Infinity\n' +
-            'tbl1 a=-Infinity\n' +
-            'tbl1 a=NaN\n' +
-            'tbl1 a=3.4028234663852886e38\n')
+            b'tbl1 a=1.0\n' +
+            b'tbl1 a=2.0\n' +
+            b'tbl1 a=3.0\n' +
+            b'tbl1 a=0.0\n' +
+            b'tbl1 a=Infinity\n' +
+            b'tbl1 a=-Infinity\n' +
+            b'tbl1 a=NaN\n' +
+            b'tbl1 a=3.4028234663852886e38\n')
 
     def test_f64_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -479,14 +479,14 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1.0\n' +
-            'tbl1 a=2.0\n' +
-            'tbl1 a=3.0\n' +
-            'tbl1 a=0.0\n' +
-            'tbl1 a=Infinity\n' +
-            'tbl1 a=-Infinity\n' +
-            'tbl1 a=NaN\n' +
-            'tbl1 a=1.7976931348623157e308\n')
+            b'tbl1 a=1.0\n' +
+            b'tbl1 a=2.0\n' +
+            b'tbl1 a=3.0\n' +
+            b'tbl1 a=0.0\n' +
+            b'tbl1 a=Infinity\n' +
+            b'tbl1 a=-Infinity\n' +
+            b'tbl1 a=NaN\n' +
+            b'tbl1 a=1.7976931348623157e308\n')
 
     def test_u8_arrow_col(self):
         df = pd.DataFrame({
@@ -500,12 +500,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n' +
-            'tbl1 a=0i,b="d"\n' +
-            'tbl1 b="e"\n' +
-            'tbl1 a=255i,b="f"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n' +
+            b'tbl1 a=0i,b="d"\n' +
+            b'tbl1 b="e"\n' +
+            b'tbl1 a=255i,b="f"\n')
 
     def test_i8_arrow_col(self):
         df = pd.DataFrame({
@@ -520,13 +520,13 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n' +
-            'tbl1 a=-128i,b="d"\n' +
-            'tbl1 a=0i,b="e"\n' +
-            'tbl1 b="f"\n' +
-            'tbl1 a=127i,b="g"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n' +
+            b'tbl1 a=-128i,b="d"\n' +
+            b'tbl1 a=0i,b="e"\n' +
+            b'tbl1 b="f"\n' +
+            b'tbl1 a=127i,b="g"\n')
 
     def test_u16_arrow_col(self):
         df = pd.DataFrame({
@@ -540,12 +540,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
+            ('tbl1 a=1i,b="a"\n' +
             'tbl1 a=2i,b="b"\n' +
             'tbl1 a=3i,b="c"\n' +
             'tbl1 a=0i,b="d"\n' +
             'tbl1 b="e"\n' +
-            'tbl1 a=65535i,b="f"\n')
+            'tbl1 a=65535i,b="f"\n').encode('utf-8'))
 
     def test_i16_arrow_col(self):
         df = pd.DataFrame({
@@ -560,13 +560,13 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n' +
-            'tbl1 a=-32768i,b="d"\n' +
-            'tbl1 a=0i,b="e"\n' +
-            'tbl1 b="f"\n' +
-            'tbl1 a=32767i,b="g"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n' +
+            b'tbl1 a=-32768i,b="d"\n' +
+            b'tbl1 a=0i,b="e"\n' +
+            b'tbl1 b="f"\n' +
+            b'tbl1 a=32767i,b="g"\n')
 
     def test_u32_arrow_col(self):
         df = pd.DataFrame({
@@ -580,12 +580,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n' +
-            'tbl1 a=0i,b="d"\n' +
-            'tbl1 b="e"\n' +
-            'tbl1 a=4294967295i,b="f"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n' +
+            b'tbl1 a=0i,b="d"\n' +
+            b'tbl1 b="e"\n' +
+            b'tbl1 a=4294967295i,b="f"\n')
 
     def test_i32_arrow_col(self):
         df = pd.DataFrame({
@@ -600,13 +600,13 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n' +
-            'tbl1 a=-2147483648i,b="d"\n' +
-            'tbl1 a=0i,b="e"\n' +
-            'tbl1 b="f"\n' +
-            'tbl1 a=2147483647i,b="g"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n' +
+            b'tbl1 a=-2147483648i,b="d"\n' +
+            b'tbl1 a=0i,b="e"\n' +
+            b'tbl1 b="f"\n' +
+            b'tbl1 a=2147483647i,b="g"\n')
 
     def test_u64_arrow_col(self):
         df = pd.DataFrame({
@@ -620,12 +620,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n' +
-            'tbl1 a=0i,b="d"\n' +
-            'tbl1 b="e"\n' +
-            'tbl1 a=9223372036854775807i,b="f"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n' +
+            b'tbl1 a=0i,b="d"\n' +
+            b'tbl1 b="e"\n' +
+            b'tbl1 a=9223372036854775807i,b="f"\n')
 
         df2 = pd.DataFrame({'a': pd.Series([
                 1, 2, 3,
@@ -650,13 +650,13 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1i,b="a"\n' +
-            'tbl1 a=2i,b="b"\n' +
-            'tbl1 a=3i,b="c"\n' +
-            'tbl1 a=-9223372036854775808i,b="d"\n' +
-            'tbl1 a=0i,b="e"\n' +
-            'tbl1 b="f"\n' +
-            'tbl1 a=9223372036854775807i,b="g"\n')
+            b'tbl1 a=1i,b="a"\n' +
+            b'tbl1 a=2i,b="b"\n' +
+            b'tbl1 a=3i,b="c"\n' +
+            b'tbl1 a=-9223372036854775808i,b="d"\n' +
+            b'tbl1 a=0i,b="e"\n' +
+            b'tbl1 b="f"\n' +
+            b'tbl1 a=9223372036854775807i,b="g"\n')
 
     def test_f32_arrow_col(self):
         df = pd.DataFrame({
@@ -673,15 +673,15 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1.0,b="a"\n' +
-            'tbl1 a=2.0,b="b"\n' +
-            'tbl1 a=3.0,b="c"\n' +
-            'tbl1 a=0.0,b="d"\n' +
-            'tbl1 a=Infinity,b="e"\n' +
-            'tbl1 a=-Infinity,b="f"\n' +
-            'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
-            'tbl1 a=3.4028234663852886e38,b="h"\n' +
-            'tbl1 b="i"\n')
+            b'tbl1 a=1.0,b="a"\n' +
+            b'tbl1 a=2.0,b="b"\n' +
+            b'tbl1 a=3.0,b="c"\n' +
+            b'tbl1 a=0.0,b="d"\n' +
+            b'tbl1 a=Infinity,b="e"\n' +
+            b'tbl1 a=-Infinity,b="f"\n' +
+            b'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
+            b'tbl1 a=3.4028234663852886e38,b="h"\n' +
+            b'tbl1 b="i"\n')
 
     def test_f64_arrow_col(self):
         df = pd.DataFrame({
@@ -698,15 +698,15 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1.0,b="a"\n' +
-            'tbl1 a=2.0,b="b"\n' +
-            'tbl1 a=3.0,b="c"\n' +
-            'tbl1 a=0.0,b="d"\n' +
-            'tbl1 a=Infinity,b="e"\n' +
-            'tbl1 a=-Infinity,b="f"\n' +
-            'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
-            'tbl1 a=1.7976931348623157e308,b="h"\n' +
-            'tbl1 b="i"\n')
+            b'tbl1 a=1.0,b="a"\n' +
+            b'tbl1 a=2.0,b="b"\n' +
+            b'tbl1 a=3.0,b="c"\n' +
+            b'tbl1 a=0.0,b="d"\n' +
+            b'tbl1 a=Infinity,b="e"\n' +
+            b'tbl1 a=-Infinity,b="f"\n' +
+            b'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
+            b'tbl1 a=1.7976931348623157e308,b="h"\n' +
+            b'tbl1 b="i"\n')
 
     def test_bool_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -716,12 +716,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=t\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=t\n' +
-            'tbl1 a=f\n')
+            b'tbl1 a=t\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=t\n' +
+            b'tbl1 a=f\n')
 
     def test_bool_arrow_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -733,18 +733,18 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=t\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=t\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=t\n' +
-            'tbl1 a=t\n' +
-            'tbl1 a=t\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n')
+            b'tbl1 a=t\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=t\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=t\n' +
+            b'tbl1 a=t\n' +
+            b'tbl1 a=t\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n')
 
         df2 = pd.DataFrame({'a': pd.Series([
                 True, False, False,
@@ -763,12 +763,12 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=t\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=f\n' +
-            'tbl1 a=t\n' +
-            'tbl1 a=f\n')
+            b'tbl1 a=t\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=f\n' +
+            b'tbl1 a=t\n' +
+            b'tbl1 a=f\n')
 
         df2 = pd.DataFrame({'a': pd.Series([
                 True, False, 'false'],
@@ -803,15 +803,15 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=1546300800000000t,b="a"\n' +
-            'tbl1 a=1546300801000000t,b="b"\n' +
-            'tbl1 a=1546300802000000t,b="c"\n' +
-            'tbl1 a=1546300803000000t,b="d"\n' +
-            'tbl1 a=1546300804000000t,b="e"\n' +
-            'tbl1 a=1546300805000000t,b="f"\n' +
-            'tbl1 b="g"\n' +
-            'tbl1 b="h"\n' +
-            'tbl1 b="i"\n')
+            b'tbl1 a=1546300800000000t,b="a"\n' +
+            b'tbl1 a=1546300801000000t,b="b"\n' +
+            b'tbl1 a=1546300802000000t,b="c"\n' +
+            b'tbl1 a=1546300803000000t,b="d"\n' +
+            b'tbl1 a=1546300804000000t,b="e"\n' +
+            b'tbl1 a=1546300805000000t,b="f"\n' +
+            b'tbl1 b="g"\n' +
+            b'tbl1 b="h"\n' +
+            b'tbl1 b="i"\n')
 
         df = pd.DataFrame({'a': pd.Series([
                 pd.Timestamp('1970-01-01 00:00:00'),
@@ -820,9 +820,9 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a=0t\n' +
-            'tbl1 a=1000000t\n' +
-            'tbl1 a=2000000t\n')
+            b'tbl1 a=0t\n' +
+            b'tbl1 a=1000000t\n' +
+            b'tbl1 a=2000000t\n')
 
     def test_datetime64_tz_arrow_col(self):
         df = pd.DataFrame({
@@ -842,10 +842,10 @@ class TestPandas(unittest.TestCase):
         self.assertEqual(
             buf,
             # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-            'tbl1,b=sym1 a=1546318800000000t\n' +
-            'tbl1,b=sym2 a=1546318801000000t\n' +
-            'tbl1,b=sym3\n' +
-            'tbl1,b=sym4 a=1546318803000000t\n')
+            b'tbl1,b=sym1 a=1546318800000000t\n' +
+            b'tbl1,b=sym2 a=1546318801000000t\n' +
+            b'tbl1,b=sym3\n' +
+            b'tbl1,b=sym4 a=1546318803000000t\n')
 
         # Not epoch 0.
         df = pd.DataFrame({
@@ -864,9 +864,9 @@ class TestPandas(unittest.TestCase):
         self.assertEqual(
             buf,
             # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-            'tbl1,b=sym1 a=18000000000t\n' +
-            'tbl1,b=sym2 a=18001000000t\n' +
-            'tbl1,b=sym3 a=18002000000t\n')
+            b'tbl1,b=sym1 a=18000000000t\n' +
+            b'tbl1,b=sym2 a=18001000000t\n' +
+            b'tbl1,b=sym3 a=18002000000t\n')
 
         # Actual epoch 0.
         df = pd.DataFrame({
@@ -884,9 +884,9 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1,b=sym1 a=0t\n' +
-            'tbl1,b=sym2 a=1000000t\n' +
-            'tbl1,b=sym3 a=2000000t\n')
+            b'tbl1,b=sym1 a=0t\n' +
+            b'tbl1,b=sym2 a=1000000t\n' +
+            b'tbl1,b=sym3 a=2000000t\n')
 
         df2 = pd.DataFrame({
             'a': [
@@ -900,8 +900,8 @@ class TestPandas(unittest.TestCase):
         # Mostly, here assert that negative timestamps are allowed.
         self.assertIn(
             buf,
-            ['tbl1,b=sym1 a=-2208970800000000t\n',
-             'tbl1,b=sym1 a=-2208971040000000t\n'])
+            [b'tbl1,b=sym1 a=-2208970800000000t\n',
+             b'tbl1,b=sym1 a=-2208971040000000t\n'])
 
     def test_datetime64_numpy_at(self):
         df = pd.DataFrame({
@@ -920,15 +920,15 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at='a')
         self.assertEqual(
             buf,
-            'tbl1 b=1i 1546300800000000000\n' +
-            'tbl1 b=2i 1546300801000000000\n' +
-            'tbl1 b=3i 1546300802000000000\n' +
-            'tbl1 b=4i 1546300803000000000\n' +
-            'tbl1 b=5i 1546300804000000000\n' +
-            'tbl1 b=6i 1546300805000000000\n' +
-            'tbl1 b=7i\n' +
-            'tbl1 b=8i\n' +
-            'tbl1 b=9i\n')
+            b'tbl1 b=1i 1546300800000000000\n' +
+            b'tbl1 b=2i 1546300801000000000\n' +
+            b'tbl1 b=3i 1546300802000000000\n' +
+            b'tbl1 b=4i 1546300803000000000\n' +
+            b'tbl1 b=5i 1546300804000000000\n' +
+            b'tbl1 b=6i 1546300805000000000\n' +
+            b'tbl1 b=7i\n' +
+            b'tbl1 b=8i\n' +
+            b'tbl1 b=9i\n')
 
         df = pd.DataFrame({
             'a': pd.Series([
@@ -940,9 +940,9 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at='a')
         self.assertEqual(
             buf,
-            'tbl1 b=1i 0\n' +
-            'tbl1 b=2i 1000000000\n' +
-            'tbl1 b=3i 2000000000\n')
+            b'tbl1 b=1i 0\n' +
+            b'tbl1 b=2i 1000000000\n' +
+            b'tbl1 b=3i 2000000000\n')
 
     def test_datetime64_tz_arrow_at(self):
         df = pd.DataFrame({
@@ -962,10 +962,10 @@ class TestPandas(unittest.TestCase):
         self.assertEqual(
             buf,
             # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-            'tbl1,b=sym1 1546318800000000000\n' +
-            'tbl1,b=sym2 1546318801000000000\n' +
-            'tbl1,b=sym3\n' +
-            'tbl1,b=sym4 1546318803000000000\n')
+            b'tbl1,b=sym1 1546318800000000000\n' +
+            b'tbl1,b=sym2 1546318801000000000\n' +
+            b'tbl1,b=sym3\n' +
+            b'tbl1,b=sym4 1546318803000000000\n')
 
         df2 = pd.DataFrame({
             'a': [
@@ -991,11 +991,11 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name_col=0, at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'a b=1i\n' +
+            ('a b=1i\n' +
             ('b' * 127) + ' b=2i\n' +
             'q❤️p b=3i\n' +
             '嚜꓂ b=4i\n' +
-            '💩🦞 b=5i\n')
+            '💩🦞 b=5i\n').encode("utf-8"))
 
         with self.assertRaisesRegex(
                 qi.IngressError, "Too long"):
@@ -1063,8 +1063,8 @@ class TestPandas(unittest.TestCase):
                     '.': pd.Series(['x', 42], dtype='string'),
                     'z': [1, 2]}),
                 table_name_col='.', at=qi.ServerTimestamp),
-            'x z=1i\n' +
-            '42 z=2i\n')
+            b'x z=1i\n' +
+            b'42 z=2i\n')
 
     def _test_pyobjstr_numpy_symbol(self, dtype):
         df = pd.DataFrame({'a': pd.Series([
@@ -1080,14 +1080,14 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1,a=a\n' +
+            ('tbl1,a=a\n' +
             'tbl1,a=q❤️p\n' +
             'tbl1,a=' + ('❤️' * 1200) + '\n' +
             'tbl1,a=Questo\\ è\\ un\\ qualcosa\n' +
             'tbl1,a=щось\n' +
             'tbl1,a=\n' +
             'tbl1,a=嚜꓂\n' +
-            'tbl1,a=💩🦞\n')
+            'tbl1,a=💩🦞\n').encode("utf-8"))
 
         for null_obj in (None, float('nan'), pd.NA):
             self.assertEqual(
@@ -1096,8 +1096,8 @@ class TestPandas(unittest.TestCase):
                         'x': pd.Series(['a', null_obj], dtype=dtype),
                         'y': [1, 2]}),
                     table_name='tbl1', symbols=[0], at=qi.ServerTimestamp),
-                'tbl1,x=a y=1i\n' +
-                'tbl1 y=2i\n')
+                b'tbl1,x=a y=1i\n' +
+                b'tbl1 y=2i\n')
 
     def test_obj_str_numpy_symbol(self):
         self._test_pyobjstr_numpy_symbol('object')
@@ -1119,8 +1119,8 @@ class TestPandas(unittest.TestCase):
                     'x': pd.Series(['x', 42], dtype='string'),
                     'y': [1, 2]}),
                 table_name='tbl1', symbols=[0], at=qi.ServerTimestamp),
-            'tbl1,x=x y=1i\n' +
-            'tbl1,x=42 y=2i\n')
+            b'tbl1,x=x y=1i\n' +
+            b'tbl1,x=42 y=2i\n')
 
     def test_str_numpy_col(self):
         df = pd.DataFrame({'a': pd.Series([
@@ -1136,14 +1136,14 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a="a"\n' +
+            ('tbl1 a="a"\n' +
             'tbl1 a="q❤️p"\n' +
             'tbl1 a="' + ('❤️' * 1200) + '"\n' +
             'tbl1 a="Questo è un qualcosa"\n' +
             'tbl1 a="щось"\n' +
             'tbl1 a=""\n' +
             'tbl1 a="嚜꓂"\n' +
-            'tbl1 a="💩🦞"\n')
+            'tbl1 a="💩🦞"\n').encode("utf-8"))
 
     def test_str_arrow_table(self):
         df = pd.DataFrame({
@@ -1158,11 +1158,11 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name_col=0, at=qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'a b=1i\n' +
+            ('a b=1i\n' +
             ('b' * 127) + ' b=2i\n' +
             'q❤️p b=3i\n' +
             '嚜꓂ b=4i\n' +
-            '💩🦞 b=5i\n')
+            '💩🦞 b=5i\n').encode("utf-8"))
 
         with self.assertRaisesRegex(
                 qi.IngressError, "Too long"):
@@ -1210,7 +1210,7 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', symbols=True, at = qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1,a=a b=1i\n' +
+            ('tbl1,a=a b=1i\n' +
             'tbl1,a=q❤️p b=2i\n' +
             'tbl1,a=' + ('❤️' * 1200) + ' b=3i\n' +
             'tbl1,a=Questo\\ è\\ un\\ qualcosa b=4i\n' +
@@ -1218,7 +1218,7 @@ class TestPandas(unittest.TestCase):
             'tbl1,a= b=6i\n' +
             'tbl1 b=7i\n' +
             'tbl1,a=嚜꓂ b=8i\n' +
-            'tbl1,a=💩🦞 b=9i\n')
+            'tbl1,a=💩🦞 b=9i\n').encode('utf-8'))
 
     def test_str_arrow_col(self):
         df = pd.DataFrame({
@@ -1237,7 +1237,7 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', symbols=False, at = qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 a="a",b=1i\n' +
+            ('tbl1 a="a",b=1i\n' +
             'tbl1 a="q❤️p",b=2i\n' +
             'tbl1 a="' + ('❤️' * 1200) + '",b=3i\n' +
             'tbl1 a="Questo è un qualcosa",b=4i\n' +
@@ -1245,7 +1245,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a="",b=6i\n' +
             'tbl1 b=7i\n' +
             'tbl1 a="嚜꓂",b=8i\n' +
-            'tbl1 a="💩🦞",b=9i\n')
+            'tbl1 a="💩🦞",b=9i\n').encode('utf-8'))
 
     def test_pyobj_int_col(self):
         int64_min = -2**63
@@ -1260,7 +1260,7 @@ class TestPandas(unittest.TestCase):
                         int64_max], dtype='object'),
                     'b': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}),
                 table_name='tbl1', at = qi.ServerTimestamp),
-            'tbl1 a=1i,b=1i\n' +
+            ('tbl1 a=1i,b=1i\n' +
             'tbl1 a=2i,b=2i\n' +
             'tbl1 a=3i,b=3i\n' +
             'tbl1 b=4i\n' +
@@ -1269,7 +1269,7 @@ class TestPandas(unittest.TestCase):
             'tbl1 a=7i,b=7i\n' +
             'tbl1 a=0i,b=8i\n' +
             'tbl1 a=' + str(int64_min) + 'i,b=9i\n' +
-            'tbl1 a=' + str(int64_max) + 'i,b=10i\n')
+            'tbl1 a=' + str(int64_max) + 'i,b=10i\n').encode('utf-8'))
 
         with self.assertRaisesRegex(
                 qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\\."):
@@ -1298,13 +1298,13 @@ class TestPandas(unittest.TestCase):
                         dtype='object'),
                     'b': [1, 2, 3, 4, 5, 6, 7]}),
                 table_name='tbl1', at = qi.ServerTimestamp),
-            'tbl1 a=1.0,b=1i\n' +
-            'tbl1 a=2.0,b=2i\n' +
-            'tbl1 a=3.0,b=3i\n' +
-            'tbl1 b=4i\n' +
-            'tbl1 a=NaN,b=5i\n' +
-            'tbl1 b=6i\n' +
-            'tbl1 a=7.0,b=7i\n')
+            b'tbl1 a=1.0,b=1i\n' +
+            b'tbl1 a=2.0,b=2i\n' +
+            b'tbl1 a=3.0,b=3i\n' +
+            b'tbl1 b=4i\n' +
+            b'tbl1 a=NaN,b=5i\n' +
+            b'tbl1 b=6i\n' +
+            b'tbl1 a=7.0,b=7i\n')
 
         with self.assertRaisesRegex(
                 qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\\."):
@@ -1335,7 +1335,7 @@ class TestPandas(unittest.TestCase):
         exp = ''.join(
             f'{s} b={i}i\n'
             for i, s in enumerate(slist))
-        self.assertEqual(buf, exp)
+        self.assertEqual(buf, exp.encode("utf-8"))
 
         slist[2] = None
         df2 = pd.DataFrame({
@@ -1369,7 +1369,7 @@ class TestPandas(unittest.TestCase):
         exp = ''.join(
             f'tbl1,a={s} b={i}i\n'
             for i, s in enumerate(slist))
-        self.assertEqual(buf, exp)
+        self.assertEqual(buf, exp.encode("utf-8"))
 
         slist[2] = None
         df2 = pd.DataFrame({
@@ -1378,7 +1378,7 @@ class TestPandas(unittest.TestCase):
 
         exp2 = exp.replace('tbl1,a=s2 b=2i\n', 'tbl1 b=2i\n')
         buf2 = _dataframe(df2, table_name='tbl1', symbols=True, at = qi.ServerTimestamp)
-        self.assertEqual(buf2, exp2)
+        self.assertEqual(buf2, exp2.encode("utf-8"))
 
     def test_cat_i8_symbol(self):
         self._test_cat_symbol(30)
@@ -1404,7 +1404,7 @@ class TestPandas(unittest.TestCase):
         exp = ''.join(
             f'tbl1 a="{s}",b={i}i\n'
             for i, s in enumerate(slist))
-        self.assertEqual(buf, exp)
+        self.assertEqual(buf, exp.encode("utf-8"))
 
         slist[2] = None
         df2 = pd.DataFrame({
@@ -1413,7 +1413,7 @@ class TestPandas(unittest.TestCase):
 
         exp2 = exp.replace('tbl1 a="s2",b=2i\n', 'tbl1 b=2i\n')
         buf2 = _dataframe(df2, table_name='tbl1', symbols=False, at = qi.ServerTimestamp)
-        self.assertEqual(buf2, exp2)
+        self.assertEqual(buf2, exp2.encode("utf-8"))
 
     def test_cat_i8_str(self):
         self._test_cat_str(30)
@@ -1435,9 +1435,9 @@ class TestPandas(unittest.TestCase):
         buf = _dataframe(df, table_name='tbl1', at = qi.ServerTimestamp)
         self.assertEqual(
             buf,
-            'tbl1 b=1i\n' +
-            'tbl1 b=2i\n' +
-            'tbl1 b=3i\n')
+            b'tbl1 b=1i\n' +
+            b'tbl1 b=2i\n' +
+            b'tbl1 b=3i\n')
 
     def test_strided_numpy_column(self):
         two_d = np.array([
@@ -1472,7 +1472,7 @@ class TestPandas(unittest.TestCase):
             exp = ''.join(
                 f'tbl1 a={i}i,b={i}i\n'
                 for i in range(index * 10, (index + 1) * 10))
-            self.assertEqual(buf, exp)
+            self.assertEqual(buf, exp.encode("utf-8"))
 
     def test_arrow_chunked_array(self):
         # We build a table with chunked arrow arrays as columns.
@@ -1495,15 +1495,15 @@ class TestPandas(unittest.TestCase):
         df = arr_tab.to_pandas()
         buf = _dataframe(df, table_name='tbl1', at = qi.ServerTimestamp)
         exp = (
-            'tbl1 a=1i,b=10i\n' +
-            'tbl1 a=2i,b=20i\n' +
-            'tbl1 a=3i,b=30i\n' +
-            'tbl1 a=4i,b=40i\n' +
-            'tbl1 a=5i,b=50i\n' +
-            'tbl1 a=6i,b=60i\n' +
-            'tbl1 a=7i,b=70i\n' +
-            'tbl1 a=8i,b=80i\n' +
-            'tbl1 a=9i,b=90i\n')
+            b'tbl1 a=1i,b=10i\n' +
+            b'tbl1 a=2i,b=20i\n' +
+            b'tbl1 a=3i,b=30i\n' +
+            b'tbl1 a=4i,b=40i\n' +
+            b'tbl1 a=5i,b=50i\n' +
+            b'tbl1 a=6i,b=60i\n' +
+            b'tbl1 a=7i,b=70i\n' +
+            b'tbl1 a=8i,b=80i\n' +
+            b'tbl1 a=9i,b=90i\n')
         self.assertEqual(buf, exp)
 
         if not hasattr(pd, 'ArrowDtype'):
@@ -1568,18 +1568,18 @@ class TestPandas(unittest.TestCase):
         df_eq(df, fp2fp_df, exp_dtypes)
 
         exp = (
-            'tbl1,s=a a=1i,b=10i,c=0.5\n' +
-            'tbl1,s=b a=2i,b=20i,c=NaN\n' +
-            'tbl1,s=a a=3i,b=30i,c=2.5\n' +
-            'tbl1,s=c a=4i,c=3.5\n' +
-            'tbl1,s=a a=5i,b=50i,c=NaN\n')
+            b'tbl1,s=a a=1i,b=10i,c=0.5\n' +
+            b'tbl1,s=b a=2i,b=20i,c=NaN\n' +
+            b'tbl1,s=a a=3i,b=30i,c=2.5\n' +
+            b'tbl1,s=c a=4i,c=3.5\n' +
+            b'tbl1,s=a a=5i,b=50i,c=NaN\n')
 
         fallback_exp = (
-            'tbl1 s="a",a=1i,b=10.0,c=0.5\n' +
-            'tbl1 s="b",a=2i,b=20.0,c=NaN\n' +
-            'tbl1 s="a",a=3i,b=30.0,c=2.5\n' +
-            'tbl1 s="c",a=4i,b=NaN,c=3.5\n' +
-            'tbl1 s="a",a=5i,b=50.0,c=NaN\n')
+            b'tbl1 s="a",a=1i,b=10.0,c=0.5\n' +
+            b'tbl1 s="b",a=2i,b=20.0,c=NaN\n' +
+            b'tbl1 s="a",a=3i,b=30.0,c=2.5\n' +
+            b'tbl1 s="c",a=4i,b=NaN,c=3.5\n' +
+            b'tbl1 s="a",a=5i,b=50.0,c=NaN\n')
 
         self.assertEqual(_dataframe(df, table_name='tbl1', at=qi.ServerTimestamp), exp)
         self.assertEqual(_dataframe(pa2pa_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
