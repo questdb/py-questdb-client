@@ -345,10 +345,10 @@ class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(buffer.peek())``.
+        Equivalent (but cheaper) to ``len(bytes(buffer))``.
         """
 
-    def peek(self) -> bytes:
+    def  __bytes__(self) -> bytes:
         """Return the constructed buffer as bytes. Use for debugging."""
 
     def row(
@@ -945,10 +945,10 @@ class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(sender.peek())``.
+        Equivalent (but cheaper) to ``len(bytes(sender))``.
         """
 
-    def peek(self) -> bytes:
+    def __bytes__(self) -> bytes:
         """
         Inspect the contents of the internal buffer.
 

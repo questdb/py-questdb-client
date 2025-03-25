@@ -35,7 +35,7 @@ except ImportError:
 def _dataframe(*args, **kwargs):
     buf = qi.Buffer()
     buf.dataframe(*args, **kwargs)
-    return buf.peek()
+    return bytes(buf)
 
 DF1 = pd.DataFrame({
     'A': [1.0, 2.0, 3.0],
@@ -413,7 +413,7 @@ class TestPandas(unittest.TestCase):
             b'tbl2 b=1.0\n' +
             b'tbl2 b=1.5\n')
         self.assertEqual(
-            buf.peek(),
+            bytes(buf),
             exp1)
         df2 = pd.DataFrame({'a': pd.Series([
                 1, 2, 3,
@@ -426,7 +426,7 @@ class TestPandas(unittest.TestCase):
             buf.dataframe(df2, table_name='tbl1', at=qi.ServerTimestamp)
 
         self.assertEqual(
-            buf.peek(),
+            bytes(buf),
             exp1)  # No partial write of `df2`.
 
     def test_i64_numpy_col(self):
