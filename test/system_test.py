@@ -26,7 +26,7 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '8.2.3'
+QUESTDB_VERSION = '8.2.1'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 
