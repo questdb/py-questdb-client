@@ -1,2 +1,2 @@
-#!/bin/sh
+#!/bin/bash
 python3 proj.py "$@"
