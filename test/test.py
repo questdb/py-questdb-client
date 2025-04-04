@@ -27,7 +27,9 @@ try:
     import pandas as pd
     import numpy
     import pyarrow
-except ImportError:
+except ImportError as e:
+    print(e)
+    print("Disabling pandas run...")
     pd = None
 
 if pd is not None:

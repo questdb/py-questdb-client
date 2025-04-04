@@ -186,6 +186,12 @@ class TestWithDatabase(unittest.TestCase):
         scrubbed_dataset = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_dataset, exp_dataset)
 
+        # test pandas.Timestamp.now()
+        df = pd.DataFrame({'x': [1,2,3]})
+        df['timestamp'] = pd.Timestamp.now()
+        with qi.Sender('tcp', 'localhost', port) as sender:
+            sender.dataframe(df, table_name='foo', at='timestamp')
+
     def test_http(self):
         port = self.qdb_plain.http_server_port
         table_name = uuid.uuid4().hex

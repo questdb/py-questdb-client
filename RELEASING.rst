@@ -63,10 +63,9 @@ From a MacOS ARM computer install UTM.
 * Install MacOS X 12.4 (Monterey). See https://docs.getutm.app/guest-support/macos/
 * Install Rust from https://rustup.rs/
 * Install Firefox
-* Install *all* OFFICIAL Python Releases from Python 3.8 onwards. Use the latest patch version for each minor release. 
+* Install *all* OFFICIAL Python Releases from Python 3.9 onwards. Use the latest patch version for each minor release.
     * https://www.python.org/downloads/macos/
     * Do NOT use Homebrew to install Python.
-    * Python 3.8.10 requires Rosetta, install it when prompted to do so. 
 
 * Optionally install VS Code
 
@@ -93,9 +92,9 @@ Inside the VM, open a terminal (or use the terminal Window in VSCode) and run th
 
     rustup update stable
 
-    /Library/Frameworks/Python.framework/Versions/3.8/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.9/bin/python3 \
         -m pip install -U pip
-    /Library/Frameworks/Python.framework/Versions/3.8/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.9/bin/python3 \
         -m pip install -U setuptools wheel twine Cython cibuildwheel pandas numpy pyarrow
 
 Smoke-testing the build
