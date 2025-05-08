@@ -38,6 +38,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 
 class IngressErrorCode(Enum):
@@ -54,7 +55,16 @@ class IngressErrorCode(Enum):
     HttpNotSupported = ...
     ServerFlushError = ...
     ConfigError = ...
+    ArrayLargeDimError = ...
+    ArrayInternalError = ...
+    ArrayWriteToBufferError = ...
+    LineProtocolVersionError = ...
     BadDataFrame = ...
+
+class LineProtocolVersion(Enum):
+    """Line protocol version."""
+    LineProtocolVersionV1 = ...
+    LineProtocolVersionV2 = ...
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -194,7 +204,7 @@ class SenderTransaction:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
         at: Union[ServerTimestamp, TimestampNanos, datetime],
     ) -> SenderTransaction:
@@ -300,7 +310,7 @@ class Buffer:
 
     """
 
-    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127):
+    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127, line_protocol_version: LineProtocolVersion = LineProtocolVersion.LineProtocolVersionV2):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
@@ -357,7 +367,7 @@ class Buffer:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
         at: Union[ServerTimestamp, TimestampNanos, datetime],
     ) -> Buffer:
@@ -806,6 +816,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ): ...
@@ -831,6 +842,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -866,6 +878,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -925,6 +938,11 @@ class Sender:
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
 
+    def default_line_protocol_version(self) -> LineProtocolVersion:
+        """
+        Returns the QuestDB server's recommended default line protocol version.
+        """
+
     def establish(self):
         """
         Prepare the sender for use.
@@ -968,7 +986,7 @@ class Sender:
         *,
         symbols: Optional[Dict[str, str]] = None,
         columns: Optional[
-            Dict[str, Union[bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
         at: Union[TimestampNanos, datetime, ServerTimestamp],
     ) -> Sender:

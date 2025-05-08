@@ -82,6 +82,8 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import sys
 import os
+cimport numpy as cnp
+import numpy as np
 
 
 # This value is automatically updated by the `bump2version` tool.
@@ -89,6 +91,7 @@ import os
 # .bumpversion.cfg.
 VERSION = '2.0.3'
 
+MAX_ARRAY_DIM = 32
 
 cdef bint _has_gil(PyThreadState** gs):
     return gs[0] == NULL
@@ -107,7 +110,6 @@ cdef void _ensure_has_gil(PyThreadState** gs):
         PyEval_RestoreThread(gs[0])
         gs[0] = NULL
 
-
 class IngressErrorCode(Enum):
     """Category of Error."""
     CouldNotResolveAddr = line_sender_error_could_not_resolve_addr
@@ -121,12 +123,20 @@ class IngressErrorCode(Enum):
     HttpNotSupported = line_sender_error_http_not_supported
     ServerFlushError = line_sender_error_server_flush_error
     ConfigError = line_sender_error_config_error
-    BadDataFrame = <int>line_sender_error_server_flush_error + 1
+    ArrayLargeDimError = line_sender_error_array_large_dim
+    ArrayInternalError = line_sender_error_array_view_internal_error
+    ArrayWriteToBufferError = line_sender_error_array_view_write_to_buffer_error
+    LineProtocolVersionError = line_sender_error_line_protocol_version_error
+    BadDataFrame = <int>line_sender_error_line_protocol_version_error + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
         return self.name
 
+class LineProtocolVersion(Enum):
+    """Line protocol version."""
+    LineProtocolVersionV1 = line_protocol_version_1
+    LineProtocolVersionV2 = line_protocol_version_2
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -163,6 +173,14 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ServerFlushError
     elif code == line_sender_error_config_error:
         return IngressErrorCode.ConfigError
+    elif code == line_sender_error_array_large_dim:
+        return IngressErrorCode.ArrayLargeDimError
+    elif code == line_sender_error_array_view_internal_error:
+        return IngressErrorCode.ArrayInternalError
+    elif code == line_sender_error_array_view_write_to_buffer_error:
+        return IngressErrorCode.ArrayWriteToBufferError
+    elif code == line_sender_error_line_protocol_version_error:
+        return IngressErrorCode.LineProtocolVersionError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -608,7 +626,7 @@ cdef class SenderTransaction:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
                 ]=None,
             at: Union[ServerTimestamp, TimestampNanos, datetime]):
         """
@@ -689,7 +707,6 @@ cdef class SenderTransaction:
         self._sender._in_txn = False
         self._complete = True
 
-
 cdef class Buffer:
     """
     Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
@@ -760,18 +777,22 @@ cdef class Buffer:
     cdef size_t _max_name_len
     cdef object _row_complete_sender
 
-    def __cinit__(self, init_buf_size: int=65536, max_name_len: int=127):
+    def __cinit__(self, init_buf_size: int=65536, max_name_len: int=127, line_protocol_version: LineProtocolVersion=LineProtocolVersion.LineProtocolVersionV2):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
-        self._cinit_impl(init_buf_size, max_name_len)
+        self._cinit_impl(init_buf_size, max_name_len, line_protocol_version.value)
 
-    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len):
+    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len, line_protocol_version version):
         self._impl = line_sender_buffer_with_max_name_len(max_name_len)
         self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_buf_size)
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_set_line_protocol_version(self._impl, version, &err):
+            raise c_err_to_py(err)
+
         self._init_buf_size = init_buf_size
         self._max_name_len = max_name_len
         self._row_complete_sender = None
@@ -905,6 +926,20 @@ cdef class Buffer:
         if not line_sender_buffer_column_ts_micros(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
 
+    cdef inline void_int _column_numpy(
+            self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
+        if cnp.PyArray_DTYPE(arr).kind != b'f':
+            raise ValueError('expect float64 array')
+        cdef size_t rank = cnp.PyArray_NDIM(arr)
+        if rank == 0:
+            raise ValueError('Zero-dimensional arrays are not supported')
+        if rank > MAX_ARRAY_DIM:
+            raise ValueError(f'Array dimension mismatch: expected at most {MAX_ARRAY_DIM} dimensions, but got {rank}')
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_column_f64_arr(
+                self._impl, c_name, rank, cnp.PyArray_DIMS(arr), cnp.PyArray_STRIDES(arr), cnp.PyArray_BYTES(arr), cnp.PyArray_NBYTES(arr), &err):
+            raise c_err_to_py(err)
+
     cdef inline void_int _column_dt(
             self, line_sender_column_name c_name, datetime dt) except -1:
         cdef line_sender_error* err = NULL
@@ -925,6 +960,8 @@ cdef class Buffer:
             self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
             self._column_ts(c_name, value)
+        elif PyArray_CheckExact(<PyObject *> value):
+            self._column_numpy(c_name, value)
         elif isinstance(value, datetime):
             self._column_dt(c_name, value)
         else:
@@ -934,7 +971,8 @@ cdef class Buffer:
                 'float',
                 'str',
                 'TimestampMicros',
-                'datetime.datetime'))
+                'datetime.datetime'
+                'np.ndarray'))
             raise TypeError(
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
@@ -1016,7 +1054,7 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
                 ]=None,
             at: Union[ServerTimestamp, TimestampNanos, datetime]):
         """
@@ -1706,6 +1744,7 @@ cdef object parse_conf_str(
         'auto_flush_rows': str,
         'auto_flush_bytes': str,
         'auto_flush_interval': str,
+        'disable_line_protocol_version': str,
         'init_buf_size': int,
         'max_name_len': int,
     }
@@ -1759,6 +1798,7 @@ cdef class Sender:
             object auto_flush_rows,
             object auto_flush_bytes,
             object auto_flush_interval,
+            object disable_line_protocol_validation,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -1906,11 +1946,30 @@ cdef class Sender:
             auto_flush_interval,
             &self._auto_flush_mode)
 
+        if isinstance(disable_line_protocol_validation, str):
+            if disable_line_protocol_validation == 'off':
+                disable_line_protocol_validation = False
+            elif disable_line_protocol_validation == 'on':
+                disable_line_protocol_validation = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.ConfigError,
+                    '"disable_line_protocol_validation" must be None, bool, "on" or "off", ' +
+                    f'not {disable_line_protocol_validation!r}')
+
+        if disable_line_protocol_validation is None:
+            disable_line_protocol_validation = False
+        elif not isinstance(disable_line_protocol_validation, bool):
+            raise ValueError(
+                '"disable_line_protocol_validation" must be None, bool, "on" or "off", ' +
+                f'not {disable_line_protocol_validation!r}')
+
+        if disable_line_protocol_validation:
+            if not line_sender_opts_disable_line_protocol_validation(self._opts, &err):
+                raise c_err_to_py(err)
+
         self._init_buf_size = init_buf_size or 65536
         self._max_name_len = max_name_len or 127
-        self._buffer = Buffer(
-            init_buf_size=self._init_buf_size,
-            max_name_len=self._max_name_len)
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
     def __cinit__(self):
@@ -1948,6 +2007,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object disable_line_protocol_validation=None,  # Default off
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
 
@@ -1991,6 +2051,7 @@ cdef class Sender:
                 auto_flush_rows,
                 auto_flush_bytes,
                 auto_flush_interval,
+                disable_line_protocol_validation,
                 init_buf_size,
                 max_name_len)
         finally:
@@ -2018,6 +2079,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object disable_line_protocol_validation=None,  # Default off
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2072,6 +2134,7 @@ cdef class Sender:
                 'auto_flush_rows': auto_flush_rows,
                 'auto_flush_bytes': auto_flush_bytes,
                 'auto_flush_interval': auto_flush_interval,
+                'disable_line_protocol_validation': disable_line_protocol_validation,
                 'init_buf_size': init_buf_size,
                 'max_name_len': max_name_len,
             }.items():
@@ -2112,6 +2175,7 @@ cdef class Sender:
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
+                params.get('disable_line_protocol_validation'),
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
             
@@ -2140,6 +2204,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object disable_line_protocol_validation=None,  # Default off
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2179,6 +2244,7 @@ cdef class Sender:
             auto_flush_rows=auto_flush_rows,
             auto_flush_bytes=auto_flush_bytes,
             auto_flush_interval=auto_flush_interval,
+            disable_line_protocol_validation=disable_line_protocol_validation,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
 
@@ -2192,7 +2258,8 @@ cdef class Sender:
         """
         return Buffer(
             init_buf_size=self._init_buf_size,
-            max_name_len=self._max_name_len)
+            max_name_len=self._max_name_len,
+            line_protocol_version=self.default_line_protocol_version())
 
     @property
     def init_buf_size(self) -> int:
@@ -2247,6 +2314,13 @@ cdef class Sender:
             return None
         return timedelta(milliseconds=self._auto_flush_mode.interval)
 
+    def default_line_protocol_version(self) -> LineProtocolVersion:
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'default_line_protocol_version() can\'t be called: Not connected.')
+        return LineProtocolVersion(line_sender_default_line_protocol_version(self._impl))
+
     def establish(self):
         """
         Prepare the sender for use.
@@ -2267,6 +2341,13 @@ cdef class Sender:
         self._impl = line_sender_build(self._opts, &err)
         if self._impl == NULL:
             raise c_err_to_py(err)
+
+        if self._buffer is None:
+            self._buffer = Buffer(
+                init_buf_size=self._init_buf_size,
+                max_name_len=self._max_name_len,
+                line_protocol_version=self.default_line_protocol_version())
+
         line_sender_opts_free(self._opts)
         self._opts = NULL
 
@@ -2311,7 +2392,7 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
+                Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]]=None,
             at: Union[TimestampNanos, datetime, ServerTimestamp]):
         """
         Write a row to the internal buffer.

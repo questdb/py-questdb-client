@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import struct
 import sys
 
 sys.dont_write_bytecode = True
@@ -40,6 +40,12 @@ else:
             with self.assertRaisesRegex(ImportError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
 
+
+def _float_binary_bytes(value: float, text_format: bool = False) -> bytes:
+    if text_format:
+        return f"={value}".encode('utf-8')
+    else:
+        return b'==' + struct.pack('<B', 16) + struct.pack('<d', value)
 
 class TestBuffer(unittest.TestCase):
     def test_buffer_row_at_disallows_none(self):
@@ -199,7 +205,12 @@ class TestBuffer(unittest.TestCase):
     def test_float(self):
         buf = qi.Buffer()
         buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), f'tbl1 num=1.2345678901234567\n'.encode('utf-8'))
+        self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567) + b'\n')
+
+    def test_float_line_protocol_v1(self):
+        buf = qi.Buffer(line_protocol_version=qi.LineProtocolVersion.LineProtocolVersionV1)
+        buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
+        self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567, True) + b'\n')
 
     def test_int_range(self):
         buf = qi.Buffer()
