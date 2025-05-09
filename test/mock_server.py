@@ -140,7 +140,7 @@ class HttpServer:
     def __enter__(self):
         self._stop_event = threading.Event()
         handler_class = self.create_handler()
-        self._http_server = hs.HTTPServer(('', 1111), handler_class, bind_and_activate=True)
+        self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()
         return self
