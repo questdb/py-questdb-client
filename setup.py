@@ -5,6 +5,7 @@ import sys
 import os
 import shutil
 import platform
+import numpy as np
 
 from setuptools import setup, find_packages
 from setuptools.extension import Extension
@@ -83,7 +84,8 @@ def ingress_extension():
         ["src/questdb/ingress.pyx"],
         include_dirs=[
             "c-questdb-client/include",
-            "pystr-to-utf8/include"],
+            "pystr-to-utf8/include",
+            np.get_include()],
         library_dirs=lib_paths,
         libraries=libraries,
         extra_compile_args=extra_compile_args,

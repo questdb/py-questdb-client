@@ -85,6 +85,11 @@ import os
 cimport numpy as cnp
 import numpy as np
 
+cdef extern from "numpy/ndarraytypes.h":
+    ctypedef struct PyArray_Descr:
+        int type_num
+    enum: NPY_FLOAT64
+cnp.import_array()
 
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
@@ -928,16 +933,23 @@ cdef class Buffer:
 
     cdef inline void_int _column_numpy(
             self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
-        if cnp.PyArray_DTYPE(arr).kind != b'f':
-            raise ValueError('expect float64 array')
-        cdef size_t rank = cnp.PyArray_NDIM(arr)
+        cdef PyArray_Descr * dtype_ptr = cnp.PyArray_DESCR(arr)
+        if dtype_ptr.type_num != NPY_FLOAT64:
+            raise ValueError('Expected float64 array, got: %s' % str(arr.dtype))
+        cdef:
+            size_t rank = cnp.PyArray_NDIM(arr)
+            const uint8_t * data_ptr
+            line_sender_error * err = NULL
+
         if rank == 0:
             raise ValueError('Zero-dimensional arrays are not supported')
         if rank > MAX_ARRAY_DIM:
-            raise ValueError(f'Array dimension mismatch: expected at most {MAX_ARRAY_DIM} dimensions, but got {rank}')
-        cdef line_sender_error* err = NULL
+            raise ValueError(f'Max dimensions {MAX_ARRAY_DIM}, got {rank}')
+        data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
+
         if not line_sender_buffer_column_f64_arr(
-                self._impl, c_name, rank, cnp.PyArray_DIMS(arr), cnp.PyArray_STRIDES(arr), cnp.PyArray_BYTES(arr), cnp.PyArray_NBYTES(arr), &err):
+                self._impl, c_name, rank, <const size_t*> cnp.PyArray_DIMS(arr),
+                <const ssize_t*> cnp.PyArray_STRIDES(arr), data_ptr, cnp.PyArray_NBYTES(arr), &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_dt(
