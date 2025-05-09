@@ -1,3 +1,4 @@
+import json
 import socket
 import select
 import re
@@ -59,12 +60,16 @@ class Server:
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
         self.close()
 
+SETTINGS_WITH_PROTOCOL_VERSION = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.default.version": 2, "line.proto.support.versions": [1, 2], "ilp.proto.transports": [ "tcp", "http" ], "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITHOUT_PROTOCOL_VERSION = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
+
 class HttpServer:
-    def __init__(self, delay_seconds=0):
+    def __init__(self, delay_seconds=0, settings=SETTINGS_WITH_PROTOCOL_VERSION):
         self.delay_seconds = delay_seconds
         self.requests = []
         self.responses = []
         self.headers = []
+        self.settings = settings.decode('utf-8')
         self._ready_event = None
         self._stop_event = None
         self._http_server = None
@@ -79,8 +84,33 @@ class HttpServer:
         requests = self.requests
         headers = self.headers
         responses = self.responses
+        server_settings = self.settings.encode('utf-8')
 
         class IlpHttpHandler(hs.BaseHTTPRequestHandler):
+            def do_GET(self):
+                try:
+                    time.sleep(delay_seconds)
+                    headers.append(dict(self.headers.items()))
+                    content_length = self.headers.get('Content-Length', 0)
+                    if content_length:
+                        self.rfile.read(int(content_length))
+
+                    if len(server_settings) == 0:
+                        self.send_error(404, "Endpoint not found")
+                    else:
+                        if self.path == '/settings':
+                            response_data = server_settings
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'application/json')
+                            self.send_header('Content-Length', len(response_data))
+                            self.end_headers()
+                            self.wfile.write(response_data)
+                            self.wfile.flush()
+                        else:
+                            self.send_error(404, "Endpoint not found")
+                except BrokenPipeError:
+                    pass
+
             def do_POST(self):
                 time.sleep(delay_seconds)
 
@@ -110,7 +140,7 @@ class HttpServer:
     def __enter__(self):
         self._stop_event = threading.Event()
         handler_class = self.create_handler()
-        self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
+        self._http_server = hs.HTTPServer(('', 1111), handler_class, bind_and_activate=True)
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()
         return self

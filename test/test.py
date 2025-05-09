@@ -10,6 +10,7 @@ import time
 from enum import Enum
 import random
 import pathlib
+import numpy as np
 
 import patch_path
 
@@ -46,6 +47,41 @@ def _float_binary_bytes(value: float, text_format: bool = False) -> bytes:
         return f"={value}".encode('utf-8')
     else:
         return b'==' + struct.pack('<B', 16) + struct.pack('<d', value)
+
+ARRAY_TYPE_TAGS = {
+    np.float64: 10,
+}
+
+def _array_binary_bytes(value: np.ndarray) -> bytes:
+    header = b'='
+    format_type = struct.pack('<B', 14)
+    try:
+        type_tag = struct.pack('<B', ARRAY_TYPE_TAGS[value.dtype.type])
+    except KeyError:
+        raise ValueError(f"Unsupported dtype: {value.dtype}")
+
+    ndim = struct.pack('<B', value.ndim)
+    shape_bytes = b''.join(struct.pack('<i', dim) for dim in value.shape)
+
+    dtype_le = value.dtype.newbyteorder('<')
+    arr_view = value.astype(dtype_le, copy=False)
+
+    if value.ndim != 0 and value.nbytes != 0:
+        data_body = b''.join(
+            elem.tobytes()
+            for elem in np.nditer(arr_view, order='C')
+        )
+    else:
+        data_body = b''
+
+    return (
+            header +
+            format_type +
+            type_tag +
+            ndim +
+            shape_bytes +
+            data_body
+    )
 
 class TestBuffer(unittest.TestCase):
     def test_buffer_row_at_disallows_none(self):
@@ -127,8 +163,8 @@ class TestBuffer(unittest.TestCase):
             'col7': two_h_after_epoch,
             'col8': None}, at=qi.ServerTimestamp)
         exp = (
-            b'tbl1 col1=t,col2=f,col3=-1i,col4=0.5,'
-            b'col5="val",col6=12345t,col7=7200000000t\n')
+            b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5) +
+            b',col5="val",col6=12345t,col7=7200000000t\n')
         self.assertEqual(bytes(buf), exp)
 
     def test_none_symbol(self):
@@ -206,6 +242,49 @@ class TestBuffer(unittest.TestCase):
         buf = qi.Buffer()
         buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
         self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567) + b'\n')
+
+    def test_array_basic(self):
+        buf = qi.Buffer()
+        arr = np.array([1.2345678901234567, 2.3456789012345678], dtype=np.float64)
+        buf.row('tbl1', columns={'array': arr}, at=qi.ServerTimestamp)
+        self.assertEqual(bytes(buf), b'tbl1 array=' + _array_binary_bytes(arr) + b'\n')
+
+    def test_array_edge_cases(self):
+        # empty array
+        buf = qi.Buffer()
+        empty_arr = np.array([], dtype=np.float64)
+        buf.row('empty_table', columns={'col': empty_arr}, at=qi.ServerTimestamp)
+        empty_expected = b'empty_table col=' + _array_binary_bytes(empty_arr) + b'\n'
+        self.assertEqual(bytes(buf), empty_expected)
+
+        # non contigious array
+        base = np.arange(6, dtype=np.float64).reshape(2, 3)
+        non_contig_arr = base[:, ::2]  # shape (2, 2), strides (24, 16)
+        buf = qi.Buffer()
+        buf.row('non_contig_table', columns={'col': non_contig_arr}, at=qi.ServerTimestamp)
+        non_contig_expected = b'non_contig_table col=' + _array_binary_bytes(non_contig_arr) + b'\n'
+        self.assertEqual(bytes(buf), non_contig_expected)
+
+        # minus stride
+        reversed_arr = np.array([1.1, 2.2, 3.3], dtype=np.float64)[::-1]  # strides -8
+        buf = qi.Buffer()
+        buf.row('reversed_table', columns={'col': reversed_arr}, at=qi.ServerTimestamp)
+        reversed_expected = b'reversed_table col=' + _array_binary_bytes(reversed_arr) + b'\n'
+        self.assertEqual(bytes(buf), reversed_expected)
+
+        with self.assertRaises(ValueError):
+            scalar_arr = np.array(42.0, dtype=np.float64)
+            buf = qi.Buffer()
+            buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
+
+        with self.assertRaises(ValueError):
+            complex_arr = np.array([1 + 2j], dtype=np.complex64)
+            buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
+
+        # large array
+        with self.assertRaises(qi.IngressError):
+            large_arr = np.arange(2147483648, dtype=np.float64)
+            buf.row('large_array', columns={'col': large_arr}, at=qi.ServerTimestamp)
 
     def test_float_line_protocol_v1(self):
         buf = qi.Buffer(line_protocol_version=qi.LineProtocolVersion.LineProtocolVersionV1)
@@ -333,7 +412,7 @@ class TestBases:
                 msgs = server.recv()
                 self.assertEqual(msgs, [
                     (b'tab1,t1=val1,t2=val2 '
-                     b'f1=t,f2=12345i,f3=10.75,f4="val3" '
+                     b'f1=t,f2=12345i,f3' + _float_binary_bytes(10.75) + b',f4="val3" '
                      b'111222233333'),
                     b'tab1,tag3=value\\ 3,tag4=value:4 field5=f'])
 
@@ -880,7 +959,7 @@ class TestBases:
         def _do_test_auto_flush_interval2(self):
             with HttpServer() as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     auto_flush_interval=10,
                     auto_flush_rows=False,
@@ -1103,6 +1182,7 @@ def build_conf(protocol, host, port, **kwargs):
         'auto_flush_rows': encode_int_or_off,
         'auto_flush_bytes': encode_int_or_off,
         'auto_flush_interval': encode_duration_or_off,
+        'disable_line_protocol_validation': lambda v: 'on' if v else 'off',
         'init_buf_size': str,
         'max_name_len': str,
     }
@@ -1165,7 +1245,6 @@ class TestSenderConf(TestBases.TestSender):
 class TestSenderEnv(TestBases.TestSender):
     name = 'env'
     builder = Builder.ENV
-
 
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
