@@ -331,7 +331,7 @@ class TestBases:
     class TestSender(unittest.TestCase):
 
         def test_transaction_row_at_disallows_none(self):
-            with Server() as server, self.builder('http', 'localhost', server.port) as sender:
+            with Server() as server, self.builder('http', 'localhost', server.port, disable_line_protocol_validation=True) as sender:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
@@ -511,12 +511,12 @@ class TestBases:
                     columns={'price': '111222233343i', 'qty': 2.5},
                     at=qi.TimestampNanos(111222233343))
                 exp = (
-                    'line_sender_buffer_example2,id=Hola price="111222233333i",qty=3.5 111222233333\n'
-                    'line_sender_example,id=Adios price="111222233343i",qty=2.5 111222233343\n')
-                self.assertEqual(bytes(buffer), exp.encode('utf-8'))
+                    b'line_sender_buffer_example2,id=Hola price="111222233333i",qty' + _float_binary_bytes(3.5) + b' 111222233333\n'
+                    b'line_sender_example,id=Adios price="111222233343i",qty' + _float_binary_bytes(2.5) + b' 111222233343\n')
+                self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 msgs = server.recv()
-                bexp = [msg.encode('utf-8') for msg in exp.rstrip().split('\n')]
+                bexp = [msg for msg in exp.rstrip().split(b'\n')]
                 self.assertEqual(msgs, bexp)
 
         def test_independent_buffer(self):
@@ -998,14 +998,14 @@ class TestBases:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
-            self.assertEqual(server.headers[0]['Authorization'], 'Basic dXNlcjpwYXNz')
+            self.assertEqual(server.headers[1]['authorization'], 'Basic dXNlcjpwYXNz')
 
         def test_http_token(self):
             with HttpServer() as server, self.builder('http', 'localhost', server.port, token='Yogi') as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
-            self.assertEqual(server.headers[0]['Authorization'], 'Bearer Yogi')
+            self.assertEqual(server.headers[1]['authorization'], 'Bearer Yogi')
 
         def test_max_buf_size(self):
             with HttpServer() as server, self.builder('http', 'localhost', server.port, max_buf_size=1024,
@@ -1048,6 +1048,7 @@ class TestBases:
                     'localhost',
                     server.port,
                     request_timeout=1000,
+                    disable_line_protocol_validation=True,
                     # request_timeout is sufficiently high since it's also used as a connect timeout and we want to
                     # survive hiccups on CI. it should be lower than the server delay though to actually test the
                     # effect of request_min_throughput.
@@ -1064,6 +1065,7 @@ class TestBases:
                     auto_flush='off',
                     request_timeout=1,
                     retry_timeout=0,
+                    disable_line_protocol_validation=True,
                     request_min_throughput=100000000) as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
@@ -1074,7 +1076,7 @@ class TestBases:
                 # wait 5ms in the server to simulate a slow response
                 server.responses.append((5, 200, 'text/plain', b'OK'))
 
-                with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
+                with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
 
         def test_http_request_timeout(self):
@@ -1084,11 +1086,12 @@ class TestBases:
                     server.port,
                     retry_timeout=0,
                     request_min_throughput=0,  # disable
+                    disable_line_protocol_validation=True,
                     request_timeout=datetime.timedelta(milliseconds=5)) as sender:
                 # wait for 10ms in the server to simulate a slow response
                 server.responses.append((20, 200, 'text/plain', b'OK'))
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                with self.assertRaisesRegex(qi.IngressError, 'timed out reading response'):
+                with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
 
     class Timestamp(unittest.TestCase):

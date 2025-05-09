@@ -1982,6 +1982,14 @@ cdef class Sender:
 
         self._init_buf_size = init_buf_size or 65536
         self._max_name_len = max_name_len or 127
+
+        # self._buffer will be constructed after establish connection.
+        if self._c_protocol == line_sender_protocol_tcp or self._c_protocol == line_sender_protocol_tcps:
+            self._buffer = Buffer(
+                init_buf_size=self._init_buf_size,
+                max_name_len=self._max_name_len,
+                line_protocol_version=LineProtocolVersion.LineProtocolVersionV2)
+
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
     def __cinit__(self):
@@ -2327,6 +2335,9 @@ cdef class Sender:
         return timedelta(milliseconds=self._auto_flush_mode.interval)
 
     def default_line_protocol_version(self) -> LineProtocolVersion:
+        if self._c_protocol == line_sender_protocol_tcp or self._c_protocol == line_sender_protocol_tcps:
+            return LineProtocolVersion.LineProtocolVersionV2
+
         if self._impl == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
@@ -2346,11 +2357,14 @@ cdef class Sender:
         method will return only *after* the handshake(s) is/are complete.
         """
         cdef line_sender_error* err = NULL
+        cdef PyThreadState * gs = NULL
         if self._opts == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'establish() can\'t be called after close().')
+        _ensure_doesnt_have_gil(&gs)
         self._impl = line_sender_build(self._opts, &err)
+        _ensure_has_gil(&gs)
         if self._impl == NULL:
             raise c_err_to_py(err)
 
