@@ -167,7 +167,7 @@ def readme():
 
 setup(
     name='questdb',
-    version='2.0.3',
+    version='2.0.4',
     platforms=['any'],
     python_requires='>=3.8',
     install_requires=[],
