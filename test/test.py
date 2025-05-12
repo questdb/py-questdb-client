@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import struct
 import sys
+
+from examples import buffer
 
 sys.dont_write_bytecode = True
 import os
@@ -14,10 +15,12 @@ import numpy as np
 
 import patch_path
 
+from common_tools import _float_binary_bytes, _array_binary_bytes
+
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
-from mock_server import Server, HttpServer
+from mock_server import Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION
 
 import questdb.ingress as qi
 
@@ -40,48 +43,6 @@ else:
             exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
             with self.assertRaisesRegex(ImportError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
-
-
-def _float_binary_bytes(value: float, text_format: bool = False) -> bytes:
-    if text_format:
-        return f"={value}".encode('utf-8')
-    else:
-        return b'==' + struct.pack('<B', 16) + struct.pack('<d', value)
-
-ARRAY_TYPE_TAGS = {
-    np.float64: 10,
-}
-
-def _array_binary_bytes(value: np.ndarray) -> bytes:
-    header = b'='
-    format_type = struct.pack('<B', 14)
-    try:
-        type_tag = struct.pack('<B', ARRAY_TYPE_TAGS[value.dtype.type])
-    except KeyError:
-        raise ValueError(f"Unsupported dtype: {value.dtype}")
-
-    ndim = struct.pack('<B', value.ndim)
-    shape_bytes = b''.join(struct.pack('<i', dim) for dim in value.shape)
-
-    dtype_le = value.dtype.newbyteorder('<')
-    arr_view = value.astype(dtype_le, copy=False)
-
-    if value.ndim != 0 and value.nbytes != 0:
-        data_body = b''.join(
-            elem.tobytes()
-            for elem in np.nditer(arr_view, order='C')
-        )
-    else:
-        data_body = b''
-
-    return (
-            header +
-            format_type +
-            type_tag +
-            ndim +
-            shape_bytes +
-            data_body
-    )
 
 class TestBuffer(unittest.TestCase):
     def test_buffer_row_at_disallows_none(self):
@@ -272,17 +233,19 @@ class TestBuffer(unittest.TestCase):
         reversed_expected = b'reversed_table col=' + _array_binary_bytes(reversed_arr) + b'\n'
         self.assertEqual(bytes(buf), reversed_expected)
 
-        with self.assertRaises(ValueError):
+        # zero dimensional array
+        with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
             scalar_arr = np.array(42.0, dtype=np.float64)
             buf = qi.Buffer()
             buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
 
-        with self.assertRaises(ValueError):
+        # not f64 dtype array
+        with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
             complex_arr = np.array([1 + 2j], dtype=np.complex64)
             buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
         # large array
-        with self.assertRaises(qi.IngressError):
+        with self.assertRaisesRegex(qi.IngressError, "Array total elem size overflow"):
             large_arr = np.arange(2147483648, dtype=np.float64)
             buf.row('large_array', columns={'col': large_arr}, at=qi.ServerTimestamp)
 
@@ -331,7 +294,7 @@ class TestBases:
     class TestSender(unittest.TestCase):
 
         def test_transaction_row_at_disallows_none(self):
-            with Server() as server, self.builder('http', 'localhost', server.port, disable_line_protocol_validation=True) as sender:
+            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
@@ -345,7 +308,7 @@ class TestBases:
 
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_transaction_dataframe_at_disallows_none(self):
-            with Server() as server, self.builder('http', 'localhost', server.port) as sender:
+            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
@@ -664,19 +627,19 @@ class TestBases:
                 msgs = server.recv()
                 self.assertEqual(
                     msgs,
-                    [b'tbl1 a=1i,b=3.0',
-                     b'tbl1 a=2i,b=4.0'])
+                    [b'tbl1 a=1i,b' + _float_binary_bytes(3.0),
+                     b'tbl1 a=2i,b' + _float_binary_bytes(4.0)])
 
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_dataframe_auto_flush(self):
             with Server() as server:
-                # An auto-flush size of 20 bytes is enough to auto-flush the first
+                # An auto-flush size of 25 bytes is enough to auto-flush the first
                 # row, but not the second.
                 with self.builder(
                         'tcp',
                         'localhost',
                         server.port,
-                        auto_flush_bytes=20,
+                        auto_flush_bytes=25,
                         auto_flush_rows=False,
                         auto_flush_interval=False) as sender:
                     server.accept()
@@ -685,18 +648,18 @@ class TestBases:
                     msgs = server.recv()
                     self.assertEqual(
                         msgs,
-                        [b'tbl1 a=100000i,b=3.0'])
+                        [b'tbl1 a=100000i,b' + _float_binary_bytes(3.0),])
 
                     # The second row is still pending send.
-                    self.assertEqual(len(sender), 16)
+                    self.assertEqual(len(sender), 23)
 
                     # So we give it some more data and we should see it flush.
                     sender.row('tbl1', columns={'a': 3, 'b': 5.0}, at=qi.ServerTimestamp)
                     msgs = server.recv()
                     self.assertEqual(
                         msgs,
-                        [b'tbl1 a=2i,b=4.0',
-                         b'tbl1 a=3i,b=5.0'])
+                        [b'tbl1 a=2i,b' + _float_binary_bytes(4.0),
+                         b'tbl1 a=3i,b' + _float_binary_bytes(5.0)])
 
                     self.assertEqual(len(sender), 0)
 
@@ -1048,7 +1011,7 @@ class TestBases:
                     'localhost',
                     server.port,
                     request_timeout=1000,
-                    disable_line_protocol_validation=True,
+                    default_line_protocol_version='v2',
                     # request_timeout is sufficiently high since it's also used as a connect timeout and we want to
                     # survive hiccups on CI. it should be lower than the server delay though to actually test the
                     # effect of request_min_throughput.
@@ -1065,7 +1028,6 @@ class TestBases:
                     auto_flush='off',
                     request_timeout=1,
                     retry_timeout=0,
-                    disable_line_protocol_validation=True,
                     request_min_throughput=100000000) as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
@@ -1086,13 +1048,194 @@ class TestBases:
                     server.port,
                     retry_timeout=0,
                     request_min_throughput=0,  # disable
-                    disable_line_protocol_validation=True,
+                    default_line_protocol_version='v2',
                     request_timeout=datetime.timedelta(milliseconds=5)) as sender:
                 # wait for 10ms in the server to simulate a slow response
                 server.responses.append((20, 200, 'text/plain', b'OK'))
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
+
+        def test_wrong_config_default_line_protocol_version(self):
+            with self.assertRaisesRegex(qi.IngressError, '"default_line_protocol_version" must be None, "auto", "v1" or "v2"not \'v3\''):
+                self.builder(
+                    'http',
+                    'localhost',
+                    0,
+                    default_line_protocol_version='v3')
+
+        def test_http_server_not_serve(self):
+            with self.assertRaisesRegex(qi.IngressError, 'Failed to detect server\'s line protocol version, settings url: http://localhost:1234/settings'):
+                with self.builder(
+                    'http',
+                    'localhost',
+                    1234,
+                    default_line_protocol_version='auto') as sender:
+                        sender.row('tbl1', columns={'x': 42})
+
+        def test_sender_connect_mock_old_server1(self):
+            with HttpServer(settings=SETTINGS_WITHOUT_PROTOCOL_VERSION) as server, self.builder('http', 'localhost', server.port) as sender:
+                buffer = sender.new_buffer()
+                buffer.row(
+                    'line_sender_buffer_old_server',
+                    symbols={'id': 'Hola'},
+                    columns={'price': '111222233333i', 'qty': 3.5},
+                    at=qi.TimestampNanos(111222233333))
+                exp = b'line_sender_buffer_old_server,id=Hola price="111222233333i",qty' + _float_binary_bytes(
+                    3.5, True) + b' 111222233333\n'
+                self.assertEqual(bytes(buffer), exp)
+                sender.flush(buffer)
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], exp)
+
+        def test_sender_connect_mock_old_server2(self):
+            with HttpServer(settings=b'') as server, self.builder('http', 'localhost', server.port) as sender:
+                buffer = sender.new_buffer()
+                with self.assertRaisesRegex(qi.IngressError, "line protocol version v1 does not support array datatype"):
+                    buffer.row(
+                        'line_sender_buffer_old_server2',
+                        symbols={'id': 'Hola'},
+                        columns={'array': np.array([1.0, 2.0, 3.0])},
+                        at=qi.TimestampNanos(111222233333))
+                    sender.flush(buffer)
+
+        def test_sender_connect_mock_old_server3(self):
+            with HttpServer(settings=b'') as server, self.builder('http', 'localhost', server.port) as sender:
+                buffer = sender.new_buffer()
+                buffer.row(
+                    'line_sender_buffer_old_server2',
+                    symbols={'id': 'Hola'},
+                    columns={'price': '111222233333i', 'qty': 3.5},
+                    at=qi.TimestampNanos(111222233333))
+                exp = b'line_sender_buffer_old_server2,id=Hola price="111222233333i",qty' + _float_binary_bytes(
+                    3.5, True) + b' 111222233333\n'
+                self.assertEqual(bytes(buffer), exp)
+                sender.flush(buffer)
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], exp)
+
+        def test_disable_line_protocol_validation(self):
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, default_line_protocol_version='v1') as sender:
+                buffer = sender.new_buffer()
+                buffer.row(
+                    'line_sender_buffer',
+                    symbols={'id': 'Hola'},
+                    columns={'qty': 3.5},
+                    at=qi.TimestampNanos(111222233333))
+                exp = b'line_sender_buffer,id=Hola qty' + _float_binary_bytes(
+                    3.5, True) + b' 111222233333\n'
+                self.assertEqual(bytes(buffer), exp)
+                sender.flush(buffer)
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], exp)
+
+        def test_line_protocol_validation_on_tcp(self):
+            with Server() as server, self.builder('tcp', 'localhost', server.port, default_line_protocol_version='v1') as sender:
+                server.accept()
+                self.assertEqual(server.recv(), [])
+                buffer = sender.new_buffer()
+                buffer.row(
+                    'line_sender_buffer_tcp_v1',
+                    symbols={'id': 'Hola'},
+                    columns={'qty': 3.5},
+                    at=qi.TimestampNanos(111222233333))
+                exp = b'line_sender_buffer_tcp_v1,id=Hola qty' + _float_binary_bytes(3.5, True) + b' 111222233333\n'
+                self.assertEqual(bytes(buffer), exp)
+                sender.flush(buffer)
+                self.assertEqual(server.recv()[0] + b'\n', exp)
+
+            with Server() as server, self.builder('tcp', 'localhost', server.port, default_line_protocol_version='v2') as sender:
+                server.accept()
+                self.assertEqual(server.recv(), [])
+                buffer = sender.new_buffer()
+                buffer.row(
+                    'line_sender_buffer_tcp_v1',
+                    symbols={'id': 'Hola'},
+                    columns={'qty': 3.5},
+                    at=qi.TimestampNanos(111222233333))
+                exp = b'line_sender_buffer_tcp_v1,id=Hola qty' + _float_binary_bytes(3.5) + b' 111222233333\n'
+                self.assertEqual(bytes(buffer), exp)
+                sender.flush(buffer)
+                self.assertEqual(server.recv()[0] + b'\n', exp)
+
+            with Server() as server, self.builder('tcp', 'localhost', server.port, default_line_protocol_version='auto') as sender:
+                server.accept()
+                self.assertEqual(server.recv(), [])
+                buffer = sender.new_buffer()
+                buffer.row(
+                    'line_sender_buffer_tcp_v1',
+                    symbols={'id': 'Hola'},
+                    columns={'qty': 3.5},
+                    at=qi.TimestampNanos(111222233333))
+                exp = b'line_sender_buffer_tcp_v1,id=Hola qty' + _float_binary_bytes(3.5) + b' 111222233333\n'
+                self.assertEqual(bytes(buffer), exp)
+                sender.flush(buffer)
+                self.assertEqual(server.recv()[0] + b'\n', exp)\
+
+        def _test_array_basic(self, arr: np.ndarray):
+            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                sender.row(
+                    'array_test',
+                    columns={'array': arr},
+                    at=qi.TimestampNanos(11111))
+                exp = b'array_test array=' + _array_binary_bytes(arr) + b' 11111\n'
+                sender.flush()
+                self.assertEqual(len(server.requests), 1)
+                self.assertEqual(server.requests[0], exp)
+
+            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+                server.accept()
+                self.assertEqual(server.recv(), [])
+                sender.row(
+                    'array_test',
+                    columns={'array': arr},
+                    at=qi.TimestampNanos(11111))
+                exp = b'array_test array=' + _array_binary_bytes(arr) + b' 11111\n'
+                self.assertEqual(bytes(sender), exp)
+                sender.flush()
+                self.assertEqual(server.recv()[0] + b'\n', exp)
+
+        def test_array_basic(self):
+            self._test_array_basic(np.array([1.2345678901234567, 2.3456789012345678], dtype=np.float64))
+
+        def test_empty_array(self):
+            self._test_array_basic(np.array([], dtype=np.float64))
+
+        def test_non_contigious_array(self):
+            base = np.arange(6, dtype=np.float64).reshape(2, 3)
+            non_contig_arr = base[:, ::2]
+            self._test_array_basic(non_contig_arr)
+
+        def test_minus_stride_array(self):
+            self._test_array_basic(np.array([1.1, 2.2, 3.3], dtype=np.float64)[::-1])
+
+        def test_array_error_cases(self):
+            # zero dimensional array
+            with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
+                scalar_arr = np.array(42.0, dtype=np.float64)
+                with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                    sender.row(
+                        'array_test',
+                        columns={'array': scalar_arr},
+                        at=qi.TimestampNanos(11111))
+
+            # not f64 dtype array
+            with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
+                complex_arr = np.array([1 + 2j], dtype=np.complex64)
+                with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                    sender.row(
+                        'array_test',
+                        columns={'array': complex_arr},
+                        at=qi.TimestampNanos(11111))
+
+            # large array
+            with self.assertRaisesRegex(qi.IngressError, "Array total elem size overflow"):
+                large_arr = np.arange(2147483648, dtype=np.float64)
+                with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                    sender.row(
+                        'array_test',
+                        columns={'array': large_arr},
+                        at=qi.TimestampNanos(11111))
 
     class Timestamp(unittest.TestCase):
         def test_from_int(self):
@@ -1185,7 +1328,7 @@ def build_conf(protocol, host, port, **kwargs):
         'auto_flush_rows': encode_int_or_off,
         'auto_flush_bytes': encode_int_or_off,
         'auto_flush_interval': encode_duration_or_off,
-        'disable_line_protocol_validation': lambda v: 'on' if v else 'off',
+        'default_line_protocol_version': str,
         'init_buf_size': str,
         'max_name_len': str,
     }

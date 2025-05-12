@@ -5,6 +5,7 @@ import re
 import http.server as hs
 import threading
 import time
+import struct
 
 NON_ESCAPED_NEW_LINE_RE = re.compile(rb'(?<!\\)\n')
 
@@ -27,11 +28,9 @@ class Server:
         self._client_sock.setblocking(False)
 
     def recv(self, wait_timeout_sec=0.1):
-        # Bail out early if there's no data.
         if not select.select([self._client_sock], [], [], wait_timeout_sec)[0]:
             return []
 
-        # Read full lines.
         buf = b''
         while True:
             # Block for *some* data.
@@ -44,10 +43,65 @@ class Server:
                 continue
             if (buf[-1] == ord('\n')) and (buf[-2] != ord('\\')):
                 break
+
         self.last_buf = buf
-        new_msgs = NON_ESCAPED_NEW_LINE_RE.split(buf)[:-1]
+        new_msgs = []
+        head = 0
+        index = 0
+
+        while index < len(buf):
+            if index < len(buf) - 1 and buf[index] == ord('=') and buf[index + 1] == ord('='):
+                new_index = self._parse_binary_data(buf, index)
+                if new_index > len(buf):
+                    break
+                index = new_index
+                continue
+
+            if index > 0 and buf[index] == ord('\n') and buf[index - 1] != ord('\\'):
+                new_msgs.append(buf[head:index])
+                head = index + 1
+
+            index += 1
+
         self.msgs.extend(new_msgs)
         return new_msgs
+
+    def _parse_binary_data(self, buf, index):
+        if buf[index] != ord('=') or index + 1 >= len(buf) or buf[index + 1] != ord('='):
+            return index
+
+        index += 2  # skip "=="
+        if index >= len(buf):
+            return index
+        binary_type = buf[index]
+        index += 1
+
+        if binary_type == 16:
+            index += 8
+        elif binary_type == 14:
+            # dims
+            if index + 1 >= len(buf):
+                return index
+            index += 1
+            if index >= len(buf):
+                return index
+            dims = buf[index]
+            index += 1
+
+            total_elements = 1
+            for _ in range(dims):
+                if index + 4 > len(buf):
+                    return index
+                dim_size = struct.unpack('<i', buf[index:index + 4])[0]
+                index += 4
+                total_elements *= dim_size
+
+            elem_size = 8
+            index += total_elements * elem_size
+        else:
+            pass
+
+        return index
 
     def close(self):
         if self._client_sock:

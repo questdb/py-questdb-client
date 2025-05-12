@@ -935,16 +935,16 @@ cdef class Buffer:
             self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
         cdef PyArray_Descr * dtype_ptr = cnp.PyArray_DESCR(arr)
         if dtype_ptr.type_num != NPY_FLOAT64:
-            raise ValueError('Expected float64 array, got: %s' % str(arr.dtype))
+            raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Only support float64 array, got: %s' % str(arr.dtype))
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
             const uint8_t * data_ptr
             line_sender_error * err = NULL
 
         if rank == 0:
-            raise ValueError('Zero-dimensional arrays are not supported')
+            raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Zero-dimensional arrays are not supported')
         if rank > MAX_ARRAY_DIM:
-            raise ValueError(f'Max dimensions {MAX_ARRAY_DIM}, got {rank}')
+            raise IngressError(IngressErrorCode.ArrayLargeDimError, f'Max dimensions {MAX_ARRAY_DIM}, got {rank}')
         data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
 
         if not line_sender_buffer_column_f64_arr(
@@ -1787,6 +1787,8 @@ cdef class Sender:
     cdef size_t _init_buf_size
     cdef size_t _max_name_len
     cdef bint _in_txn
+    cdef line_protocol_version _line_protocol_version
+    cdef bint _auto_detect_line_protocol_version
 
     cdef void_int _set_sender_fields(
             self,
@@ -1810,7 +1812,7 @@ cdef class Sender:
             object auto_flush_rows,
             object auto_flush_bytes,
             object auto_flush_interval,
-            object disable_line_protocol_validation,
+            str default_line_protocol_version,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -1958,37 +1960,39 @@ cdef class Sender:
             auto_flush_interval,
             &self._auto_flush_mode)
 
-        if isinstance(disable_line_protocol_validation, str):
-            if disable_line_protocol_validation == 'off':
-                disable_line_protocol_validation = False
-            elif disable_line_protocol_validation == 'on':
-                disable_line_protocol_validation = True
-            else:
+        # default line protocol version is v2 for tcp/tcps and auto-detection for http/https
+        if self._c_protocol == line_sender_protocol_tcp or self._c_protocol == line_sender_protocol_tcps:
+            self._line_protocol_version = line_protocol_version_2
+            self._auto_detect_line_protocol_version = False
+        else:
+            self._auto_detect_line_protocol_version = True
+
+        if default_line_protocol_version is not None:
+            if default_line_protocol_version == "v1":
+                self._line_protocol_version = line_protocol_version_1
+                self._auto_detect_line_protocol_version = False
+                if not line_sender_opts_disable_line_protocol_validation(self._opts, &err):
+                    raise c_err_to_py(err)
+            elif default_line_protocol_version == "v2":
+                self._line_protocol_version = line_protocol_version_2
+                self._auto_detect_line_protocol_version = False
+                if not line_sender_opts_disable_line_protocol_validation(self._opts, &err):
+                    raise c_err_to_py(err)
+            elif default_line_protocol_version != "auto":
                 raise IngressError(
                     IngressErrorCode.ConfigError,
-                    '"disable_line_protocol_validation" must be None, bool, "on" or "off", ' +
-                    f'not {disable_line_protocol_validation!r}')
-
-        if disable_line_protocol_validation is None:
-            disable_line_protocol_validation = False
-        elif not isinstance(disable_line_protocol_validation, bool):
-            raise ValueError(
-                '"disable_line_protocol_validation" must be None, bool, "on" or "off", ' +
-                f'not {disable_line_protocol_validation!r}')
-
-        if disable_line_protocol_validation:
-            if not line_sender_opts_disable_line_protocol_validation(self._opts, &err):
-                raise c_err_to_py(err)
+                    '"default_line_protocol_version" must be None, "auto", "v1" or "v2"' +
+                    f'not {default_line_protocol_version!r}')
 
         self._init_buf_size = init_buf_size or 65536
         self._max_name_len = max_name_len or 127
 
-        # self._buffer will be constructed after establish connection.
+        # self._buffer will be constructed after establish connection for http/https.
         if self._c_protocol == line_sender_protocol_tcp or self._c_protocol == line_sender_protocol_tcps:
             self._buffer = Buffer(
                 init_buf_size=self._init_buf_size,
                 max_name_len=self._max_name_len,
-                line_protocol_version=LineProtocolVersion.LineProtocolVersionV2)
+                line_protocol_version=LineProtocolVersion(self._line_protocol_version))
 
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
@@ -2027,7 +2031,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object disable_line_protocol_validation=None,  # Default off
+            object default_line_protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
 
@@ -2071,7 +2075,7 @@ cdef class Sender:
                 auto_flush_rows,
                 auto_flush_bytes,
                 auto_flush_interval,
-                disable_line_protocol_validation,
+                default_line_protocol_version,
                 init_buf_size,
                 max_name_len)
         finally:
@@ -2099,7 +2103,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object disable_line_protocol_validation=None,  # Default off
+            object default_line_protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2154,7 +2158,7 @@ cdef class Sender:
                 'auto_flush_rows': auto_flush_rows,
                 'auto_flush_bytes': auto_flush_bytes,
                 'auto_flush_interval': auto_flush_interval,
-                'disable_line_protocol_validation': disable_line_protocol_validation,
+                'default_line_protocol_version': default_line_protocol_version,
                 'init_buf_size': init_buf_size,
                 'max_name_len': max_name_len,
             }.items():
@@ -2195,7 +2199,7 @@ cdef class Sender:
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
-                params.get('disable_line_protocol_validation'),
+                params.get('default_line_protocol_version'),
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
             
@@ -2224,7 +2228,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object disable_line_protocol_validation=None,  # Default off
+            object default_line_protocol_version=None,  # Default off
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2264,7 +2268,7 @@ cdef class Sender:
             auto_flush_rows=auto_flush_rows,
             auto_flush_bytes=auto_flush_bytes,
             auto_flush_interval=auto_flush_interval,
-            disable_line_protocol_validation=disable_line_protocol_validation,
+            default_line_protocol_version=default_line_protocol_version,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
 
@@ -2335,14 +2339,13 @@ cdef class Sender:
         return timedelta(milliseconds=self._auto_flush_mode.interval)
 
     def default_line_protocol_version(self) -> LineProtocolVersion:
-        if self._c_protocol == line_sender_protocol_tcp or self._c_protocol == line_sender_protocol_tcps:
-            return LineProtocolVersion.LineProtocolVersionV2
-
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'default_line_protocol_version() can\'t be called: Not connected.')
-        return LineProtocolVersion(line_sender_default_line_protocol_version(self._impl))
+        if self._auto_detect_line_protocol_version:
+            if self._impl == NULL:
+                raise IngressError(
+                    IngressErrorCode.InvalidApiCall,
+                    'default_line_protocol_version() can\'t be called: Not connected.')
+            return LineProtocolVersion(line_sender_default_line_protocol_version(self._impl))
+        return LineProtocolVersion(self._line_protocol_version)
 
     def establish(self):
         """
