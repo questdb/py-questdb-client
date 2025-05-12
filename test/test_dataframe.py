@@ -1610,12 +1610,19 @@ class TestPandasBase:
         def test_f64_np_array(self):
             df = pd.DataFrame({
                 'a': [np.array([1.0], np.float64), np.array([2.0], np.float64), np.array([3.0], np.float64)]})
-            buf = _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
-            self.assertEqual(
-                buf,
-                b'tbl1 b' + _array_binary_bytes(np.array([1.0], np.float64)) + b'\n' +
-                b'tbl1 b' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
-                b'tbl1 b' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
+
+            if self.version == qi.LineProtocolVersion.LineProtocolVersionV1:
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        "line protocol version v1 does not support array datatype"):
+                    _ = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
+            else:
+                buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
+                self.assertEqual(
+                    buf,
+                    b'tbl1 a=' + _array_binary_bytes(np.array([1.0], np.float64)) + b'\n' +
+                    b'tbl1 a=' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
+                    b'tbl1 a=' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
 
 class TestPandasLineProtocolVersionV1(TestPandasBase.TestPandas):
     name = 'init'

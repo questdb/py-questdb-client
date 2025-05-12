@@ -10,6 +10,7 @@ cdef struct auto_flush_mode_t:
     int64_t row_count
     int64_t byte_count
 
+
 cdef struct auto_flush_t:
     line_sender* sender
     auto_flush_mode_t mode
@@ -2044,15 +2045,17 @@ cdef void_int _dataframe_serialize_cell_column_array__array_numpy(
     cdef:
         size_t rank = cnp.PyArray_NDIM(arr)
         const uint8_t* data_ptr
+        line_sender_error * err = NULL
     if rank == 0:
         raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Zero-dimensional arrays are not supported')
     if rank > 32:
         raise IngressError(IngressErrorCode.ArrayLargeDimError, f'Max dimensions 32, got {rank}')
     data_ptr = <const uint8_t *> cnp.PyArray_DATA(arr)
-    cdef line_sender_error* err = NULL
+
     if not line_sender_buffer_column_f64_arr(
             ls_buf, col.name, rank, <const size_t*> cnp.PyArray_DIMS(arr),
             <const ssize_t*> cnp.PyArray_STRIDES(arr), data_ptr, cnp.PyArray_NBYTES(arr), &err):
+        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
