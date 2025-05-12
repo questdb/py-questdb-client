@@ -1607,6 +1607,16 @@ class TestPandasBase:
             self.assertEqual(_dataframe(self.version, fp2pa_df, table_name='tbl1', at=qi.ServerTimestamp), fallback_exp)
             self.assertEqual(_dataframe(self.version, fp2fp_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
 
+        def test_f64_np_array(self):
+            df = pd.DataFrame({
+                'a': [np.array([1.0], np.float64), np.array([2.0], np.float64), np.array([3.0], np.float64)]})
+            buf = _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
+            self.assertEqual(
+                buf,
+                b'tbl1 b' + _array_binary_bytes(np.array([1.0], np.float64)) + b'\n' +
+                b'tbl1 b' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
+                b'tbl1 b' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
+
 class TestPandasLineProtocolVersionV1(TestPandasBase.TestPandas):
     name = 'init'
     version = qi.LineProtocolVersion.LineProtocolVersionV1
