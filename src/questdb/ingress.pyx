@@ -2228,7 +2228,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object default_line_protocol_version=None,  # Default off
+            object default_line_protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """

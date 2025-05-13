@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 import sys
 
-from examples import buffer
-
 sys.dont_write_bytecode = True
 import os
 import unittest
@@ -35,7 +33,8 @@ except ImportError:
     pd = None
 
 if pd is not None:
-    from test_dataframe import TestPandas
+    from test_dataframe import TestPandasLineProtocolVersionV1
+    from test_dataframe import TestPandasLineProtocolVersionV2
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
@@ -245,7 +244,7 @@ class TestBuffer(unittest.TestCase):
             buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
         # large array
-        with self.assertRaisesRegex(qi.IngressError, "Array total elem size overflow"):
+        with self.assertRaisesRegex(qi.IngressError, "Array buffer size too big"):
             large_arr = np.arange(2147483648, dtype=np.float64)
             buf.row('large_array', columns={'col': large_arr}, at=qi.ServerTimestamp)
 
@@ -1229,7 +1228,7 @@ class TestBases:
                         at=qi.TimestampNanos(11111))
 
             # large array
-            with self.assertRaisesRegex(qi.IngressError, "Array total elem size overflow"):
+            with self.assertRaisesRegex(qi.IngressError, "Array buffer size too big:"):
                 large_arr = np.arange(2147483648, dtype=np.float64)
                 with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
                     sender.row(
