@@ -58,13 +58,13 @@ class IngressErrorCode(Enum):
     ArrayLargeDimError = ...
     ArrayInternalError = ...
     ArrayWriteToBufferError = ...
-    LineProtocolVersionError = ...
+    ProtocolVersionError = ...
     BadDataFrame = ...
 
-class LineProtocolVersion(Enum):
+class ProtocolVersion(Enum):
     """Line protocol version."""
-    LineProtocolVersionV1 = ...
-    LineProtocolVersionV2 = ...
+    ProtocolVersionV1 = ...
+    ProtocolVersionV2 = ...
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -310,7 +310,7 @@ class Buffer:
 
     """
 
-    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127, line_protocol_version: LineProtocolVersion = LineProtocolVersion.LineProtocolVersionV2):
+    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127, protocol_version: ProtocolVersion = ProtocolVersion.ProtocolVersionV2):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
@@ -938,7 +938,7 @@ class Sender:
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
 
-    def default_line_protocol_version(self) -> LineProtocolVersion:
+    def default_protocol_version(self) -> ProtocolVersion:
         """
         Returns the QuestDB server's recommended default line protocol version.
         """

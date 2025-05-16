@@ -131,17 +131,17 @@ class IngressErrorCode(Enum):
     ArrayLargeDimError = line_sender_error_array_large_dim
     ArrayInternalError = line_sender_error_array_view_internal_error
     ArrayWriteToBufferError = line_sender_error_array_view_write_to_buffer_error
-    LineProtocolVersionError = line_sender_error_line_protocol_version_error
-    BadDataFrame = <int>line_sender_error_line_protocol_version_error + 1
+    ProtocolVersionError = line_sender_error_protocol_version_error
+    BadDataFrame = <int>line_sender_error_protocol_version_error + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
         return self.name
 
-class LineProtocolVersion(Enum):
+class ProtocolVersion(Enum):
     """Line protocol version."""
-    LineProtocolVersionV1 = line_protocol_version_1
-    LineProtocolVersionV2 = line_protocol_version_2
+    ProtocolVersionV1 = protocol_version_1
+    ProtocolVersionV2 = protocol_version_2
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -184,8 +184,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ArrayInternalError
     elif code == line_sender_error_array_view_write_to_buffer_error:
         return IngressErrorCode.ArrayWriteToBufferError
-    elif code == line_sender_error_line_protocol_version_error:
-        return IngressErrorCode.LineProtocolVersionError
+    elif code == line_sender_error_protocol_version_error:
+        return IngressErrorCode.ProtocolVersionError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -644,6 +644,13 @@ cdef class SenderTransaction:
                 IngressErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
+
+        if self._sender._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "row() can\'t be called: Not connected."
+            )
+
         self._sender._buffer._row(
             False,  # allow_auto_flush
             self._table_name,
@@ -667,6 +674,11 @@ cdef class SenderTransaction:
             raise IngressError(
                 IngressErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
+        if self._sender._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "dataframe() can\'t be called: Not connected."
             )
         _dataframe(
             auto_flush_blank(),
@@ -708,7 +720,8 @@ cdef class SenderTransaction:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t rollback.')
-        self._sender._buffer.clear()
+        if self._sender._buffer is not None:
+            self._sender._buffer.clear()
         self._sender._in_txn = False
         self._complete = True
 
@@ -782,25 +795,23 @@ cdef class Buffer:
     cdef size_t _max_name_len
     cdef object _row_complete_sender
 
-    def __cinit__(self, init_buf_size: int=65536, max_name_len: int=127, line_protocol_version: LineProtocolVersion=LineProtocolVersion.LineProtocolVersionV2):
+    def __cinit__(self, protocol_version: ProtocolVersion, init_buf_size: int=65536, max_name_len: int=127):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
-        self._cinit_impl(init_buf_size, max_name_len, line_protocol_version.value)
+        self._cinit_impl(init_buf_size, max_name_len, protocol_version.value)
 
-    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len, line_protocol_version version):
-        self._impl = line_sender_buffer_with_max_name_len(max_name_len)
+    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len, protocol_version version):
+        self._impl = line_sender_buffer_with_max_name_len(max_name_len, version)
         self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_buf_size)
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_set_line_protocol_version(self._impl, version, &err):
-            raise c_err_to_py(err)
-
         self._init_buf_size = init_buf_size
         self._max_name_len = max_name_len
         self._row_complete_sender = None
+
 
     def __dealloc__(self):
         self._row_complete_sender = None
@@ -938,14 +949,8 @@ cdef class Buffer:
             raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Only support float64 array, got: %s' % str(arr.dtype))
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
-            const uint8_t * data_ptr
+            const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
             line_sender_error * err = NULL
-
-        if rank == 0:
-            raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Zero-dimensional arrays are not supported')
-        if rank > MAX_ARRAY_DIM:
-            raise IngressError(IngressErrorCode.ArrayLargeDimError, f'Max dimensions {MAX_ARRAY_DIM}, got {rank}')
-        data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
 
         if not line_sender_buffer_column_f64_arr(
                 self._impl, c_name, rank, <const size_t*> cnp.PyArray_DIMS(arr),
@@ -1756,7 +1761,6 @@ cdef object parse_conf_str(
         'auto_flush_rows': str,
         'auto_flush_bytes': str,
         'auto_flush_interval': str,
-        'disable_line_protocol_version': str,
         'init_buf_size': int,
         'max_name_len': int,
     }
@@ -1787,8 +1791,6 @@ cdef class Sender:
     cdef size_t _init_buf_size
     cdef size_t _max_name_len
     cdef bint _in_txn
-    cdef line_protocol_version _line_protocol_version
-    cdef bint _auto_detect_line_protocol_version
 
     cdef void_int _set_sender_fields(
             self,
@@ -1812,7 +1814,7 @@ cdef class Sender:
             object auto_flush_rows,
             object auto_flush_bytes,
             object auto_flush_interval,
-            str default_line_protocol_version,
+            str protocol_version,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -1872,6 +1874,19 @@ cdef class Sender:
             str_to_utf8(b, <PyObject*>token_y, &c_token_y)
             if not line_sender_opts_token_y(self._opts, c_token_y, &err):
                 raise c_err_to_py(err)
+
+        if protocol_version is not None:
+            if protocol_version == "1":
+                if not line_sender_opts_protocol_version(self._opts, protocol_version_1, &err):
+                    raise c_err_to_py(err)
+            elif protocol_version == "2":
+                if not line_sender_opts_protocol_version(self._opts, protocol_version_2, &err):
+                    raise c_err_to_py(err)
+            elif protocol_version != "auto":
+                raise IngressError(
+                    IngressErrorCode.ConfigError,
+                    '"protocol_version" must be None, "auto", "1" or "2"' +
+                    f' not {protocol_version!r}')
 
         if auth_timeout is not None:
             if isinstance(auth_timeout, int):
@@ -1960,40 +1975,8 @@ cdef class Sender:
             auto_flush_interval,
             &self._auto_flush_mode)
 
-        # default line protocol version is v2 for tcp/tcps and auto-detection for http/https
-        if self._c_protocol == line_sender_protocol_tcp or self._c_protocol == line_sender_protocol_tcps:
-            self._line_protocol_version = line_protocol_version_2
-            self._auto_detect_line_protocol_version = False
-        else:
-            self._auto_detect_line_protocol_version = True
-
-        if default_line_protocol_version is not None:
-            if default_line_protocol_version == "v1":
-                self._line_protocol_version = line_protocol_version_1
-                self._auto_detect_line_protocol_version = False
-                if not line_sender_opts_disable_line_protocol_validation(self._opts, &err):
-                    raise c_err_to_py(err)
-            elif default_line_protocol_version == "v2":
-                self._line_protocol_version = line_protocol_version_2
-                self._auto_detect_line_protocol_version = False
-                if not line_sender_opts_disable_line_protocol_validation(self._opts, &err):
-                    raise c_err_to_py(err)
-            elif default_line_protocol_version != "auto":
-                raise IngressError(
-                    IngressErrorCode.ConfigError,
-                    '"default_line_protocol_version" must be None, "auto", "v1" or "v2"' +
-                    f'not {default_line_protocol_version!r}')
-
         self._init_buf_size = init_buf_size or 65536
         self._max_name_len = max_name_len or 127
-
-        # self._buffer will be constructed after establish connection for http/https.
-        if self._c_protocol == line_sender_protocol_tcp or self._c_protocol == line_sender_protocol_tcps:
-            self._buffer = Buffer(
-                init_buf_size=self._init_buf_size,
-                max_name_len=self._max_name_len,
-                line_protocol_version=LineProtocolVersion(self._line_protocol_version))
-
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
     def __cinit__(self):
@@ -2031,7 +2014,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object default_line_protocol_version=None,  # Default auto
+            object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
 
@@ -2075,7 +2058,7 @@ cdef class Sender:
                 auto_flush_rows,
                 auto_flush_bytes,
                 auto_flush_interval,
-                default_line_protocol_version,
+                protocol_version,
                 init_buf_size,
                 max_name_len)
         finally:
@@ -2103,7 +2086,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object default_line_protocol_version=None,  # Default auto
+            object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2158,7 +2141,7 @@ cdef class Sender:
                 'auto_flush_rows': auto_flush_rows,
                 'auto_flush_bytes': auto_flush_bytes,
                 'auto_flush_interval': auto_flush_interval,
-                'default_line_protocol_version': default_line_protocol_version,
+                'protocol_version': protocol_version,
                 'init_buf_size': init_buf_size,
                 'max_name_len': max_name_len,
             }.items():
@@ -2199,7 +2182,7 @@ cdef class Sender:
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
-                params.get('default_line_protocol_version'),
+                params.get('protocol_version'),
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
             
@@ -2228,7 +2211,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
-            object default_line_protocol_version=None,  # Default auto
+            object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2268,7 +2251,7 @@ cdef class Sender:
             auto_flush_rows=auto_flush_rows,
             auto_flush_bytes=auto_flush_bytes,
             auto_flush_interval=auto_flush_interval,
-            default_line_protocol_version=default_line_protocol_version,
+            protocol_version=protocol_version,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
 
@@ -2281,9 +2264,9 @@ cdef class Sender:
         `max_name_len`.
         """
         return Buffer(
+            protocol_version=self.default_protocol_version,
             init_buf_size=self._init_buf_size,
-            max_name_len=self._max_name_len,
-            line_protocol_version=self.default_line_protocol_version())
+            max_name_len=self._max_name_len)
 
     @property
     def init_buf_size(self) -> int:
@@ -2338,14 +2321,13 @@ cdef class Sender:
             return None
         return timedelta(milliseconds=self._auto_flush_mode.interval)
 
-    def default_line_protocol_version(self) -> LineProtocolVersion:
-        if self._auto_detect_line_protocol_version:
-            if self._impl == NULL:
-                raise IngressError(
-                    IngressErrorCode.InvalidApiCall,
-                    'default_line_protocol_version() can\'t be called: Not connected.')
-            return LineProtocolVersion(line_sender_default_line_protocol_version(self._impl))
-        return LineProtocolVersion(self._line_protocol_version)
+    @property
+    def default_protocol_version(self) -> ProtocolVersion:
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'default_protocol_version() can\'t be called: Not connected.')
+        return ProtocolVersion(line_sender_default_protocol_version(self._impl))
 
     def establish(self):
         """
@@ -2373,9 +2355,9 @@ cdef class Sender:
 
         if self._buffer is None:
             self._buffer = Buffer(
+                protocol_version=self.default_protocol_version,
                 init_buf_size=self._init_buf_size,
-                max_name_len=self._max_name_len,
-                line_protocol_version=self.default_line_protocol_version())
+                max_name_len=self._max_name_len)
 
         line_sender_opts_free(self._opts)
         self._opts = NULL
@@ -2399,7 +2381,10 @@ cdef class Sender:
 
         Also see :func:`Sender.__len__`.
         """
-        return bytes(self._buffer)
+        if self._buffer is None:
+            return b''
+        else:
+            return bytes(self._buffer)
 
     def __len__(self) -> int:
         """
@@ -2407,7 +2392,10 @@ cdef class Sender:
 
         Equivalent (but cheaper) to ``len(bytes(sender))``.
         """
-        return len(self._buffer)
+        if self._buffer is None:
+            return 0
+        else:
+            return len(self._buffer)
 
     def transaction(self, table_name: str):
         """
@@ -2440,6 +2428,12 @@ cdef class Sender:
                 IngressErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
+        if self._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "row() can\'t be called: Not connected."
+            )
+
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
         return self
 
@@ -2505,6 +2499,12 @@ cdef class Sender:
             af.sender = self._impl
             af.mode = self._auto_flush_mode
             af.last_flush_ms = self._last_flush_ms
+
+        if self._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "dataframe() can\'t be called: Not connected."
+            )
         _dataframe(
             af,
             self._buffer._impl,

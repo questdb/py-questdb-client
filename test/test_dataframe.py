@@ -33,8 +33,8 @@ except ImportError:
     fastparquet = None
 
 
-def _dataframe(line_protocol_version: qi.LineProtocolVersion, *args, **kwargs):
-    buf = qi.Buffer(line_protocol_version = line_protocol_version)
+def _dataframe(protocol_version: qi.ProtocolVersion, *args, **kwargs):
+    buf = qi.Buffer(protocol_version = protocol_version)
     buf.dataframe(*args, **kwargs)
     return bytes(buf)
 
@@ -187,9 +187,9 @@ class TestPandasBase:
                 at=-1)
             self.assertEqual(
                 buf,
-                b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) +  b',F=1i 1520640000000000000\n' +
-                b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',F=2i 1520726400000000000\n' +
-                b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',F=3i 1520812800000000000\n')
+                b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) +  b',F=1i 1520640000000000000\n' +
+                b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',F=2i 1520726400000000000\n' +
+                b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',F=3i 1520812800000000000\n')
 
         def test_named_dataframe(self):
             df = pd.DataFrame({
@@ -408,12 +408,12 @@ class TestPandasBase:
                 b'tbl1 a=0i\n' +
                 b'tbl1 a=9223372036854775807i\n')
 
-            buf = qi.Buffer(line_protocol_version=self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.dataframe(pd.DataFrame({'b': [.5, 1.0, 1.5]}), table_name='tbl2', at=qi.ServerTimestamp)
             exp1 = (
-                b'tbl2 b' + _float_binary_bytes(0.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl2 b' + _float_binary_bytes(1.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl2 b' + _float_binary_bytes(1.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n')
+                b'tbl2 b' + _float_binary_bytes(0.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl2 b' + _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl2 b' + _float_binary_bytes(1.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n')
             self.assertEqual(
                 bytes(buf),
                 exp1)
@@ -460,14 +460,14 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(float('NaN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(3.4028234663852886e38, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n')
+                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(float('NaN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(3.4028234663852886e38, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n')
 
         def test_f64_numpy_col(self):
             df = pd.DataFrame({'a': pd.Series([
@@ -481,14 +481,14 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(float('NAN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n')
+                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(float('NAN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n')
 
         def test_u8_arrow_col(self):
             df = pd.DataFrame({
@@ -675,14 +675,14 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="a"\n' +
-                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="b"\n' +
-                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="c"\n' +
-                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="d"\n' +
-                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="e"\n' +
-                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="f"\n' +
+                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="a"\n' +
+                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="b"\n' +
+                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="c"\n' +
+                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="d"\n' +
+                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="e"\n' +
+                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="f"\n' +
                 b'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
-                b'tbl1 a' + _float_binary_bytes(3.4028234663852886e38, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="h"\n' +
+                b'tbl1 a' + _float_binary_bytes(3.4028234663852886e38, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="h"\n' +
                 b'tbl1 b="i"\n')
 
         def test_f64_arrow_col(self):
@@ -700,14 +700,14 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="a"\n' +
-                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="b"\n' +
-                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="c"\n' +
-                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="d"\n' +
-                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="e"\n' +
-                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="f"\n' +
+                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="a"\n' +
+                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="b"\n' +
+                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="c"\n' +
+                b'tbl1 a' + _float_binary_bytes(0.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="d"\n' +
+                b'tbl1 a' + _float_binary_bytes(float('inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="e"\n' +
+                b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="f"\n' +
                 b'tbl1 b="g"\n' +  # This one is wierd: `nan` gets 0 in the bitmask.
-                b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b="h"\n' +
+                b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b="h"\n' +
                 b'tbl1 b="i"\n')
 
         def test_bool_numpy_col(self):
@@ -1311,13 +1311,13 @@ class TestPandasBase:
                             dtype='object'),
                         'b': [1, 2, 3, 4, 5, 6, 7]}),
                     table_name='tbl1', at = qi.ServerTimestamp),
-                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b=1i\n' +
-                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b=2i\n' +
-                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b=3i\n' +
+                b'tbl1 a' + _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b=1i\n' +
+                b'tbl1 a' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b=2i\n' +
+                b'tbl1 a' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b=3i\n' +
                 b'tbl1 b=4i\n' +
-                b'tbl1 a' + _float_binary_bytes(float('NaN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b=5i\n' +
+                b'tbl1 a' + _float_binary_bytes(float('NaN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b=5i\n' +
                 b'tbl1 b=6i\n' +
-                b'tbl1 a' + _float_binary_bytes(7.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',b=7i\n')
+                b'tbl1 a' + _float_binary_bytes(7.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',b=7i\n')
 
             with self.assertRaisesRegex(
                     qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\\."):
@@ -1583,23 +1583,23 @@ class TestPandasBase:
             df_eq(df, fp2fp_df, exp_dtypes)
 
             exp = (
-                b'tbl1,s=a a=1i,b=10i,c' + _float_binary_bytes(0.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1,s=b a=2i,b=20i,c' + _float_binary_bytes(float('NaN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1,s=a a=3i,b=30i,c' + _float_binary_bytes(2.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1,s=c a=4i,c' + _float_binary_bytes(3.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1,s=a a=5i,b=50i,c' + _float_binary_bytes(float('NaN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n')
+                b'tbl1,s=a a=1i,b=10i,c' + _float_binary_bytes(0.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1,s=b a=2i,b=20i,c' + _float_binary_bytes(float('NaN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1,s=a a=3i,b=30i,c' + _float_binary_bytes(2.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1,s=c a=4i,c' + _float_binary_bytes(3.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1,s=a a=5i,b=50i,c' + _float_binary_bytes(float('NaN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n')
 
             fallback_exp = (
-                b'tbl1 s="a",a=1i,b' + _float_binary_bytes(10.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',c' +
-                _float_binary_bytes(0.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 s="b",a=2i,b' + _float_binary_bytes(20.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',c' +
-                _float_binary_bytes(float('NaN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 s="a",a=3i,b' + _float_binary_bytes(30.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',c' +
-                _float_binary_bytes(2.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 s="c",a=4i,b' + _float_binary_bytes(float('NaN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',c' +
-                _float_binary_bytes(3.5, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n' +
-                b'tbl1 s="a",a=5i,b' + _float_binary_bytes(50.0, self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b',c' +
-                _float_binary_bytes(float('NaN'), self.version == qi.LineProtocolVersion.LineProtocolVersionV1) + b'\n')
+                b'tbl1 s="a",a=1i,b' + _float_binary_bytes(10.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',c' +
+                _float_binary_bytes(0.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 s="b",a=2i,b' + _float_binary_bytes(20.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',c' +
+                _float_binary_bytes(float('NaN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 s="a",a=3i,b' + _float_binary_bytes(30.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',c' +
+                _float_binary_bytes(2.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 s="c",a=4i,b' + _float_binary_bytes(float('NaN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',c' +
+                _float_binary_bytes(3.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n' +
+                b'tbl1 s="a",a=5i,b' + _float_binary_bytes(50.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',c' +
+                _float_binary_bytes(float('NaN'), self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n')
 
             self.assertEqual(_dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp), exp)
             self.assertEqual(_dataframe(self.version, pa2pa_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
@@ -1611,7 +1611,7 @@ class TestPandasBase:
             df = pd.DataFrame({
                 'a': [np.array([1.0], np.float64), np.array([2.0], np.float64), np.array([3.0], np.float64)]})
 
-            if self.version == qi.LineProtocolVersion.LineProtocolVersionV1:
+            if self.version == qi.ProtocolVersion.ProtocolVersionV1:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         "line protocol version v1 does not support array datatype"):
@@ -1624,13 +1624,13 @@ class TestPandasBase:
                     b'tbl1 a=' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
 
-class TestPandasLineProtocolVersionV1(TestPandasBase.TestPandas):
+class TestPandasProtocolVersionV1(TestPandasBase.TestPandas):
     name = 'init'
-    version = qi.LineProtocolVersion.LineProtocolVersionV1
+    version = qi.ProtocolVersion.ProtocolVersionV1
 
-class TestPandasLineProtocolVersionV2(TestPandasBase.TestPandas):
+class TestPandasProtocolVersionV2(TestPandasBase.TestPandas):
     name = 'init'
-    version = qi.LineProtocolVersion.LineProtocolVersionV2
+    version = qi.ProtocolVersion.ProtocolVersionV2
 
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':

@@ -43,7 +43,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_array_large_dim
         line_sender_error_array_view_internal_error
         line_sender_error_array_view_write_to_buffer_error
-        line_sender_error_line_protocol_version_error
+        line_sender_error_protocol_version_error
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,
@@ -51,9 +51,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_protocol_http,
         line_sender_protocol_https,
 
-    cdef enum line_protocol_version:
-        line_protocol_version_1 = 1,
-        line_protocol_version_2 = 2,
+    cdef enum protocol_version:
+        protocol_version_1 = 1,
+        protocol_version_2 = 2,
 
     cdef enum line_sender_ca:
         line_sender_ca_webpki_roots,
@@ -130,16 +130,12 @@ cdef extern from "questdb/ingress/line_sender.h":
         pass
 
     line_sender_buffer* line_sender_buffer_new(
+        protocol_version version,
         ) noexcept nogil
 
     line_sender_buffer* line_sender_buffer_with_max_name_len(
-        size_t max_name_len
-        ) noexcept nogil
-
-    bint line_sender_buffer_set_line_protocol_version(
-        line_sender_buffer* buffer,
-        line_protocol_version version,
-        line_sender_error** err_out
+        size_t max_name_len,
+        protocol_version version,
         ) noexcept nogil
 
     void line_sender_buffer_free(
@@ -339,8 +335,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint line_sender_opts_disable_line_protocol_validation(
+    bint line_sender_opts_protocol_version(
         line_sender_opts* opts,
+        protocol_version version,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -414,8 +411,18 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    line_protocol_version line_sender_default_line_protocol_version(
-        const line_sender * sender);
+    protocol_version line_sender_default_protocol_version(
+        const line_sender * sender
+        ) noexcept nogil
+
+    line_sender_buffer* line_sender_buffer_new_for_sender(
+        const line_sender * sender
+        ) noexcept nogil
+
+    line_sender_buffer* line_sender_buffer_with_max_name_len_for_sender(
+        const line_sender * sender,
+        size_t max_name_len
+        ) noexcept nogil
 
     bint line_sender_must_close(
         const line_sender* sender

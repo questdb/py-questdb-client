@@ -33,8 +33,8 @@ except ImportError:
     pd = None
 
 if pd is not None:
-    from test_dataframe import TestPandasLineProtocolVersionV1
-    from test_dataframe import TestPandasLineProtocolVersionV2
+    from test_dataframe import TestPandasProtocolVersionV1
+    from test_dataframe import TestPandasProtocolVersionV2
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
@@ -249,7 +249,7 @@ class TestBuffer(unittest.TestCase):
             buf.row('large_array', columns={'col': large_arr}, at=qi.ServerTimestamp)
 
     def test_float_line_protocol_v1(self):
-        buf = qi.Buffer(line_protocol_version=qi.LineProtocolVersion.LineProtocolVersionV1)
+        buf = qi.Buffer(protocol_version=qi.ProtocolVersion.ProtocolVersionV1)
         buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
         self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567, True) + b'\n')
 
@@ -348,7 +348,8 @@ class TestBases:
                         'tcp',
                         'localhost',
                         server.port,
-                        bind_interface='0.0.0.0') as sender:
+                        bind_interface='0.0.0.0',
+                        protocol_version='2') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 sender.row(
@@ -396,9 +397,8 @@ class TestBases:
         def test_row_before_connect(self):
             try:
                 sender = self.builder('tcp', 'localhost', 12345)
-                sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
-                    sender.flush()
+                    sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             finally:
                 sender.close()
 
@@ -458,7 +458,7 @@ class TestBases:
                         sender.flush(buffer=None, clear=False)
 
         def test_two_rows_explicit_buffer(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -482,14 +482,14 @@ class TestBases:
                 self.assertEqual(msgs, bexp)
 
         def test_independent_buffer(self):
-            buf = qi.Buffer()
+            buf = qi.Buffer(protocol_version=qi.ProtocolVersion.ProtocolVersionV2)
             buf.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             exp = b'tbl1,sym1=val1\n'
             self.assertEqual(bytes(buf), exp)
 
             with Server() as server1, Server() as server2:
-                with self.builder('tcp', 'localhost', server1.port) as sender1, \
-                        self.builder('tcp', 'localhost', server2.port) as sender2:
+                with self.builder('tcp', 'localhost', server1.port, protocol_version='2') as sender1, \
+                        self.builder('tcp', 'localhost', server2.port, protocol_version='2') as sender2:
                     server1.accept()
                     server2.accept()
 
@@ -619,7 +619,7 @@ class TestBases:
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_dataframe(self):
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port) as sender:
+                with self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
                     server.accept()
                     df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
                     sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -640,7 +640,8 @@ class TestBases:
                         server.port,
                         auto_flush_bytes=25,
                         auto_flush_rows=False,
-                        auto_flush_interval=False) as sender:
+                        auto_flush_interval=False,
+                        protocol_version='2') as sender:
                     server.accept()
                     df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
                     sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -672,17 +673,18 @@ class TestBases:
                             sender.dataframe(df.head(1), table_name='tbl1', at=qi.ServerTimestamp)
 
         def test_new_buffer(self):
-            sender = self.builder(
+            with Server() as server:
+                with self.builder(
                 protocol='tcp',
                 host='localhost',
-                port=9009,
+                port=server.port,
                 init_buf_size=1024,
-                max_name_len=10)
-            buffer = sender.new_buffer()
-            self.assertEqual(buffer.init_buf_size, 1024)
-            self.assertEqual(buffer.max_name_len, 10)
-            self.assertEqual(buffer.init_buf_size, sender.init_buf_size)
-            self.assertEqual(buffer.max_name_len, sender.max_name_len)
+                max_name_len=10) as sender:
+                    buffer = sender.new_buffer()
+                    self.assertEqual(buffer.init_buf_size, 1024)
+                    self.assertEqual(buffer.max_name_len, 10)
+                    self.assertEqual(buffer.init_buf_size, sender.init_buf_size)
+                    self.assertEqual(buffer.max_name_len, sender.max_name_len)
 
         def test_connect_after_close(self):
             with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
@@ -1010,7 +1012,7 @@ class TestBases:
                     'localhost',
                     server.port,
                     request_timeout=1000,
-                    default_line_protocol_version='v2',
+                    protocol_version='2',
                     # request_timeout is sufficiently high since it's also used as a connect timeout and we want to
                     # survive hiccups on CI. it should be lower than the server delay though to actually test the
                     # effect of request_min_throughput.
@@ -1047,7 +1049,7 @@ class TestBases:
                     server.port,
                     retry_timeout=0,
                     request_min_throughput=0,  # disable
-                    default_line_protocol_version='v2',
+                    protocol_version='2',
                     request_timeout=datetime.timedelta(milliseconds=5)) as sender:
                 # wait for 10ms in the server to simulate a slow response
                 server.responses.append((20, 200, 'text/plain', b'OK'))
@@ -1055,13 +1057,13 @@ class TestBases:
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
 
-        def test_wrong_config_default_line_protocol_version(self):
-            with self.assertRaisesRegex(qi.IngressError, '"default_line_protocol_version" must be None, "auto", "v1" or "v2"not \'v3\''):
+        def test_wrong_config_protocol_version(self):
+            with self.assertRaisesRegex(qi.IngressError, '"protocol_version" must be None, "auto", "1" or "2" not \'3\''):
                 self.builder(
                     'http',
                     'localhost',
                     0,
-                    default_line_protocol_version='v3')
+                    protocol_version='3')
 
         def test_http_server_not_serve(self):
             with self.assertRaisesRegex(qi.IngressError, 'Failed to detect server\'s line protocol version, settings url: http://localhost:1234/settings'):
@@ -1069,7 +1071,7 @@ class TestBases:
                     'http',
                     'localhost',
                     1234,
-                    default_line_protocol_version='auto') as sender:
+                    protocol_version='auto') as sender:
                         sender.row('tbl1', columns={'x': 42})
 
         def test_sender_connect_mock_old_server1(self):
@@ -1114,7 +1116,7 @@ class TestBases:
                 self.assertEqual(server.requests[0], exp)
 
         def test_disable_line_protocol_validation(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, default_line_protocol_version='v1') as sender:
+            with HttpServer() as server, self.builder('http', 'localhost', server.port, protocol_version='1') as sender:
                 buffer = sender.new_buffer()
                 buffer.row(
                     'line_sender_buffer',
@@ -1128,8 +1130,8 @@ class TestBases:
                 self.assertEqual(len(server.requests), 1)
                 self.assertEqual(server.requests[0], exp)
 
-        def test_line_protocol_validation_on_tcp(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port, default_line_protocol_version='v1') as sender:
+        def test_line_protocol_version_on_tcp(self):
+            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='1') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -1138,12 +1140,12 @@ class TestBases:
                     symbols={'id': 'Hola'},
                     columns={'qty': 3.5},
                     at=qi.TimestampNanos(111222233333))
-                exp = b'line_sender_buffer_tcp_v1,id=Hola qty' + _float_binary_bytes(3.5, True) + b' 111222233333\n'
+                exp = b'line_sender_buffer_tcp_v1,id=Hola qty=3.5 111222233333\n'
                 self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 self.assertEqual(server.recv()[0] + b'\n', exp)
 
-            with Server() as server, self.builder('tcp', 'localhost', server.port, default_line_protocol_version='v2') as sender:
+            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -1157,7 +1159,7 @@ class TestBases:
                 sender.flush(buffer)
                 self.assertEqual(server.recv()[0] + b'\n', exp)
 
-            with Server() as server, self.builder('tcp', 'localhost', server.port, default_line_protocol_version='auto') as sender:
+            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='auto') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -1166,12 +1168,13 @@ class TestBases:
                     symbols={'id': 'Hola'},
                     columns={'qty': 3.5},
                     at=qi.TimestampNanos(111222233333))
-                exp = b'line_sender_buffer_tcp_v1,id=Hola qty' + _float_binary_bytes(3.5) + b' 111222233333\n'
+                exp = b'line_sender_buffer_tcp_v1,id=Hola qty=3.5 111222233333\n'
                 self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 self.assertEqual(server.recv()[0] + b'\n', exp)\
 
         def _test_array_basic(self, arr: np.ndarray):
+            # http
             with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
                 sender.row(
                     'array_test',
@@ -1182,7 +1185,8 @@ class TestBases:
                 self.assertEqual(len(server.requests), 1)
                 self.assertEqual(server.requests[0], exp)
 
-            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+            #tcp
+            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 sender.row(
@@ -1327,7 +1331,7 @@ def build_conf(protocol, host, port, **kwargs):
         'auto_flush_rows': encode_int_or_off,
         'auto_flush_bytes': encode_int_or_off,
         'auto_flush_interval': encode_duration_or_off,
-        'default_line_protocol_version': str,
+        'protocol_version': str,
         'init_buf_size': str,
         'max_name_len': str,
     }

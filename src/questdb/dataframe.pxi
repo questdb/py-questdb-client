@@ -2044,14 +2044,8 @@ cdef void_int _dataframe_serialize_cell_column_array__array_numpy(
                            'Only support float64 array, got: %s' % str(arr.dtype))
     cdef:
         size_t rank = cnp.PyArray_NDIM(arr)
-        const uint8_t* data_ptr
+        const uint8_t* data_ptr = <const uint8_t *> cnp.PyArray_DATA(arr)
         line_sender_error * err = NULL
-    if rank == 0:
-        raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Zero-dimensional arrays are not supported')
-    if rank > 32:
-        raise IngressError(IngressErrorCode.ArrayLargeDimError, f'Max dimensions 32, got {rank}')
-    data_ptr = <const uint8_t *> cnp.PyArray_DATA(arr)
-
     if not line_sender_buffer_column_f64_arr(
             ls_buf, col.name, rank, <const size_t*> cnp.PyArray_DIMS(arr),
             <const ssize_t*> cnp.PyArray_STRIDES(arr), data_ptr, cnp.PyArray_NBYTES(arr), &err):

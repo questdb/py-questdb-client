@@ -114,7 +114,7 @@ class Server:
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
         self.close()
 
-SETTINGS_WITH_PROTOCOL_VERSION = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.default.version": 2, "line.proto.support.versions": [1, 2], "ilp.proto.transports": [ "tcp", "http" ], "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITH_PROTOCOL_VERSION = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [1, 2], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
 SETTINGS_WITHOUT_PROTOCOL_VERSION = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
 
 class HttpServer:
