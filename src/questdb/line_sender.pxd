@@ -22,7 +22,7 @@
 ##
 ################################################################################
 
-from libc.stdint cimport int64_t, uint16_t, uint64_t
+from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t, uint32_t, int32_t
 
 cdef extern from "questdb/ingress/line_sender.h":
     cdef struct line_sender_error:
@@ -40,12 +40,20 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_http_not_supported,
         line_sender_error_server_flush_error,
         line_sender_error_config_error,
+        line_sender_error_array_large_dim
+        line_sender_error_array_view_internal_error
+        line_sender_error_array_view_write_to_buffer_error
+        line_sender_error_protocol_version_error
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,
         line_sender_protocol_tcps,
         line_sender_protocol_http,
         line_sender_protocol_https,
+
+    cdef enum protocol_version:
+        protocol_version_1 = 1,
+        protocol_version_2 = 2,
 
     cdef enum line_sender_ca:
         line_sender_ca_webpki_roots,
@@ -102,6 +110,10 @@ cdef extern from "questdb/ingress/line_sender.h":
         size_t len
         const char* buf
 
+    cdef struct line_sender_buffer_view:
+        size_t len
+        const uint8_t* buf
+
     bint line_sender_column_name_init(
         line_sender_column_name* name,
         size_t len,
@@ -118,10 +130,12 @@ cdef extern from "questdb/ingress/line_sender.h":
         pass
 
     line_sender_buffer* line_sender_buffer_new(
+        protocol_version version,
         ) noexcept nogil
 
     line_sender_buffer* line_sender_buffer_with_max_name_len(
-        size_t max_name_len
+        size_t max_name_len,
+        protocol_version version,
         ) noexcept nogil
 
     void line_sender_buffer_free(
@@ -171,9 +185,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         const line_sender_buffer* buffer
         ) noexcept nogil
 
-    const char* line_sender_buffer_peek(
-        const line_sender_buffer* buffer,
-        size_t* len_out
+    line_sender_buffer_view line_sender_buffer_peek(
+        const line_sender_buffer* buffer
         ) noexcept nogil
 
     bint line_sender_buffer_table(
@@ -214,6 +227,17 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_buffer* buffer,
         line_sender_column_name name,
         line_sender_utf8 value,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_f64_arr(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        size_t rank,
+        const size_t* shapes,
+        const ssize_t* strides,
+        const uint8_t* data_buffer,
+        size_t data_buffer_len,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -311,6 +335,12 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_opts_protocol_version(
+        line_sender_opts* opts,
+        protocol_version version,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint line_sender_opts_auth_timeout(
         line_sender_opts* opts,
         uint64_t millis,
@@ -379,6 +409,19 @@ cdef extern from "questdb/ingress/line_sender.h":
 
     line_sender* line_sender_from_env(
         line_sender_error** err_out
+        ) noexcept nogil
+
+    protocol_version line_sender_default_protocol_version(
+        const line_sender * sender
+        ) noexcept nogil
+
+    line_sender_buffer* line_sender_buffer_new_for_sender(
+        const line_sender * sender
+        ) noexcept nogil
+
+    line_sender_buffer* line_sender_buffer_with_max_name_len_for_sender(
+        const line_sender * sender,
+        size_t max_name_len
         ) noexcept nogil
 
     bint line_sender_must_close(

@@ -27,7 +27,6 @@ cdef auto_flush_t auto_flush_blank() noexcept nogil:
     af.last_flush_ms = NULL
     return af
 
-
 cdef bint should_auto_flush(
             const auto_flush_mode_t* af_mode,
             line_sender_buffer* ls_buf,
@@ -73,7 +72,8 @@ cdef enum col_target_t:
     col_target_column_f64 = 5
     col_target_column_str = 6
     col_target_column_ts = 7
-    col_target_at = 8
+    col_target_column_array = 8
+    col_target_at = 9
 
 
 cdef dict _TARGET_NAMES = {
@@ -85,6 +85,7 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_f64: "float",
     col_target_t.col_target_column_str: "string",
     col_target_t.col_target_column_ts: "timestamp",
+    col_target_t.col_target_column_array: "array",
     col_target_t.col_target_at: "designated timestamp",
 }
 
@@ -125,6 +126,7 @@ cdef enum col_source_t:
     col_source_str_lrg_utf8_arrow =     406000
     col_source_dt64ns_numpy =           501000
     col_source_dt64ns_tz_arrow =        502000
+    col_source_array_numpy =            503000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -213,6 +215,9 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
     },
+    col_target_t.col_target_column_array: {
+        col_source_t.col_source_array_numpy,
+    },
     col_target_t.col_target_at: {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
@@ -227,7 +232,8 @@ cdef tuple _FIELD_TARGETS = (
     col_target_t.col_target_column_i64,
     col_target_t.col_target_column_f64,
     col_target_t.col_target_column_str,
-    col_target_t.col_target_column_ts)
+    col_target_t.col_target_column_ts,
+    col_target_t.col_target_column_array)
 
 
 # Targets that map directly from a meta target.
@@ -348,6 +354,9 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_at + col_source_t.col_source_dt64ns_numpy
     col_dispatch_code_at__dt64ns_tz_arrow = \
         col_target_t.col_target_at + col_source_t.col_source_dt64ns_tz_arrow
+
+    col_dispatch_code_column_array__array_numpy = \
+        col_target_t.col_target_column_array + col_source_t.col_source_array_numpy
 
 
 # Int values in order for sorting (as needed for API's sequential coupling).
@@ -932,6 +941,8 @@ cdef void_int _dataframe_series_sniff_pyobj(
                 col.setup.source = col_source_t.col_source_float_pyobj
             elif PyUnicode_CheckExact(obj):
                 col.setup.source = col_source_t.col_source_str_pyobj
+            elif PyArray_CheckExact(obj):
+                col.setup.source = col_source_t.col_source_array_numpy
             elif PyBytes_CheckExact(obj):
                 raise IngressError(
                     IngressErrorCode.BadDataFrame,
@@ -2016,6 +2027,30 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
+cimport numpy as cnp
+cnp.import_array()
+
+cdef void_int _dataframe_serialize_cell_column_array__array_numpy(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+    cdef cnp.ndarray arr = <cnp.ndarray> cell
+    cdef PyArray_Descr* dtype_ptr = cnp.PyArray_DESCR(arr)
+    if dtype_ptr.type_num != NPY_FLOAT64:
+        raise IngressError(IngressErrorCode.ArrayWriteToBufferError,
+                           'Only support float64 array, got: %s' % str(arr.dtype))
+    cdef:
+        size_t rank = cnp.PyArray_NDIM(arr)
+        const uint8_t* data_ptr = <const uint8_t *> cnp.PyArray_DATA(arr)
+        line_sender_error * err = NULL
+    if not line_sender_buffer_column_f64_arr(
+            ls_buf, col.name, rank, <const size_t*> cnp.PyArray_DIMS(arr),
+            <const ssize_t*> cnp.PyArray_STRIDES(arr), data_ptr, cnp.PyArray_NBYTES(arr), &err):
+        _ensure_has_gil(gs)
+        raise c_err_to_py(err)
 
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,
@@ -2173,6 +2208,8 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_str__str_i32_cat(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_array__array_numpy:
+        _dataframe_serialize_cell_column_array__array_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
         _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:

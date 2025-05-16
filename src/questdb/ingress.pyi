@@ -38,6 +38,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 
 class IngressErrorCode(Enum):
@@ -54,7 +55,16 @@ class IngressErrorCode(Enum):
     HttpNotSupported = ...
     ServerFlushError = ...
     ConfigError = ...
+    ArrayLargeDimError = ...
+    ArrayInternalError = ...
+    ArrayWriteToBufferError = ...
+    ProtocolVersionError = ...
     BadDataFrame = ...
+
+class ProtocolVersion(Enum):
+    """Line protocol version."""
+    ProtocolVersionV1 = ...
+    ProtocolVersionV2 = ...
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -194,7 +204,7 @@ class SenderTransaction:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
         at: Union[ServerTimestamp, TimestampNanos, datetime],
     ) -> SenderTransaction:
@@ -300,7 +310,7 @@ class Buffer:
 
     """
 
-    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127):
+    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127, protocol_version: ProtocolVersion = ProtocolVersion.ProtocolVersionV2):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
@@ -345,11 +355,11 @@ class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(buffer))``.
         """
 
-    def __str__(self) -> str:
-        """Return the constructed buffer as a string. Use for debugging."""
+    def  __bytes__(self) -> bytes:
+        """Return the constructed buffer as bytes. Use for debugging."""
 
     def row(
         self,
@@ -357,7 +367,7 @@ class Buffer:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
         at: Union[ServerTimestamp, TimestampNanos, datetime],
     ) -> Buffer:
@@ -806,6 +816,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ): ...
@@ -831,6 +842,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -866,6 +878,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -925,6 +938,11 @@ class Sender:
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
 
+    def default_protocol_version(self) -> ProtocolVersion:
+        """
+        Returns the QuestDB server's recommended default line protocol version.
+        """
+
     def establish(self):
         """
         Prepare the sender for use.
@@ -941,20 +959,20 @@ class Sender:
     def __enter__(self) -> Sender:
         """Call :func:`Sender.establish` at the start of a ``with`` block."""
 
-    def __str__(self) -> str:
-        """
-        Inspect the contents of the internal buffer.
-
-        The ``str`` value returned represents the unsent data.
-
-        Also see :func:`Sender.__len__`.
-        """
-
     def __len__(self) -> int:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        """
+
+    def __bytes__(self) -> bytes:
+        """
+        Inspect the contents of the internal buffer.
+
+        The ``bytes`` value returned represents the unsent data.
+
+        Also see :func:`Sender.__len__`.
         """
 
     def transaction(self, table_name: str) -> SenderTransaction:
@@ -968,7 +986,7 @@ class Sender:
         *,
         symbols: Optional[Dict[str, str]] = None,
         columns: Optional[
-            Dict[str, Union[bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
         at: Union[TimestampNanos, datetime, ServerTimestamp],
     ) -> Sender:
