@@ -1026,7 +1026,8 @@ class TestBases:
                     auto_flush='off',
                     request_timeout=1,
                     retry_timeout=0,
-                    request_min_throughput=100000000) as sender:
+                    request_min_throughput=100000000,
+                    protocol_version='2') as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)

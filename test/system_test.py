@@ -228,7 +228,8 @@ class TestWithDatabase(unittest.TestCase):
         self.assertEqual(scrubbed_dataset, exp_dataset)
 
     def test_f64_arr(self):
-        if self.qdb_plain.version < (8,3,2):
+        # first array release is 8.3.2
+        if self.qdb_plain.version < (8, 3, 3):
             self.skipTest('old server does not support array')
         table_name = uuid.uuid4().hex
         array1 = np.array(
