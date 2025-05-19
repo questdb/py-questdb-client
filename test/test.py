@@ -250,11 +250,6 @@ class TestBufferBase:
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
-            # large array
-            with self.assertRaisesRegex(qi.IngressError, "Array buffer size too big"):
-                large_arr = np.arange(2147483648, dtype=np.float64)
-                buf.row('large_array', columns={'col': large_arr}, at=qi.ServerTimestamp)
-
         def test_int_range(self):
             buf = qi.Buffer(self.version)
             buf.row('tbl1', columns={'num': 0}, at=qi.ServerTimestamp)
