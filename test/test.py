@@ -1035,7 +1035,7 @@ class TestBases:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
 
                 # wait 5ms in the server to simulate a slow response
-                server.responses.append((5, 200, 'text/plain', b'OK'))
+                server.responses.append((10, 200, 'text/plain', b'OK'))
 
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
