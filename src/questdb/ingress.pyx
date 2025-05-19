@@ -82,13 +82,10 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import sys
 import os
-cimport numpy as cnp
-import numpy as np
 
-cdef extern from "numpy/ndarraytypes.h":
-    ctypedef struct PyArray_Descr:
-        int type_num
-    enum: NPY_FLOAT64
+import numpy as np
+cimport numpy as cnp
+
 cnp.import_array()
 
 # This value is automatically updated by the `bump2version` tool.
@@ -604,7 +601,7 @@ cdef class SenderTransaction:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Already inside a transaction, can\'t start another.')
-        if len(self._sender._buffer):
+        if self._sender._buffer is not None and len(self._sender._buffer):
             if self._sender._auto_flush_mode.enabled:
                 self._sender.flush()
             else:
@@ -727,7 +724,8 @@ cdef class SenderTransaction:
 
 cdef class Buffer:
     """
-    Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
+    Construct QuestDB Ingestion Line Protocol (ILP) messages.
+    Version 1 is compatible with the InfluxDB Line Protocol.
 
     The :func:`Buffer.row` method is used to add a row to the buffer.
 
@@ -944,8 +942,7 @@ cdef class Buffer:
 
     cdef inline void_int _column_numpy(
             self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
-        cdef PyArray_Descr * dtype_ptr = cnp.PyArray_DESCR(arr)
-        if dtype_ptr.type_num != NPY_FLOAT64:
+        if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
             raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Only support float64 array, got: %s' % str(arr.dtype))
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
@@ -1090,7 +1087,8 @@ cdef class Buffer:
                     'col4': 'xyz',
                     'col5': TimestampMicros(123456789),
                     'col6': datetime(2019, 1, 1, 12, 0, 0),
-                    'col7': None},
+                    'col7': np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                    'col8': None},
                 at=TimestampNanos(123456789))
 
             # Only symbols specified. Designated timestamp assigned by the db.
@@ -1133,6 +1131,8 @@ cdef class Buffer:
               - `FLOAT <https://questdb.io/docs/reference/api/ilp/columnset-types#float>`_
             * - ``str``
               - `STRING <https://questdb.io/docs/reference/api/ilp/columnset-types#string>`_
+            * - ``np.ndarray``
+              - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``
@@ -2363,9 +2363,7 @@ cdef class Sender:
         self._opts = NULL
 
         # Request callbacks when rows are complete.
-        if self._buffer is not None:
-            self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
-
+        self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
         self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
     def __enter__(self) -> Sender:

@@ -62,7 +62,7 @@ class IngressErrorCode(Enum):
     BadDataFrame = ...
 
 class ProtocolVersion(Enum):
-    """Line protocol version."""
+    """Write protocol version."""
     ProtocolVersionV1 = ...
     ProtocolVersionV2 = ...
 
@@ -247,7 +247,7 @@ class SenderTransaction:
 
 class Buffer:
     """
-    Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
+    Construct QuestDB-flavored Ingestion Line Protocol (ILP) messages.
 
     The :func:`Buffer.row` method is used to add a row to the buffer.
 
@@ -310,7 +310,7 @@ class Buffer:
 
     """
 
-    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127, protocol_version: ProtocolVersion = ProtocolVersion.ProtocolVersionV2):
+    def __init__(self, protocol_version: ProtocolVersion, init_buf_size: int = 65536, max_name_len: int = 127):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
@@ -387,7 +387,8 @@ class Buffer:
                     'col4': 'xyz',
                     'col5': TimestampMicros(123456789),
                     'col6': datetime(2019, 1, 1, 12, 0, 0),
-                    'col7': None},
+                    'col7': np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                    'col8': None},
                 at=TimestampNanos(123456789))
 
             # Only symbols specified. Designated timestamp assigned by the db.
@@ -430,6 +431,8 @@ class Buffer:
               - `FLOAT <https://questdb.io/docs/reference/api/ilp/columnset-types#float>`_
             * - ``str``
               - `STRING <https://questdb.io/docs/reference/api/ilp/columnset-types#string>`_
+            * - ``np.ndarray``
+              - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``

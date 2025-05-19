@@ -8,7 +8,7 @@ import datetime as dt
 import functools
 import tempfile
 import pathlib
-from common_tools import _float_binary_bytes, _array_binary_bytes
+from test_tools import _float_binary_bytes, _array_binary_bytes
 
 BROKEN_TIMEZONES = True
 
@@ -61,6 +61,24 @@ DF2 = pd.DataFrame({
         pd.Timestamp('20180311'),
         pd.Timestamp('20180312')]})
 
+DF3 = pd.DataFrame({
+    'T': ['t1', 't2', 't1'],
+    'A': ['a1', 'a2', 'a3'],
+    'B': ['b1', None, 'b3'],
+    'C': pd.Series(['b1', None, 'b3'], dtype='string'),
+    'D': pd.Series(['a1', 'a2', 'a3'], dtype='string'),
+    'E': [1.0, 2.0, 3.0],
+    'F': [1, 2, 3],
+    "G": [
+        np.array([1.0]),
+        np.array([10.0]),
+        np.array([100.0])],
+    'H': [
+        pd.Timestamp('20180310'),
+        pd.Timestamp('20180311'),
+        pd.Timestamp('20180312')]}
+)
+
 
 def with_tmp_dir(func):
     @functools.wraps(func)
@@ -75,18 +93,18 @@ class TestPandasBase:
             with self.assertRaisesRegex(TypeError, "needs keyword-only argument at"):
                 _dataframe(self.version, [])
             with self.assertRaisesRegex(TypeError, "needs keyword-only argument at"):
-                buf = qi.Buffer()
+                buf = qi.Buffer(self.version)
                 buf.dataframe([])
 
-            buf = qi.Buffer()
+            buf = qi.Buffer(self.version)
             buf.dataframe(pd.DataFrame(), at=qi.ServerTimestamp)
 
         def test_mandatory_at_row(self):
             with self.assertRaisesRegex(TypeError, "needs keyword-only argument at"):
-                buf = qi.Buffer()
+                buf = qi.Buffer(self.version)
                 buf.row(table_name="test_buffer")
 
-            buf = qi.Buffer()
+            buf = qi.Buffer(self.version)
             buf.row(table_name="test_mandatory_at_row", at=qi.ServerTimestamp)
 
         def test_bad_dataframe(self):
@@ -190,6 +208,21 @@ class TestPandasBase:
                 b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) +  b',F=1i 1520640000000000000\n' +
                 b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',F=2i 1520726400000000000\n' +
                 b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',F=3i 1520812800000000000\n')
+
+        def test_basic_with_arrays(self):
+            if self.version == qi.ProtocolVersion.ProtocolVersionV1:
+                self.skipTest('Protocol version v1 doesn\'t support arrays')
+            buf = _dataframe(
+                self.version,
+                DF3,
+                table_name_col='T',
+                symbols=['A', 'B', 'C', 'D'],
+                at=-1)
+            self.assertEqual(
+                buf,
+                b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) +  b',F=1i,G=' + _array_binary_bytes(np.array([1.0])) + b' 1520640000000000000\n' +
+                b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',F=2i,G=' + _array_binary_bytes(np.array([10.0])) + b' 1520726400000000000\n' +
+                b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b',F=3i,G=' + _array_binary_bytes(np.array([100.0])) + b' 1520812800000000000\n')
 
         def test_named_dataframe(self):
             df = pd.DataFrame({
@@ -1614,7 +1647,7 @@ class TestPandasBase:
             if self.version == qi.ProtocolVersion.ProtocolVersionV1:
                 with self.assertRaisesRegex(
                         qi.IngressError,
-                        "line protocol version v1 does not support array datatype"):
+                        "Protocol version v1 does not support array datatype"):
                     _ = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             else:
                 buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -1625,11 +1658,11 @@ class TestPandasBase:
                     b'tbl1 a=' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
 
 class TestPandasProtocolVersionV1(TestPandasBase.TestPandas):
-    name = 'init'
+    name = 'protocol version 1'
     version = qi.ProtocolVersion.ProtocolVersionV1
 
 class TestPandasProtocolVersionV2(TestPandasBase.TestPandas):
-    name = 'init'
+    name = 'protocol version 2'
     version = qi.ProtocolVersion.ProtocolVersionV2
 
 if __name__ == '__main__':

@@ -90,7 +90,11 @@ def ingress_extension():
         libraries=libraries,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
-        extra_objects=extra_objects)
+        extra_objects=extra_objects,
+        define_macros = [
+            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')
+        ]
+    )
 
 
 def cargo_build():

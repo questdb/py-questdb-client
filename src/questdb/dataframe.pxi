@@ -2027,9 +2027,6 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
-cimport numpy as cnp
-cnp.import_array()
-
 cdef void_int _dataframe_serialize_cell_column_array__array_numpy(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
@@ -2038,8 +2035,7 @@ cdef void_int _dataframe_serialize_cell_column_array__array_numpy(
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
     cdef cnp.ndarray arr = <cnp.ndarray> cell
-    cdef PyArray_Descr* dtype_ptr = cnp.PyArray_DESCR(arr)
-    if dtype_ptr.type_num != NPY_FLOAT64:
+    if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
         raise IngressError(IngressErrorCode.ArrayWriteToBufferError,
                            'Only support float64 array, got: %s' % str(arr.dtype))
     cdef:

@@ -13,12 +13,14 @@ import numpy as np
 
 import patch_path
 
-from common_tools import _float_binary_bytes, _array_binary_bytes
+from test_tools import _float_binary_bytes, _array_binary_bytes
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
-from mock_server import Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION
+from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
+                         SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
+                         SETTINGS_WITH_PROTOCOL_VERSION_V1_V2,SETTINGS_WITH_PROTOCOL_VERSION_V3)
 
 import questdb.ingress as qi
 
@@ -38,244 +40,244 @@ if pd is not None:
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
-            buf = qi.Buffer()
+            buf = qi.Buffer(qi.ProtocolVersion.ProtocolVersionV2)
             exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
             with self.assertRaisesRegex(ImportError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
 
-class TestBuffer(unittest.TestCase):
-    def test_buffer_row_at_disallows_none(self):
-        with self.assertRaisesRegex(
-                qi.IngressError,
-                'must be of type TimestampNanos, datetime, or ServerTimestamp'):
-            buffer = qi.Buffer()
-            buffer.row('tbl1', symbols={'sym1': 'val1'}, at=None)
-        with self.assertRaisesRegex(
-                TypeError,
-                'needs keyword-only argument at'):
-            buffer = qi.Buffer()
-            buffer.row('tbl1', symbols={'sym1': 'val1'})
+class TestBufferBase:
+    class TestBuffer(unittest.TestCase):
+        def test_buffer_row_at_disallows_none(self):
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'must be of type TimestampNanos, datetime, or ServerTimestamp'):
+                buffer = qi.Buffer(self.version)
+                buffer.row('tbl1', symbols={'sym1': 'val1'}, at=None)
+            with self.assertRaisesRegex(
+                    TypeError,
+                    'needs keyword-only argument at'):
+                buffer = qi.Buffer(self.version)
+                buffer.row('tbl1', symbols={'sym1': 'val1'})
 
-    @unittest.skipIf(not pd, 'pandas not installed')
-    def test_buffer_dataframe_at_disallows_none(self):
-        with self.assertRaisesRegex(
-                qi.IngressError,
-                'must be of type TimestampNanos, datetime, or ServerTimestamp'):
-            buffer = qi.Buffer()
-            buffer.dataframe(pd.DataFrame(), at=None)
-        with self.assertRaisesRegex(
-                TypeError,
-                'needs keyword-only argument at'):
-            buffer = qi.Buffer()
-            buffer.dataframe(pd.DataFrame())
+        @unittest.skipIf(not pd, 'pandas not installed')
+        def test_buffer_dataframe_at_disallows_none(self):
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'must be of type TimestampNanos, datetime, or ServerTimestamp'):
+                buffer = qi.Buffer(self.version)
+                buffer.dataframe(pd.DataFrame(), at=None)
+            with self.assertRaisesRegex(
+                    TypeError,
+                    'needs keyword-only argument at'):
+                buffer = qi.Buffer(self.version)
+                buffer.dataframe(pd.DataFrame())
 
-    def test_new(self):
-        buf = qi.Buffer()
-        self.assertEqual(len(buf), 0)
-        self.assertEqual(buf.capacity(), 64 * 1024)
+        def test_new(self):
+            buf = qi.Buffer(self.version)
+            self.assertEqual(len(buf), 0)
+            self.assertEqual(buf.capacity(), 64 * 1024)
 
-    def test_basic(self):
-        buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
-        self.assertEqual(len(buf), 25)
-        self.assertEqual(bytes(buf), b'tbl1,sym1=val1,sym2=val2\n')
+        def test_basic(self):
+            buf = qi.Buffer(self.version)
+            buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
+            self.assertEqual(len(buf), 25)
+            self.assertEqual(bytes(buf), b'tbl1,sym1=val1,sym2=val2\n')
 
-    def test_bad_table(self):
-        buf = qi.Buffer()
-        with self.assertRaisesRegex(
-                qi.IngressError,
-                'Table names must have a non-zero length'):
-            buf.row('', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
-        with self.assertRaisesRegex(
-                qi.IngressError,
-                'Bad string "x..y": Found invalid dot `.` at position 2.'):
-            buf.row('x..y', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+        def test_bad_table(self):
+            buf = qi.Buffer(self.version)
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'Table names must have a non-zero length'):
+                buf.row('', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'Bad string "x..y": Found invalid dot `.` at position 2.'):
+                buf.row('x..y', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
 
-    def test_symbol(self):
-        buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), b'tbl1,sym1=val1,sym2=val2\n')
+        def test_symbol(self):
+            buf = qi.Buffer(self.version)
+            buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), b'tbl1,sym1=val1,sym2=val2\n')
 
-    def test_bad_symbol_column_name(self):
-        buf = qi.Buffer()
-        with self.assertRaisesRegex(
-                qi.IngressError,
-                'Column names must have a non-zero length.'):
-            buf.row('tbl1', symbols={'': 'val1'}, at=qi.ServerTimestamp)
-        with self.assertRaisesRegex(
-                qi.IngressError,
-                'Bad string "sym.bol": '
-                'Column names can\'t contain a \'.\' character, '
-                'which was found at byte position 3.'):
-            buf.row('tbl1', symbols={'sym.bol': 'val1'}, at=qi.ServerTimestamp)
+        def test_bad_symbol_column_name(self):
+            buf = qi.Buffer(self.version)
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'Column names must have a non-zero length.'):
+                buf.row('tbl1', symbols={'': 'val1'}, at=qi.ServerTimestamp)
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'Bad string "sym.bol": '
+                    'Column names can\'t contain a \'.\' character, '
+                    'which was found at byte position 3.'):
+                buf.row('tbl1', symbols={'sym.bol': 'val1'}, at=qi.ServerTimestamp)
 
-    def test_column(self):
-        two_h_after_epoch = datetime.datetime(
-            1970, 1, 1, 2, tzinfo=datetime.timezone.utc)
-        buf = qi.Buffer()
-        buf.row('tbl1', columns={
-            'col1': True,
-            'col2': False,
-            'col3': -1,
-            'col4': 0.5,
-            'col5': 'val',
-            'col6': qi.TimestampMicros(12345),
-            'col7': two_h_after_epoch,
-            'col8': None}, at=qi.ServerTimestamp)
-        exp = (
-            b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5) +
-            b',col5="val",col6=12345t,col7=7200000000t\n')
-        self.assertEqual(bytes(buf), exp)
+        def test_column(self):
+            two_h_after_epoch = datetime.datetime(
+                1970, 1, 1, 2, tzinfo=datetime.timezone.utc)
+            buf = qi.Buffer(self.version)
+            buf.row('tbl1', columns={
+                'col1': True,
+                'col2': False,
+                'col3': -1,
+                'col4': 0.5,
+                'col5': 'val',
+                'col6': qi.TimestampMicros(12345),
+                'col7': two_h_after_epoch,
+                'col8': None}, at=qi.ServerTimestamp)
+            exp = (
+                b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) +
+                b',col5="val",col6=12345t,col7=7200000000t\n')
+            self.assertEqual(bytes(buf), exp)
 
-    def test_none_symbol(self):
-        buf = qi.Buffer()
-        buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None}, at=qi.ServerTimestamp)
-        exp = b'tbl1,sym1=val1\n'
-        self.assertEqual(bytes(buf), exp)
-        self.assertEqual(len(buf), len(exp))
+        def test_none_symbol(self):
+            buf = qi.Buffer(self.version)
+            buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None}, at=qi.ServerTimestamp)
+            exp = b'tbl1,sym1=val1\n'
+            self.assertEqual(bytes(buf), exp)
+            self.assertEqual(len(buf), len(exp))
 
-        # No fields to write, no fields written, therefore a no-op.
-        buf.row('tbl1', symbols={'sym1': None, 'sym2': None}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), exp)
-        self.assertEqual(len(buf), len(exp))
+            # No fields to write, no fields written, therefore a no-op.
+            buf.row('tbl1', symbols={'sym1': None, 'sym2': None}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), exp)
+            self.assertEqual(len(buf), len(exp))
 
-    def test_none_column(self):
-        buf = qi.Buffer()
-        buf.row('tbl1', columns={'col1': 1}, at=qi.ServerTimestamp)
-        exp = b'tbl1 col1=1i\n'
-        self.assertEqual(bytes(buf), exp)
-        self.assertEqual(len(buf), len(exp))
+        def test_none_column(self):
+            buf = qi.Buffer(self.version)
+            buf.row('tbl1', columns={'col1': 1}, at=qi.ServerTimestamp)
+            exp = b'tbl1 col1=1i\n'
+            self.assertEqual(bytes(buf), exp)
+            self.assertEqual(len(buf), len(exp))
 
-        # No fields to write, no fields written, therefore a no-op.
-        buf.row('tbl1', columns={'col1': None, 'col2': None}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), exp)
-        self.assertEqual(len(buf), len(exp))
+            # No fields to write, no fields written, therefore a no-op.
+            buf.row('tbl1', columns={'col1': None, 'col2': None}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), exp)
+            self.assertEqual(len(buf), len(exp))
 
-    def test_no_symbol_or_col_args(self):
-        buf = qi.Buffer()
-        buf.row('table_name', at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), b'')
+        def test_no_symbol_or_col_args(self):
+            buf = qi.Buffer(self.version)
+            buf.row('table_name', at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), b'')
 
-    def test_unicode(self):
-        buf = qi.Buffer()
-        buf.row(
-            'tbl1',  # ASCII
-            symbols={'questdb1': 'q❤️p'},  # Mixed ASCII and UCS-2
-            columns={'questdb2': '❤️' * 1200},
-            at=qi.ServerTimestamp)  # Over the 1024 buffer prealloc.
-        buf.row(
-            'tbl1',
-            symbols={
-                'Questo è il nome di una colonna':  # Non-ASCII UCS-1
-                    'Це символьне значення'},  # UCS-2, 2 bytes for UTF-8.
-            columns={
-                'questdb1': '',  # Empty string
-                'questdb2': '嚜꓂',  # UCS-2, 3 bytes for UTF-8.
-                'questdb3': '💩🦞'},
-            at=qi.ServerTimestamp)  # UCS-4, 4 bytes for UTF-8.
-        self.assertEqual(bytes(buf),
-                         (f'tbl1,questdb1=q❤️p questdb2="{"❤️" * 1200}"\n' +
-                         'tbl1,Questo\\ è\\ il\\ nome\\ di\\ una\\ colonna=' +
-                         'Це\\ символьне\\ значення ' +
-                         'questdb1="",questdb2="嚜꓂",questdb3="💩🦞"\n').encode('utf-8'))
+        def test_unicode(self):
+            buf = qi.Buffer(self.version)
+            buf.row(
+                'tbl1',  # ASCII
+                symbols={'questdb1': 'q❤️p'},  # Mixed ASCII and UCS-2
+                columns={'questdb2': '❤️' * 1200},
+                at=qi.ServerTimestamp)  # Over the 1024 buffer prealloc.
+            buf.row(
+                'tbl1',
+                symbols={
+                    'Questo è il nome di una colonna':  # Non-ASCII UCS-1
+                        'Це символьне значення'},  # UCS-2, 2 bytes for UTF-8.
+                columns={
+                    'questdb1': '',  # Empty string
+                    'questdb2': '嚜꓂',  # UCS-2, 3 bytes for UTF-8.
+                    'questdb3': '💩🦞'},
+                at=qi.ServerTimestamp)  # UCS-4, 4 bytes for UTF-8.
+            self.assertEqual(bytes(buf),
+                             (f'tbl1,questdb1=q❤️p questdb2="{"❤️" * 1200}"\n' +
+                             'tbl1,Questo\\ è\\ il\\ nome\\ di\\ una\\ colonna=' +
+                             'Це\\ символьне\\ значення ' +
+                             'questdb1="",questdb2="嚜꓂",questdb3="💩🦞"\n').encode('utf-8'))
 
-        buf.clear()
-        buf.row('tbl1', symbols={'questdb1': 'q❤️p'}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), 'tbl1,questdb1=q❤️p\n'.encode('utf-8'))
+            buf.clear()
+            buf.row('tbl1', symbols={'questdb1': 'q❤️p'}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), 'tbl1,questdb1=q❤️p\n'.encode('utf-8'))
 
-        # A bad char in Python.
-        with self.assertRaisesRegex(
-                qi.IngressError,
-                '.*codepoint 0xd800 in string .*'):
-            buf.row('tbl1', symbols={'questdb1': 'a\ud800'}, at=qi.ServerTimestamp)
+            # A bad char in Python.
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    '.*codepoint 0xd800 in string .*'):
+                buf.row('tbl1', symbols={'questdb1': 'a\ud800'}, at=qi.ServerTimestamp)
 
-        # Strong exception safety: no partial writes.
-        # Ensure we can continue using the buffer after an error.
-        buf.row('tbl1', symbols={'questdb1': 'another line of input'}, at=qi.ServerTimestamp)
-        self.assertEqual(
-            bytes(buf),
-            ('tbl1,questdb1=q❤️p\n' +
-            # Note: No partially written failed line here.
-            'tbl1,questdb1=another\\ line\\ of\\ input\n').encode('utf-8'))
+            # Strong exception safety: no partial writes.
+            # Ensure we can continue using the buffer after an error.
+            buf.row('tbl1', symbols={'questdb1': 'another line of input'}, at=qi.ServerTimestamp)
+            self.assertEqual(
+                bytes(buf),
+                ('tbl1,questdb1=q❤️p\n' +
+                # Note: No partially written failed line here.
+                'tbl1,questdb1=another\\ line\\ of\\ input\n').encode('utf-8'))
 
-    def test_float(self):
-        buf = qi.Buffer()
-        buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567) + b'\n')
+        def test_float(self):
+            buf = qi.Buffer(self.version)
+            buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n')
 
-    def test_array_basic(self):
-        buf = qi.Buffer()
-        arr = np.array([1.2345678901234567, 2.3456789012345678], dtype=np.float64)
-        buf.row('tbl1', columns={'array': arr}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), b'tbl1 array=' + _array_binary_bytes(arr) + b'\n')
+        def test_array_basic(self):
+            if self.version == qi.ProtocolVersion.ProtocolVersionV1:
+                self.skipTest('Protocol version v1 doesn\'t support arrays')
+            buf = qi.Buffer(self.version)
+            arr = np.array([1.2345678901234567, 2.3456789012345678], dtype=np.float64)
+            buf.row('tbl1', columns={'array': arr}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), b'tbl1 array=' + _array_binary_bytes(arr) + b'\n')
 
-    def test_array_edge_cases(self):
-        # empty array
-        buf = qi.Buffer()
-        empty_arr = np.array([], dtype=np.float64)
-        buf.row('empty_table', columns={'col': empty_arr}, at=qi.ServerTimestamp)
-        empty_expected = b'empty_table col=' + _array_binary_bytes(empty_arr) + b'\n'
-        self.assertEqual(bytes(buf), empty_expected)
+        def test_array_edge_cases(self):
+            if self.version == qi.ProtocolVersion.ProtocolVersionV1:
+                self.skipTest('Protocol version v1 doesn\'t support arrays')
+            # empty array
+            buf = qi.Buffer(self.version)
+            empty_arr = np.array([], dtype=np.float64)
+            buf.row('empty_table', columns={'col': empty_arr}, at=qi.ServerTimestamp)
+            empty_expected = b'empty_table col=' + _array_binary_bytes(empty_arr) + b'\n'
+            self.assertEqual(bytes(buf), empty_expected)
 
-        # non contigious array
-        base = np.arange(6, dtype=np.float64).reshape(2, 3)
-        non_contig_arr = base[:, ::2]  # shape (2, 2), strides (24, 16)
-        buf = qi.Buffer()
-        buf.row('non_contig_table', columns={'col': non_contig_arr}, at=qi.ServerTimestamp)
-        non_contig_expected = b'non_contig_table col=' + _array_binary_bytes(non_contig_arr) + b'\n'
-        self.assertEqual(bytes(buf), non_contig_expected)
+            # non contigious array
+            base = np.arange(6, dtype=np.float64).reshape(2, 3)
+            non_contig_arr = base[:, ::2]  # shape (2, 2), strides (24, 16)
+            buf = qi.Buffer(self.version)
+            buf.row('non_contig_table', columns={'col': non_contig_arr}, at=qi.ServerTimestamp)
+            non_contig_expected = b'non_contig_table col=' + _array_binary_bytes(non_contig_arr) + b'\n'
+            self.assertEqual(bytes(buf), non_contig_expected)
 
-        # minus stride
-        reversed_arr = np.array([1.1, 2.2, 3.3], dtype=np.float64)[::-1]  # strides -8
-        buf = qi.Buffer()
-        buf.row('reversed_table', columns={'col': reversed_arr}, at=qi.ServerTimestamp)
-        reversed_expected = b'reversed_table col=' + _array_binary_bytes(reversed_arr) + b'\n'
-        self.assertEqual(bytes(buf), reversed_expected)
+            # minus stride
+            reversed_arr = np.array([1.1, 2.2, 3.3], dtype=np.float64)[::-1]  # strides -8
+            buf = qi.Buffer(self.version)
+            buf.row('reversed_table', columns={'col': reversed_arr}, at=qi.ServerTimestamp)
+            reversed_expected = b'reversed_table col=' + _array_binary_bytes(reversed_arr) + b'\n'
+            self.assertEqual(bytes(buf), reversed_expected)
 
-        # zero dimensional array
-        with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
-            scalar_arr = np.array(42.0, dtype=np.float64)
-            buf = qi.Buffer()
-            buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
+            # zero dimensional array
+            with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
+                scalar_arr = np.array(42.0, dtype=np.float64)
+                buf = qi.Buffer(self.version)
+                buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
 
-        # not f64 dtype array
-        with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
-            complex_arr = np.array([1 + 2j], dtype=np.complex64)
-            buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
+            # not f64 dtype array
+            with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
+                complex_arr = np.array([1 + 2j], dtype=np.complex64)
+                buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
-        # large array
-        with self.assertRaisesRegex(qi.IngressError, "Array buffer size too big"):
-            large_arr = np.arange(2147483648, dtype=np.float64)
-            buf.row('large_array', columns={'col': large_arr}, at=qi.ServerTimestamp)
+            # large array
+            with self.assertRaisesRegex(qi.IngressError, "Array buffer size too big"):
+                large_arr = np.arange(2147483648, dtype=np.float64)
+                buf.row('large_array', columns={'col': large_arr}, at=qi.ServerTimestamp)
 
-    def test_float_line_protocol_v1(self):
-        buf = qi.Buffer(protocol_version=qi.ProtocolVersion.ProtocolVersionV1)
-        buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567, True) + b'\n')
+        def test_int_range(self):
+            buf = qi.Buffer(self.version)
+            buf.row('tbl1', columns={'num': 0}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), f'tbl1 num=0i\n'.encode('utf-8'))
+            buf.clear()
 
-    def test_int_range(self):
-        buf = qi.Buffer()
-        buf.row('tbl1', columns={'num': 0}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), f'tbl1 num=0i\n'.encode('utf-8'))
-        buf.clear()
+            # 32-bit int range.
+            buf.row('tbl1', columns={'min': -2 ** 31, 'max': 2 ** 31 - 1}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), f'tbl1 min=-2147483648i,max=2147483647i\n'.encode('utf-8'))
+            buf.clear()
 
-        # 32-bit int range.
-        buf.row('tbl1', columns={'min': -2 ** 31, 'max': 2 ** 31 - 1}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), f'tbl1 min=-2147483648i,max=2147483647i\n'.encode('utf-8'))
-        buf.clear()
+            # 64-bit int range.
+            buf.row('tbl1', columns={'min': -2 ** 63, 'max': 2 ** 63 - 1}, at=qi.ServerTimestamp)
+            self.assertEqual(bytes(buf), f'tbl1 min=-9223372036854775808i,max=9223372036854775807i\n'.encode('utf-8'))
+            buf.clear()
 
-        # 64-bit int range.
-        buf.row('tbl1', columns={'min': -2 ** 63, 'max': 2 ** 63 - 1}, at=qi.ServerTimestamp)
-        self.assertEqual(bytes(buf), f'tbl1 min=-9223372036854775808i,max=9223372036854775807i\n'.encode('utf-8'))
-        buf.clear()
+            # Overflow.
+            with self.assertRaises(OverflowError):
+                buf.row('tbl1', columns={'num': 2 ** 63}, at=qi.ServerTimestamp)
 
-        # Overflow.
-        with self.assertRaises(OverflowError):
-            buf.row('tbl1', columns={'num': 2 ** 63}, at=qi.ServerTimestamp)
-
-        # Underflow.
-        with self.assertRaises(OverflowError):
-            buf.row('tbl1', columns={'num': -2 ** 63 - 1}, at=qi.ServerTimestamp)
+            # Underflow.
+            with self.assertRaises(OverflowError):
+                buf.row('tbl1', columns={'num': -2 ** 63 - 1}, at=qi.ServerTimestamp)
 
 
 class TestManifest(unittest.TestCase):
@@ -1066,7 +1068,7 @@ class TestBases:
                     protocol_version='3')
 
         def test_http_server_not_serve(self):
-            with self.assertRaisesRegex(qi.IngressError, 'Failed to detect server\'s line protocol version, settings url: http://localhost:1234/settings'):
+            with self.assertRaisesRegex(qi.IngressError, 'Could not detect server\'s line protocol version, settings url: http://localhost:1234/settings'):
                 with self.builder(
                     'http',
                     'localhost',
@@ -1074,34 +1076,21 @@ class TestBases:
                     protocol_version='auto') as sender:
                         sender.row('tbl1', columns={'x': 42})
 
-        def test_sender_connect_mock_old_server1(self):
-            with HttpServer(settings=SETTINGS_WITHOUT_PROTOCOL_VERSION) as server, self.builder('http', 'localhost', server.port) as sender:
-                buffer = sender.new_buffer()
-                buffer.row(
-                    'line_sender_buffer_old_server',
-                    symbols={'id': 'Hola'},
-                    columns={'price': '111222233333i', 'qty': 3.5},
-                    at=qi.TimestampNanos(111222233333))
-                exp = b'line_sender_buffer_old_server,id=Hola price="111222233333i",qty' + _float_binary_bytes(
-                    3.5, True) + b' 111222233333\n'
-                self.assertEqual(bytes(buffer), exp)
-                sender.flush(buffer)
-                self.assertEqual(len(server.requests), 1)
-                self.assertEqual(server.requests[0], exp)
+        def test_http_auto_protocol_version_only_v1(self):
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1, qi.ProtocolVersion.ProtocolVersionV1)
 
-        def test_sender_connect_mock_old_server2(self):
-            with HttpServer(settings=b'') as server, self.builder('http', 'localhost', server.port) as sender:
-                buffer = sender.new_buffer()
-                with self.assertRaisesRegex(qi.IngressError, "line protocol version v1 does not support array datatype"):
-                    buffer.row(
-                        'line_sender_buffer_old_server2',
-                        symbols={'id': 'Hola'},
-                        columns={'array': np.array([1.0, 2.0, 3.0])},
-                        at=qi.TimestampNanos(111222233333))
-                    sender.flush(buffer)
+        def test_http_auto_protocol_version_only_v2(self):
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V2, qi.ProtocolVersion.ProtocolVersionV2)
 
-        def test_sender_connect_mock_old_server3(self):
-            with HttpServer(settings=b'') as server, self.builder('http', 'localhost', server.port) as sender:
+        def test_http_auto_protocol_version_v1_v2(self):
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1_V2, qi.ProtocolVersion.ProtocolVersionV2)
+
+        def test_http_auto_protocol_version_without_version(self):
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITHOUT_PROTOCOL_VERSION, qi.ProtocolVersion.ProtocolVersionV1)
+
+        def _test_sender_http_auto_protocol_version(self, settings, expected_version: qi.ProtocolVersion):
+            with HttpServer(settings) as server, self.builder('http', 'localhost', server.port) as sender:
+                self.assertEqual(sender.default_protocol_version, expected_version)
                 buffer = sender.new_buffer()
                 buffer.row(
                     'line_sender_buffer_old_server2',
@@ -1109,13 +1098,18 @@ class TestBases:
                     columns={'price': '111222233333i', 'qty': 3.5},
                     at=qi.TimestampNanos(111222233333))
                 exp = b'line_sender_buffer_old_server2,id=Hola price="111222233333i",qty' + _float_binary_bytes(
-                    3.5, True) + b' 111222233333\n'
+                    3.5, expected_version == qi.ProtocolVersion.ProtocolVersionV1) + b' 111222233333\n'
                 self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 self.assertEqual(len(server.requests), 1)
                 self.assertEqual(server.requests[0], exp)
 
-        def test_disable_line_protocol_validation(self):
+        def test_http_auto_protocol_version_unsupported_client(self):
+            with self.assertRaisesRegex(qi.IngressError, 'Server does not support current client'):
+                with HttpServer(SETTINGS_WITH_PROTOCOL_VERSION_V3) as server, self.builder('http', 'localhost', server.port) as sender:
+                    sender.row('tbl1', columns={'x': 42})
+
+        def test_specify_line_protocol_explicitly(self):
             with HttpServer() as server, self.builder('http', 'localhost', server.port, protocol_version='1') as sender:
                 buffer = sender.new_buffer()
                 buffer.row(
@@ -1238,6 +1232,25 @@ class TestBases:
                     sender.row(
                         'array_test',
                         columns={'array': large_arr},
+                        at=qi.TimestampNanos(11111))
+
+            # max dims
+            with self.assertRaisesRegex(qi.IngressError, "Array dimension mismatch: expected at most 32 dimensions, but got 33"):
+                dims = (1,) * 33
+                array = np.empty(dims, dtype=np.float64)
+                with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version="2") as sender:
+                    sender.row(
+                        'array_test',
+                        columns={'array': array},
+                        at=qi.TimestampNanos(11111))
+
+            # default protocol version is v1, which does not support array datatype.
+            with self.assertRaisesRegex(qi.IngressError, "Protocol version v1 does not support array datatype"):
+                array = np.zeros([1,2], dtype=np.float64)
+                with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+                    sender.row(
+                        'array_test',
+                        columns={'array': array},
                         at=qi.TimestampNanos(11111))
 
     class Timestamp(unittest.TestCase):
@@ -1394,6 +1407,14 @@ class TestSenderConf(TestBases.TestSender):
 class TestSenderEnv(TestBases.TestSender):
     name = 'env'
     builder = Builder.ENV
+
+class TestBufferProtocolVersionV1(TestBufferBase.TestBuffer):
+    name = 'protocol version 1'
+    version = qi.ProtocolVersion.ProtocolVersionV1
+
+class TestBufferProtocolVersionV2(TestBufferBase.TestBuffer):
+    name = 'protocol version 1'
+    version = qi.ProtocolVersion.ProtocolVersionV2
 
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':

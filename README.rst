@@ -5,7 +5,7 @@ QuestDB Client Library for Python
 This is the official Python client library for `QuestDB <https://questdb.io>`_.
 
 This client library implements QuestDB's variant of the
-`InfluxDB Line Protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_
+`Ingestion Line Protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_
 (ILP) over HTTP and TCP.
 
 ILP provides the fastest way to insert data into QuestDB.
