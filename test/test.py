@@ -1034,10 +1034,9 @@ class TestBases:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
 
-                # wait 5ms in the server to simulate a slow response
-                server.responses.append((10, 200, 'text/plain', b'OK'))
-
-                with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
+                # wait 10ms in the server to simulate a slow response
+                server.responses.append((30, 200, 'text/plain', b'OK'))
+                with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
                     sender.flush()
 
         def test_http_request_timeout(self):
@@ -1050,7 +1049,7 @@ class TestBases:
                     protocol_version='2',
                     request_timeout=datetime.timedelta(milliseconds=5)) as sender:
                 # wait for 10ms in the server to simulate a slow response
-                server.responses.append((20, 200, 'text/plain', b'OK'))
+                server.responses.append((30, 200, 'text/plain', b'OK'))
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
