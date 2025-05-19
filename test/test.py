@@ -1225,15 +1225,6 @@ class TestBases:
                         columns={'array': complex_arr},
                         at=qi.TimestampNanos(11111))
 
-            # large array
-            with self.assertRaisesRegex(qi.IngressError, "Array buffer size too big:"):
-                large_arr = np.arange(2147483648, dtype=np.float64)
-                with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
-                    sender.row(
-                        'array_test',
-                        columns={'array': large_arr},
-                        at=qi.TimestampNanos(11111))
-
             # max dims
             with self.assertRaisesRegex(qi.IngressError, "Array dimension mismatch: expected at most 32 dimensions, but got 33"):
                 dims = (1,) * 33

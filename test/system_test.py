@@ -7,6 +7,7 @@ import shutil
 import unittest
 import uuid
 import pathlib
+import numpy as np
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
@@ -26,7 +27,7 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '8.2.3'
+QUESTDB_VERSION = '8.3.1'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 
@@ -98,7 +99,7 @@ class TestWithDatabase(unittest.TestCase):
                         'name_d': 2.5,
                         'name_e': 'val_b'},
                    at=qi.ServerTimestamp)
-            pending = str(sender)
+            pending = bytes(sender)
 
         resp = qdb.retry_check_table(table_name, min_rows=3, log_ctx=pending)
         exp_columns = [
@@ -165,7 +166,7 @@ class TestWithDatabase(unittest.TestCase):
         df.index.name = table_name
         with qi.Sender('tcp', 'localhost', port) as sender:
             sender.dataframe(df, at=qi.ServerTimestamp)
-            pending = str(sender)
+            pending = bytes(sender)
 
         resp = self.qdb_plain.retry_check_table(
             table_name, min_rows=3, log_ctx=pending)
@@ -226,6 +227,39 @@ class TestWithDatabase(unittest.TestCase):
         scrubbed_dataset = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_dataset, exp_dataset)
 
+    def test_f64_arr(self):
+        if self.qdb_plain.version < (8,3,2):
+            self.skipTest('old server does not support array')
+        table_name = uuid.uuid4().hex
+        array1 = np.array(
+            [
+                [[1.1, 2.2], [3.3, 4.4]],
+                [[5.5, 6.6], [7.7, 8.8]]
+            ],
+            dtype=np.float64
+        )
+        array2 = array1.T
+        array3 = array1[::-1, ::-1]
+        with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
+            sender.row(
+                table_name,
+                columns={
+                    'f64_arr1': array1,
+                    'f64_arr2': array2,
+                    'f64_arr3': array3},
+                at=qi.ServerTimestamp)
+
+        resp = self.qdb_plain.retry_check_table(table_name)
+        exp_columns = [{'dim': 3, 'elemType': 'DOUBLE', 'name': 'f64_arr1', 'type': 'ARRAY'},
+                       {'dim': 3, 'elemType': 'DOUBLE', 'name': 'f64_arr2', 'type': 'ARRAY'},
+                       {'dim': 3, 'elemType': 'DOUBLE', 'name': 'f64_arr3', 'type': 'ARRAY'},
+                       {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        expected_data = [[[[[1.1, 2.2], [3.3, 4.4]], [[5.5, 6.6], [7.7, 8.8]]],
+                          [[[1.1, 5.5], [3.3, 7.7]], [[2.2, 6.6], [4.4, 8.8]]],
+                          [[[7.7, 8.8], [5.5, 6.6]], [[3.3, 4.4], [1.1, 2.2]]]]]
+        scrubbed_data = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed_data, expected_data)
 
 if __name__ == '__main__':
     unittest.main()
