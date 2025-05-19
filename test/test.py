@@ -290,7 +290,7 @@ class TestBases:
     class TestSender(unittest.TestCase):
 
         def test_transaction_row_at_disallows_none(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
@@ -304,7 +304,7 @@ class TestBases:
 
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_transaction_dataframe_at_disallows_none(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
@@ -317,7 +317,7 @@ class TestBases:
                         txn.dataframe(pd.DataFrame())
 
         def test_sender_row_at_disallows_none(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
@@ -329,7 +329,7 @@ class TestBases:
 
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_sender_dataframe_at_disallows_none(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
@@ -343,7 +343,7 @@ class TestBases:
             with Server() as server, \
                     self.builder(
                         'tcp',
-                        'localhost',
+                        '127.0.0.1',
                         server.port,
                         bind_interface='0.0.0.0',
                         protocol_version='2') as sender:
@@ -380,7 +380,7 @@ class TestBases:
             with Server() as server:
                 sender = None
                 try:
-                    sender = self.builder('tcp', 'localhost', server.port)
+                    sender = self.builder('tcp', '127.0.0.1', server.port)
                     sender.establish()
                     server.accept()
                     self.assertEqual(server.recv(), [])
@@ -393,7 +393,7 @@ class TestBases:
 
         def test_row_before_connect(self):
             try:
-                sender = self.builder('tcp', 'localhost', 12345)
+                sender = self.builder('tcp', '127.0.0.1', 12345)
                 with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             finally:
@@ -401,7 +401,7 @@ class TestBases:
 
         def test_flush_1(self):
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port) as sender:
+                with self.builder('tcp', '127.0.0.1', server.port) as sender:
                     server.accept()
                     with self.assertRaisesRegex(qi.IngressError, 'Column names'):
                         sender.row('tbl1', symbols={'...bad name..': 'val1'}, at=qi.ServerTimestamp)
@@ -413,7 +413,7 @@ class TestBases:
 
         def test_flush_2(self):
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port) as sender:
+                with self.builder('tcp', '127.0.0.1', server.port) as sender:
                     server.accept()
                     server.close()
 
@@ -437,7 +437,7 @@ class TestBases:
             # sender's `with` block, to ensure no exceptions get trapped.
             with Server() as server:
                 with self.assertRaises(qi.IngressError):
-                    with self.builder('tcp', 'localhost', server.port) as sender:
+                    with self.builder('tcp', '127.0.0.1', server.port) as sender:
                         server.accept()
                         server.close()
                         for _ in range(1000):
@@ -449,13 +449,13 @@ class TestBases:
             # Clearing of the internal buffer is not allowed.
             with Server() as server:
                 with self.assertRaises(ValueError):
-                    with self.builder('tcp', 'localhost', server.port) as sender:
+                    with self.builder('tcp', '127.0.0.1', server.port) as sender:
                         server.accept()
                         sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                         sender.flush(buffer=None, clear=False)
 
         def test_two_rows_explicit_buffer(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version='2') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -485,8 +485,8 @@ class TestBases:
             self.assertEqual(bytes(buf), exp)
 
             with Server() as server1, Server() as server2:
-                with self.builder('tcp', 'localhost', server1.port, protocol_version='2') as sender1, \
-                        self.builder('tcp', 'localhost', server2.port, protocol_version='2') as sender2:
+                with self.builder('tcp', '127.0.0.1', server1.port, protocol_version='2') as sender1, \
+                        self.builder('tcp', '127.0.0.1', server2.port, protocol_version='2') as sender2:
                     server1.accept()
                     server2.accept()
 
@@ -509,7 +509,7 @@ class TestBases:
 
         def test_auto_flush_settings_defaults(self):
             for protocol in ('tcp', 'tcps', 'http', 'https'):
-                sender = self.builder(protocol, 'localhost', 9009)
+                sender = self.builder(protocol, '127.0.0.1', 9009)
                 self.assertTrue(sender.auto_flush)
                 self.assertEqual(sender.auto_flush_bytes, None)
                 self.assertEqual(
@@ -519,7 +519,7 @@ class TestBases:
 
         def test_auto_flush_settings_off(self):
             for protocol in ('tcp', 'tcps', 'http', 'https'):
-                sender = self.builder(protocol, 'localhost', 9009, auto_flush=False)
+                sender = self.builder(protocol, '127.0.0.1', 9009, auto_flush=False)
                 self.assertFalse(sender.auto_flush)
                 self.assertEqual(sender.auto_flush_bytes, None)
                 self.assertEqual(sender.auto_flush_rows, None)
@@ -527,7 +527,7 @@ class TestBases:
 
         def test_auto_flush_settings_on(self):
             for protocol in ('tcp', 'tcps', 'http', 'https'):
-                sender = self.builder(protocol, 'localhost', 9009, auto_flush=True)
+                sender = self.builder(protocol, '127.0.0.1', 9009, auto_flush=True)
                 # Same as default.
                 self.assertEqual(sender.auto_flush_bytes, None)
                 self.assertEqual(
@@ -539,7 +539,7 @@ class TestBases:
             for protocol in ('tcp', 'tcps', 'http', 'https'):
                 sender = self.builder(
                     protocol,
-                    'localhost',
+                    '127.0.0.1',
                     9009,
                     auto_flush_bytes=1024,
                     auto_flush_rows=100,
@@ -553,7 +553,7 @@ class TestBases:
             with Server() as server:
                 with self.builder(
                         'tcp',
-                        'localhost',
+                        '127.0.0.1',
                         server.port,
                         auto_flush_bytes=4,
                         auto_flush_rows=False,
@@ -566,7 +566,7 @@ class TestBases:
 
         def test_immediate_auto_flush(self):
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
+                with self.builder('tcp', '127.0.0.1', server.port, auto_flush_rows=1) as sender:
                     server.accept()
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                     self.assertEqual(len(sender), 0)  # auto-flushed buffer.
@@ -575,7 +575,7 @@ class TestBases:
 
         def test_auto_flush_on_closed_socket(self):
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port, auto_flush_rows=1) as sender:
+                with self.builder('tcp', '127.0.0.1', server.port, auto_flush_rows=1) as sender:
                     server.accept()
                     server.close()
                     exp_err = 'Could not flush buffer.* - See https'
@@ -587,7 +587,7 @@ class TestBases:
         def test_dont_auto_flush(self):
             msg_counter = 0
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port, auto_flush=False) as sender:
+                with self.builder('tcp', '127.0.0.1', server.port, auto_flush=False) as sender:
                     server.accept()
                     while len(sender) < 32768:  # 32KiB
                         sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
@@ -605,7 +605,7 @@ class TestBases:
         def test_dont_flush_on_exception(self):
             with Server() as server:
                 with self.assertRaises(RuntimeError):
-                    with self.builder('tcp', 'localhost', server.port) as sender:
+                    with self.builder('tcp', '127.0.0.1', server.port) as sender:
                         server.accept()
                         sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                         self.assertEqual(bytes(sender), b'tbl1,sym1=val1\n')
@@ -616,7 +616,7 @@ class TestBases:
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_dataframe(self):
             with Server() as server:
-                with self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
+                with self.builder('tcp', '127.0.0.1', server.port, protocol_version='2') as sender:
                     server.accept()
                     df = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
                     sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -633,7 +633,7 @@ class TestBases:
                 # row, but not the second.
                 with self.builder(
                         'tcp',
-                        'localhost',
+                        '127.0.0.1',
                         server.port,
                         auto_flush_bytes=25,
                         auto_flush_rows=False,
@@ -673,7 +673,7 @@ class TestBases:
             with Server() as server:
                 with self.builder(
                 protocol='tcp',
-                host='localhost',
+                host='127.0.0.1',
                 port=server.port,
                 init_buf_size=1024,
                 max_name_len=10) as sender:
@@ -684,7 +684,7 @@ class TestBases:
                     self.assertEqual(buffer.max_name_len, sender.max_name_len)
 
         def test_connect_after_close(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 sender.close()
@@ -693,16 +693,16 @@ class TestBases:
 
         def test_bad_init_args(self):
             with self.assertRaises(OverflowError):
-                self.builder(protocol='tcp', host='localhost', port=9009, auth_timeout=-1)
+                self.builder(protocol='tcp', host='127.0.0.1', port=9009, auth_timeout=-1)
 
             with self.assertRaises(OverflowError):
-                self.builder(protocol='tcp', host='localhost', port=9009, init_buf_size=-1)
+                self.builder(protocol='tcp', host='127.0.0.1', port=9009, init_buf_size=-1)
 
             with self.assertRaises(OverflowError):
-                self.builder(protocol='tcp', host='localhost', port=9009, max_name_len=-1)
+                self.builder(protocol='tcp', host='127.0.0.1', port=9009, max_name_len=-1)
 
         def test_transaction_over_tcp(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                 server.accept()
                 self.assertRaisesRegex(
                     qi.IngressError,
@@ -715,7 +715,7 @@ class TestBases:
             expected = (
                     f'table_name,sym1=val1 {ts.value}\n' +
                     f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with sender.transaction('table_name') as txn:
                     self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
                     self.assertIs(txn.row(symbols={'sym2': 'val2'}, at=ts), txn)
@@ -728,7 +728,7 @@ class TestBases:
             expected = (
                     f'table_name,sym1=val1 {ts.value}\n' +
                     f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with sender.transaction('table_name') as txn:
                     df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
                     self.assertIs(txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts), txn)
@@ -740,7 +740,7 @@ class TestBases:
             expected = (
                     f'table_name,sym1=val1 {ts.value}\n' +
                     f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=False) as sender:
                 with sender.transaction('table_name') as txn:
                     txn.row(symbols={'sym1': 'val1'}, at=ts)
                     txn.row(symbols={'sym2': 'val2'}, at=ts)
@@ -753,7 +753,7 @@ class TestBases:
             expected = (
                     f'table_name,sym1=val1 {ts.value}\n' +
                     f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=False) as sender:
                 with sender.transaction('table_name') as txn:
                     df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
                     txn.dataframe(df, symbols=['sym1', 'sym2'], at=ts)
@@ -768,7 +768,7 @@ class TestBases:
             expected2 = (
                     f'tbl2,sym3=val3 {ts.value}\n' +
                     f'tbl2,sym4=val4 {ts.value}\n').encode('utf-8')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=True) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=True) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
                 with sender.transaction('tbl2') as txn:
@@ -783,7 +783,7 @@ class TestBases:
             exp_err = (
                     'Sender buffer must be clear when starting a transaction. ' +
                     'You must call ..flush... before this call.')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush=False) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=False) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
                 with self.assertRaisesRegex(qi.IngressError, exp_err):
@@ -797,7 +797,7 @@ class TestBases:
             expected3 = (
                     f'tbl3,sym3=val3 {ts.value}\n' +
                     f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush_rows=1) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
                 with sender.transaction('tbl3') as txn:
@@ -817,7 +817,7 @@ class TestBases:
             expected3 = (
                     f'tbl3,sym3=val3 {ts.value}\n' +
                     f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush_rows=1) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
                 with sender.transaction('tbl3') as txn:
@@ -830,7 +830,7 @@ class TestBases:
 
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_http_illegal_ops_in_txn(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, auto_flush_rows=1) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush_rows=1) as sender:
                 with sender.transaction('tbl1') as txn:
                     txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                     txn.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
@@ -866,7 +866,7 @@ class TestBases:
             expected = []
             with HttpServer() as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     auto_flush_rows=auto_flush_rows,
                     auto_flush_interval=False,
@@ -886,7 +886,7 @@ class TestBases:
         def _do_test_auto_flush_interval(self):
             with HttpServer() as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     auto_flush_interval=10,
                     auto_flush_rows=False,
@@ -954,7 +954,7 @@ class TestBases:
             self.assertEqual(len(requests), 3)
 
         def test_http_username_password(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, username='user',
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, username='user',
                                                       password='pass') as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             self.assertEqual(len(server.requests), 1)
@@ -962,14 +962,14 @@ class TestBases:
             self.assertEqual(server.headers[1]['authorization'], 'Basic dXNlcjpwYXNz')
 
         def test_http_token(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, token='Yogi') as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, token='Yogi') as sender:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
             self.assertEqual(len(server.requests), 1)
             self.assertEqual(server.requests[0], b'tbl1 x=42i\n')
             self.assertEqual(server.headers[1]['authorization'], 'Bearer Yogi')
 
         def test_max_buf_size(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, max_buf_size=1024,
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, max_buf_size=1024,
                                                       auto_flush=False) as sender:
                 while len(sender) < 1024:
                     sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
@@ -979,7 +979,7 @@ class TestBases:
         def test_http_err(self):
             with HttpServer() as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     retry_timeout=datetime.timedelta(milliseconds=1)) as sender:
                 server.responses.append((0, 500, 'text/plain', b'Internal Server Error'))
@@ -992,7 +992,7 @@ class TestBases:
             exp_payload = b'tbl1 x=42i\n'
             with HttpServer() as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     retry_timeout=datetime.timedelta(seconds=1)) as sender:
                 server.responses.append((0, 500, 'text/plain', b'retriable error'))
@@ -1006,7 +1006,7 @@ class TestBases:
         def test_http_request_min_throughput(self):
             with HttpServer(delay_seconds=2) as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     request_timeout=1000,
                     protocol_version='2',
@@ -1021,7 +1021,7 @@ class TestBases:
         def test_http_request_min_throughput_timeout(self):
             with HttpServer() as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     auto_flush='off',
                     request_timeout=1,
@@ -1034,22 +1034,22 @@ class TestBases:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
 
-                # wait 10ms in the server to simulate a slow response
-                server.responses.append((30, 200, 'text/plain', b'OK'))
+                # wait 50ms in the server to simulate a slow response
+                server.responses.append((50, 200, 'text/plain', b'OK'))
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
                     sender.flush()
 
         def test_http_request_timeout(self):
             with HttpServer() as server, self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     server.port,
                     retry_timeout=0,
                     request_min_throughput=0,  # disable
                     protocol_version='2',
                     request_timeout=datetime.timedelta(milliseconds=5)) as sender:
-                # wait for 10ms in the server to simulate a slow response
-                server.responses.append((30, 200, 'text/plain', b'OK'))
+                # wait for 50ms in the server to simulate a slow response
+                server.responses.append((50, 200, 'text/plain', b'OK'))
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
@@ -1058,15 +1058,15 @@ class TestBases:
             with self.assertRaisesRegex(qi.IngressError, '"protocol_version" must be None, "auto", "1" or "2" not \'3\''):
                 self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     0,
                     protocol_version='3')
 
         def test_http_server_not_serve(self):
-            with self.assertRaisesRegex(qi.IngressError, 'Could not detect server\'s line protocol version, settings url: http://localhost:1234/settings'):
+            with self.assertRaisesRegex(qi.IngressError, 'Could not detect server\'s line protocol version, settings url: http://127.0.0.1:1234/settings'):
                 with self.builder(
                     'http',
-                    'localhost',
+                    '127.0.0.1',
                     1234,
                     protocol_version='auto') as sender:
                         sender.row('tbl1', columns={'x': 42})
@@ -1084,7 +1084,7 @@ class TestBases:
             self._test_sender_http_auto_protocol_version(SETTINGS_WITHOUT_PROTOCOL_VERSION, qi.ProtocolVersion.ProtocolVersionV1)
 
         def _test_sender_http_auto_protocol_version(self, settings, expected_version: qi.ProtocolVersion):
-            with HttpServer(settings) as server, self.builder('http', 'localhost', server.port) as sender:
+            with HttpServer(settings) as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 self.assertEqual(sender.default_protocol_version, expected_version)
                 buffer = sender.new_buffer()
                 buffer.row(
@@ -1101,11 +1101,11 @@ class TestBases:
 
         def test_http_auto_protocol_version_unsupported_client(self):
             with self.assertRaisesRegex(qi.IngressError, 'Server does not support current client'):
-                with HttpServer(SETTINGS_WITH_PROTOCOL_VERSION_V3) as server, self.builder('http', 'localhost', server.port) as sender:
+                with HttpServer(SETTINGS_WITH_PROTOCOL_VERSION_V3) as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row('tbl1', columns={'x': 42})
 
         def test_specify_line_protocol_explicitly(self):
-            with HttpServer() as server, self.builder('http', 'localhost', server.port, protocol_version='1') as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, protocol_version='1') as sender:
                 buffer = sender.new_buffer()
                 buffer.row(
                     'line_sender_buffer',
@@ -1120,7 +1120,7 @@ class TestBases:
                 self.assertEqual(server.requests[0], exp)
 
         def test_line_protocol_version_on_tcp(self):
-            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='1') as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version='1') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -1134,7 +1134,7 @@ class TestBases:
                 sender.flush(buffer)
                 self.assertEqual(server.recv()[0] + b'\n', exp)
 
-            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version='2') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -1148,7 +1148,7 @@ class TestBases:
                 sender.flush(buffer)
                 self.assertEqual(server.recv()[0] + b'\n', exp)
 
-            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='auto') as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version='auto') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 buffer = sender.new_buffer()
@@ -1164,7 +1164,7 @@ class TestBases:
 
         def _test_array_basic(self, arr: np.ndarray):
             # http
-            with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+            with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 sender.row(
                     'array_test',
                     columns={'array': arr},
@@ -1175,7 +1175,7 @@ class TestBases:
                 self.assertEqual(server.requests[0], exp)
 
             #tcp
-            with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version='2') as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version='2') as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 sender.row(
@@ -1205,7 +1205,7 @@ class TestBases:
             # zero dimensional array
             with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
                 scalar_arr = np.array(42.0, dtype=np.float64)
-                with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row(
                         'array_test',
                         columns={'array': scalar_arr},
@@ -1214,7 +1214,7 @@ class TestBases:
             # not f64 dtype array
             with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
-                with HttpServer() as server, self.builder('http', 'localhost', server.port) as sender:
+                with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row(
                         'array_test',
                         columns={'array': complex_arr},
@@ -1224,7 +1224,7 @@ class TestBases:
             with self.assertRaisesRegex(qi.IngressError, "Array dimension mismatch: expected at most 32 dimensions, but got 33"):
                 dims = (1,) * 33
                 array = np.empty(dims, dtype=np.float64)
-                with Server() as server, self.builder('tcp', 'localhost', server.port, protocol_version="2") as sender:
+                with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version="2") as sender:
                     sender.row(
                         'array_test',
                         columns={'array': array},
@@ -1233,7 +1233,7 @@ class TestBases:
             # default protocol version is v1, which does not support array datatype.
             with self.assertRaisesRegex(qi.IngressError, "Protocol version v1 does not support array datatype"):
                 array = np.zeros([1,2], dtype=np.float64)
-                with Server() as server, self.builder('tcp', 'localhost', server.port) as sender:
+                with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                     sender.row(
                         'array_test',
                         columns={'array': array},

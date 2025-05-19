@@ -87,7 +87,7 @@ class TestWithDatabase(unittest.TestCase):
         port = qdb.tls_line_tcp_port if protocol.tls_enabled else qdb.line_tcp_port
         pending = None
         table_name = uuid.uuid4().hex
-        with qi.Sender(protocol, 'localhost', port, **kwargs) as sender:
+        with qi.Sender(protocol, '127.0.0.1', port, **kwargs) as sender:
             for _ in range(3):
                 sender.row(
                     table_name,
@@ -164,7 +164,7 @@ class TestWithDatabase(unittest.TestCase):
                 numpy.datetime64('2021-01-02'),
                 numpy.datetime64('2021-01-03')]})
         df.index.name = table_name
-        with qi.Sender('tcp', 'localhost', port) as sender:
+        with qi.Sender('tcp', '127.0.0.1', port) as sender:
             sender.dataframe(df, at=qi.ServerTimestamp)
             pending = bytes(sender)
 
@@ -190,7 +190,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_http(self):
         port = self.qdb_plain.http_server_port
         table_name = uuid.uuid4().hex
-        with qi.Sender('http', 'localhost', port) as sender:
+        with qi.Sender('http', '127.0.0.1', port) as sender:
             for _ in range(3):
                 sender.row(
                     table_name,
@@ -241,7 +241,7 @@ class TestWithDatabase(unittest.TestCase):
         )
         array2 = array1.T
         array3 = array1[::-1, ::-1]
-        with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
+        with qi.Sender('http', '127.0.0.1', self.qdb_plain.http_server_port) as sender:
             sender.row(
                 table_name,
                 columns={
