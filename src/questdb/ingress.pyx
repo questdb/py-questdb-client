@@ -91,9 +91,7 @@ cnp.import_array()
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '2.0.4'
-
-MAX_ARRAY_DIM = 32
+VERSION = '3.0.0rc1'
 
 cdef bint _has_gil(PyThreadState** gs):
     return gs[0] == NULL
