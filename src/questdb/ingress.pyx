@@ -136,9 +136,9 @@ class IngressErrorCode(Enum):
         return self.name
 
 class ProtocolVersion(Enum):
-    """Line protocol version."""
-    ProtocolVersionV1 = protocol_version_1
-    ProtocolVersionV2 = protocol_version_2
+    """Ingestion protocol version."""
+    ProtocolVersionV1 = line_sender_protocol_version_1
+    ProtocolVersionV2 = line_sender_protocol_version_2
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -801,8 +801,8 @@ cdef class Buffer:
         """
         self._cinit_impl(init_buf_size, max_name_len, protocol_version.value)
 
-    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len, protocol_version version):
-        self._impl = line_sender_buffer_with_max_name_len(max_name_len, version)
+    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len, line_sender_protocol_version version):
+        self._impl = line_sender_buffer_with_max_name_len(version, max_name_len)
         self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_buf_size)
         cdef line_sender_error* err = NULL
@@ -1789,7 +1789,6 @@ cdef class Sender:
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
-    cdef size_t _max_name_len
     cdef bint _in_txn
 
     cdef void_int _set_sender_fields(
@@ -1837,6 +1836,7 @@ cdef class Sender:
         cdef uint64_t c_retry_timeout
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
+        cdef uint64_t c_max_name_len
 
         self._c_protocol = protocol.c_value
 
@@ -1877,10 +1877,10 @@ cdef class Sender:
 
         if protocol_version is not None:
             if protocol_version == "1":
-                if not line_sender_opts_protocol_version(self._opts, protocol_version_1, &err):
+                if not line_sender_opts_protocol_version(self._opts, line_sender_protocol_version_1, &err):
                     raise c_err_to_py(err)
             elif protocol_version == "2":
-                if not line_sender_opts_protocol_version(self._opts, protocol_version_2, &err):
+                if not line_sender_opts_protocol_version(self._opts, line_sender_protocol_version_2, &err):
                     raise c_err_to_py(err)
             elif protocol_version != "auto":
                 raise IngressError(
@@ -1953,6 +1953,11 @@ cdef class Sender:
             if not line_sender_opts_request_min_throughput(self._opts, c_request_min_throughput, &err):
                 raise c_err_to_py(err)
 
+        if max_name_len is not None:
+            c_max_name_len = max_name_len
+            if not line_sender_opts_max_name_len(self._opts, c_max_name_len, &err):
+                raise c_err_to_py(err)
+
         if request_timeout is not None:
             if isinstance(request_timeout, int):
                 c_request_timeout = request_timeout
@@ -1976,7 +1981,6 @@ cdef class Sender:
             &self._auto_flush_mode)
 
         self._init_buf_size = init_buf_size or 65536
-        self._max_name_len = max_name_len or 127
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
     def __cinit__(self):
@@ -1987,7 +1991,6 @@ cdef class Sender:
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
-        self._max_name_len = 0
         self._in_txn = False
 
     def __init__(
@@ -2264,9 +2267,9 @@ cdef class Sender:
         `max_name_len`.
         """
         return Buffer(
-            protocol_version=self.default_protocol_version,
+            protocol_version=self.protocol_version,
             init_buf_size=self._init_buf_size,
-            max_name_len=self._max_name_len)
+            max_name_len=self.max_name_len)
 
     @property
     def init_buf_size(self) -> int:
@@ -2276,7 +2279,11 @@ cdef class Sender:
     @property
     def max_name_len(self) -> int:
         """Maximum length of a table or column name."""
-        return self._max_name_len
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'max_name_len() can\'t be called: Not connected.')
+        return line_sender_get_max_name_len(self._impl)
 
     @property
     def auto_flush(self) -> bint:
@@ -2322,12 +2329,12 @@ cdef class Sender:
         return timedelta(milliseconds=self._auto_flush_mode.interval)
 
     @property
-    def default_protocol_version(self) -> ProtocolVersion:
+    def protocol_version(self) -> ProtocolVersion:
         if self._impl == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'default_protocol_version() can\'t be called: Not connected.')
-        return ProtocolVersion(line_sender_default_protocol_version(self._impl))
+                'protocol_version() can\'t be called: Not connected.')
+        return ProtocolVersion(line_sender_get_protocol_version(self._impl))
 
     def establish(self):
         """
@@ -2355,9 +2362,9 @@ cdef class Sender:
 
         if self._buffer is None:
             self._buffer = Buffer(
-                protocol_version=self.default_protocol_version,
+                protocol_version=self.protocol_version,
                 init_buf_size=self._init_buf_size,
-                max_name_len=self._max_name_len)
+                max_name_len=self.max_name_len)
 
         line_sender_opts_free(self._opts)
         self._opts = NULL

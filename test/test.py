@@ -1085,7 +1085,7 @@ class TestBases:
 
         def _test_sender_http_auto_protocol_version(self, settings, expected_version: qi.ProtocolVersion):
             with HttpServer(settings) as server, self.builder('http', '127.0.0.1', server.port) as sender:
-                self.assertEqual(sender.default_protocol_version, expected_version)
+                self.assertEqual(sender.protocol_version, expected_version)
                 buffer = sender.new_buffer()
                 buffer.row(
                     'line_sender_buffer_old_server2',

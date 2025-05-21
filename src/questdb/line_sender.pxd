@@ -51,9 +51,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_protocol_http,
         line_sender_protocol_https,
 
-    cdef enum protocol_version:
-        protocol_version_1 = 1,
-        protocol_version_2 = 2,
+    cdef enum line_sender_protocol_version:
+        line_sender_protocol_version_1 = 1,
+        line_sender_protocol_version_2 = 2,
 
     cdef enum line_sender_ca:
         line_sender_ca_webpki_roots,
@@ -130,12 +130,12 @@ cdef extern from "questdb/ingress/line_sender.h":
         pass
 
     line_sender_buffer* line_sender_buffer_new(
-        protocol_version version,
+        line_sender_protocol_version version,
         ) noexcept nogil
 
     line_sender_buffer* line_sender_buffer_with_max_name_len(
-        size_t max_name_len,
-        protocol_version version,
+        line_sender_protocol_version version,
+        size_t max_name_len
         ) noexcept nogil
 
     void line_sender_buffer_free(
@@ -272,6 +272,11 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_buffer_check_can_flush(
+        const line_sender_buffer* buffer,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     cdef struct line_sender:
         pass
 
@@ -337,7 +342,7 @@ cdef extern from "questdb/ingress/line_sender.h":
 
     bint line_sender_opts_protocol_version(
         line_sender_opts* opts,
-        protocol_version version,
+        line_sender_protocol_version version,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -368,6 +373,12 @@ cdef extern from "questdb/ingress/line_sender.h":
     bint line_sender_opts_max_buf_size(
         line_sender_opts* opts,
         size_t max_buf_size,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_opts_max_name_len(
+        line_sender_opts* opts,
+        size_t max_name_len,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -411,17 +422,16 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    protocol_version line_sender_default_protocol_version(
+    line_sender_protocol_version line_sender_get_protocol_version(
+        const line_sender * sender
+        ) noexcept nogil
+
+    size_t line_sender_get_max_name_len(
         const line_sender * sender
         ) noexcept nogil
 
     line_sender_buffer* line_sender_buffer_new_for_sender(
         const line_sender * sender
-        ) noexcept nogil
-
-    line_sender_buffer* line_sender_buffer_with_max_name_len_for_sender(
-        const line_sender * sender,
-        size_t max_name_len
         ) noexcept nogil
 
     bint line_sender_must_close(

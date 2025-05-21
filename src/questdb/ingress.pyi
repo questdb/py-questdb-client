@@ -941,7 +941,7 @@ class Sender:
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
 
-    def default_protocol_version(self) -> ProtocolVersion:
+    def protocol_version(self) -> ProtocolVersion:
         """
         Returns the QuestDB server's recommended default line protocol version.
         """
