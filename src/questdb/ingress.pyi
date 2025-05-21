@@ -61,10 +61,6 @@ class IngressErrorCode(Enum):
     ProtocolVersionError = ...
     BadDataFrame = ...
 
-class ProtocolVersion(Enum):
-    """Write protocol version."""
-    ProtocolVersionV1 = ...
-    ProtocolVersionV2 = ...
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -73,10 +69,12 @@ class IngressError(Exception):
     def code(self) -> IngressErrorCode:
         """Return the error code."""
 
+
 class ServerTimestamp:
     """
     A placeholder value to indicate using a server-generated-timestamp.
     """
+
 
 class TimestampMicros:
     """
@@ -129,6 +127,7 @@ class TimestampMicros:
     def value(self) -> int:
         """Number of microseconds (Unix epoch timestamp, UTC)."""
 
+
 class TimestampNanos:
     """
     A timestamp in nanoseconds since the UNIX epoch (UTC).
@@ -178,6 +177,7 @@ class TimestampNanos:
     @property
     def value(self) -> int:
         """Number of nanoseconds (Unix epoch timestamp, UTC)."""
+
 
 class SenderTransaction:
     """
@@ -245,6 +245,7 @@ class SenderTransaction:
         This will clear the buffer.
         """
 
+
 class Buffer:
     """
     Construct QuestDB-flavored Ingestion Line Protocol (ILP) messages.
@@ -257,7 +258,7 @@ class Buffer:
 
         from questdb.ingress import Buffer
 
-        buf = Buffer()
+        buf = Buffer(protocol_version=2)  # or better yet, `sender.new_buffer()`
         buf.row(
             'table_name1',
             symbols={'s1', 'v1', 's2', 'v2'},
@@ -280,8 +281,13 @@ class Buffer:
 
         # etc.
 
+    In general, it's best to create a new buffer from a sender instance,
+    via the :func:`Sender.new_buffer` method, as this will ensure the buffer
+    is configured with the same protocol version and maximum name length
+    as the sender. 
 
     Buffer Constructor Arguments:
+      * protocol_version (``int``): The protocol version to use.
       * ``init_buf_size`` (``int``): Initial capacity of the buffer in bytes.
         Defaults to ``65536`` (64KiB).
       * ``max_name_len`` (``int``): Maximum length of a column name.
@@ -292,8 +298,8 @@ class Buffer:
     .. code-block:: python
 
         # These two buffer constructions are equivalent.
-        buf1 = Buffer()
-        buf2 = Buffer(init_buf_size=65536, max_name_len=127)
+        buf1 = Buffer(protocol_version=2)
+        buf2 = Buffer(protocol_version=2, init_buf_size=65536, max_name_len=127)
 
     To avoid having to manually set these arguments every time, you can call
     the sender's ``new_buffer()`` method instead.
@@ -303,16 +309,22 @@ class Buffer:
         from questdb.ingress import Sender, Buffer
 
         sender = Sender('http', 'localhost', 9009,
-            init_buf_size=16384, max_name_len=64)
+            init_buf_size=16384)
         buf = sender.new_buffer()
         assert buf.init_buf_size == 16384
-        assert buf.max_name_len == 64
+        assert buf.max_name_len == 127
 
     """
 
-    def __init__(self, protocol_version: ProtocolVersion, init_buf_size: int = 65536, max_name_len: int = 127):
+    def __init__(
+            self,
+            *,
+            protocol_version: int,
+            init_buf_size: int = 65536,
+            max_name_len: int = 127):
         """
         Create a new buffer with the an initial capacity and max name length.
+        :param int protocol_version: The protocol version to use.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
@@ -571,7 +583,7 @@ class Buffer:
             import pandas as pd
             import questdb.ingress as qi
 
-            buf = qi.Buffer()
+            buf = qi.Buffer(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -941,7 +953,7 @@ class Sender:
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
 
-    def protocol_version(self) -> ProtocolVersion:
+    def protocol_version(self) -> int:
         """
         Returns the QuestDB server's recommended default line protocol version.
         """

@@ -88,10 +88,12 @@ cimport numpy as cnp
 
 cnp.import_array()
 
+
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
 VERSION = '3.0.0rc1'
+
 
 cdef bint _has_gil(PyThreadState** gs):
     return gs[0] == NULL
@@ -109,6 +111,7 @@ cdef void _ensure_has_gil(PyThreadState** gs):
     if not _has_gil(gs):
         PyEval_RestoreThread(gs[0])
         gs[0] = NULL
+
 
 class IngressErrorCode(Enum):
     """Category of Error."""
@@ -133,10 +136,6 @@ class IngressErrorCode(Enum):
         """Return the name of the enum."""
         return self.name
 
-class ProtocolVersion(Enum):
-    """Ingestion protocol version."""
-    ProtocolVersionV1 = line_sender_protocol_version_1
-    ProtocolVersionV2 = line_sender_protocol_version_2
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -791,15 +790,15 @@ cdef class Buffer:
     cdef size_t _max_name_len
     cdef object _row_complete_sender
 
-    def __cinit__(self, protocol_version: ProtocolVersion, init_buf_size: int=65536, max_name_len: int=127):
+    def __cinit__(self, protocol_version: int, init_buf_size: int=65536, max_name_len: int=127):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
-        self._cinit_impl(init_buf_size, max_name_len, protocol_version.value)
+        self._cinit_impl(protocol_version, init_buf_size, max_name_len)
 
-    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len, line_sender_protocol_version version):
+    cdef inline _cinit_impl(self, line_sender_protocol_version version, size_t init_buf_size, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(version, max_name_len)
         self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_buf_size)
@@ -1280,7 +1279,7 @@ cdef class Buffer:
             import pandas as pd
             import questdb.ingress as qi
 
-            buf = qi.Buffer()
+            buf = qi.Buffer(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -1811,7 +1810,7 @@ cdef class Sender:
             object auto_flush_rows,
             object auto_flush_bytes,
             object auto_flush_interval,
-            str protocol_version,
+            object protocol_version,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -1845,7 +1844,8 @@ cdef class Sender:
 
         if bind_interface is not None:
             str_to_utf8(b, <PyObject*>bind_interface, &c_bind_interface)
-            if not line_sender_opts_bind_interface(self._opts, c_bind_interface, &err):
+            if not line_sender_opts_bind_interface(
+                    self._opts, c_bind_interface, &err):
                 raise c_err_to_py(err)
 
         if username is not None:
@@ -1874,13 +1874,17 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if protocol_version is not None:
-            if protocol_version == "1":
-                if not line_sender_opts_protocol_version(self._opts, line_sender_protocol_version_1, &err):
+            if protocol_version == 'auto':
+                pass
+            elif int(protocol_version) == 1:
+                if not line_sender_opts_protocol_version(
+                        self._opts, line_sender_protocol_version_1, &err):
                     raise c_err_to_py(err)
-            elif protocol_version == "2":
-                if not line_sender_opts_protocol_version(self._opts, line_sender_protocol_version_2, &err):
+            elif int(protocol_version) == 2:
+                if not line_sender_opts_protocol_version(
+                        self._opts, line_sender_protocol_version_2, &err):
                     raise c_err_to_py(err)
-            elif protocol_version != "auto":
+            else:
                 raise IngressError(
                     IngressErrorCode.ConfigError,
                     '"protocol_version" must be None, "auto", "1" or "2"' +
@@ -2327,12 +2331,21 @@ cdef class Sender:
         return timedelta(milliseconds=self._auto_flush_mode.interval)
 
     @property
-    def protocol_version(self) -> ProtocolVersion:
+    def protocol_version(self) -> int:
+        """
+        The protocol version used by the sender.
+
+        Protocol version 1 is retained for backwards compatibility with
+        older QuestDB versions.
+
+        Protocol version 2 introduces binary floating point support and
+        the array datatype.
+        """
         if self._impl == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'protocol_version() can\'t be called: Not connected.')
-        return ProtocolVersion(line_sender_get_protocol_version(self._impl))
+        return <int>line_sender_get_protocol_version(self._impl)
 
     def establish(self):
         """

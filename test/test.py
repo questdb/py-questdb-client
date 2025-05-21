@@ -40,7 +40,7 @@ if pd is not None:
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
-            buf = qi.Buffer(qi.ProtocolVersion.ProtocolVersionV2)
+            buf = qi.Buffer(protocol_version=2)
             exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
             with self.assertRaisesRegex(ImportError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
@@ -51,12 +51,12 @@ class TestBufferBase:
             with self.assertRaisesRegex(
                     qi.IngressError,
                     'must be of type TimestampNanos, datetime, or ServerTimestamp'):
-                buffer = qi.Buffer(self.version)
+                buffer = qi.Buffer(protocol_version=self.version)
                 buffer.row('tbl1', symbols={'sym1': 'val1'}, at=None)
             with self.assertRaisesRegex(
                     TypeError,
                     'needs keyword-only argument at'):
-                buffer = qi.Buffer(self.version)
+                buffer = qi.Buffer(protocol_version=self.version)
                 buffer.row('tbl1', symbols={'sym1': 'val1'})
 
         @unittest.skipIf(not pd, 'pandas not installed')
@@ -64,27 +64,27 @@ class TestBufferBase:
             with self.assertRaisesRegex(
                     qi.IngressError,
                     'must be of type TimestampNanos, datetime, or ServerTimestamp'):
-                buffer = qi.Buffer(self.version)
+                buffer = qi.Buffer(protocol_version=self.version)
                 buffer.dataframe(pd.DataFrame(), at=None)
             with self.assertRaisesRegex(
                     TypeError,
                     'needs keyword-only argument at'):
-                buffer = qi.Buffer(self.version)
+                buffer = qi.Buffer(protocol_version=self.version)
                 buffer.dataframe(pd.DataFrame())
 
         def test_new(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             self.assertEqual(len(buf), 0)
             self.assertEqual(buf.capacity(), 64 * 1024)
 
         def test_basic(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
             self.assertEqual(len(buf), 25)
             self.assertEqual(bytes(buf), b'tbl1,sym1=val1,sym2=val2\n')
 
         def test_bad_table(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             with self.assertRaisesRegex(
                     qi.IngressError,
                     'Table names must have a non-zero length'):
@@ -95,12 +95,12 @@ class TestBufferBase:
                 buf.row('x..y', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
 
         def test_symbol(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': 'val2'}, at=qi.ServerTimestamp)
             self.assertEqual(bytes(buf), b'tbl1,sym1=val1,sym2=val2\n')
 
         def test_bad_symbol_column_name(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             with self.assertRaisesRegex(
                     qi.IngressError,
                     'Column names must have a non-zero length.'):
@@ -115,7 +115,7 @@ class TestBufferBase:
         def test_column(self):
             two_h_after_epoch = datetime.datetime(
                 1970, 1, 1, 2, tzinfo=datetime.timezone.utc)
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('tbl1', columns={
                 'col1': True,
                 'col2': False,
@@ -126,12 +126,12 @@ class TestBufferBase:
                 'col7': two_h_after_epoch,
                 'col8': None}, at=qi.ServerTimestamp)
             exp = (
-                b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5, self.version == qi.ProtocolVersion.ProtocolVersionV1) +
+                b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5, self.version == 1) +
                 b',col5="val",col6=12345t,col7=7200000000t\n')
             self.assertEqual(bytes(buf), exp)
 
         def test_none_symbol(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('tbl1', symbols={'sym1': 'val1', 'sym2': None}, at=qi.ServerTimestamp)
             exp = b'tbl1,sym1=val1\n'
             self.assertEqual(bytes(buf), exp)
@@ -143,7 +143,7 @@ class TestBufferBase:
             self.assertEqual(len(buf), len(exp))
 
         def test_none_column(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('tbl1', columns={'col1': 1}, at=qi.ServerTimestamp)
             exp = b'tbl1 col1=1i\n'
             self.assertEqual(bytes(buf), exp)
@@ -155,12 +155,12 @@ class TestBufferBase:
             self.assertEqual(len(buf), len(exp))
 
         def test_no_symbol_or_col_args(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('table_name', at=qi.ServerTimestamp)
             self.assertEqual(bytes(buf), b'')
 
         def test_unicode(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row(
                 'tbl1',  # ASCII
                 symbols={'questdb1': 'q❤️p'},  # Mixed ASCII and UCS-2
@@ -202,23 +202,23 @@ class TestBufferBase:
                 'tbl1,questdb1=another\\ line\\ of\\ input\n').encode('utf-8'))
 
         def test_float(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('tbl1', columns={'num': 1.2345678901234567}, at=qi.ServerTimestamp)
-            self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567, self.version == qi.ProtocolVersion.ProtocolVersionV1) + b'\n')
+            self.assertEqual(bytes(buf), b'tbl1 num' + _float_binary_bytes(1.2345678901234567, self.version == 1) + b'\n')
 
         def test_array_basic(self):
-            if self.version == qi.ProtocolVersion.ProtocolVersionV1:
+            if self.version == 1:
                 self.skipTest('Protocol version v1 doesn\'t support arrays')
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             arr = np.array([1.2345678901234567, 2.3456789012345678], dtype=np.float64)
             buf.row('tbl1', columns={'array': arr}, at=qi.ServerTimestamp)
             self.assertEqual(bytes(buf), b'tbl1 array=' + _array_binary_bytes(arr) + b'\n')
 
         def test_array_edge_cases(self):
-            if self.version == qi.ProtocolVersion.ProtocolVersionV1:
+            if self.version == 1:
                 self.skipTest('Protocol version v1 doesn\'t support arrays')
             # empty array
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             empty_arr = np.array([], dtype=np.float64)
             buf.row('empty_table', columns={'col': empty_arr}, at=qi.ServerTimestamp)
             empty_expected = b'empty_table col=' + _array_binary_bytes(empty_arr) + b'\n'
@@ -227,14 +227,14 @@ class TestBufferBase:
             # non contigious array
             base = np.arange(6, dtype=np.float64).reshape(2, 3)
             non_contig_arr = base[:, ::2]  # shape (2, 2), strides (24, 16)
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('non_contig_table', columns={'col': non_contig_arr}, at=qi.ServerTimestamp)
             non_contig_expected = b'non_contig_table col=' + _array_binary_bytes(non_contig_arr) + b'\n'
             self.assertEqual(bytes(buf), non_contig_expected)
 
             # minus stride
             reversed_arr = np.array([1.1, 2.2, 3.3], dtype=np.float64)[::-1]  # strides -8
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('reversed_table', columns={'col': reversed_arr}, at=qi.ServerTimestamp)
             reversed_expected = b'reversed_table col=' + _array_binary_bytes(reversed_arr) + b'\n'
             self.assertEqual(bytes(buf), reversed_expected)
@@ -242,7 +242,7 @@ class TestBufferBase:
             # zero dimensional array
             with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
                 scalar_arr = np.array(42.0, dtype=np.float64)
-                buf = qi.Buffer(self.version)
+                buf = qi.Buffer(protocol_version=self.version)
                 buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
 
             # not f64 dtype array
@@ -251,7 +251,7 @@ class TestBufferBase:
                 buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
         def test_int_range(self):
-            buf = qi.Buffer(self.version)
+            buf = qi.Buffer(protocol_version=self.version)
             buf.row('tbl1', columns={'num': 0}, at=qi.ServerTimestamp)
             self.assertEqual(bytes(buf), f'tbl1 num=0i\n'.encode('utf-8'))
             buf.clear()
@@ -288,7 +288,6 @@ class TestManifest(unittest.TestCase):
 
 class TestBases:
     class TestSender(unittest.TestCase):
-
         def test_transaction_row_at_disallows_none(self):
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
@@ -479,7 +478,7 @@ class TestBases:
                 self.assertEqual(msgs, bexp)
 
         def test_independent_buffer(self):
-            buf = qi.Buffer(protocol_version=qi.ProtocolVersion.ProtocolVersionV2)
+            buf = qi.Buffer(protocol_version=2)
             buf.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             exp = b'tbl1,sym1=val1\n'
             self.assertEqual(bytes(buf), exp)
@@ -638,7 +637,7 @@ class TestBases:
                         auto_flush_bytes=25,
                         auto_flush_rows=False,
                         auto_flush_interval=False,
-                        protocol_version='2') as sender:
+                        protocol_version=2) as sender:
                     server.accept()
                     df = pd.DataFrame({'a': [100000, 2], 'b': [3.0, 4.0]})
                     sender.dataframe(df, table_name='tbl1', at=qi.ServerTimestamp)
@@ -1046,7 +1045,7 @@ class TestBases:
                     server.port,
                     retry_timeout=0,
                     request_min_throughput=0,  # disable
-                    protocol_version='2',
+                    protocol_version=2,
                     request_timeout=datetime.timedelta(milliseconds=5)) as sender:
                 # wait for 50ms in the server to simulate a slow response
                 server.responses.append((50, 200, 'text/plain', b'OK'))
@@ -1072,18 +1071,18 @@ class TestBases:
                         sender.row('tbl1', columns={'x': 42})
 
         def test_http_auto_protocol_version_only_v1(self):
-            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1, qi.ProtocolVersion.ProtocolVersionV1)
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1, 1)
 
         def test_http_auto_protocol_version_only_v2(self):
-            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V2, qi.ProtocolVersion.ProtocolVersionV2)
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V2, 2)
 
         def test_http_auto_protocol_version_v1_v2(self):
-            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1_V2, qi.ProtocolVersion.ProtocolVersionV2)
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1_V2, 2)
 
         def test_http_auto_protocol_version_without_version(self):
-            self._test_sender_http_auto_protocol_version(SETTINGS_WITHOUT_PROTOCOL_VERSION, qi.ProtocolVersion.ProtocolVersionV1)
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITHOUT_PROTOCOL_VERSION, 1)
 
-        def _test_sender_http_auto_protocol_version(self, settings, expected_version: qi.ProtocolVersion):
+        def _test_sender_http_auto_protocol_version(self, settings, expected_version: int):
             with HttpServer(settings) as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 self.assertEqual(sender.protocol_version, expected_version)
                 buffer = sender.new_buffer()
@@ -1093,7 +1092,7 @@ class TestBases:
                     columns={'price': '111222233333i', 'qty': 3.5},
                     at=qi.TimestampNanos(111222233333))
                 exp = b'line_sender_buffer_old_server2,id=Hola price="111222233333i",qty' + _float_binary_bytes(
-                    3.5, expected_version == qi.ProtocolVersion.ProtocolVersionV1) + b' 111222233333\n'
+                    3.5, expected_version == 1) + b' 111222233333\n'
                 self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 self.assertEqual(len(server.requests), 1)
@@ -1175,7 +1174,7 @@ class TestBases:
                 self.assertEqual(server.requests[0], exp)
 
             #tcp
-            with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version='2') as sender:
+            with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version=2) as sender:
                 server.accept()
                 self.assertEqual(server.recv(), [])
                 sender.row(
@@ -1394,13 +1393,16 @@ class TestSenderEnv(TestBases.TestSender):
     name = 'env'
     builder = Builder.ENV
 
+
 class TestBufferProtocolVersionV1(TestBufferBase.TestBuffer):
     name = 'protocol version 1'
-    version = qi.ProtocolVersion.ProtocolVersionV1
+    version = 1
+
 
 class TestBufferProtocolVersionV2(TestBufferBase.TestBuffer):
     name = 'protocol version 1'
-    version = qi.ProtocolVersion.ProtocolVersionV2
+    version = 2
+
 
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
