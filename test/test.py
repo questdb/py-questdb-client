@@ -676,10 +676,10 @@ class TestBases:
                 host='127.0.0.1',
                 port=server.port,
                 init_buf_size=1024,
-                max_name_len=10) as sender:
+                max_name_len=20) as sender:
                     buffer = sender.new_buffer()
                     self.assertEqual(buffer.init_buf_size, 1024)
-                    self.assertEqual(buffer.max_name_len, 10)
+                    self.assertEqual(buffer.max_name_len, 20)
                     self.assertEqual(buffer.init_buf_size, sender.init_buf_size)
                     self.assertEqual(buffer.max_name_len, sender.max_name_len)
 
