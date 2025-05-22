@@ -1056,18 +1056,26 @@ class TestBases:
                     auto_flush='off',
                     request_timeout=1,
                     retry_timeout=0,
+
+                    # effectively calculates a ~1ms timeout
                     request_min_throughput=100000000,
-                    protocol_version='2') as sender:
-                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+
+                    protocol_version=2) as sender:
+                
+                buffer = sender.new_buffer()
+                buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
 
                 # wait 50ms in the server to simulate a slow response
                 server.responses.append((50, 200, 'text/plain', b'OK'))
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
-                    sender.flush()
+                    for _ in range(100):
+                        # We retry in case the network thread gets descheduled
+                        # and is only rescheduled after the timeout elapsed.
+                        sender.flush(buffer, clear=False)
 
         def test_http_request_timeout(self):
             with HttpServer() as server, self.builder(
