@@ -374,6 +374,37 @@ class TestBases:
                      b'f1=t,f2=12345i,f3' + _float_binary_bytes(10.75) + b',f4="val3" '
                      b'111222233333'),
                     b'tab1,tag3=value\\ 3,tag4=value:4 field5=f'])
+                
+        def test_bad_protocol_versions(self):
+            bad_versions = [
+                '0',
+                'automatic',
+                0,
+                3,
+                '3',
+                1.5,
+                '1.5',
+                '2.0',
+            ]
+
+            for version in bad_versions:
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        '"protocol_version" must be None, "auto", 1 or 2'):
+                    self.builder('tcp', '127.0.0.1', 12345, protocol_version='3')
+                    self.fail('Should not have reached here - constructing sender')
+
+            bad_versions.append(None)
+            for version in bad_versions:
+                with self.assertRaises(Exception) as capture:
+                    qi.Buffer(protocol_version=version)
+                    self.fail('Should not have reached here - constructing buffer')
+
+                self.assertIn(type(capture.exception), (qi.IngressError, TypeError))
+
+                if isinstance(capture.exception, qi.IngressError):
+                    self.assertEqual(capture.exception.code, qi.IngressErrorCode.ProtocolVersionError)
+                    self.assertIn('Invalid protocol version', str(capture.exception))
 
         def test_connect_close(self):
             with Server() as server:
@@ -1052,14 +1083,6 @@ class TestBases:
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
-
-        def test_wrong_config_protocol_version(self):
-            with self.assertRaisesRegex(qi.IngressError, '"protocol_version" must be None, "auto", "1" or "2" not \'3\''):
-                self.builder(
-                    'http',
-                    '127.0.0.1',
-                    0,
-                    protocol_version='3')
 
         def test_http_server_not_serve(self):
             with self.assertRaisesRegex(qi.IngressError, 'Could not detect server\'s line protocol version, settings url: http://127.0.0.1:1234/settings'):

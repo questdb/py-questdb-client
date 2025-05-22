@@ -796,6 +796,10 @@ cdef class Buffer:
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
+        if protocol_version not in (1, 2):
+            raise IngressError(
+                IngressErrorCode.ProtocolVersionError,
+                'Invalid protocol version. Supported versions are 1 and 2.')
         self._cinit_impl(protocol_version, init_buf_size, max_name_len)
 
     cdef inline _cinit_impl(self, line_sender_protocol_version version, size_t init_buf_size, size_t max_name_len):
@@ -1876,18 +1880,18 @@ cdef class Sender:
         if protocol_version is not None:
             if protocol_version == 'auto':
                 pass
-            elif int(protocol_version) == 1:
+            elif (protocol_version == 1) or (protocol_version == '1'):
                 if not line_sender_opts_protocol_version(
                         self._opts, line_sender_protocol_version_1, &err):
                     raise c_err_to_py(err)
-            elif int(protocol_version) == 2:
+            elif (protocol_version == 2) or (protocol_version == '2'):
                 if not line_sender_opts_protocol_version(
                         self._opts, line_sender_protocol_version_2, &err):
                     raise c_err_to_py(err)
             else:
                 raise IngressError(
                     IngressErrorCode.ConfigError,
-                    '"protocol_version" must be None, "auto", "1" or "2"' +
+                    '"protocol_version" must be None, "auto", 1 or 2' +
                     f' not {protocol_version!r}')
 
         if auth_timeout is not None:
