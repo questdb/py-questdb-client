@@ -264,6 +264,42 @@ completely disabled:
 See the :ref:`sender_conf_auto_flush` section for more details. and note that
 ``auto_flush_interval`` :ref:`does NOT start a timer <sender_conf_auto_flush_interval>`.
 
+.. _sender_protocol_version:
+
+Protocol Version
+===============
+
+Specifies the version of Ingest Protocol to use for sender. Valid options are:
+
+* ``1`` - Text-based format compatible with InfluxDB line protocol.
+* ``2`` - Binary format with array and f64 support.
+* ``auto`` (default) - Automatic version selection based on connection type.
+
+Behavior details:
+
+^^^^^^^^^^^^^^^^^
+
++----------------+--------------------------------------------------------------+
+| Value          | Behavior                                                     |
++================+==============================================================+
+|                | - Plain text serialization                                   |
+|     ``1``      | - Compatible with InfluxDB servers                           |
+|                | - No array type support                                      |
++----------------+--------------------------------------------------------------+
+|     ``2``      | - Binary encoding for f64                                    |
+|                | - Full support for array                                     |
++----------------+--------------------------------------------------------------+
+|                | - **HTTP/HTTPS**: Auto-detects server capability during      |
+|     ``auto``   |   handshake (supports version negotiation)                   |
+|                | - **TCP/TCPS**: Defaults to version 1 for compatibility      |
++----------------+--------------------------------------------------------------+
+
+Here is a configuration string with ``protocol_version=2`` for ``TCP``:
+
+``tcp::addr=localhost:9000;protocol_version=2;``
+
+See the :ref:`sender_conf_protocol_version` section for more details.
+
 Error Reporting
 ===============
 

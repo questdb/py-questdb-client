@@ -223,10 +223,29 @@ If you need consistent flushing at specific intervals, you should set
 ``auto_flush_interval=off`` and implement your own timer-based logic.
 The :ref:`sender_advanced` documentation should help you.
 
+.. _sender_conf_protocol_version:
+
+Protocol Version
+======
+
+Specifies the version of Ingest Protocol to use. Valid options are:
+
+* ``1`` - Text-based format compatible with InfluxDB line protocol.
+
+* ``2`` - Array support and binary format serialization for f64.
+
+* ``auto`` (default) - Automatic version selection based on protocol type.
+
+  HTTP/HTTPS: Auto-detects server capability during handshake (supports version negotiation)
+
+  TCP/TCPS: Defaults to version 1 for compatibility
+
 .. _sender_conf_buffer:
 
 Buffer
 ======
+
+* ``protocol_version`` - ``int (1, 2)``: Buffer protocol version.
 
 * ``init_buf_size`` - ``int > 0``: Initial buffer capacity.
     

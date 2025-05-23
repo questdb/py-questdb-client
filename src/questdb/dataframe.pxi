@@ -126,7 +126,7 @@ cdef enum col_source_t:
     col_source_str_lrg_utf8_arrow =     406000
     col_source_dt64ns_numpy =           501000
     col_source_dt64ns_tz_arrow =        502000
-    col_source_array_numpy =            503000
+    col_source_array_numpy =            601100
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
