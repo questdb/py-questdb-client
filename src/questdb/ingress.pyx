@@ -956,7 +956,7 @@ cdef class Buffer:
             const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
             line_sender_error * err = NULL
 
-        if not line_sender_buffer_column_f64_arr(
+        if not line_sender_buffer_column_f64_arr_byte_strides(
                 self._impl,
                 c_name,
                 rank,

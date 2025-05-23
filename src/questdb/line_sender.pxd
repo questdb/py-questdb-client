@@ -230,7 +230,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint line_sender_buffer_column_f64_arr(
+    bint line_sender_buffer_column_f64_arr_byte_strides(
         line_sender_buffer* buffer,
         line_sender_column_name name,
         size_t rank,
