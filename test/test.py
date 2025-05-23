@@ -27,6 +27,10 @@ import questdb.ingress as qi
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import TestWithDatabase
 
+from fixture import _parse_version
+
+NUMPY_VERSION = _parse_version(np.__version__)
+
 try:
     import pandas as pd
     import numpy
@@ -246,7 +250,7 @@ class TestBufferBase:
                 buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
 
             # not f64 dtype array
-            with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
+            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy array are supported, got dtype: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
@@ -1070,9 +1074,9 @@ class TestBases:
                 buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
 
                 # wait 50ms in the server to simulate a slow response
-                server.responses.append((50, 200, 'text/plain', b'OK'))
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
                     for _ in range(100):
+                        server.responses.append((50, 200, 'text/plain', b'OK'))
                         # We retry in case the network thread gets descheduled
                         # and is only rescheduled after the timeout elapsed.
                         sender.flush(buffer, clear=False)
@@ -1242,7 +1246,7 @@ class TestBases:
                         at=qi.TimestampNanos(11111))
 
             # not f64 dtype array
-            with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
+            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy array are supported, got dtype: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row(
@@ -1251,14 +1255,16 @@ class TestBases:
                         at=qi.TimestampNanos(11111))
 
             # max dims
-            with self.assertRaisesRegex(qi.IngressError, "Array dimension mismatch: expected at most 32 dimensions, but got 33"):
-                dims = (1,) * 33
-                array = np.empty(dims, dtype=np.float64)
-                with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version="2") as sender:
-                    sender.row(
-                        'array_test',
-                        columns={'array': array},
-                        at=qi.TimestampNanos(11111))
+            if NUMPY_VERSION >= (2,):
+                # Note: Older numpy versions don't support more than 32 dimensions.
+                with self.assertRaisesRegex(qi.IngressError, "Array dimension mismatch: expected at most 32 dimensions, but got 33"):
+                    dims = (1,) * 33
+                    array = np.empty(dims, dtype=np.float64)
+                    with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version="2") as sender:
+                        sender.row(
+                            'array_test',
+                            columns={'array': array},
+                            at=qi.TimestampNanos(11111))
 
             # default protocol version is v1, which does not support array datatype.
             with self.assertRaisesRegex(qi.IngressError, "Protocol version v1 does not support array datatype"):

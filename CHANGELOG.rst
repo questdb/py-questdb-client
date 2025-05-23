@@ -8,7 +8,8 @@ Changelog
 3.0.0rc1 (2025-05-23)
 ------------------
 
-This is a major release introducing new features and breaking changes.
+This is the pre-release of a major release introducing new features and some
+minor breaking changes.
 
 Features
 ~~~~~~~~
@@ -29,7 +30,8 @@ Features
             columns={'array_2d': array_2d},
             at=timestamp)
 
-* Implements binary protocol (only for ``float64``) with performance improvements. You can Access raw payloads via the ``bytes(sender)`` method.
+* Implements binary protocol (only for ``float64`` and ``numpy`` arrays)
+with performance improvements.
 
 Breaking Changes
 ~~~~~~~~~~~~~~~~
@@ -38,8 +40,15 @@ Breaking Changes
 
 .. code-block:: python
 
-    with sender.new_buffer() as buf:  # protocol_version auto-applied
-        buf.row('table', columns={'arr': np.array([...], dtype=np.float64)}))
+    buf = sender.new_buffer()  # protocol_version determined automatically
+    buf.row(
+      'table',
+      columns={'arr': np.array([1.5, 3.0], dtype=np.float64)},
+      at=timestamp)
+
+* To access the raw payload, call ``bytes(sender)`` or ``bytes(buffer)`` (
+  rather than calling the ``str`` function on the same objects as in version
+  2.x.x of the questdb library) method.
 
 * **NumPy Dependency**
 
