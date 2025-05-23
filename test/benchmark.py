@@ -27,7 +27,7 @@ class TestBenchmarkPandas(unittest.TestCase):
             'a': slist,
             'b': list(range(len(slist)))})
 
-        buf = qi.Buffer()
+        buf = qi.Buffer(protocol_version=1)
 
         # Warm up and pre-size buffer
         buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
@@ -53,7 +53,7 @@ class TestBenchmarkPandas(unittest.TestCase):
                 ['a', 'b', 'c', 'a', None, 'c', 'a', float('nan')] *
                 (count // 8))})
 
-        buf = qi.Buffer()
+        buf = qi.Buffer(protocol_version=2)
 
         # Warm up and pre-size buffer
         buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
@@ -77,7 +77,7 @@ class TestBenchmarkPandas(unittest.TestCase):
             'col5': series,
             'col6': series})
         
-        buf = qi.Buffer()
+        buf = qi.Buffer(protocol_version=2)
 
         # Warm up and pre-size buffer
         buf.dataframe(df, table_name='tbl1', symbols=True, at=qi.ServerTimestamp)
@@ -109,7 +109,7 @@ class TestBenchmarkPandas(unittest.TestCase):
             'col4': slist,
             'col5': slist})
 
-        buf = qi.Buffer()
+        buf = qi.Buffer(protocol_version=2)
 
         # Warm up and pre-size buffer
         buf.dataframe(df, table_name='tbl1', symbols=False, at=qi.ServerTimestamp)
@@ -133,7 +133,7 @@ class TestBenchmarkPandas(unittest.TestCase):
             'col6': series})
 
         tpe = ThreadPoolExecutor(max_workers=threads)
-        bufs = [qi.Buffer() for _ in range(threads)]
+        bufs = [qi.Buffer(protocol_version=2) for _ in range(threads)]
 
         def benchmark_run(buf):
             t0 = time.monotonic()

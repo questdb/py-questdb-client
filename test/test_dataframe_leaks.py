@@ -12,7 +12,7 @@ def get_rss():
 
 
 def serialize_and_cleanup():
-    # qi.Buffer().row(
+    # qi.Buffer(protocol_version=2).row(
     #     'table_name',
     #     symbols={'x': 'a', 'y': 'b'},
     #     columns={'a': 1, 'b': 2, 'c': 3})
@@ -20,7 +20,7 @@ def serialize_and_cleanup():
         'a': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
         'b': [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
         'c': [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]})
-    qi.Buffer().dataframe(df, table_name='test', at=qi.ServerTimestamp)
+    qi.Buffer(protocol_version=2).dataframe(df, table_name='test', at=qi.ServerTimestamp)
 
 
 def main():

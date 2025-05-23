@@ -149,7 +149,7 @@ def test_dataframe(input_bytes):
     df, table_name, table_name_col, symbols, at = params
 
     try:
-        BUF = qi.Buffer()
+        BUF = qi.Buffer(protocol_version=2)
         BUF.clear()
         try:
             BUF.dataframe(

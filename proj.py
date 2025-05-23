@@ -14,6 +14,19 @@ import platform
 PROJ_ROOT = pathlib.Path(__file__).parent
 
 
+def patch_mac_archflags_env():
+    system = platform.system()
+    machine = platform.machine()
+
+    if system == "Darwin":
+        if machine == "arm64":
+            os.environ["ARCHFLAGS"] = "-arch arm64"
+        elif machine == "x86_64":
+            os.environ["ARCHFLAGS"] = "-arch x86_64"
+        else:
+            raise RuntimeError(f"Unknown macOS architecture: {machine}")
+
+
 def _run(*args, env=None, cwd=None):
     """
     Log and run a command within the build dir.
@@ -269,6 +282,7 @@ def main():
             sys.stderr.write(f'  {command}\n')
         sys.stderr.write('\n')
         sys.exit(0)
+    patch_mac_archflags_env()
     fn = sys.argv[1]
     args = list(sys.argv)[2:]
     globals()[fn](*args)
