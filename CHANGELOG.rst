@@ -1,7 +1,59 @@
 .. _changelog:
 
+
 Changelog
+
 =========
+
+3.0.0rc1 (2025-05-23)
+------------------
+
+This is a major release introducing new features and breaking changes.
+
+Features
+~~~~~~~~
+* Array Data Type Support. Adds native support for NumPy arrays
+  (currently only for ``np.float64`` element type and up to 32 dimensions).
+
+.. code-block:: python
+
+        import numpy as np
+
+        # Create 2D numpy array
+        array_2d = np.array([
+            [1.1, 2.2, 3.3],
+            [4.4, 5.5, 6.6]], dtype=np.float64)
+
+        sender.row(
+            'table',
+            columns={'array_2d': array_2d},
+            at=timestamp)
+
+* Implements binary protocol (only for ``float64``) with performance improvements. You can Access raw payloads via the ``bytes(sender)`` method.
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+* Buffer Constructor Changes. The ``Buffer`` constructor now requires the ``protocol_version`` parameter.
+  You can create buffer through the sender for automatic ``protocol_version`` management:
+
+.. code-block:: python
+
+    with sender.new_buffer() as buf:  # protocol_version auto-applied
+        buf.row('table', columns={'arr': np.array([...], dtype=np.float64)}))
+
+* **NumPy Dependency**
+
+  Array functionality mandates NumPy installation.
+
+* **Sender/Buffer String Conversion Removal**
+
+  The legacy string conversion via `str(sender)` is removed.
+  Access raw binary payloads through the `bytes(sender)` method:
+
+.. code-block:: python
+
+    # for debugging
+    payload = bytes(sender)
 
 2.0.4 (2025-04-02)
 ------------------
