@@ -948,15 +948,23 @@ cdef class Buffer:
     cdef inline void_int _column_numpy(
             self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
         if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
-            raise IngressError(IngressErrorCode.ArrayWriteToBufferError, 'Only support float64 array, got: %s' % str(arr.dtype))
+            raise IngressError(
+                IngressErrorCode.ArrayWriteToBufferError,
+                f'Only float64 numpy array are supported, got dtype: %s' % str(arr.dtype))
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
             const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
             line_sender_error * err = NULL
 
         if not line_sender_buffer_column_f64_arr(
-                self._impl, c_name, rank, <const size_t*> cnp.PyArray_DIMS(arr),
-                <const ssize_t*> cnp.PyArray_STRIDES(arr), data_ptr, cnp.PyArray_NBYTES(arr), &err):
+                self._impl,
+                c_name,
+                rank,
+                <const size_t*> cnp.PyArray_DIMS(arr),
+                <const ssize_t*> cnp.PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+                data_ptr,
+                cnp.PyArray_NBYTES(arr),
+                &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_dt(

@@ -2048,7 +2048,7 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
-cdef void_int _dataframe_serialize_cell_column_array__array_numpy(
+cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col,
@@ -2067,8 +2067,14 @@ cdef void_int _dataframe_serialize_cell_column_array__array_numpy(
         const uint8_t* data_ptr = <const uint8_t *> PyArray_DATA(arr)
         line_sender_error * err = NULL
     if not line_sender_buffer_column_f64_arr(
-            ls_buf, col.name, rank, <const size_t*> PyArray_DIMS(arr),
-            <const ssize_t*> PyArray_STRIDES(arr), data_ptr, PyArray_NBYTES(arr), &err):
+            ls_buf,
+            col.name,
+            rank,
+            <const size_t*> PyArray_DIMS(arr),
+            <const ssize_t*> PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+            data_ptr,
+            PyArray_NBYTES(arr),
+            &err):
         _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
@@ -2229,7 +2235,7 @@ cdef void_int _dataframe_serialize_cell(
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_arr_f64__arr_f64_numpyobj:
-        _dataframe_serialize_cell_column_array__array_numpy(ls_buf, b, col, gs)
+        _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
         _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:
