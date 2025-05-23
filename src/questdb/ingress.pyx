@@ -85,6 +85,10 @@ import os
 
 import numpy as np
 cimport numpy as cnp
+from numpy cimport NPY_DOUBLE, PyArrayObject
+
+# Functions we need to import as `PyObject` to avoid Cython's `object` type
+from .extra_numpy cimport *
 
 cnp.import_array()
 
