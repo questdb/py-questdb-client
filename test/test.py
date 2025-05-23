@@ -1242,7 +1242,7 @@ class TestBases:
                         at=qi.TimestampNanos(11111))
 
             # not f64 dtype array
-            with self.assertRaisesRegex(qi.IngressError, "Only support float64 array, got: complex64"):
+            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy array are supported, got dtype: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row(

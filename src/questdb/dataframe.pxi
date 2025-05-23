@@ -2066,7 +2066,7 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
         size_t rank = PyArray_NDIM(arr)
         const uint8_t* data_ptr = <const uint8_t *> PyArray_DATA(arr)
         line_sender_error * err = NULL
-    if not line_sender_buffer_column_f64_arr(
+    if not line_sender_buffer_column_f64_arr_byte_strides(
             ls_buf,
             col.name,
             rank,
