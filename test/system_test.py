@@ -27,10 +27,10 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '8.3.1'
+QUESTDB_VERSION = '8.3.2'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
-
+FIRST_ARRAY_RELEASE = (8, 4, 0)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -228,8 +228,7 @@ class TestWithDatabase(unittest.TestCase):
         self.assertEqual(scrubbed_dataset, exp_dataset)
 
     def test_f64_arr(self):
-        # first array release is 8.3.2
-        if self.qdb_plain.version < (8, 3, 3):
+        if self.qdb_plain.version < FIRST_ARRAY_RELEASE:
             self.skipTest('old server does not support array')
         table_name = uuid.uuid4().hex
         array1 = np.array(
