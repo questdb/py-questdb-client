@@ -267,7 +267,7 @@ See the :ref:`sender_conf_auto_flush` section for more details. and note that
 .. _sender_protocol_version:
 
 Protocol Version
-===============
+================
 
 Specifies the version of Ingestion Line Protocol to use for sender.
 

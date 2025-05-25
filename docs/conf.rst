@@ -226,7 +226,7 @@ The :ref:`sender_advanced` documentation should help you.
 .. _sender_conf_protocol_version:
 
 Protocol Version
-======
+================
 
 Specifies the version of Ingestion Line Protocol to use. Valid options are:
 

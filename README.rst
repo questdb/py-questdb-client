@@ -15,16 +15,29 @@ This implementation supports `authentication
 and full-connection encryption with
 `TLS <https://py-questdb-client.readthedocs.io/en/latest/conf.html#tls>`_.
 
-Quickstart
-==========
+Install
+=======
 
-The latest version of the library is 2.0.3 (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
+The latest *stable* version of the library is **2.0.4** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
 
 ::
 
     python3 -m pip install -U questdb[dataframe]
 
-Please start by `setting up QuestDB <https://questdb.io/docs/quick-start/>`_ . Once set up, you can use this library to insert data.
+
+The latest *pre-release* version of the library is **3.0.0r1** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
+This release supports NumPy float64 arrays which are transmitted over a new
+protocol version supported by QuestDB 8.4.0 or later.
+
+:: 
+
+    python3 -m pip install --pre -U questdb[dataframe]
+
+Quickstart
+==========
+
+Start by `setting up QuestDB <https://questdb.io/docs/quick-start/>`_ .
+Once set up, you can use this library to insert data.
 
 The most common way to insert data is from a Pandas dataframe.
 
@@ -38,6 +51,13 @@ The most common way to insert data is from a Pandas dataframe.
         'side': pd.Categorical(['sell', 'sell']),
         'price': [2615.54, 39269.98],
         'amount': [0.00044, 0.001],
+
+        # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
+        'ord_book_bids': [
+            np.array([2615.54, 2618.63]),
+            np.array([39269.98, 39270.00])
+        ],
+
         'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
     conf = f'http::addr=localhost:9000;'
@@ -57,7 +77,13 @@ You can also send individual rows. This only requires a more minimal installatio
         sender.row(
             'trades',
             symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
+            columns={
+                'price': 2615.54,
+                'amount': 0.00044,
+
+                # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
+                'ord_book_bids': np.array([2615.54, 2618.63]),
+            },
             at=TimestampNanos.now())
         sender.flush()
 
