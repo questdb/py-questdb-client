@@ -37,6 +37,7 @@ __all__ = [
     'Protocol',
     'Sender',
     'ServerTimestamp',
+    'ServerTimestampType',
     'TimestampMicros',
     'TimestampNanos',
     'TlsCa',
@@ -387,7 +388,7 @@ cdef void_int str_to_column_name_copy(
 
 cdef int64_t datetime_to_micros(datetime dt):
     """
-    Convert a `datetime.datetime` to microseconds since the epoch.
+    Convert a :class:`datetime.datetime` to microseconds since the epoch.
     """
     return (
         <int64_t>(dt.timestamp()) *
@@ -404,13 +405,28 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(1000000000) +
         <int64_t>(dt.microsecond * 1000))
 
-cdef class _ServerTimestamp:
+
+class ServerTimestampType:
     """
-    A placeholder value to indicate using a server-generated-timestamp.
+    A placeholder value to indicate that the data should be inserted
+    using a server-generated-timestamp.
+
+    Don't instantiate this class directly, use the singleton
+    :data:`ServerTimestamp` instead.
+
+    This feature is mostly provided for legacy compatibility.
+    We recommend always specifying an explicit timestamp.
+
+    Using ``ServerTimestamp`` will prevent QuestDB's deduplication
+    feature from working as it would generate unique rows on resubmission.
     """
     pass
 
-ServerTimestamp = _ServerTimestamp()
+
+#: Singleton instance used to request server-side timestamping.
+#: See :class:`ServerTimestampType` for more details.
+ServerTimestamp = ServerTimestampType()
+
 
 cdef class TimestampMicros:
     """
@@ -455,7 +471,7 @@ cdef class TimestampMicros:
     @classmethod
     def from_datetime(cls, dt: datetime):
         """
-        Construct a ``TimestampMicros`` from a ``datetime.datetime`` object.
+        Construct a ``TimestampMicros`` from a :class:`datetime.datetime` object.
         """
         if not isinstance(dt, datetime):
             raise TypeError('dt must be a datetime object.')
@@ -631,7 +647,7 @@ cdef class SenderTransaction:
                 str,
                 Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
                 ]=None,
-            at: Union[ServerTimestamp, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime]):
         """
         Write a row for the table in the transaction.
 
@@ -662,7 +678,7 @@ cdef class SenderTransaction:
             df,  # : pd.DataFrame
             *,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
         """
         Write a dataframe for the table in the transaction.
 
@@ -1063,7 +1079,7 @@ cdef class Buffer:
                         self._column(name, value)
                         wrote_fields = True
             if wrote_fields:
-                self._at(at if not isinstance(at, _ServerTimestamp) else None)
+                self._at(at if not isinstance(at, ServerTimestampType) else None)
                 self._clear_marker()
             else:
                 self._rewind_to_marker()
@@ -1082,7 +1098,7 @@ cdef class Buffer:
                 str,
                 Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
                 ]=None,
-            at: Union[ServerTimestamp, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime]):
         """
         Add a single row (line) to the buffer.
 
@@ -1194,7 +1210,7 @@ cdef class Buffer:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
         """
         Add a pandas DataFrame to the buffer.
 
@@ -2444,7 +2460,7 @@ cdef class Sender:
             columns: Optional[Dict[
                 str,
                 Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]]=None,
-            at: Union[TimestampNanos, datetime, ServerTimestamp]):
+            at: Union[TimestampNanos, datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
 
@@ -2478,7 +2494,7 @@ cdef class Sender:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
         """
         Write a Pandas DataFrame to the internal buffer.
 

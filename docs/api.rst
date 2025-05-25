@@ -54,10 +54,14 @@ questdb.ingress
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.ServerTimestamp
+.. autoclass:: questdb.ingress.ServerTimestampType
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. autodata:: questdb.ingress.ServerTimestamp
+    :annotation:
+    :no-value:
 
 .. autoclass:: questdb.ingress.TaggedEnum
    :members:

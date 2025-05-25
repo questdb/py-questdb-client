@@ -28,7 +28,7 @@ __all__ = [
     "IngressErrorCode",
     "Protocol",
     "Sender",
-    "ServerTimestamp",
+    "ServerTimestampType",
     "TimestampMicros",
     "TimestampNanos",
     "TlsCa",
@@ -70,7 +70,7 @@ class IngressError(Exception):
         """Return the error code."""
 
 
-class ServerTimestamp:
+class ServerTimestampType:
     """
     A placeholder value to indicate using a server-generated-timestamp.
     """
@@ -206,7 +206,7 @@ class SenderTransaction:
         columns: Optional[
             Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
-        at: Union[ServerTimestamp, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> SenderTransaction:
         """
         Write a row for the table in the transaction.
@@ -219,7 +219,7 @@ class SenderTransaction:
         df: pd.DataFrame,
         *,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestamp, int, str, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
     ) -> SenderTransaction:
         """
         Write a dataframe for the table in the transaction.
@@ -381,7 +381,7 @@ class Buffer:
         columns: Optional[
             Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
-        at: Union[ServerTimestamp, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> Buffer:
         """
         Add a single row (line) to the buffer.
@@ -482,7 +482,7 @@ class Buffer:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestamp, int, str, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
     ) -> Buffer:
         """
         Add a pandas DataFrame to the buffer.
@@ -688,6 +688,9 @@ class Buffer:
             * - ``'object'`` (``str`` objects)
               - Y
               - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'object' (``numpy.ndarray[numpy.float64]``)``
+              - Y
+              - ``ARRAY[DOUBLE]``
             * - ``'datetime64[ns]'``
               - Y
               - ``TIMESTAMP`` **ζ**
@@ -1008,7 +1011,7 @@ class Sender:
         columns: Optional[
             Dict[str, Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
-        at: Union[TimestampNanos, datetime, ServerTimestamp],
+        at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:
         """
         Write a row to the internal buffer.
@@ -1026,7 +1029,7 @@ class Sender:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestamp, int, str, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
     ) -> Sender:
         """
         Write a Pandas DataFrame to the internal buffer.

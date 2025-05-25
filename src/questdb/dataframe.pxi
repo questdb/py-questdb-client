@@ -2360,7 +2360,7 @@ cdef void_int _dataframe(
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, _ServerTimestamp) else None,
+            at if not isinstance(at, ServerTimestampType) else None,
             b,
             col_count,
             &c_table_name,
