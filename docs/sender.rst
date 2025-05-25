@@ -269,7 +269,9 @@ See the :ref:`sender_conf_auto_flush` section for more details. and note that
 Protocol Version
 ===============
 
-Specifies the version of Ingest Protocol to use for sender. Valid options are:
+Specifies the version of Ingestion Line Protocol to use for sender.
+
+Valid options are:
 
 * ``1`` - Text-based format compatible with InfluxDB line protocol.
 * ``2`` - Binary format with array and f64 support.

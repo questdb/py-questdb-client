@@ -13,14 +13,12 @@ from numpy cimport (
     PyArrayObject,
     PyArray_Descr,
     npy_intp,
-    npy_int,
-    dtype,
-
-    # Functions
-    PyArray_DescrFromType,  # returns a `dtype` Python/C object.
+    npy_int
 )
 
 cdef extern from "numpy/arrayobject.h":
+    bint PyArray_CheckExact(PyObject * o)
+
     # PyArrayObject
     npy_intp PyArray_NBYTES(PyArrayObject*) nogil
     npy_intp* PyArray_STRIDES(PyArrayObject*) nogil

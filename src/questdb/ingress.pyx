@@ -646,7 +646,7 @@ cdef class SenderTransaction:
         if self._sender._buffer is None:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                "row() can\'t be called: Not connected."
+                "row() can\'t be called: Sender is closed."
             )
 
         self._sender._buffer._row(
@@ -676,7 +676,7 @@ cdef class SenderTransaction:
         if self._sender._buffer is None:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                "dataframe() can\'t be called: Not connected."
+                "dataframe() can\'t be called: Sender is closed."
             )
         _dataframe(
             auto_flush_blank(),
@@ -810,7 +810,6 @@ cdef class Buffer:
         self._impl = line_sender_buffer_with_max_name_len(version, max_name_len)
         self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_buf_size)
-        cdef line_sender_error* err = NULL
         self._init_buf_size = init_buf_size
         self._max_name_len = max_name_len
         self._row_complete_sender = None
@@ -950,7 +949,7 @@ cdef class Buffer:
         if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
             raise IngressError(
                 IngressErrorCode.ArrayWriteToBufferError,
-                f'Only float64 numpy array are supported, got dtype: %s' % str(arr.dtype))
+                f'Only float64 numpy arrays are supported, got dtype: {arr.dtype}')
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
             const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
@@ -1849,7 +1848,6 @@ cdef class Sender:
         cdef uint64_t c_retry_timeout
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
-        cdef uint64_t c_max_name_len
 
         self._c_protocol = protocol.c_value
 
@@ -2300,7 +2298,7 @@ cdef class Sender:
         if self._impl == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'max_name_len() can\'t be called: Not connected.')
+                'max_name_len() can\'t be called: Sender is closed.')
         return line_sender_get_max_name_len(self._impl)
 
     @property
@@ -2360,7 +2358,7 @@ cdef class Sender:
         if self._impl == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'protocol_version() can\'t be called: Not connected.')
+                'protocol_version() can\'t be called: Sender is closed.')
         return <int>line_sender_get_protocol_version(self._impl)
 
     def establish(self):
@@ -2381,9 +2379,13 @@ cdef class Sender:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'establish() can\'t be called after close().')
+
+        # We disable the GIL when calling `line_sender_build` since for HTTP
+        # it can make HTTP requests to auto-detect the protocol version.
         _ensure_doesnt_have_gil(&gs)
         self._impl = line_sender_build(self._opts, &err)
         _ensure_has_gil(&gs)
+
         if self._impl == NULL:
             raise c_err_to_py(err)
 
@@ -2463,7 +2465,7 @@ cdef class Sender:
         if self._buffer is None:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                "row() can\'t be called: Not connected."
+                "row() can\'t be called: Sender is closed."
             )
 
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
@@ -2535,7 +2537,7 @@ cdef class Sender:
         if self._buffer is None:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                "dataframe() can\'t be called: Not connected."
+                "dataframe() can\'t be called: Sender is closed."
             )
         _dataframe(
             af,
@@ -2596,7 +2598,7 @@ cdef class Sender:
         if sender == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'flush() can\'t be called: Not connected.')
+                'flush() can\'t be called: Sender is closed.')
         if buffer is not None:
             c_buf = buffer._impl
         else:

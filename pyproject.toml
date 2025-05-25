@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: Database :: Front-Ends",
     "Topic :: Scientific/Engineering",
 ]
-dependencies = ["numpy>=2.1.0"]
+dependencies = ["numpy>=1.26.0"]  # Might work with older, but not tested.
 
 [project.license]
 text = "Apache License 2.0"

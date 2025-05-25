@@ -114,11 +114,11 @@ class Server:
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
         self.close()
 
-SETTINGS_WITH_PROTOCOL_VERSION_V1 = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [1], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
-SETTINGS_WITH_PROTOCOL_VERSION_V2 = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [2], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
-SETTINGS_WITH_PROTOCOL_VERSION_V3 = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [3], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
-SETTINGS_WITH_PROTOCOL_VERSION_V1_V2 = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [1, 2], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
-SETTINGS_WITHOUT_PROTOCOL_VERSION = b'{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITH_PROTOCOL_VERSION_V1 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [1], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITH_PROTOCOL_VERSION_V2 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [2], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITH_PROTOCOL_VERSION_V3 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [3], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITH_PROTOCOL_VERSION_V1_V2 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [1, 2], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITHOUT_PROTOCOL_VERSION = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
 
 class HttpServer:
     def __init__(self, settings=SETTINGS_WITH_PROTOCOL_VERSION_V1_V2, delay_seconds=0):
@@ -126,7 +126,7 @@ class HttpServer:
         self.requests = []
         self.responses = []
         self.headers = []
-        self.settings = settings.decode('utf-8')
+        self.settings = settings
         self._ready_event = None
         self._stop_event = None
         self._http_server = None

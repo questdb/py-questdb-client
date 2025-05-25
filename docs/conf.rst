@@ -228,7 +228,7 @@ The :ref:`sender_advanced` documentation should help you.
 Protocol Version
 ======
 
-Specifies the version of Ingest Protocol to use. Valid options are:
+Specifies the version of Ingestion Line Protocol to use. Valid options are:
 
 * ``1`` - Text-based format compatible with InfluxDB line protocol.
 

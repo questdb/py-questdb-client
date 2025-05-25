@@ -49,7 +49,28 @@ else:
             with self.assertRaisesRegex(ImportError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
 
-class TestBufferBase:
+
+class TestManifest(unittest.TestCase):
+    def test_valid_yaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest('Python version does not support yaml')
+        examples_manifest_file = pathlib.Path(__file__).parent.parent / 'examples.manifest.yaml'
+        with open(examples_manifest_file, 'r') as f:
+            yaml.safe_load(f)
+
+
+class TestBases:
+    """
+    Dummy class that's only used so that we can create subclasses of testcases.
+
+    By nesting these base classes within another class, Python's `unittest` will
+    not find them.
+
+    The discoverable subclasses can drive extra parameters.
+    """
+
     class TestBuffer(unittest.TestCase):
         def test_buffer_row_at_disallows_none(self):
             with self.assertRaisesRegex(
@@ -250,7 +271,7 @@ class TestBufferBase:
                 buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
 
             # not f64 dtype array
-            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy array are supported, got dtype: complex64"):
+            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy arrays are supported, got dtype: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
@@ -278,19 +299,6 @@ class TestBufferBase:
             with self.assertRaises(OverflowError):
                 buf.row('tbl1', columns={'num': -2 ** 63 - 1}, at=qi.ServerTimestamp)
 
-
-class TestManifest(unittest.TestCase):
-    def test_valid_yaml(self):
-        try:
-            import yaml
-        except ImportError:
-            self.skipTest('Python version does not support yaml')
-        examples_manifest_file = pathlib.Path(__file__).parent.parent / 'examples.manifest.yaml'
-        with open(examples_manifest_file, 'r') as f:
-            yaml.safe_load(f)
-
-
-class TestBases:
     class TestSender(unittest.TestCase):
         def test_transaction_row_at_disallows_none(self):
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
@@ -428,7 +436,7 @@ class TestBases:
         def test_row_before_connect(self):
             try:
                 sender = self.builder('tcp', '127.0.0.1', 12345)
-                with self.assertRaisesRegex(qi.IngressError, 'Not connected'):
+                with self.assertRaisesRegex(qi.IngressError, 'Sender is closed'):
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             finally:
                 sender.close()
@@ -1246,7 +1254,7 @@ class TestBases:
                         at=qi.TimestampNanos(11111))
 
             # not f64 dtype array
-            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy array are supported, got dtype: complex64"):
+            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy arrays are supported, got dtype: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row(
@@ -1431,12 +1439,12 @@ class TestSenderEnv(TestBases.TestSender):
     builder = Builder.ENV
 
 
-class TestBufferProtocolVersionV1(TestBufferBase.TestBuffer):
+class TestBufferProtocolVersionV1(TestBases.TestBuffer):
     name = 'protocol version 1'
     version = 1
 
 
-class TestBufferProtocolVersionV2(TestBufferBase.TestBuffer):
+class TestBufferProtocolVersionV2(TestBases.TestBuffer):
     name = 'protocol version 1'
     version = 2
 

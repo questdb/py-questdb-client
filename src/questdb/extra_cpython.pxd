@@ -54,8 +54,6 @@ cdef extern from "Python.h":
 
     bint PyLong_CheckExact(PyObject* o)
 
-    bint PyArray_CheckExact(PyObject * o)
-
     bint PyFloat_CheckExact(PyObject* o)
 
     double PyFloat_AS_DOUBLE(PyObject* o)

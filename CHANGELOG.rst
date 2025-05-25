@@ -5,10 +5,10 @@ Changelog
 
 =========
 
-3.0.0rc1 (2025-05-23)
-------------------
+3.0.0rc1 (2025-05-25)
+---------------------
 
-This is the pre-release of a major release introducing new features and some
+This is the pre-release of a major release introducing array ingestion and some
 minor breaking changes.
 
 Features
@@ -30,8 +30,9 @@ Features
             columns={'array_2d': array_2d},
             at=timestamp)
 
-* Implements binary protocol (only for ``float64`` and ``numpy`` arrays)
-with performance improvements.
+* Implements binary protocol for columns of ``float`` (double-precision) and
+  ``numpy.ndarray[np.float64]``, with performance improvements for these
+  two datatypes.
 
 Breaking Changes
 ~~~~~~~~~~~~~~~~

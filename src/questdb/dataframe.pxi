@@ -933,7 +933,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
     # To access elements which are themselves arrays.
     cdef PyArrayObject* arr
     cdef npy_int arr_type
-    cdef dtype arr_descr  # A Cython/Python object compiling to a `PyArray_Descr`
+    cdef cnp.dtype arr_descr  # A cython defn for `PyArray_Descr*`
     cdef str arr_type_name
 
     _dataframe_series_as_pybuf(pandas_col, col)
@@ -956,7 +956,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
                     col.setup.source = col_source_t.col_source_arr_f64_numpyobj
                 else:
                     arr_type_name = '??unknown??'
-                    arr_descr = PyArray_DescrFromType(arr_type)
+                    arr_descr = cnp.PyArray_DescrFromType(arr_type)
                     if arr_descr is not None:
                         arr_type_name = arr_descr.name.decode('ascii')
                     raise IngressError(
@@ -2051,17 +2051,17 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
 cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
-        col_t* col,
-        PyThreadState** gs) except -1:
+        col_t* col) except -1:
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
     cdef PyArrayObject* arr = <PyArrayObject*> cell
     cdef npy_int arr_type = PyArray_TYPE(arr)
-    cdef dtype arr_desc
+    cdef cnp.dtype arr_descr
     if arr_type != NPY_DOUBLE:
-        arr_desc = PyArray_DescrFromType(arr_type)
-        raise IngressError(IngressErrorCode.ArrayWriteToBufferError,
-                           'Only support float64 array, got: %s' % str(arr_desc))
+        arr_descr = cnp.PyArray_DescrFromType(arr_type)
+        raise IngressError(
+            IngressErrorCode.ArrayWriteToBufferError,
+            f'Only float64 numpy arrays are supported, got dtype: {arr_descr}')
     cdef:
         size_t rank = PyArray_NDIM(arr)
         const uint8_t* data_ptr = <const uint8_t *> PyArray_DATA(arr)
@@ -2075,7 +2075,6 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
             data_ptr,
             PyArray_NBYTES(arr),
             &err):
-        _ensure_has_gil(gs)
         raise c_err_to_py(err)
 
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
@@ -2235,7 +2234,7 @@ cdef void_int _dataframe_serialize_cell(
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_arr_f64__arr_f64_numpyobj:
-        _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col, gs)
+        _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
         _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:

@@ -248,7 +248,7 @@ class SenderTransaction:
 
 class Buffer:
     """
-    Construct QuestDB-flavored Ingestion Line Protocol (ILP) messages.
+    Construct QuestDB Ingestion Line Protocol (ILP) messages.
 
     The :func:`Buffer.row` method is used to add a row to the buffer.
 
@@ -831,7 +831,6 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
-        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ): ...
@@ -857,7 +856,6 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
-        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -893,7 +891,6 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
-        disable_line_protocol_validation: bool = False,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -953,9 +950,17 @@ class Sender:
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
 
+    @property
     def protocol_version(self) -> int:
         """
         Returns the QuestDB server's recommended default line protocol version.
+        """
+
+    @property
+    def max_name_len(self):
+        """
+        Returns the sender's maximum-configured maximum name length for table
+        names and column names.
         """
 
     def establish(self):
