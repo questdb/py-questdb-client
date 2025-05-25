@@ -186,6 +186,7 @@ def open_browser(port):
 def doc(http_serve=False, port=None):
     _run('python3', '-m', 'sphinx.cmd.build',
          '-b', 'html', 'docs', 'build/docs',
+         '-nW', '--keep-going', '-v',
          env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
     if _arg2bool(http_serve):
         serve(port)

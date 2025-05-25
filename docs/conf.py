@@ -3,6 +3,8 @@ from __future__ import unicode_literals
 
 import os
 
+from questdb.ingress import *
+
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
