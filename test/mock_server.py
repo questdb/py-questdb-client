@@ -200,6 +200,7 @@ class HttpServer:
         self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()
+        print(f"HTTP server started on port {self._http_server.server_port}")
         return self
 
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
