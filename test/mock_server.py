@@ -114,10 +114,10 @@ class Server:
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
         self.close()
 
-SETTINGS_WITH_PROTOCOL_VERSION_V1 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [1], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
-SETTINGS_WITH_PROTOCOL_VERSION_V2 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [2], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
-SETTINGS_WITH_PROTOCOL_VERSION_V3 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [3], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
-SETTINGS_WITH_PROTOCOL_VERSION_V1_V2 = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "line.proto.support.versions": [1, 2], "ilp.proto.transports": [ "tcp", "http", "tcps", "https"], "posthog.enabled": false, "posthog.api.key": null }'
+SETTINGS_WITH_PROTOCOL_VERSION_V1 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
+SETTINGS_WITH_PROTOCOL_VERSION_V2 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[2],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
+SETTINGS_WITH_PROTOCOL_VERSION_V3 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[3],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
+SETTINGS_WITH_PROTOCOL_VERSION_V1_V2 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1,2],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITHOUT_PROTOCOL_VERSION = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
 
 class HttpServer:
