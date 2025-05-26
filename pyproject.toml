@@ -57,9 +57,9 @@ before-build = "python {project}/install_rust.py"
 before-test = "python {project}/ci/pip_install_deps.py"
 test-command = "python {project}/test/test.py -v"
 skip = [
-    # No 32-bit musl C native tool chain for Rust.
-    # There's a tier 2 target for it, but it would need cross-compiling.
-    "*-musllinux_i686",
+    # Skip all 32-bit builds, except for Windows.
+    # Those builds are named `*win32*` in cibuildwheel.
+    "*i686*",
 ]
 
 # [tool.cibuildwheel.windows]
