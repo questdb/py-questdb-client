@@ -60,10 +60,14 @@ Breaking Changes
   The legacy string conversion via `str(sender)` is removed.
   Access raw binary payloads through the `bytes(sender)` method:
 
-.. code-block:: python
+  .. code-block:: python
 
-    # for debugging
-    payload = bytes(sender)
+      # for debugging
+      payload = bytes(sender)
+
+* Python 3.8 support is dropped.
+
+  The minimum supported Python version is now 3.9.
 
 2.0.4 (2025-04-02)
 ------------------
