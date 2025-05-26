@@ -204,6 +204,7 @@ class HttpServer:
         return self
 
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
+        print(f"HTTP server exit on port {self._http_server.server_port}")
         self._http_server.shutdown()
         self._http_server.server_close()
         self._stop_event.set()

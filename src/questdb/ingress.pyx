@@ -65,6 +65,7 @@ from .conf_str cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
 from .ingress_helper cimport *
+from libc.stdio cimport printf
 
 # An int we use only for error reporting.
 #  0 is success.
@@ -2624,6 +2625,7 @@ cdef class Sender:
 
         # We might be blocking on IO, so temporarily release the GIL.
         _ensure_doesnt_have_gil(&gs)
+        printf("sender flush   \n")
         if transactional:
             ok = line_sender_flush_and_keep_with_flags(
                     sender,
