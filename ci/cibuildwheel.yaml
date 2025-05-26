@@ -52,7 +52,6 @@ stages:
       - job: linux_arm64
         pool:
           name: "arm64-clients"
-          vmImage:
           demands:
             - Agent.Name -equals arm64-clients-$(Build.BuildId)
         dependsOn:
