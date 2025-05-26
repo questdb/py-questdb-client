@@ -66,8 +66,8 @@ def install_old_pandas_and_numpy(args):
     try_pip_install('numpy<2')
 
 def install_new_pandas_and_numpy():
-    try_pip_install('pandas')
-    try_pip_install('numpy')
+    try_pip_install('pandas>2')
+    try_pip_install('numpy>2')
 
 def main(args):
     ensure_timezone()
