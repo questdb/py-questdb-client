@@ -52,12 +52,13 @@ def ingress_extension():
     else:
         questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
         pystr_to_utf8_lib_dir = pystr_to_utf8_dir / 'target' / 'release'
-        if INSTRUMENT_FUZZING:
-            extra_compile_args.append('-fsanitize=fuzzer-no-link')
-            extra_link_args.append('-fsanitize=fuzzer-no-link')
-        else:
-            extra_compile_args.append('-flto')
-            extra_link_args.append('-flto')
+        if PLATFORM != 'win32':
+            if INSTRUMENT_FUZZING:
+                extra_compile_args.append('-fsanitize=fuzzer-no-link')
+                extra_link_args.append('-fsanitize=fuzzer-no-link')
+            else:
+                extra_compile_args.append('-flto')
+                extra_link_args.append('-flto')
 
     if PLATFORM == 'darwin':
         lib_prefix = 'lib'
