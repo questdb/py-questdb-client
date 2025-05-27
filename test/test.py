@@ -965,15 +965,15 @@ class TestBases:
                     'http',
                     '127.0.0.1',
                     server.port,
-                    auto_flush_interval=10,
+                    auto_flush_interval=100,
                     auto_flush_rows=False,
                     auto_flush_bytes=False) as sender:
                 sender.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
                 sender.row('t', columns={'x': 2}, at=qi.ServerTimestamp)
-                time.sleep(0.02)
+                time.sleep(0.2)
                 sender.row('t', columns={'x': 3}, at=qi.ServerTimestamp)
                 sender.row('t', columns={'x': 4}, at=qi.ServerTimestamp)
-                time.sleep(0.02)
+                time.sleep(0.2)
                 sender.row('t', columns={'x': 5}, at=qi.ServerTimestamp)
                 sender.row('t', columns={'x': 6}, at=qi.ServerTimestamp)
             return server.requests
