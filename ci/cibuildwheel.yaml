@@ -56,7 +56,7 @@ stages:
           - task: UsePythonVersion@0
           - uses: TheMrMilchmann/setup-msvc-dev@v3
             with:
-              arch: x64
+              arch: x86
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
