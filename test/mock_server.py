@@ -161,7 +161,6 @@ class HttpServer:
                             self.send_header('Content-Length', len(response_data))
                             self.end_headers()
                             self.wfile.write(response_data)
-                            self.wfile.flush()
                         else:
                             self.send_error(404, "Endpoint not found")
                 except BrokenPipeError as e:
