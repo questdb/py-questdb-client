@@ -60,7 +60,7 @@ stages:
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
           - script: |
-              call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+              call "C:\Program Files\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
               echo "current path：%PATH%"
               where cl.exe
             displayName: 'Active MSVC'
