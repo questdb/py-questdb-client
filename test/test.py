@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 import os
 import unittest
 import datetime
+import timeit
 import time
 from enum import Enum
 import random
@@ -933,10 +934,10 @@ class TestBases:
                     auto_flush_interval=10,
                     auto_flush_rows=False,
                     auto_flush_bytes=False) as sender:
-                start_time = time.monotonic()
+                start_time = timeit.default_timer()
                 while True:
                     sender.row('tbl1', columns={'x': 1}, at=qi.ServerTimestamp)
-                    elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                    elapsed_ms = int((timeit.default_timer() - start_time) * 1000)
                     if elapsed_ms < 5:
                         self.assertEqual(len(server.requests), 0)
                     if elapsed_ms >= 15:  # 5ms grace period.
