@@ -148,7 +148,7 @@ class HttpServer:
             def do_GET(self):
                 try:
                     time.sleep(delay_seconds)
-                    headers.append(dict(self.headers.items()))
+                    headers.append({key: value for key, value in self.headers.items()})
 
 
                     if len(server_settings) == 0:
