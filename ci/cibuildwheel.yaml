@@ -59,6 +59,15 @@ stages:
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
+          - task: VisualStudioBuild@1
+            inputs:
+              vsVersion: '16.0'
+              workload: 'Microsoft.VisualStudio.Workload.VCTools'
+          - script: |
+              call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+              where cl.exe
+            displayName: 'Setup MSVC'
+
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
