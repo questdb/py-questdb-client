@@ -60,10 +60,12 @@ stages:
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
           - script: |
-              call "C:\Program Files\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-              echo "current path：%PATH%"
-              where cl.exe
-            displayName: 'Active MSVC'
+              set VSWHERE="%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+              set VSINSTALLDIR=%%("!VSWHERE!" -latest -products * -property installationPath)
+              call "!VSINSTALLDIR!\VC\Auxiliary\Build\vcvars64.bat"
+              echo ##vso[task.setvariable variable=PATH]%PATH%
+              where cl.exe  # 验证 cl.exe 路径
+            displayName: 'active MSVC'
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
