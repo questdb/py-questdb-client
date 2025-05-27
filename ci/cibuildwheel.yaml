@@ -54,7 +54,6 @@ stages:
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
-          - uses: ilammy/msvc-dev-cmd@v1
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
