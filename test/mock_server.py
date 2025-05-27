@@ -165,10 +165,14 @@ class HttpServer:
                         else:
                             self.send_error(404, "Endpoint not found")
                 except BrokenPipeError as e:
-                    sys.stderr.writelines(f"\nHTTP server doGet() {outer_self._http_server.server_port} exception {e}\n")
+                    sys.stderr.writelines(f"\nHTTP server doGet()1111 {outer_self._http_server.server_port} exception {e}\n")
                     pass
+                except Exception as e:
+                    sys.stderr.writelines(
+                        f"\nHTTP server doGet()2222 {outer_self._http_server.server_port} exception {e}\n")
 
             def do_POST(self):
+                sys.stderr.writelines(f"HTTP server do_POST() {outer_self._http_server.server_port} 0000")
                 time.sleep(delay_seconds)
                 sys.stderr.writelines(f"HTTP server do_POST() {outer_self._http_server.server_port} 11111")
 
