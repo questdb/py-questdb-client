@@ -54,10 +54,6 @@ stages:
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
-          - name: Add MSVC to PATH
-            uses: TheMrMilchmann/setup-msvc-dev@v3
-            with:
-              arch: x86
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
