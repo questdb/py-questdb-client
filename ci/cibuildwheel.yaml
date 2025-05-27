@@ -54,17 +54,17 @@ stages:
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
+          - uses: TheMrMilchmann/setup-msvc-dev@v3
+            with:
+              arch: x64
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - script: |
-              call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat" amd64
-              cibuildwheel --output-dir wheelhouse .
-            displayName: build wheels
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
             env:
               CIBW_BUILD: "*win_amd64*"
-              CIBW_ENVIRONMENT: "MSSdk=1 DISTUTILS_USE_SDK=1 SETUP_DO_GIT_SUBMODULE_INIT=1"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
