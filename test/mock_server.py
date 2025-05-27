@@ -137,6 +137,7 @@ class HttpServer:
         self._stop_event.set()
 
     def create_handler(self):
+        outer_self = self
         delay_seconds = self.delay_seconds
         requests = self.requests
         headers = self.headers
@@ -164,12 +165,12 @@ class HttpServer:
                         else:
                             self.send_error(404, "Endpoint not found")
                 except BrokenPipeError as e:
-                    sys.stderr.write(f"\nHTTP server doGet() {self._http_server.server_port} exception {e}\n")
+                    sys.stderr.write(f"\nHTTP server doGet() {outer_self._http_server.server_port} exception {e}\n")
                     pass
 
             def do_POST(self):
                 time.sleep(delay_seconds)
-                sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 11111")
+                sys.stderr.write(f"HTTP server do_POST() {outer_self._http_server.server_port} 11111")
 
                 try:
                     headers.append({key: value for key, value in self.headers.items()})
@@ -182,18 +183,18 @@ class HttpServer:
                         wait_ms, code, content_type, body = 0, 200, None, None
                     time.sleep(wait_ms / 1000)
                     self.send_response(code)
-                    sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 222222")
+                    sys.stderr.write(f"HTTP server do_POST() {outer_self._http_server.server_port} 222222")
                     if content_type:
                         self.send_header('Content-Type', content_type)
                     if body:
                         self.send_header('Content-Length', len(body))
                     self.end_headers()
-                    sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 33333")
+                    sys.stderr.write(f"HTTP server do_POST() {outer_self._http_server.server_port} 33333")
                     if body:
                         self.wfile.write(body)
                         self.wfile.flush()
                 except BrokenPipeError as e:
-                    sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 44444 {e}")
+                    sys.stderr.write(f"HTTP server do_POST() {outer_self._http_server.server_port} 44444 {e}")
                     pass
 
         return IlpHttpHandler
