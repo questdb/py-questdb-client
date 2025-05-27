@@ -147,11 +147,7 @@ class HttpServer:
             def do_GET(self):
                 try:
                     time.sleep(delay_seconds)
-                    headers.append(dict(self.headers.items()))
-                    content_length = self.headers.get('Content-Length', 0)
-                    if content_length:
-                        self.rfile.read(int(content_length))
-
+                    headers.append({key: value for key, value in self.headers.items()})
                     if len(server_settings) == 0:
                         self.send_error(404, "Endpoint not found")
                     else:
@@ -162,7 +158,6 @@ class HttpServer:
                             self.send_header('Content-Length', len(response_data))
                             self.end_headers()
                             self.wfile.write(response_data)
-                            self.wfile.flush()
                         else:
                             self.send_error(404, "Endpoint not found")
                 except BrokenPipeError:
