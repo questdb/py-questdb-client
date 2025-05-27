@@ -158,7 +158,7 @@ stages:
             inputs: {pathtoPublish: 'wheelhouse'}
 
       - job: windows_x86_64
-        pool: {vmImage: 'windows-2019'}
+        pool: {vmImage: 'windows-latest'}
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
