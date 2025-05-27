@@ -160,6 +160,7 @@ class HttpServer:
                             self.wfile.write(response_data)
                         else:
                             self.send_error(404, "Endpoint not found")
+                    self.close_connection = False
                 except BrokenPipeError:
                     pass
 
@@ -184,6 +185,7 @@ class HttpServer:
                     self.end_headers()
                     if body:
                         self.wfile.write(body)
+                    self.close_connection = False
                 except BrokenPipeError:
                     pass
 
