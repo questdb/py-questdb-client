@@ -1,4 +1,4 @@
-import json
+import sys
 import socket
 import select
 import re
@@ -200,11 +200,11 @@ class HttpServer:
         self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()
-        print(f"HTTP server started on port {self._http_server.server_port}")
+        sys.stderr.write(f"HTTP server started on port {self._http_server.server_port}")
         return self
 
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
-        print(f"HTTP server exit on port {self._http_server.server_port}")
+        sys.stderr.write(f"HTTP server exit on port {self._http_server.server_port}")
         self._http_server.shutdown()
         self._http_server.server_close()
         self._stop_event.set()
