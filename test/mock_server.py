@@ -148,9 +148,7 @@ class HttpServer:
                 try:
                     time.sleep(delay_seconds)
                     headers.append(dict(self.headers.items()))
-                    content_length = self.headers.get('Content-Length', 0)
-                    if content_length:
-                        self.rfile.read(int(content_length))
+
 
                     if len(server_settings) == 0:
                         self.send_error(404, "Endpoint not found")
@@ -165,11 +163,13 @@ class HttpServer:
                             self.wfile.flush()
                         else:
                             self.send_error(404, "Endpoint not found")
-                except BrokenPipeError:
+                except BrokenPipeError as e:
+                    sys.stderr.write(f"\nHTTP server doGet() {self._http_server.server_port} exception {e}\n")
                     pass
 
             def do_POST(self):
                 time.sleep(delay_seconds)
+                sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 11111")
 
                 try:
                     headers.append({key: value for key, value in self.headers.items()})
@@ -182,14 +182,18 @@ class HttpServer:
                         wait_ms, code, content_type, body = 0, 200, None, None
                     time.sleep(wait_ms / 1000)
                     self.send_response(code)
+                    sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 222222")
                     if content_type:
                         self.send_header('Content-Type', content_type)
                     if body:
                         self.send_header('Content-Length', len(body))
                     self.end_headers()
+                    sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 33333")
                     if body:
                         self.wfile.write(body)
-                except BrokenPipeError:
+                        self.wfile.flush()
+                except BrokenPipeError as e:
+                    sys.stderr.write(f"HTTP server do_POST() {self._http_server.server_port} 44444 {e}")
                     pass
 
         return IlpHttpHandler
@@ -200,7 +204,7 @@ class HttpServer:
         self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()
-        sys.stderr.write(f"HTTP server started on port {self._http_server.server_port}")
+
         return self
 
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
