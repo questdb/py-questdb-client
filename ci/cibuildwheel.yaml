@@ -54,6 +54,12 @@ stages:
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
+          - task: CmdLine@2
+            displayName: Setup MSVC Environment
+            inputs:
+              script: |
+                call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+                cl.exe /?
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
