@@ -62,6 +62,10 @@ stages:
           - powershell: |
               $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
               cmd /c "call `"$vsPath`" && cl.exe /?"
+              $env:PATH = "$env:PATH;$(Split-Path (where.exe cl.exe))"
+              $env:INCLUDE = "$fixedInclude;$env:INCLUDE"
+              Write-Host "##[command]cl.exe Path: $(where.exe cl.exe)"
+              Write-Host "##[command]PATH contains: $($env:PATH -replace ';', "`n")"
               cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
