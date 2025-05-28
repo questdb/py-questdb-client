@@ -62,6 +62,18 @@ stages:
           - powershell: |
               $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
               cmd /c "call `"$vsPath`" && cl.exe /?"
+              cmd /c "call `"$vsPath`" && set > env_vars.txt"
+              
+              Get-Content env_vars.txt | ForEach-Object {
+                if ($_ -match "^(.*?)=(.*)$") {
+                  [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
+                  Write-Host "##vso[task.setvariable variable=$($matches[1])]$($matches[2])"
+                }
+              }
+              
+              # 验证环境
+              cl.exe /Bv
+              where.exe cl.exe
               cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
