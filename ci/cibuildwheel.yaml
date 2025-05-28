@@ -63,9 +63,8 @@ stages:
               $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
               
-              $excludePattern = '^(SYSTEM|AGENT|BUILD|RELEASE|VSTS|TASK|USE_|FAIL_|MSDEPLOY|AZP_75787|AZP_AGENT|AZP_ENABLE|AZURE_HTTP|COPYFILESOVERSSHV0|ENABLE_ISSUE_SOURCE_VALIDATION|MODIFY_NUMBER_OF_RETRIES_IN_ROBOCOPY|MSBUILDHELPERS_ENABLE_TELEMETRY|RETIRE_AZURERM_POWERSHELL_MODULE|ROSETTA2_WARNING)'
               Get-Content env_vars.txt | ForEach-Object {
-                if ($_ -match "^([^=]+?)=(.*)$" -and $matches[1] -notmatch '^(SYSTEM|AGENT|BUILD|VSTS|USE_|FAIL_|MSDEPLOY)') {
+                if ($_ -match "^([^=]+?)=(.*)$" -and $matches[1] -notmatch '^(SYSTEM|AGENT|BUILD|RELEASE|VSTS|TASK|USE_|FAIL_|MSDEPLOY|AZP_75787|AZP_AGENT|AZP_ENABLE|AZURE_HTTP|COPYFILESOVERSSHV0|ENABLE_ISSUE_SOURCE_VALIDATION|MODIFY_NUMBER_OF_RETRIES_IN_ROBOCOPY|MSBUILDHELPERS_ENABLE_TELEMETRY|RETIRE_AZURERM_POWERSHELL_MODULE|ROSETTA2_WARNING)') {
                   [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
                   Write-Host "##vso[task.setvariable variable=$($matches[1])]$($matches[2])"
                 }
