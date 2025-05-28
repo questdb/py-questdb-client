@@ -64,11 +64,10 @@ stages:
                       if ($matches.key -notmatch $excludePattern -or $matches.key -match '^PATH$|^INCLUDE$|^LIB$') {
                           $safeKey = $matches.key -replace '[^A-Z0-9_]', '_'
                           Write-Host "##vso[task.setvariable variable=ENV_$safeKey]$($matches.val)"
-                          Write-Host "已注入: ENV_$safeKey"
+                          Write-Host "Inject ENV_$safeKey"
                       }
                   }
               }
-              where.exe cl.exe
             displayName: Setup MSVC and environment
           - bash: |
               set -o errexit
