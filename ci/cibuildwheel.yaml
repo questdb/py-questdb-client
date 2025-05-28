@@ -59,7 +59,7 @@ stages:
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: ｜
+          - bash: |
               call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
               cl.exe /?
               cibuildwheel --output-dir wheelhouse .
