@@ -60,9 +60,42 @@ stages:
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
           - powershell: |
-              $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
-              cmd /c "call `"$vsPath`" && cl.exe /?"
-              $env:PATH = "$env:PATH;$(Split-Path (where.exe cl.exe))"
+              $vcPaths = @(
+                  "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
+                  "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
+                  "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+              ) | Where-Object { Test-Path $_ }
+              
+              # 2. 选择最新版本的 VC 工具链
+                             Sort-Object { [version]($_ -replace '[^\d\.]','') } -Descending |
+                             Select-Object -First 1
+              
+              $envOutput = cmd /c "call `"$latestVcPath`" 2>&1 && set" 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Host "##[error] $envOutput"
+                  exit 1
+              }
+              
+              $envOutput | ForEach-Object {
+                  if ($_ -match '^([^=]+)=(.*)') {
+                      [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
+                  }
+              }
+              
+              try {
+                  $clPath = (Get-Command cl.exe -ErrorAction Stop).Source
+                  $clDir = Split-Path $clPath -Parent
+              } catch {
+                  Write-Host "##[error]cl.exe not found："
+                  Write-Host "1. VS Installer 'MSVC v142 - VS 2019 C++ x64/x86 build tools'"
+                  Write-Host "2. cxx: $clDir"
+                  exit 1
+              }
+              
+              if (-not $env:PATH.Contains($clDir)) {
+                  $env:PATH = "$clDir;$env:PATH"
+              }
+
               $env:INCLUDE = "$fixedInclude;$env:INCLUDE"
               Write-Host "##[command]cl.exe Path: $(where.exe cl.exe)"
               Write-Host "##[command]PATH contains: $($env:PATH -replace ';', "`n")"
