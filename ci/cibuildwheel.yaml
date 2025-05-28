@@ -58,12 +58,13 @@ stages:
               $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
               
-              $excludePattern = '^(agent|AZP|BUILD|SYSTEM|ENDPOINT|RELEASE|CommonProgramFiles|PROCESSOR_ARCHITE)'
+              $excludePattern = '^(agent|AZP|BUILD|SYSTEM|ENDPOINT|RELEASE|CommonProgramFiles|PROCESSOR_ARCHITECTURE|VSCMD)'
               Get-Content env_vars.txt | ForEach-Object {
                   if ($_ -match "^(?<key>[^=]+)=(?<val>.*)") {
-                      if ($matches.key -notmatch $excludePattern) {
-                          Write-Host "Injecting variable: $($matches.key)"
-                          Write-Host "##vso[task.setvariable variable=ENV_$($matches.key)]$($matches.val)"
+                      if ($matches.key -notmatch $excludePattern -or $matches.key -match '^PATH$|^INCLUDE$|^LIB$') {
+                          $safeKey = $matches.key -replace '[^A-Z0-9_]', '_'
+                          Write-Host "##vso[task.setvariable variable=ENV_$safeKey]$($matches.val)"
+                          Write-Host "已注入: ENV_$safeKey"
                       }
                   }
               }
