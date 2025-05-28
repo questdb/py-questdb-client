@@ -54,13 +54,11 @@ stages:
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
-          - task: CmdLine@2
+          - powershell: |
+              $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
+              cmd /c "call `"$vsPath`" && set > env.txt"
+              Get-Content env.txt | ForEach-Object { Write-Host "##vso[task.setvariable variable=$($_.Split('=')[0])]$($_.Split('=')[1])" }
             displayName: Setup MSVC Environment
-            inputs:
-              script: |
-                call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-                cl.exe /?
-                where cl.exe
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
