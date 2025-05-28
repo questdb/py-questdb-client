@@ -63,8 +63,9 @@ stages:
               $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
               
+              $excludePattern = '^(SYSTEM|AGENT|BUILD|RELEASE|VSTS|TASK|USE_|FAIL_|MSDEPLOY)'
               Get-Content env_vars.txt | ForEach-Object {
-                if ($_ -match "^(.*?)=(.*)$") {
+                if ($_ -match "^([^=]+?)=(.*)$" -and $matches[1] -notmatch '^(SYSTEM|AGENT|BUILD|VSTS|USE_|FAIL_|MSDEPLOY)') {
                   [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
                   Write-Host "##vso[task.setvariable variable=$($matches[1])]$($matches[2])"
                 }
