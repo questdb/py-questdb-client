@@ -70,7 +70,6 @@ stages:
                 }
               }
               
-              # 验证环境
               cl.exe /Bv
               where.exe cl.exe
               cibuildwheel --output-dir wheelhouse .
