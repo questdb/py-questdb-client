@@ -65,7 +65,7 @@ stages:
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
               
               Get-Content env_vars.txt | ForEach-Object {
-                if ($_ -match "^([^=]+?)=(.*)$" -and $matches[1] -notmatch '^(SYSTEM|AGENT|BUILD|RELEASE|VSTS|TASK|USE_|FAIL_|MSDEPLOY|AZP_75787|AZP_AGENT|AZP_ENABLE|AZURE_HTTP|COPYFILESOVERSSHV0|ENABLE_ISSUE_SOURCE_VALIDATION|MODIFY_NUMBER_OF_RETRIES_IN_ROBOCOPY|MSBUILDHELPERS_ENABLE_TELEMETRY|RETIRE_AZURERM_POWERSHELL_MODULE|ROSETTA2_WARNING|AZP_PS_ENABLE|)') {
+                if ($_ -match "^([^=]+?)=(.*)$" -and $matches[1] -notmatch '^(SYSTEM|AGENT|BUILD|RELEASE|VSTS|TASK|USE_|FAIL_|MSDEPLOY|AZP_75787|AZP_AGENT|AZP_ENABLE|AZURE_HTTP|COPYFILESOVERSSHV0|ENABLE_ISSUE_SOURCE_VALIDATION|MODIFY_NUMBER_OF_RETRIES_IN_ROBOCOPY|MSBUILDHELPERS_ENABLE_TELEMETRY|RETIRE_AZURERM_POWERSHELL_MODULE|ROSETTA2_WARNING|AZP_PS_ENABLE)') {
                   [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
                   Write-Host "##vso[task.setvariable variable=$($matches[1])]$($matches[2])"
                 }
@@ -95,7 +95,7 @@ stages:
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
               
               Get-Content env_vars.txt | ForEach-Object {
-                if ($_ -match "^([^=]+?)=(.*)$" -and $matches[1] -notmatch '^(SYSTEM|AGENT|BUILD|RELEASE|VSTS|TASK|USE_|FAIL_|MSDEPLOY|AZP_75787|AZP_AGENT|AZP_ENABLE|AZURE_HTTP|COPYFILESOVERSSHV0|ENABLE_ISSUE_SOURCE_VALIDATION|MODIFY_NUMBER_OF_RETRIES_IN_ROBOCOPY|MSBUILDHELPERS_ENABLE_TELEMETRY|RETIRE_AZURERM_POWERSHELL_MODULE|ROSETTA2_WARNING|AZP_PS_ENABLE|)') {
+                if ($_ -match "^([^=]+?)=(.*)$" -and $matches[1] -notmatch '^(SYSTEM|AGENT|BUILD|RELEASE|VSTS|TASK|USE_|FAIL_|MSDEPLOY|AZP_75787|AZP_AGENT|AZP_ENABLE|AZURE_HTTP|COPYFILESOVERSSHV0|ENABLE_ISSUE_SOURCE_VALIDATION|MODIFY_NUMBER_OF_RETRIES_IN_ROBOCOPY|MSBUILDHELPERS_ENABLE_TELEMETRY|RETIRE_AZURERM_POWERSHELL_MODULE|ROSETTA2_WARNING|AZP_PS_ENABLE)') {
                   [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
                   Write-Host "##vso[task.setvariable variable=$($matches[1])]$($matches[2])"
                 }
@@ -107,5 +107,7 @@ stages:
             env:
               CIBW_BUILD: "*win_amd64*"
               CIBW_ENVIRONMENT: "MSSdk=1 DISTUTILS_USE_SDK=1 SETUP_DO_GIT_SUBMODULE_INIT=1"
+              CIBW_BUILD_VERBOSITY: "3"
+              DISTUTILS_DEBUG: "1"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
