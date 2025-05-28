@@ -61,7 +61,6 @@ stages:
             displayName: Install dependencies
           - powershell: |
               $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
-              cmd /c "call `"$vsPath`" && cl.exe /?"
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
               
               Get-Content env_vars.txt | ForEach-Object {
