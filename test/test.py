@@ -1085,7 +1085,7 @@ class TestBases:
                 # wait 50ms in the server to simulate a slow response
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
                     for _ in range(100):
-                        server.responses.append((50, 200, 'text/plain', b'OK'))
+                        server.responses.append((100, 200, 'text/plain', b'OK'))
                         # We retry in case the network thread gets descheduled
                         # and is only rescheduled after the timeout elapsed.
                         sender.flush(buffer, clear=False)
