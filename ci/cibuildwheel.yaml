@@ -54,23 +54,15 @@ stages:
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
-          - powershell: |
-              $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
-              cmd /c "call `"$vsPath`" && set > env.txt"
-              $excludeVars = @('agent.*', 'system.*', 'build.*', 'common.*', 'release.*', 'jobstatus')
-              Get-Content env.txt | ForEach-Object {
-                  $varName = $_.Split('=')[0]
-                  if ($varName -notmatch ($excludeVars -join '|')) {
-                      $varValue = $_.Substring($varName.Length + 1)
-                      Write-Host "##vso[task.setvariable variable=$varName]$varValue"
-
-            displayName: Setup MSVC Environment
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: ｜
+              call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+              cl.exe /?
+              cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "*win_amd64*"
