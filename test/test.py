@@ -1067,7 +1067,7 @@ class TestBases:
                     '127.0.0.1',
                     server.port,
                     auto_flush='off',
-                    request_timeout=1,
+                    request_timeout=100,
                     retry_timeout=0,
                     # effectively calculates a ~1ms timeout
                     request_min_throughput=100000000,
@@ -1081,8 +1081,8 @@ class TestBases:
 
                 # wait 50ms in the server to simulate a slow response
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
-                    for _ in range(100):
-                        server.responses.append((70, 200, 'text/plain', b'OK'))
+                    for _ in range(10):
+                        server.responses.append((500, 200, 'text/plain', b'OK'))
                         # We retry in case the network thread gets descheduled
                         # and is only rescheduled after the timeout elapsed.
                         sender.flush(buffer, clear=False)
