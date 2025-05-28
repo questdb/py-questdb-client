@@ -1069,12 +1069,9 @@ class TestBases:
                     auto_flush='off',
                     request_timeout=1,
                     retry_timeout=0,
-
                     # effectively calculates a ~1ms timeout
                     request_min_throughput=100000000,
-
                     protocol_version=2) as sender:
-                
                 buffer = sender.new_buffer()
                 buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
@@ -1085,7 +1082,7 @@ class TestBases:
                 # wait 50ms in the server to simulate a slow response
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
                     for _ in range(100):
-                        server.responses.append((100, 200, 'text/plain', b'OK'))
+                        server.responses.append((70, 200, 'text/plain', b'OK'))
                         # We retry in case the network thread gets descheduled
                         # and is only rescheduled after the timeout elapsed.
                         sender.flush(buffer, clear=False)
