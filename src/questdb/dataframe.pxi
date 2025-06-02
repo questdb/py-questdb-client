@@ -27,7 +27,6 @@ cdef auto_flush_t auto_flush_blank() noexcept nogil:
     af.last_flush_ms = NULL
     return af
 
-
 cdef bint should_auto_flush(
             const auto_flush_mode_t* af_mode,
             line_sender_buffer* ls_buf,
@@ -73,7 +72,8 @@ cdef enum col_target_t:
     col_target_column_f64 = 5
     col_target_column_str = 6
     col_target_column_ts = 7
-    col_target_at = 8
+    col_target_column_arr_f64 = 8
+    col_target_at = 9
 
 
 cdef dict _TARGET_NAMES = {
@@ -85,6 +85,7 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_f64: "float",
     col_target_t.col_target_column_str: "string",
     col_target_t.col_target_column_ts: "timestamp",
+    col_target_t.col_target_column_arr_f64: "array",
     col_target_t.col_target_at: "designated timestamp",
 }
 
@@ -125,6 +126,7 @@ cdef enum col_source_t:
     col_source_str_lrg_utf8_arrow =     406000
     col_source_dt64ns_numpy =           501000
     col_source_dt64ns_tz_arrow =        502000
+    col_source_arr_f64_numpyobj =       601100
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -213,6 +215,9 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
     },
+    col_target_t.col_target_column_arr_f64: {
+        col_source_t.col_source_arr_f64_numpyobj,
+    },
     col_target_t.col_target_at: {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
@@ -227,7 +232,8 @@ cdef tuple _FIELD_TARGETS = (
     col_target_t.col_target_column_i64,
     col_target_t.col_target_column_f64,
     col_target_t.col_target_column_str,
-    col_target_t.col_target_column_ts)
+    col_target_t.col_target_column_ts,
+    col_target_t.col_target_column_arr_f64)
 
 
 # Targets that map directly from a meta target.
@@ -348,6 +354,9 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_at + col_source_t.col_source_dt64ns_numpy
     col_dispatch_code_at__dt64ns_tz_arrow = \
         col_target_t.col_target_at + col_source_t.col_source_dt64ns_tz_arrow
+
+    col_dispatch_code_column_arr_f64__arr_f64_numpyobj = \
+        col_target_t.col_target_column_arr_f64 + col_source_t.col_source_arr_f64_numpyobj
 
 
 # Int values in order for sorting (as needed for API's sequential coupling).
@@ -915,10 +924,18 @@ cdef void_int _dataframe_series_sniff_pyobj(
     Object columns can contain pretty much anything, but they usually don't.
     We make an educated guess by finding the first non-null value in the column.
     """
+    # To access elements.
     cdef size_t el_index
     cdef size_t n_elements = len(pandas_col.series)
     cdef PyObject** obj_arr
     cdef PyObject* obj
+
+    # To access elements which are themselves arrays.
+    cdef PyArrayObject* arr
+    cdef npy_int arr_type
+    cdef cnp.dtype arr_descr  # A cython defn for `PyArray_Descr*`
+    cdef str arr_type_name
+
     _dataframe_series_as_pybuf(pandas_col, col)
     obj_arr = <PyObject**>(col.setup.pybuf.buf)
     for el_index in range(n_elements):
@@ -932,6 +949,21 @@ cdef void_int _dataframe_series_sniff_pyobj(
                 col.setup.source = col_source_t.col_source_float_pyobj
             elif PyUnicode_CheckExact(obj):
                 col.setup.source = col_source_t.col_source_str_pyobj
+            elif PyArray_CheckExact(obj):
+                arr = <PyArrayObject*>obj
+                arr_type = PyArray_TYPE(arr)
+                if arr_type == NPY_DOUBLE:
+                    col.setup.source = col_source_t.col_source_arr_f64_numpyobj
+                else:
+                    arr_type_name = '??unknown??'
+                    arr_descr = cnp.PyArray_DescrFromType(arr_type)
+                    if arr_descr is not None:
+                        arr_type_name = arr_descr.name.decode('ascii')
+                    raise IngressError(
+                        IngressErrorCode.BadDataFrame,
+                        f'Bad column {pandas_col.name!r}: ' +
+                        'Unsupported object column containing a numpy array ' +
+                        f'of an unsupported element type {arr_type_name}.')
             elif PyBytes_CheckExact(obj):
                 raise IngressError(
                     IngressErrorCode.BadDataFrame,
@@ -2016,6 +2048,34 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
+cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col) except -1:
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+    cdef PyArrayObject* arr = <PyArrayObject*> cell
+    cdef npy_int arr_type = PyArray_TYPE(arr)
+    cdef cnp.dtype arr_descr
+    if arr_type != NPY_DOUBLE:
+        arr_descr = cnp.PyArray_DescrFromType(arr_type)
+        raise IngressError(
+            IngressErrorCode.ArrayWriteToBufferError,
+            f'Only float64 numpy arrays are supported, got dtype: {arr_descr}')
+    cdef:
+        size_t rank = PyArray_NDIM(arr)
+        const uint8_t* data_ptr = <const uint8_t *> PyArray_DATA(arr)
+        line_sender_error * err = NULL
+    if not line_sender_buffer_column_f64_arr_byte_strides(
+            ls_buf,
+            col.name,
+            rank,
+            <const size_t*> PyArray_DIMS(arr),
+            <const ssize_t*> PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+            data_ptr,
+            PyArray_NBYTES(arr),
+            &err):
+        raise c_err_to_py(err)
 
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,
@@ -2173,6 +2233,8 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_str__str_i32_cat(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_arr_f64__arr_f64_numpyobj:
+        _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
         _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:
@@ -2298,7 +2360,7 @@ cdef void_int _dataframe(
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, _ServerTimestamp) else None,
+            at if not isinstance(at, ServerTimestampType) else None,
             b,
             col_count,
             &c_table_name,

@@ -28,7 +28,7 @@ __all__ = [
     "IngressErrorCode",
     "Protocol",
     "Sender",
-    "ServerTimestamp",
+    "ServerTimestampType",
     "TimestampMicros",
     "TimestampNanos",
     "TlsCa",
@@ -38,6 +38,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 
 class IngressErrorCode(Enum):
@@ -54,7 +55,12 @@ class IngressErrorCode(Enum):
     HttpNotSupported = ...
     ServerFlushError = ...
     ConfigError = ...
+    ArrayLargeDimError = ...
+    ArrayInternalError = ...
+    ArrayWriteToBufferError = ...
+    ProtocolVersionError = ...
     BadDataFrame = ...
+
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
@@ -63,10 +69,12 @@ class IngressError(Exception):
     def code(self) -> IngressErrorCode:
         """Return the error code."""
 
-class ServerTimestamp:
+
+class ServerTimestampType:
     """
     A placeholder value to indicate using a server-generated-timestamp.
     """
+
 
 class TimestampMicros:
     """
@@ -119,6 +127,7 @@ class TimestampMicros:
     def value(self) -> int:
         """Number of microseconds (Unix epoch timestamp, UTC)."""
 
+
 class TimestampNanos:
     """
     A timestamp in nanoseconds since the UNIX epoch (UTC).
@@ -169,6 +178,7 @@ class TimestampNanos:
     def value(self) -> int:
         """Number of nanoseconds (Unix epoch timestamp, UTC)."""
 
+
 class SenderTransaction:
     """
     A transaction for a specific table.
@@ -194,9 +204,9 @@ class SenderTransaction:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
-        at: Union[ServerTimestamp, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> SenderTransaction:
         """
         Write a row for the table in the transaction.
@@ -209,7 +219,7 @@ class SenderTransaction:
         df: pd.DataFrame,
         *,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestamp, int, str, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
     ) -> SenderTransaction:
         """
         Write a dataframe for the table in the transaction.
@@ -235,9 +245,10 @@ class SenderTransaction:
         This will clear the buffer.
         """
 
+
 class Buffer:
     """
-    Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
+    Construct QuestDB InfluxDB Line Protocol (ILP) messages.
 
     The :func:`Buffer.row` method is used to add a row to the buffer.
 
@@ -247,7 +258,7 @@ class Buffer:
 
         from questdb.ingress import Buffer
 
-        buf = Buffer()
+        buf = Buffer(protocol_version=2)  # or better yet, `sender.new_buffer()`
         buf.row(
             'table_name1',
             symbols={'s1', 'v1', 's2', 'v2'},
@@ -270,8 +281,13 @@ class Buffer:
 
         # etc.
 
+    In general, it's best to create a new buffer from a sender instance,
+    via the :func:`Sender.new_buffer` method, as this will ensure the buffer
+    is configured with the same protocol version and maximum name length
+    as the sender. 
 
     Buffer Constructor Arguments:
+      * protocol_version (``int``): The protocol version to use.
       * ``init_buf_size`` (``int``): Initial capacity of the buffer in bytes.
         Defaults to ``65536`` (64KiB).
       * ``max_name_len`` (``int``): Maximum length of a column name.
@@ -282,8 +298,8 @@ class Buffer:
     .. code-block:: python
 
         # These two buffer constructions are equivalent.
-        buf1 = Buffer()
-        buf2 = Buffer(init_buf_size=65536, max_name_len=127)
+        buf1 = Buffer(protocol_version=2)
+        buf2 = Buffer(protocol_version=2, init_buf_size=65536, max_name_len=127)
 
     To avoid having to manually set these arguments every time, you can call
     the sender's ``new_buffer()`` method instead.
@@ -293,16 +309,22 @@ class Buffer:
         from questdb.ingress import Sender, Buffer
 
         sender = Sender('http', 'localhost', 9009,
-            init_buf_size=16384, max_name_len=64)
+            init_buf_size=16384)
         buf = sender.new_buffer()
         assert buf.init_buf_size == 16384
-        assert buf.max_name_len == 64
+        assert buf.max_name_len == 127
 
     """
 
-    def __init__(self, init_buf_size: int = 65536, max_name_len: int = 127):
+    def __init__(
+            self,
+            *,
+            protocol_version: int,
+            init_buf_size: int = 65536,
+            max_name_len: int = 127):
         """
         Create a new buffer with the an initial capacity and max name length.
+        :param int protocol_version: The protocol version to use.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
@@ -345,11 +367,11 @@ class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(buffer))``.
         """
 
-    def __str__(self) -> str:
-        """Return the constructed buffer as a string. Use for debugging."""
+    def  __bytes__(self) -> bytes:
+        """Return the constructed buffer as bytes. Use for debugging."""
 
     def row(
         self,
@@ -357,9 +379,9 @@ class Buffer:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
-        at: Union[ServerTimestamp, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> Buffer:
         """
         Add a single row (line) to the buffer.
@@ -377,7 +399,8 @@ class Buffer:
                     'col4': 'xyz',
                     'col5': TimestampMicros(123456789),
                     'col6': datetime(2019, 1, 1, 12, 0, 0),
-                    'col7': None},
+                    'col7': np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                    'col8': None},
                 at=TimestampNanos(123456789))
 
             # Only symbols specified. Designated timestamp assigned by the db.
@@ -420,6 +443,8 @@ class Buffer:
               - `FLOAT <https://questdb.io/docs/reference/api/ilp/columnset-types#float>`_
             * - ``str``
               - `STRING <https://questdb.io/docs/reference/api/ilp/columnset-types#string>`_
+            * - ``np.ndarray``
+              - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``
@@ -457,7 +482,7 @@ class Buffer:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestamp, int, str, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
     ) -> Buffer:
         """
         Add a pandas DataFrame to the buffer.
@@ -558,7 +583,7 @@ class Buffer:
             import pandas as pd
             import questdb.ingress as qi
 
-            buf = qi.Buffer()
+            buf = qi.Buffer(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -663,6 +688,9 @@ class Buffer:
             * - ``'object'`` (``str`` objects)
               - Y
               - ``STRING`` (default), ``SYMBOL`` via ``symbols`` arg. **δ**
+            * - ``'object' (``numpy.ndarray[numpy.float64]``)``
+              - Y
+              - ``ARRAY[DOUBLE]``
             * - ``'datetime64[ns]'``
               - Y
               - ``TIMESTAMP`` **ζ**
@@ -925,6 +953,19 @@ class Sender:
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
 
+    @property
+    def protocol_version(self) -> int:
+        """
+        Returns the QuestDB server's recommended default line protocol version.
+        """
+
+    @property
+    def max_name_len(self):
+        """
+        Returns the sender's maximum-configured maximum name length for table
+        names and column names.
+        """
+
     def establish(self):
         """
         Prepare the sender for use.
@@ -941,20 +982,20 @@ class Sender:
     def __enter__(self) -> Sender:
         """Call :func:`Sender.establish` at the start of a ``with`` block."""
 
-    def __str__(self) -> str:
-        """
-        Inspect the contents of the internal buffer.
-
-        The ``str`` value returned represents the unsent data.
-
-        Also see :func:`Sender.__len__`.
-        """
-
     def __len__(self) -> int:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        """
+
+    def __bytes__(self) -> bytes:
+        """
+        Inspect the contents of the internal buffer.
+
+        The ``bytes`` value returned represents the unsent data.
+
+        Also see :func:`Sender.__len__`.
         """
 
     def transaction(self, table_name: str) -> SenderTransaction:
@@ -968,9 +1009,9 @@ class Sender:
         *,
         symbols: Optional[Dict[str, str]] = None,
         columns: Optional[
-            Dict[str, Union[bool, int, float, str, TimestampMicros, datetime]]
+            Dict[str, Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
-        at: Union[TimestampNanos, datetime, ServerTimestamp],
+        at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:
         """
         Write a row to the internal buffer.
@@ -988,7 +1029,7 @@ class Sender:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestamp, int, str, TimestampNanos, datetime],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
     ) -> Sender:
         """
         Write a Pandas DataFrame to the internal buffer.

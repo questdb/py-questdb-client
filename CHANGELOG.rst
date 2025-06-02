@@ -1,7 +1,73 @@
 .. _changelog:
 
+
 Changelog
+
 =========
+
+3.0.0rc1 (2025-06-02)
+---------------------
+
+This is the pre-release of a major release introducing array ingestion and some
+minor breaking changes.
+
+Features
+~~~~~~~~
+* Array Data Type Support. Adds native support for NumPy arrays
+  (currently only for ``np.float64`` element type and up to 32 dimensions).
+
+.. code-block:: python
+
+        import numpy as np
+
+        # Create 2D numpy array
+        array_2d = np.array([
+            [1.1, 2.2, 3.3],
+            [4.4, 5.5, 6.6]], dtype=np.float64)
+
+        sender.row(
+            'table',
+            columns={'array_2d': array_2d},
+            at=timestamp)
+
+* Implements binary protocol for columns of ``float`` (double-precision) and
+  ``numpy.ndarray[np.float64]``, with performance improvements for these
+  two datatypes.
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+* Buffer Constructor Changes. The ``Buffer`` constructor now requires the ``protocol_version`` parameter.
+  You can create buffer through the sender for automatic ``protocol_version`` management:
+
+.. code-block:: python
+
+    buf = sender.new_buffer()  # protocol_version determined automatically
+    buf.row(
+      'table',
+      columns={'arr': np.array([1.5, 3.0], dtype=np.float64)},
+      at=timestamp)
+
+* To access the raw payload, call ``bytes(sender)`` or ``bytes(buffer)`` (
+  rather than calling the ``str`` function on the same objects as in version
+  2.x.x of the questdb library) method.
+
+* **NumPy Dependency**
+
+  Array functionality mandates NumPy installation.
+
+* **Sender/Buffer String Conversion Removal**
+
+  The legacy string conversion via `str(sender)` is removed.
+  Access raw binary payloads through the `bytes(sender)` method:
+
+  .. code-block:: python
+
+      # for debugging
+      payload = bytes(sender)
+
+* Python 3.8 support is dropped.
+
+  The minimum supported Python version is now 3.9.
 
 2.0.4 (2025-04-02)
 ------------------

@@ -1,8 +1,8 @@
 [project]
 # See: https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
 name = "questdb"
-requires-python = ">=3.8"
-version = "2.0.4"
+requires-python = ">=3.9"
+version = "3.0.0rc1"
 description = "QuestDB client library for Python"
 readme = "README.rst"
 classifiers = [
@@ -17,9 +17,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Networking",
     "Topic :: Database :: Front-Ends",
-    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering"
 ]
-
+dependencies = ["numpy>=1.26.0"]  # Keep in sync with build-system.requires
 [project.license]
 text = "Apache License 2.0"
 
@@ -40,13 +40,13 @@ Source = "https://github.com/questdb/py-questdb-client/"
 Tracker = "https://github.com/questdb/py-questdb-client/issues"
 Community = "http://community.questdb.io"
 
-
 [build-system]
 requires = [
     # Setuptools 18.0 and above properly handles Cython extensions.
     "setuptools>=45.2.0",
     "wheel>=0.34.2",
     "cython>=0.29.24",
+    "numpy>=1.26.0",  # keep in sync with project.dependencies
 ]
 
 
@@ -57,9 +57,9 @@ before-build = "python {project}/install_rust.py"
 before-test = "python {project}/ci/pip_install_deps.py"
 test-command = "python {project}/test/test.py -v"
 skip = [
-    # No 32-bit musl C native tool chain for Rust.
-    # There's a tier 2 target for it, but it would need cross-compiling.
-    "*-musllinux_i686",
+    # Skip all 32-bit builds, except for Windows.
+    # Those builds are named `*win32*` in cibuildwheel.
+    "*i686*",
 ]
 
 # [tool.cibuildwheel.windows]

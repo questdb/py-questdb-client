@@ -66,20 +66,19 @@ def install_old_pandas_and_numpy(args):
     try_pip_install('numpy<2')
 
 def install_new_pandas_and_numpy():
-    try_pip_install('pandas')
-    try_pip_install('numpy')
+    try_pip_install('pandas>2')
+    try_pip_install('numpy>2')
 
 def main(args):
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')
-    try_pip_install('fastparquet>=2023.10.1')
-
     if args.pandas_version is not None and args.pandas_version != '':
         install_old_pandas_and_numpy(args)
     else:
         install_new_pandas_and_numpy()
 
+    try_pip_install('fastparquet>=2023.10.1')
     try_pip_install('pyarrow')
 
     on_linux_is_glibc = (

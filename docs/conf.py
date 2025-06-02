@@ -3,6 +3,8 @@ from __future__ import unicode_literals
 
 import os
 
+from questdb.ingress import *
+
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
@@ -12,7 +14,8 @@ extensions = [
     'sphinx.ext.ifconfig',
     'sphinx.ext.napoleon',
     'sphinx.ext.todo',
-    'sphinx.ext.viewcode'
+    'sphinx.ext.viewcode',
+    "sphinx.ext.intersphinx",
 ]
 source_suffix = '.rst'
 master_doc = 'index'
@@ -20,7 +23,7 @@ project = 'questdb'
 year = '2024'
 author = 'QuestDB'
 copyright = '{0}, {1}'.format(year, author)
-version = release = '2.0.4'
+version = release = '3.0.0rc1'
 
 github_repo_url = 'https://github.com/questdb/py-questdb-client'
 
@@ -67,6 +70,11 @@ autodoc_default_options = {
     'undoc-members': True
 }
 
+intersphinx_mapping = {
+    "python": ("https://docs.python.org/3", None),
+    "numpy": ("https://numpy.org/doc/stable/", None),
+    "pandas": ("https://pandas.pydata.org/pandas-docs/stable/", None),
+}
 
 # def do_not_skip_dunder_members(_app, _what, name, _obj, would_skip, _options):
 #     if name in ('__init__', '__call__', '__str__', '__enter__', '__exit__'):

@@ -37,6 +37,7 @@ __all__ = [
     'Protocol',
     'Sender',
     'ServerTimestamp',
+    'ServerTimestampType',
     'TimestampMicros',
     'TimestampNanos',
     'TlsCa',
@@ -78,15 +79,25 @@ from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
     Iterable
 import pathlib
+from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import sys
 import os
+
+import numpy as np
+cimport numpy as cnp
+from numpy cimport NPY_DOUBLE, PyArrayObject
+
+# Functions we need to import as `PyObject` to avoid Cython's `object` type
+from .extra_numpy cimport *
+
+cnp.import_array()
 
 
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '2.0.4'
+VERSION = '3.0.0rc1'
 
 
 cdef bint _has_gil(PyThreadState** gs):
@@ -120,7 +131,11 @@ class IngressErrorCode(Enum):
     HttpNotSupported = line_sender_error_http_not_supported
     ServerFlushError = line_sender_error_server_flush_error
     ConfigError = line_sender_error_config_error
-    BadDataFrame = <int>line_sender_error_server_flush_error + 1
+    ArrayLargeDimError = line_sender_error_array_large_dim
+    ArrayInternalError = line_sender_error_array_view_internal_error
+    ArrayWriteToBufferError = line_sender_error_array_view_write_to_buffer_error
+    ProtocolVersionError = line_sender_error_protocol_version_error
+    BadDataFrame = <int>line_sender_error_protocol_version_error + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -162,6 +177,14 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ServerFlushError
     elif code == line_sender_error_config_error:
         return IngressErrorCode.ConfigError
+    elif code == line_sender_error_array_large_dim:
+        return IngressErrorCode.ArrayLargeDimError
+    elif code == line_sender_error_array_view_internal_error:
+        return IngressErrorCode.ArrayInternalError
+    elif code == line_sender_error_array_view_write_to_buffer_error:
+        return IngressErrorCode.ArrayWriteToBufferError
+    elif code == line_sender_error_protocol_version_error:
+        return IngressErrorCode.ProtocolVersionError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -365,7 +388,7 @@ cdef void_int str_to_column_name_copy(
 
 cdef int64_t datetime_to_micros(datetime dt):
     """
-    Convert a `datetime.datetime` to microseconds since the epoch.
+    Convert a :class:`datetime.datetime` to microseconds since the epoch.
     """
     return (
         <int64_t>(dt.timestamp()) *
@@ -382,13 +405,28 @@ cdef int64_t datetime_to_nanos(datetime dt):
         <int64_t>(1000000000) +
         <int64_t>(dt.microsecond * 1000))
 
-cdef class _ServerTimestamp:
+
+class ServerTimestampType:
     """
-    A placeholder value to indicate using a server-generated-timestamp.
+    A placeholder value to indicate that the data should be inserted
+    using a server-generated-timestamp.
+
+    Don't instantiate this class directly, use the singleton
+    :data:`ServerTimestamp` instead.
+
+    This feature is mostly provided for legacy compatibility.
+    We recommend always specifying an explicit timestamp.
+
+    Using ``ServerTimestamp`` will prevent QuestDB's deduplication
+    feature from working as it would generate unique rows on resubmission.
     """
     pass
 
-ServerTimestamp = _ServerTimestamp()
+
+#: Singleton instance used to request server-side timestamping.
+#: See :class:`ServerTimestampType` for more details.
+ServerTimestamp = ServerTimestampType()
+
 
 cdef class TimestampMicros:
     """
@@ -433,7 +471,7 @@ cdef class TimestampMicros:
     @classmethod
     def from_datetime(cls, dt: datetime):
         """
-        Construct a ``TimestampMicros`` from a ``datetime.datetime`` object.
+        Construct a ``TimestampMicros`` from a :class:`datetime.datetime` object.
         """
         if not isinstance(dt, datetime):
             raise TypeError('dt must be a datetime object.')
@@ -580,7 +618,7 @@ cdef class SenderTransaction:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Already inside a transaction, can\'t start another.')
-        if len(self._sender._buffer):
+        if self._sender._buffer is not None and len(self._sender._buffer):
             if self._sender._auto_flush_mode.enabled:
                 self._sender.flush()
             else:
@@ -607,9 +645,9 @@ cdef class SenderTransaction:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
                 ]=None,
-            at: Union[ServerTimestamp, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime]):
         """
         Write a row for the table in the transaction.
 
@@ -620,6 +658,13 @@ cdef class SenderTransaction:
                 IngressErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
+
+        if self._sender._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "row() can\'t be called: Sender is closed."
+            )
+
         self._sender._buffer._row(
             False,  # allow_auto_flush
             self._table_name,
@@ -633,7 +678,7 @@ cdef class SenderTransaction:
             df,  # : pd.DataFrame
             *,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
         """
         Write a dataframe for the table in the transaction.
 
@@ -643,6 +688,11 @@ cdef class SenderTransaction:
             raise IngressError(
                 IngressErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
+            )
+        if self._sender._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "dataframe() can\'t be called: Sender is closed."
             )
         _dataframe(
             auto_flush_blank(),
@@ -684,14 +734,15 @@ cdef class SenderTransaction:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t rollback.')
-        self._sender._buffer.clear()
+        if self._sender._buffer is not None:
+            self._sender._buffer.clear()
         self._sender._in_txn = False
         self._complete = True
 
-
 cdef class Buffer:
     """
-    Construct QuestDB-flavored InfluxDB Line Protocol (ILP) messages.
+    Construct QuestDB InfluxDB Line Protocol (ILP) messages.
+    Version 1 is compatible with the InfluxDB Line Protocol.
 
     The :func:`Buffer.row` method is used to add a row to the buffer.
 
@@ -759,21 +810,26 @@ cdef class Buffer:
     cdef size_t _max_name_len
     cdef object _row_complete_sender
 
-    def __cinit__(self, init_buf_size: int=65536, max_name_len: int=127):
+    def __cinit__(self, protocol_version: int, init_buf_size: int=65536, max_name_len: int=127):
         """
         Create a new buffer with the an initial capacity and max name length.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
-        self._cinit_impl(init_buf_size, max_name_len)
+        if protocol_version not in (1, 2):
+            raise IngressError(
+                IngressErrorCode.ProtocolVersionError,
+                'Invalid protocol version. Supported versions are 1 and 2.')
+        self._cinit_impl(protocol_version, init_buf_size, max_name_len)
 
-    cdef inline _cinit_impl(self, size_t init_buf_size, size_t max_name_len):
-        self._impl = line_sender_buffer_with_max_name_len(max_name_len)
+    cdef inline _cinit_impl(self, line_sender_protocol_version version, size_t init_buf_size, size_t max_name_len):
+        self._impl = line_sender_buffer_with_max_name_len(version, max_name_len)
         self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_buf_size)
         self._init_buf_size = init_buf_size
         self._max_name_len = max_name_len
         self._row_complete_sender = None
+
 
     def __dealloc__(self):
         self._row_complete_sender = None
@@ -825,18 +881,17 @@ cdef class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(buffer))``.
         """
         return line_sender_buffer_size(self._impl)
 
-    def __str__(self) -> str:
-        """Return the constructed buffer as a string. Use for debugging."""
-        return self._to_str()
+    def __bytes__(self) -> bytes:
+        """Return the constructed buffer as bytes. Use for debugging."""
+        return self._to_bytes()
 
-    cdef inline object _to_str(self):
-        cdef size_t size = 0
-        cdef const char* utf8 = line_sender_buffer_peek(self._impl, &size)
-        return PyUnicode_FromStringAndSize(utf8, <Py_ssize_t>size)
+    cdef inline object _to_bytes(self):
+        cdef line_sender_buffer_view view = line_sender_buffer_peek(self._impl)
+        return PyBytes_FromStringAndSize(<const char *> view.buf, <Py_ssize_t> view.len)
 
     cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
@@ -905,6 +960,28 @@ cdef class Buffer:
         if not line_sender_buffer_column_ts_micros(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
 
+    cdef inline void_int _column_numpy(
+            self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
+        if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
+            raise IngressError(
+                IngressErrorCode.ArrayWriteToBufferError,
+                f'Only float64 numpy arrays are supported, got dtype: {arr.dtype}')
+        cdef:
+            size_t rank = cnp.PyArray_NDIM(arr)
+            const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
+            line_sender_error * err = NULL
+
+        if not line_sender_buffer_column_f64_arr_byte_strides(
+                self._impl,
+                c_name,
+                rank,
+                <const size_t*> cnp.PyArray_DIMS(arr),
+                <const ssize_t*> cnp.PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+                data_ptr,
+                cnp.PyArray_NBYTES(arr),
+                &err):
+            raise c_err_to_py(err)
+
     cdef inline void_int _column_dt(
             self, line_sender_column_name c_name, datetime dt) except -1:
         cdef line_sender_error* err = NULL
@@ -925,6 +1002,8 @@ cdef class Buffer:
             self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
             self._column_ts(c_name, value)
+        elif PyArray_CheckExact(<PyObject *> value):
+            self._column_numpy(c_name, value)
         elif isinstance(value, datetime):
             self._column_dt(c_name, value)
         else:
@@ -934,7 +1013,8 @@ cdef class Buffer:
                 'float',
                 'str',
                 'TimestampMicros',
-                'datetime.datetime'))
+                'datetime.datetime'
+                'np.ndarray'))
             raise TypeError(
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
@@ -999,7 +1079,7 @@ cdef class Buffer:
                         self._column(name, value)
                         wrote_fields = True
             if wrote_fields:
-                self._at(at if not isinstance(at, _ServerTimestamp) else None)
+                self._at(at if not isinstance(at, ServerTimestampType) else None)
                 self._clear_marker()
             else:
                 self._rewind_to_marker()
@@ -1016,9 +1096,9 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
                 ]=None,
-            at: Union[ServerTimestamp, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime]):
         """
         Add a single row (line) to the buffer.
 
@@ -1035,7 +1115,8 @@ cdef class Buffer:
                     'col4': 'xyz',
                     'col5': TimestampMicros(123456789),
                     'col6': datetime(2019, 1, 1, 12, 0, 0),
-                    'col7': None},
+                    'col7': np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                    'col8': None},
                 at=TimestampNanos(123456789))
 
             # Only symbols specified. Designated timestamp assigned by the db.
@@ -1078,6 +1159,8 @@ cdef class Buffer:
               - `FLOAT <https://questdb.io/docs/reference/api/ilp/columnset-types#float>`_
             * - ``str``
               - `STRING <https://questdb.io/docs/reference/api/ilp/columnset-types#string>`_
+            * - ``np.ndarray``
+              - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``
@@ -1127,7 +1210,7 @@ cdef class Buffer:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
         """
         Add a pandas DataFrame to the buffer.
 
@@ -1227,7 +1310,7 @@ cdef class Buffer:
             import pandas as pd
             import questdb.ingress as qi
 
-            buf = qi.Buffer()
+            buf = qi.Buffer(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -1734,7 +1817,6 @@ cdef class Sender:
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
-    cdef size_t _max_name_len
     cdef bint _in_txn
 
     cdef void_int _set_sender_fields(
@@ -1759,6 +1841,7 @@ cdef class Sender:
             object auto_flush_rows,
             object auto_flush_bytes,
             object auto_flush_interval,
+            object protocol_version,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -1791,7 +1874,8 @@ cdef class Sender:
 
         if bind_interface is not None:
             str_to_utf8(b, <PyObject*>bind_interface, &c_bind_interface)
-            if not line_sender_opts_bind_interface(self._opts, c_bind_interface, &err):
+            if not line_sender_opts_bind_interface(
+                    self._opts, c_bind_interface, &err):
                 raise c_err_to_py(err)
 
         if username is not None:
@@ -1818,6 +1902,23 @@ cdef class Sender:
             str_to_utf8(b, <PyObject*>token_y, &c_token_y)
             if not line_sender_opts_token_y(self._opts, c_token_y, &err):
                 raise c_err_to_py(err)
+
+        if protocol_version is not None:
+            if protocol_version == 'auto':
+                pass
+            elif (protocol_version == 1) or (protocol_version == '1'):
+                if not line_sender_opts_protocol_version(
+                        self._opts, line_sender_protocol_version_1, &err):
+                    raise c_err_to_py(err)
+            elif (protocol_version == 2) or (protocol_version == '2'):
+                if not line_sender_opts_protocol_version(
+                        self._opts, line_sender_protocol_version_2, &err):
+                    raise c_err_to_py(err)
+            else:
+                raise IngressError(
+                    IngressErrorCode.ConfigError,
+                    '"protocol_version" must be None, "auto", 1 or 2' +
+                    f' not {protocol_version!r}')
 
         if auth_timeout is not None:
             if isinstance(auth_timeout, int):
@@ -1884,6 +1985,11 @@ cdef class Sender:
             if not line_sender_opts_request_min_throughput(self._opts, c_request_min_throughput, &err):
                 raise c_err_to_py(err)
 
+        if max_name_len is not None:
+            c_max_name_len = max_name_len
+            if not line_sender_opts_max_name_len(self._opts, c_max_name_len, &err):
+                raise c_err_to_py(err)
+
         if request_timeout is not None:
             if isinstance(request_timeout, int):
                 c_request_timeout = request_timeout
@@ -1907,10 +2013,6 @@ cdef class Sender:
             &self._auto_flush_mode)
 
         self._init_buf_size = init_buf_size or 65536
-        self._max_name_len = max_name_len or 127
-        self._buffer = Buffer(
-            init_buf_size=self._init_buf_size,
-            max_name_len=self._max_name_len)
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
     def __cinit__(self):
@@ -1921,7 +2023,6 @@ cdef class Sender:
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
-        self._max_name_len = 0
         self._in_txn = False
 
     def __init__(
@@ -1948,6 +2049,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
 
@@ -1991,6 +2093,7 @@ cdef class Sender:
                 auto_flush_rows,
                 auto_flush_bytes,
                 auto_flush_interval,
+                protocol_version,
                 init_buf_size,
                 max_name_len)
         finally:
@@ -2018,6 +2121,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2072,6 +2176,7 @@ cdef class Sender:
                 'auto_flush_rows': auto_flush_rows,
                 'auto_flush_bytes': auto_flush_bytes,
                 'auto_flush_interval': auto_flush_interval,
+                'protocol_version': protocol_version,
                 'init_buf_size': init_buf_size,
                 'max_name_len': max_name_len,
             }.items():
@@ -2112,6 +2217,7 @@ cdef class Sender:
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
+                params.get('protocol_version'),
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
             
@@ -2140,6 +2246,7 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
         """
@@ -2179,6 +2286,7 @@ cdef class Sender:
             auto_flush_rows=auto_flush_rows,
             auto_flush_bytes=auto_flush_bytes,
             auto_flush_interval=auto_flush_interval,
+            protocol_version=protocol_version,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
 
@@ -2191,8 +2299,9 @@ cdef class Sender:
         `max_name_len`.
         """
         return Buffer(
+            protocol_version=self.protocol_version,
             init_buf_size=self._init_buf_size,
-            max_name_len=self._max_name_len)
+            max_name_len=self.max_name_len)
 
     @property
     def init_buf_size(self) -> int:
@@ -2202,7 +2311,11 @@ cdef class Sender:
     @property
     def max_name_len(self) -> int:
         """Maximum length of a table or column name."""
-        return self._max_name_len
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'max_name_len() can\'t be called: Sender is closed.')
+        return line_sender_get_max_name_len(self._impl)
 
     @property
     def auto_flush(self) -> bint:
@@ -2247,6 +2360,23 @@ cdef class Sender:
             return None
         return timedelta(milliseconds=self._auto_flush_mode.interval)
 
+    @property
+    def protocol_version(self) -> int:
+        """
+        The protocol version used by the sender.
+
+        Protocol version 1 is retained for backwards compatibility with
+        older QuestDB versions.
+
+        Protocol version 2 introduces binary floating point support and
+        the array datatype.
+        """
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'protocol_version() can\'t be called: Sender is closed.')
+        return <int>line_sender_get_protocol_version(self._impl)
+
     def establish(self):
         """
         Prepare the sender for use.
@@ -2260,20 +2390,32 @@ cdef class Sender:
         method will return only *after* the handshake(s) is/are complete.
         """
         cdef line_sender_error* err = NULL
+        cdef PyThreadState * gs = NULL
         if self._opts == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'establish() can\'t be called after close().')
+
+        # We disable the GIL when calling `line_sender_build` since for HTTP
+        # it can make HTTP requests to auto-detect the protocol version.
+        _ensure_doesnt_have_gil(&gs)
         self._impl = line_sender_build(self._opts, &err)
+        _ensure_has_gil(&gs)
+
         if self._impl == NULL:
             raise c_err_to_py(err)
+
+        if self._buffer is None:
+            self._buffer = Buffer(
+                protocol_version=self.protocol_version,
+                init_buf_size=self._init_buf_size,
+                max_name_len=self.max_name_len)
+
         line_sender_opts_free(self._opts)
         self._opts = NULL
 
         # Request callbacks when rows are complete.
-        if self._buffer is not None:
-            self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
-
+        self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
         self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
     def __enter__(self) -> Sender:
@@ -2281,23 +2423,29 @@ cdef class Sender:
         self.establish()
         return self
 
-    def __str__(self) -> str:
+    def __bytes__(self) -> bytes:
         """
         Inspect the contents of the internal buffer.
 
-        The ``str`` value returned represents the unsent data.
+        The ``bytes`` value returned represents the unsent data.
 
         Also see :func:`Sender.__len__`.
         """
-        return str(self._buffer)
+        if self._buffer is None:
+            return b''
+        else:
+            return bytes(self._buffer)
 
     def __len__(self) -> int:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(str(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))``.
         """
-        return len(self._buffer)
+        if self._buffer is None:
+            return 0
+        else:
+            return len(self._buffer)
 
     def transaction(self, table_name: str):
         """
@@ -2311,8 +2459,8 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[bool, int, float, str, TimestampMicros, datetime]]]=None,
-            at: Union[TimestampNanos, datetime, ServerTimestamp]):
+                Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]]=None,
+            at: Union[TimestampNanos, datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
 
@@ -2330,6 +2478,12 @@ cdef class Sender:
                 IngressErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
+        if self._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "row() can\'t be called: Sender is closed."
+            )
+
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
         return self
 
@@ -2340,7 +2494,7 @@ cdef class Sender:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestamp, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
         """
         Write a Pandas DataFrame to the internal buffer.
 
@@ -2395,6 +2549,12 @@ cdef class Sender:
             af.sender = self._impl
             af.mode = self._auto_flush_mode
             af.last_flush_ms = self._last_flush_ms
+
+        if self._buffer is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                "dataframe() can\'t be called: Sender is closed."
+            )
         _dataframe(
             af,
             self._buffer._impl,
@@ -2454,7 +2614,7 @@ cdef class Sender:
         if sender == NULL:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                'flush() can\'t be called: Not connected.')
+                'flush() can\'t be called: Sender is closed.')
         if buffer is not None:
             c_buf = buffer._impl
         else:

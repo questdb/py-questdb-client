@@ -14,6 +14,19 @@ import platform
 PROJ_ROOT = pathlib.Path(__file__).parent
 
 
+def patch_mac_archflags_env():
+    system = platform.system()
+    machine = platform.machine()
+
+    if system == "Darwin":
+        if machine == "arm64":
+            os.environ["ARCHFLAGS"] = "-arch arm64"
+        elif machine == "x86_64":
+            os.environ["ARCHFLAGS"] = "-arch x86_64"
+        else:
+            raise RuntimeError(f"Unknown macOS architecture: {machine}")
+
+
 def _run(*args, env=None, cwd=None):
     """
     Log and run a command within the build dir.
@@ -173,6 +186,7 @@ def open_browser(port):
 def doc(http_serve=False, port=None):
     _run('python3', '-m', 'sphinx.cmd.build',
          '-b', 'html', 'docs', 'build/docs',
+         '-nW', '--keep-going', '-v',
          env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
     if _arg2bool(http_serve):
         serve(port)
@@ -194,14 +208,14 @@ def cibuildwheel(*args):
         'darwin': 'macos',
         'linux': 'linux'}[sys.platform]
     python = 'python3'
-    if sys.platform == 'darwin':
-        # Launching with version other than 3.8 will
-        # fail saying the 3.8 wheel is unsupported.
-        # This is because the 3.8 wheel ends up getting loaded with another
-        # Python version.
-        #
-        # NB: Make sure to update `cibuildwheel` on py3.8 too before running!
-        python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
+    # if sys.platform == 'darwin':
+    #     # Launching with version other than 3.8 will
+    #     # fail saying the 3.8 wheel is unsupported.
+    #     # This is because the 3.8 wheel ends up getting loaded with another
+    #     # Python version.
+    #     #
+    #     # NB: Make sure to update `cibuildwheel` on py3.8 too before running!
+    #     python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
     _run(python, '-m',
          'cibuildwheel',
          '--platform', plat,
@@ -269,6 +283,7 @@ def main():
             sys.stderr.write(f'  {command}\n')
         sys.stderr.write('\n')
         sys.exit(0)
+    patch_mac_archflags_env()
     fn = sys.argv[1]
     args = list(sys.argv)[2:]
     globals()[fn](*args)

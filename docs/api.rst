@@ -9,7 +9,61 @@ questdb.ingress
 
     from questdb.ingress import *
 
-.. automodule:: questdb.ingress
+.. autoclass:: questdb.ingress.Sender
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.Buffer
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.SenderTransaction
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.IngressError
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.IngressErrorCode
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.Protocol
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.TimestampMicros
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.TimestampNanos
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.TlsCa
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.ServerTimestampType
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autodata:: questdb.ingress.ServerTimestamp
+    :annotation:
+    :no-value:
+
+.. autoclass:: questdb.ingress.TaggedEnum
    :members:
    :undoc-members:
    :show-inheritance:

@@ -5,6 +5,7 @@ import sys
 import os
 import shutil
 import platform
+import numpy as np
 
 from setuptools import setup, find_packages
 from setuptools.extension import Extension
@@ -83,12 +84,17 @@ def ingress_extension():
         ["src/questdb/ingress.pyx"],
         include_dirs=[
             "c-questdb-client/include",
-            "pystr-to-utf8/include"],
+            "pystr-to-utf8/include",
+            np.get_include()],
         library_dirs=lib_paths,
         libraries=libraries,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
-        extra_objects=extra_objects)
+        extra_objects=extra_objects,
+        define_macros = [
+            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')
+        ]
+    )
 
 
 def cargo_build():
@@ -165,7 +171,7 @@ def readme():
 
 setup(
     name='questdb',
-    version='2.0.4',
+    version='3.0.0rc1',
     platforms=['any'],
     python_requires='>=3.8',
     install_requires=[],
