@@ -248,7 +248,7 @@ class SenderTransaction:
 
 class Buffer:
     """
-    Construct QuestDB Ingestion Line Protocol (ILP) messages.
+    Construct QuestDB InfluxDB Line Protocol (ILP) messages.
 
     The :func:`Buffer.row` method is used to add a row to the buffer.
 

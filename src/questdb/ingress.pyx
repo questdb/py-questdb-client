@@ -741,7 +741,7 @@ cdef class SenderTransaction:
 
 cdef class Buffer:
     """
-    Construct QuestDB Ingestion Line Protocol (ILP) messages.
+    Construct QuestDB InfluxDB Line Protocol (ILP) messages.
     Version 1 is compatible with the InfluxDB Line Protocol.
 
     The :func:`Buffer.row` method is used to add a row to the buffer.

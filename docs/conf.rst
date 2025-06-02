@@ -228,11 +228,11 @@ The :ref:`sender_advanced` documentation should help you.
 Protocol Version
 ================
 
-Specifies the version of Ingestion Line Protocol to use. Valid options are:
+Specifies the version of InfluxDB Line Protocol to use. Valid options are:
 
-* ``1`` - Text-based format compatible with InfluxDB line protocol.
+* ``1`` - Text-based format compatible with InfluxDB database when used over HTTP.
 
-* ``2`` - Array support and binary format serialization for f64.
+* ``2`` - Array support and binary format serialization for 64-bit floats (version specific to QuestDB).
 
 * ``auto`` (default) - Automatic version selection based on protocol type.
 

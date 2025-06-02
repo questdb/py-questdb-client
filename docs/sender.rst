@@ -269,12 +269,12 @@ See the :ref:`sender_conf_auto_flush` section for more details. and note that
 Protocol Version
 ================
 
-Specifies the version of Ingestion Line Protocol to use for sender.
+Specifies the version of InfluxDB Line Protocol to use for sender.
 
 Valid options are:
 
-* ``1`` - Text-based format compatible with InfluxDB line protocol.
-* ``2`` - Binary format with array and f64 support.
+* ``1`` - Text-based format compatible with InfluxDB database when used over HTTP.
+* ``2`` - Array support and binary format serialization for 64-bit floats (version specific to QuestDB).
 * ``auto`` (default) - Automatic version selection based on connection type.
 
 Behavior details:
