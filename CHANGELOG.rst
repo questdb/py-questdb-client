@@ -5,7 +5,7 @@ Changelog
 
 =========
 
-3.0.0rc1 (2025-05-26)
+3.0.0rc1 (2025-06-02)
 ---------------------
 
 This is the pre-release of a major release introducing array ingestion and some
