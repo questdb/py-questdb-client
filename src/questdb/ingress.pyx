@@ -131,9 +131,7 @@ class IngressErrorCode(Enum):
     HttpNotSupported = line_sender_error_http_not_supported
     ServerFlushError = line_sender_error_server_flush_error
     ConfigError = line_sender_error_config_error
-    ArrayLargeDimError = line_sender_error_array_large_dim
-    ArrayInternalError = line_sender_error_array_view_internal_error
-    ArrayWriteToBufferError = line_sender_error_array_view_write_to_buffer_error
+    ArrayError = line_sender_error_array_error
     ProtocolVersionError = line_sender_error_protocol_version_error
     BadDataFrame = <int>line_sender_error_protocol_version_error + 1
 
@@ -177,12 +175,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ServerFlushError
     elif code == line_sender_error_config_error:
         return IngressErrorCode.ConfigError
-    elif code == line_sender_error_array_large_dim:
-        return IngressErrorCode.ArrayLargeDimError
-    elif code == line_sender_error_array_view_internal_error:
-        return IngressErrorCode.ArrayInternalError
-    elif code == line_sender_error_array_view_write_to_buffer_error:
-        return IngressErrorCode.ArrayWriteToBufferError
+    elif code == line_sender_error_array_error:
+        return IngressErrorCode.ArrayError
     elif code == line_sender_error_protocol_version_error:
         return IngressErrorCode.ProtocolVersionError
     else:
@@ -964,7 +958,7 @@ cdef class Buffer:
             self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
         if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
             raise IngressError(
-                IngressErrorCode.ArrayWriteToBufferError,
+                IngressErrorCode.ArrayError,
                 f'Only float64 numpy arrays are supported, got dtype: {arr.dtype}')
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)

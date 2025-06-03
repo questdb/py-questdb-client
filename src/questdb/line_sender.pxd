@@ -40,9 +40,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_http_not_supported,
         line_sender_error_server_flush_error,
         line_sender_error_config_error,
-        line_sender_error_array_large_dim
-        line_sender_error_array_view_internal_error
-        line_sender_error_array_view_write_to_buffer_error
+        line_sender_error_array_error
         line_sender_error_protocol_version_error
 
     cdef enum line_sender_protocol:
