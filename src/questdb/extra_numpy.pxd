@@ -8,6 +8,7 @@ from cpython.object cimport PyObject
 from numpy cimport (
     # Constants
     NPY_DOUBLE,  # N.B.: From `#include <numpy/npy_common.h>`: `#define NPY_FLOAT64 NPY_DOUBLE`
+    NPY_ARRAY_C_CONTIGUOUS,
 
     # Types
     PyArrayObject,
@@ -31,3 +32,4 @@ cdef extern from "numpy/arrayobject.h":
     npy_intp PyArray_DIM(PyArrayObject*, size_t) nogil
     npy_intp PyArray_STRIDE(PyArrayObject*, size_t) nogil
     int PyArray_NDIM(PyArrayObject*) nogil
+    int PyArray_FLAGS(PyArrayObject*)

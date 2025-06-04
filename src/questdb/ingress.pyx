@@ -74,7 +74,6 @@ ctypedef int void_int
 import cython
 include "dataframe.pxi"
 
-
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
     Iterable
@@ -965,16 +964,27 @@ cdef class Buffer:
             const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
             line_sender_error * err = NULL
 
-        if not line_sender_buffer_column_f64_arr_byte_strides(
-                self._impl,
-                c_name,
-                rank,
-                <const size_t*> cnp.PyArray_DIMS(arr),
-                <const ssize_t*> cnp.PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
-                data_ptr,
-                cnp.PyArray_NBYTES(arr),
-                &err):
-            raise c_err_to_py(err)
+        if cnp.PyArray_FLAGS(arr) & cnp.NPY_ARRAY_C_CONTIGUOUS != 0:
+            if not line_sender_buffer_column_f64_arr_c_major(
+                    self._impl,
+                    c_name,
+                    rank,
+                    <const size_t*> cnp.PyArray_DIMS(arr),
+                    data_ptr,
+                    cnp.PyArray_NBYTES(arr),
+                    &err):
+                raise c_err_to_py(err)
+        else:
+            if not line_sender_buffer_column_f64_arr_byte_strides(
+                    self._impl,
+                    c_name,
+                    rank,
+                    <const size_t*> cnp.PyArray_DIMS(arr),
+                    <const ssize_t*> cnp.PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+                    data_ptr,
+                    cnp.PyArray_NBYTES(arr),
+                    &err):
+                raise c_err_to_py(err)
 
     cdef inline void_int _column_dt(
             self, line_sender_column_name c_name, datetime dt) except -1:

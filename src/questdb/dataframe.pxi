@@ -2065,17 +2065,29 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
     cdef:
         size_t rank = PyArray_NDIM(arr)
         const uint8_t* data_ptr = <const uint8_t *> PyArray_DATA(arr)
-        line_sender_error * err = NULL
-    if not line_sender_buffer_column_f64_arr_byte_strides(
-            ls_buf,
-            col.name,
-            rank,
-            <const size_t*> PyArray_DIMS(arr),
-            <const ssize_t*> PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
-            data_ptr,
-            PyArray_NBYTES(arr),
-            &err):
-        raise c_err_to_py(err)
+        line_sender_error * err = NULL\
+
+    if PyArray_FLAGS(arr) & NPY_ARRAY_C_CONTIGUOUS != 0:
+        if not line_sender_buffer_column_f64_arr_c_major(
+                ls_buf,
+                col.name,
+                rank,
+                <const size_t *> PyArray_DIMS(arr),
+                data_ptr,
+                PyArray_NBYTES(arr),
+                &err):
+            raise c_err_to_py(err)
+    else:
+        if not line_sender_buffer_column_f64_arr_byte_strides(
+                ls_buf,
+                col.name,
+                rank,
+                <const size_t*> PyArray_DIMS(arr),
+                <const ssize_t*> PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+                data_ptr,
+                PyArray_NBYTES(arr),
+                &err):
+            raise c_err_to_py(err)
 
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,
