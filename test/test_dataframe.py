@@ -1523,6 +1523,18 @@ class TestPandasBase:
                     for i in range(index * 10, (index + 1) * 10))
                 self.assertEqual(buf, exp.encode("utf-8"))
 
+        def test_auto_flush_error_msg(self):
+            header = ["x", "y"]
+            x = list(range(10000))
+            y = list(range(10000))
+
+            df = pd.DataFrame(zip(x, y), columns=header)
+
+            with self.assertRaisesRegex(qi.IngressError, 'Could not flush buffer: Buffer size of 21780 exceeds maximum configured allowed size of 1024 bytes'):
+                with qi.Sender.from_conf("http::addr=localhost:9000;auto_flush_rows=1000;max_buf_size=1024;protocol_version=2;") as sender:
+                    sender.dataframe(df, table_name='test_df', at=qi.ServerTimestamp)
+                    sender.flush()
+
         def test_arrow_chunked_array(self):
             # We build a table with chunked arrow arrays as columns.
             chunks_a = [
