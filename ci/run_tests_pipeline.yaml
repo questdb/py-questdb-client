@@ -87,5 +87,15 @@ stages:
               sudo apt-get install -y libopenblas-dev pkg-config
               uv python list
             displayName: "Install uv"
+          - script: uv run --with 'numpy==1.21.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 1.21"
+          - script: uv run --with 'numpy==1.24.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 1.24"
           - script: uv run --with 'numpy==1.26.0' test/test.py -v TestBufferProtocolVersionV2
             displayName: "Test vs numpy 1.26"
+          - script: uv run --with 'numpy==2.0.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 2.0"
+          - script: uv run --with 'numpy==2.2.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 2.2"
+          - script: uv run --with 'numpy==2.3.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 2.3"
