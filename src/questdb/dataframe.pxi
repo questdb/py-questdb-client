@@ -2436,14 +2436,16 @@ cdef void_int _dataframe(
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 
+                was_auto_flush = True
                 _dataframe_handle_auto_flush(&af, ls_buf, &gs)
+                was_auto_flush = False
         except Exception as e:
             # It would be an internal bug for this to raise.
             if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
                 raise c_err_to_py(err)
 
             if (isinstance(e, IngressError) and
-                    (e.code == IngressErrorCode.InvalidApiCall)):
+                    (e.code == IngressErrorCode.InvalidApiCall) and not was_auto_flush):
                 # TODO: This should be allowed by the database.
                 # It currently isn't so we have to raise an error.
                 raise IngressError(
