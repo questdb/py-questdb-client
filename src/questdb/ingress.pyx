@@ -645,6 +645,8 @@ cdef class SenderTransaction:
         Write a row for the table in the transaction.
 
         The table name is taken from the transaction.
+
+        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
         """
         if at is None:
             raise IngressError(
@@ -770,12 +772,15 @@ cdef class Buffer:
 
 
     Buffer Constructor Arguments:
+      * protocol_version (``int``): The protocol version to use.
       * ``init_buf_size`` (``int``): Initial capacity of the buffer in bytes.
         Defaults to ``65536`` (64KiB).
       * ``max_name_len`` (``int``): Maximum length of a column name.
         Defaults to ``127`` which is the same default value as QuestDB.
         This should match the ``cairo.max.file.name.length`` setting of the
         QuestDB instance you're connecting to.
+
+    **Note**: Protocol version ``2`` requires QuestDB server version 8.4.0 or higher.
 
     .. code-block:: python
 
@@ -1169,6 +1174,8 @@ cdef class Buffer:
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``
               - *Column is skipped and not serialized.*
+
+        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -2472,6 +2479,8 @@ cdef class Sender:
         in the constructor.
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
+
+        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
         """
         if self._in_txn:
             raise IngressError(

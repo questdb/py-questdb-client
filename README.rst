@@ -53,6 +53,7 @@ The most common way to insert data is from a Pandas dataframe.
         'amount': [0.00044, 0.001],
 
         # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
+        # Note that requires QuestDB server >= 8.4.0 for array support
         'ord_book_bids': [
             np.array([2615.54, 2618.63]),
             np.array([39269.98, 39270.00])
@@ -82,6 +83,7 @@ You can also send individual rows. This only requires a more minimal installatio
                 'amount': 0.00044,
 
                 # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
+                # Note that requires QuestDB server >= 8.4.0 for array support
                 'ord_book_bids': np.array([2615.54, 2618.63]),
             },
             at=TimestampNanos.now())

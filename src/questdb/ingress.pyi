@@ -55,8 +55,6 @@ class IngressErrorCode(Enum):
     HttpNotSupported = ...
     ServerFlushError = ...
     ConfigError = ...
-    ArrayLargeDimError = ...
-    ArrayInternalError = ...
     ArrayError = ...
     ProtocolVersionError = ...
     BadDataFrame = ...
@@ -212,6 +210,8 @@ class SenderTransaction:
         Write a row for the table in the transaction.
 
         The table name is taken from the transaction.
+
+        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
         """
 
     def dataframe(
@@ -294,6 +294,8 @@ class Buffer:
         Defaults to ``127`` which is the same default value as QuestDB.
         This should match the ``cairo.max.file.name.length`` setting of the
         QuestDB instance you're connecting to.
+
+    **Note**: Protocol version ``2`` requires QuestDB server version 8.4.0 or higher.
 
     .. code-block:: python
 
@@ -449,6 +451,8 @@ class Buffer:
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``
               - *Column is skipped and not serialized.*
+
+        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -727,6 +731,9 @@ class Buffer:
               interpreted as the current QuestDB server time set on receipt of
               message.
 
+            * **η**: Support for NumPy arrays (``np.array``) requires QuestDB
+              server version 8.4.0 or higher.
+
         **Error Handling and Recovery**
 
         In case an exception is raised during dataframe serialization, the
@@ -834,6 +841,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ): ...
@@ -859,6 +867,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -894,6 +903,7 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
     ) -> Sender:
@@ -956,7 +966,13 @@ class Sender:
     @property
     def protocol_version(self) -> int:
         """
-        Returns the QuestDB server's recommended default line protocol version.
+        The protocol version used by the sender.
+
+        Protocol version 1 is retained for backwards compatibility with
+        older QuestDB versions.
+
+        Protocol version 2 introduces binary floating point support and
+        the array datatype.
         """
 
     @property
@@ -1020,6 +1036,8 @@ class Sender:
         in the constructor.
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
+
+        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
         """
 
     def dataframe(

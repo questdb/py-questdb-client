@@ -302,6 +302,9 @@ Here is a configuration string with ``protocol_version=2`` for ``TCP``:
 
 See the :ref:`sender_conf_protocol_version` section for more details.
 
+.. note::
+    Protocol version ``2`` requires QuestDB server version 8.4.0 or higher.
+
 Error Reporting
 ===============
 

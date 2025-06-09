@@ -16,6 +16,10 @@ Features
 * Array Data Type Support. Adds native support for NumPy arrays
   (currently only for ``np.float64`` element type and up to 32 dimensions).
 
+.. note::
+    **Server Requirement**: This feature requires QuestDB server version 8.4.0 or higher.
+    Ensure your server is upgraded before ingesting array types, otherwise data ingestion will fail.
+
 .. code-block:: python
 
         import numpy as np

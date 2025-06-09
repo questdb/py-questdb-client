@@ -240,6 +240,9 @@ Specifies the version of InfluxDB Line Protocol to use. Valid options are:
 
   TCP/TCPS: Defaults to version 1 for compatibility
 
+.. note::
+    Protocol version ``2`` requires QuestDB server version 8.4.0 or higher.
+
 .. _sender_conf_buffer:
 
 Buffer
