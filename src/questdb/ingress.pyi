@@ -189,7 +189,7 @@ class SenderTransaction:
 
     To create a transaction:
 
-    .. code_block:: python
+    .. code-block:: python
 
         with sender.transaction('table_name') as txn:
             txn.row(..)

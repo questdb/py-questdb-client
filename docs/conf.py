@@ -5,6 +5,11 @@ import os
 
 from questdb.ingress import *
 
+autodoc_mock_imports = ["_cython"]
+autodoc_type_aliases = {
+    'datetime': 'datetime.datetime',
+}
+
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
