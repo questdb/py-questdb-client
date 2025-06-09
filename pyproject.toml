@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: Database :: Front-Ends",
     "Topic :: Scientific/Engineering"
 ]
-dependencies = ["numpy>=1.26.0"]  # Keep in sync with build-system.requires
+dependencies = ["numpy>=1.21.0"]  # Keep in sync with build-system.requires
 [project.license]
 text = "Apache License 2.0"
 
@@ -46,7 +46,7 @@ requires = [
     "setuptools>=45.2.0",
     "wheel>=0.34.2",
     "cython>=0.29.24",
-    "numpy>=1.26.0",  # keep in sync with project.dependencies
+    "numpy>=1.21.0",  # keep in sync with project.dependencies
 ]
 
 
