@@ -68,3 +68,33 @@ stages:
               JAVA_HOME: $(JAVA_HOME_11_X64)
               QDB_REPO_PATH: './questdb'
             condition: eq(variables.vsQuestDbMaster, true)
+      - job: TestsAgainstVariousNumpyVersion
+        pool:
+          name: "Azure Pipelines"
+          vmImage: "ubuntu-latest"
+        timeoutInMinutes: 45
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.11'
+          - script: |
+              python3 --version
+              python3 -m pip install uv
+              sudo apt-get install -y libopenblas-dev pkg-config
+            displayName: "Install uv"
+          - script: uv run --with 'numpy==1.21.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 1.21"
+          - script: uv run --with 'numpy==1.24.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 1.24"
+          - script: uv run --with 'numpy==1.26.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 1.26"
+          - script: uv run --with 'numpy==2.0.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 2.0"
+          - script: uv run --with 'numpy==2.2.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 2.2"
+          - script: uv run --with 'numpy==2.3.0' test/test.py -v TestBufferProtocolVersionV2
+            displayName: "Test vs numpy 2.3"
