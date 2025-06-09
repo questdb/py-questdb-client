@@ -68,7 +68,7 @@ stages:
               JAVA_HOME: $(JAVA_HOME_11_X64)
               QDB_REPO_PATH: './questdb'
             condition: eq(variables.vsQuestDbMaster, true)
-      - job: TestsAgainstVariousNumpyVersion1.x
+      - job: TestsAgainstVariousNumpyVersion1x
         pool:
           name: "Azure Pipelines"
           vmImage: "ubuntu-latest"
@@ -92,7 +92,7 @@ stages:
             displayName: "Test vs numpy 1.24"
           - script: uv run --with 'numpy==1.26.0' test/test.py -v TestBufferProtocolVersionV2
             displayName: "Test vs numpy 1.26"
-      - job: TestsAgainstVariousNumpyVersion2.x
+      - job: TestsAgainstVariousNumpyVersion2x
         pool:
           name: "Azure Pipelines"
           vmImage: "ubuntu-latest"
