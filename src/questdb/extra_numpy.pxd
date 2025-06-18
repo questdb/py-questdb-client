@@ -21,7 +21,7 @@ cdef extern from "numpy/arrayobject.h":
     bint PyArray_CheckExact(PyObject * o)
 
     # PyArrayObject
-    npy_intp PyArray_NBYTES(PyArrayObject*) nogil
+    npy_intp PyArray_SIZE(PyArrayObject*) nogil
     npy_intp* PyArray_STRIDES(PyArrayObject*) nogil
     npy_intp* PyArray_DIMS(PyArrayObject*) nogil
     npy_int PyArray_TYPE(PyArrayObject* arr) nogil

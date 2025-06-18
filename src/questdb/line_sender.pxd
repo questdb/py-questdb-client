@@ -233,8 +233,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_column_name name,
         size_t rank,
         const size_t* shapes,
-        const uint8_t* data_buffer,
-        size_t data_buffer_len,
+        const double* data,
+        size_t data_len,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -244,8 +244,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         size_t rank,
         const size_t* shapes,
         const ssize_t* strides,
-        const uint8_t* data_buffer,
-        size_t data_buffer_len,
+        const double* data,
+        size_t data_len,
         line_sender_error** err_out
         ) noexcept nogil
 

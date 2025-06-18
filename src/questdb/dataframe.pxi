@@ -2064,8 +2064,8 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
             f'Only float64 numpy arrays are supported, got dtype: {arr_descr}')
     cdef:
         size_t rank = PyArray_NDIM(arr)
-        const uint8_t* data_ptr = <const uint8_t *> PyArray_DATA(arr)
-        line_sender_error * err = NULL\
+        const double* data_ptr = <const double *> PyArray_DATA(arr)
+        line_sender_error * err = NULL
 
     if PyArray_FLAGS(arr) & NPY_ARRAY_C_CONTIGUOUS != 0:
         if not line_sender_buffer_column_f64_arr_c_major(
@@ -2074,7 +2074,7 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
                 rank,
                 <const size_t *> PyArray_DIMS(arr),
                 data_ptr,
-                PyArray_NBYTES(arr),
+                PyArray_SIZE(arr),
                 &err):
             raise c_err_to_py(err)
     else:
@@ -2085,7 +2085,7 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
                 <const size_t*> PyArray_DIMS(arr),
                 <const ssize_t*> PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
                 data_ptr,
-                PyArray_NBYTES(arr),
+                PyArray_SIZE(arr),
                 &err):
             raise c_err_to_py(err)
 

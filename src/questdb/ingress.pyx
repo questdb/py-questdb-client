@@ -966,7 +966,7 @@ cdef class Buffer:
                 f'Only float64 numpy arrays are supported, got dtype: {arr.dtype}')
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
-            const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
+            const double * data_ptr = <const double*> cnp.PyArray_DATA(arr)
             line_sender_error * err = NULL
 
         if cnp.PyArray_FLAGS(arr) & cnp.NPY_ARRAY_C_CONTIGUOUS != 0:
@@ -976,7 +976,7 @@ cdef class Buffer:
                     rank,
                     <const size_t*> cnp.PyArray_DIMS(arr),
                     data_ptr,
-                    cnp.PyArray_NBYTES(arr),
+                    cnp.PyArray_SIZE(arr),
                     &err):
                 raise c_err_to_py(err)
         else:
@@ -987,7 +987,7 @@ cdef class Buffer:
                     <const size_t*> cnp.PyArray_DIMS(arr),
                     <const ssize_t*> cnp.PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
                     data_ptr,
-                    cnp.PyArray_NBYTES(arr),
+                    cnp.PyArray_SIZE(arr),
                     &err):
                 raise c_err_to_py(err)
 
