@@ -122,6 +122,8 @@ stages:
             displayName: Build wheels
             env:
               CIBW_BUILD: pp*
+              CIBW_ARCHS: x86_64
+              CIBW_PLATFORM: linux
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
