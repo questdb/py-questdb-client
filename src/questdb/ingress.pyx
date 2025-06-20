@@ -90,7 +90,7 @@ import time
 import heapq
 import warnings
 
-import numpy as np
+import numpy
 cimport numpy as cnp
 from numpy cimport NPY_DOUBLE, PyArrayObject
 
@@ -751,7 +751,7 @@ cdef class SenderTransaction:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, np.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]
                 ]=None,
             at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
@@ -759,7 +759,7 @@ cdef class SenderTransaction:
 
         The table name is taken from the transaction.
 
-        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 8.4.0 or higher.
         """
         if at is None:
             raise IngressError(
@@ -1136,7 +1136,7 @@ cdef class Buffer:
                 'str',
                 'TimestampMicros',
                 'datetime.datetime'
-                'np.ndarray'))
+                'numpy.ndarray'))
             raise TypeError(
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
@@ -1218,7 +1218,7 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, np.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]
                 ]=None,
             at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
@@ -1237,7 +1237,7 @@ cdef class Buffer:
                     'col4': 'xyz',
                     'col5': TimestampMicros(123456789),
                     'col6': datetime(2019, 1, 1, 12, 0, 0),
-                    'col7': np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                    'col7': numpy.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
                     'col8': None},
                 at=TimestampNanos(123456789))
 
@@ -1281,14 +1281,14 @@ cdef class Buffer:
               - `FLOAT <https://questdb.io/docs/reference/api/ilp/columnset-types#float>`_
             * - ``str``
               - `STRING <https://questdb.io/docs/reference/api/ilp/columnset-types#string>`_
-            * - ``np.ndarray``
+            * - ``numpy.ndarray``
               - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``
               - *Column is skipped and not serialized.*
 
-        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 8.4.0 or higher.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -2588,7 +2588,7 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[bool, int, float, str, TimestampMicros, datetime.datetime, np.ndarray]]]=None,
+                Union[bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]]=None,
             at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
@@ -2598,7 +2598,7 @@ cdef class Sender:
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
 
-        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 8.4.0 or higher.
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 8.4.0 or higher.
         """
         if self._in_txn:
             raise IngressError(
