@@ -20,21 +20,17 @@ Create a new PR with the new changes in ``CHANGELOG.rst``.
 
 Make a commit and push the changes to a new branch.
 
-You also want to bump the version.
+You also want to bump the version. This process is semi-automated.
 
-This process is automated by the following command:
+* Ensure you have `uv` and `bump-my-version` installed:
+  * `curl -LsSf https://astral.sh/uv/install.sh | sh` : see https://docs.astral.sh/uv/getting-started/installation/
+  * `uv tool install bump-my-version`: see https://github.com/callowayproject/bump-my-version.
 
-.. code-block:: bash
+```console
+bump-my-version replace --new-version NEW_VERSION
+```
 
-    bump2version --config-file .bumpversion.cfg --no-tag patch
-
-Here use:
-
-* ``patch`` to bump the version to the next patch version, e.g. 1.0.0 -> 1.0.1
-
-* ``minor`` to bump the version to the next minor version, e.g. 1.0.0 -> 1.1.0
-
-* ``major`` to bump the version to the next major version, e.g. 1.0.0 -> 2.0.0
+If you're unsure, append `--dry-run` to preview changes.
 
 Now merge the PR with the title "Bump version: V.V.V → W.W.W".
 

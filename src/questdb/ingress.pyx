@@ -82,6 +82,11 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import sys
 import os
+import threading
+import collections
+import time
+import heapq
+import warnings
 
 import numpy as np
 cimport numpy as cnp
@@ -97,6 +102,112 @@ cnp.import_array()
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
 VERSION = '3.0.0rc1'
+
+
+_SENDER_RECONNECT_WARN_THRESHOLD = 25  # reconnections
+_SENDER_RECONNECT_WARN_WINDOW_NS = 5_000_000_000  # 5 seconds in nanoseconds
+
+
+class _ActiveSenders:
+    def __init__(self):
+        self._lock = threading.Lock()
+
+        # The slots fields manage a pool of unsigned integer slot IDs. These slot IDs are:
+        # * Always non-negative integers (starting from 0).
+        # * Reused when returned.
+        # * Allocated in the lowest-available order to keep them compact.
+        self._next_slot = 0 # Next available slot ID in the linear range.
+        self._returned_slots = []  # I.e. "holes" in the range `0..self._next_slot`.
+
+        # Tracked established/closed connection events.
+        # Keys are slot IDs, which are always non-negative integers.
+        # Values are `collections.deque(maxlen=100)` containing established `time.monotonic_ns()` timestamps.
+        self._series = {}
+
+        # Timestamp of last warning (monotonic_ns)
+        self._last_warning_ns = None  # Track last warning time (monotonic_ns)
+
+    def _get_next_slot(self) -> int:
+        # Always called with a lock held.
+        if self._returned_slots:
+            return heapq.heappop(self._returned_slots)
+        else:
+            self._next_slot += 1
+            return self._next_slot - 1
+
+    def _return_slot(self, slot_id):
+        # Always called with a lock held.
+        if slot_id == self._next_slot - 1:
+            # Not optimal since we're not dealing with "trailing" slots,
+            # but at least the code is simple :-)
+            self._next_slot -= 1
+        else:
+            heapq.heappush(self._returned_slots, slot_id)
+
+    def _count_recent_reconnections(self, window_ns) -> int:
+        """
+        Return the number of sender connections established within the last `window_ns` window.
+        Each slot's most recent establishment is counted if it falls within the window.
+        """
+        # Always called with a lock held.
+        now = time.monotonic_ns()
+        cutoff = now - window_ns
+        max_count = 0
+        to_delete = []
+        for slot_id, serie in self._series.items():
+            while serie and serie[0] < cutoff:
+                serie.popleft()
+            count = len(serie)
+            if not serie:
+                to_delete.append(slot_id)
+            elif count > max_count:
+                max_count = count
+        for slot_id in to_delete:
+            del self._series[slot_id]
+        return max_count
+
+    def track_established(self) -> int:
+        """
+        Track a sender connection event (threadsafe).
+        """
+        with self._lock:
+            slot_id = self._get_next_slot()
+            serie = self._series.setdefault(slot_id, collections.deque(maxlen=100))
+            serie.append(time.monotonic_ns())
+
+            max_recent_reconnections = self._count_recent_reconnections(
+                _SENDER_RECONNECT_WARN_WINDOW_NS)
+
+            if max_recent_reconnections >= _SENDER_RECONNECT_WARN_THRESHOLD:
+                now = time.monotonic_ns()
+                # 10 minutes in nanoseconds
+                min_rewarn_interval_ns = 10 * 60 * 1_000_000_000
+                no_recent_warnings = self._last_warning_ns is None or \
+                    (now - self._last_warning_ns > min_rewarn_interval_ns)
+                if no_recent_warnings:
+                    warnings.warn(
+                        "questdb.ingress.Sender: "
+                        f"Detected {max_recent_reconnections} reconnections "
+                        f"within the last {_SENDER_RECONNECT_WARN_WINDOW_NS / 1_000_000_000} seconds. "
+                        "This may indicate an inefficient coding pattern where the sender is "
+                        "frequently created and destroyed. "
+                        "Consider reusing sender instance whenever possible.",
+                        UserWarning,
+                        stacklevel=2
+                    )
+                    self._last_warning_ns = now
+            return slot_id
+
+    def track_closed(self, slot_id: int):
+        """
+        Track a sender connection closed event (threadsafe).
+        """
+        with self._lock:
+            self._return_slot(slot_id)
+
+
+_ACTIVE_SENDERS = _ActiveSenders()
+
 
 
 cdef bint _has_gil(PyThreadState** gs):
@@ -1829,6 +1940,7 @@ cdef class Sender:
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
+    cdef int64_t _slot_id
 
     cdef void_int _set_sender_fields(
             self,
@@ -2035,6 +2147,7 @@ cdef class Sender:
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._in_txn = False
+        self._slot_id = -1
 
     def __init__(
             self,
@@ -2429,6 +2542,9 @@ cdef class Sender:
         self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
         self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
+        # Track and warn about overly quick reconnections to the server.
+        self._slot_id = _ACTIVE_SENDERS.track_established()
+
     def __enter__(self) -> Sender:
         """Call :func:`Sender.establish` at the start of a ``with`` block."""
         self.establish()
@@ -2671,6 +2787,9 @@ cdef class Sender:
         self._opts = NULL
         line_sender_close(self._impl)
         self._impl = NULL
+        if self._slot_id != -1:
+            _ACTIVE_SENDERS.track_closed(self._slot_id)
+            self._slot_id = -1
 
     cpdef close(self, bint flush=True):
         """
