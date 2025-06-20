@@ -51,7 +51,8 @@ from libc.string cimport strncmp, memset
 from libc.math cimport isnan
 from libc.errno cimport errno
 # from libc.stdio cimport stderr, fprintf
-from cpython.datetime cimport datetime, timedelta
+from cpython.datetime cimport datetime as cp_datetime
+from cpython.datetime cimport timedelta as cp_timedelta
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
@@ -81,6 +82,7 @@ import pathlib
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import sys
+import datetime
 import os
 import threading
 import collections
@@ -490,7 +492,7 @@ cdef void_int str_to_column_name_copy(
         raise c_err_to_py(err)
 
 
-cdef int64_t datetime_to_micros(datetime dt):
+cdef int64_t datetime_to_micros(cp_datetime dt):
     """
     Convert a :class:`datetime.datetime` to microseconds since the epoch.
     """
@@ -500,7 +502,7 @@ cdef int64_t datetime_to_micros(datetime dt):
         <int64_t>(dt.microsecond))
 
 
-cdef int64_t datetime_to_nanos(datetime dt):
+cdef int64_t datetime_to_nanos(cp_datetime dt):
     """
     Convert a `datetime.datetime` to nanoseconds since the epoch.
     """
@@ -573,11 +575,11 @@ cdef class TimestampMicros:
         self._value = value
 
     @classmethod
-    def from_datetime(cls, dt: datetime):
+    def from_datetime(cls, dt: datetime.datetime):
         """
         Construct a ``TimestampMicros`` from a :class:`datetime.datetime` object.
         """
-        if not isinstance(dt, datetime):
+        if not isinstance(dt, cp_datetime):
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_micros(dt))
 
@@ -638,11 +640,11 @@ cdef class TimestampNanos:
         self._value = value
 
     @classmethod
-    def from_datetime(cls, dt: datetime):
+    def from_datetime(cls, dt: datetime.datetime):
         """
         Construct a ``TimestampNanos`` from a ``datetime.datetime`` object.
         """
-        if not isinstance(dt, datetime):
+        if not isinstance(dt, cp_datetime):
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_nanos(dt))
 
@@ -749,9 +751,9 @@ cdef class SenderTransaction:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, np.ndarray]]
                 ]=None,
-            at: Union[ServerTimestampType, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
         Write a row for the table in the transaction.
 
@@ -784,7 +786,7 @@ cdef class SenderTransaction:
             df,  # : pd.DataFrame
             *,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
         """
         Write a dataframe for the table in the transaction.
 
@@ -1103,7 +1105,7 @@ cdef class Buffer:
                 raise c_err_to_py(err)
 
     cdef inline void_int _column_dt(
-            self, line_sender_column_name c_name, datetime dt) except -1:
+            self, line_sender_column_name c_name, cp_datetime dt) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_ts_micros(
                 self._impl, c_name, datetime_to_micros(dt), &err):
@@ -1124,7 +1126,7 @@ cdef class Buffer:
             self._column_ts(c_name, value)
         elif PyArray_CheckExact(<PyObject *> value):
             self._column_numpy(c_name, value)
-        elif isinstance(value, datetime):
+        elif isinstance(value, cp_datetime):
             self._column_dt(c_name, value)
         else:
             valid = ', '.join((
@@ -1151,7 +1153,7 @@ cdef class Buffer:
         if not line_sender_buffer_at_nanos(self._impl, ts._value, &err):
             raise c_err_to_py(err)
 
-    cdef inline void_int _at_dt(self, datetime dt) except -1:
+    cdef inline void_int _at_dt(self, cp_datetime dt) except -1:
         cdef int64_t value = datetime_to_nanos(dt)
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at_nanos(self._impl, value, &err):
@@ -1167,7 +1169,7 @@ cdef class Buffer:
             self._at_now()
         elif isinstance(ts, TimestampNanos):
             self._at_ts(ts)
-        elif isinstance(ts, datetime):
+        elif isinstance(ts, cp_datetime):
             self._at_dt(ts)
         else:
             raise TypeError(
@@ -1216,9 +1218,9 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, np.ndarray]]
                 ]=None,
-            at: Union[ServerTimestampType, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
         Add a single row (line) to the buffer.
 
@@ -1332,7 +1334,7 @@ cdef class Buffer:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
         """
         Add a pandas DataFrame to the buffer.
 
@@ -1620,7 +1622,7 @@ _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
-cdef uint64_t _timedelta_to_millis(object timedelta):
+cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     """
     Convert a timedelta to milliseconds.
     """
@@ -1713,7 +1715,7 @@ cdef void_int _parse_auto_flush(
             auto_flush_interval = int(auto_flush_interval)
     elif auto_flush_interval is False or isinstance(auto_flush_interval, int):
         pass
-    elif isinstance(auto_flush_interval, timedelta):
+    elif isinstance(auto_flush_interval, cp_timedelta):
         auto_flush_interval = _timedelta_to_millis(auto_flush_interval)
     else:
         raise TypeError(
@@ -2046,7 +2048,7 @@ cdef class Sender:
         if auth_timeout is not None:
             if isinstance(auth_timeout, int):
                 c_auth_timeout = auth_timeout
-            elif isinstance(auth_timeout, timedelta):
+            elif isinstance(auth_timeout, cp_timedelta):
                 c_auth_timeout = _timedelta_to_millis(auth_timeout)
             else:
                 raise TypeError(
@@ -2094,7 +2096,7 @@ cdef class Sender:
                 c_retry_timeout = retry_timeout
                 if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
                     raise c_err_to_py(err)
-            elif isinstance(retry_timeout, timedelta):
+            elif isinstance(retry_timeout, cp_timedelta):
                 c_retry_timeout = _timedelta_to_millis(retry_timeout)
                 if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
                     raise c_err_to_py(err)
@@ -2118,7 +2120,7 @@ cdef class Sender:
                 c_request_timeout = request_timeout
                 if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
                     raise c_err_to_py(err)
-            elif isinstance(request_timeout, timedelta):
+            elif isinstance(request_timeout, cp_timedelta):
                 c_request_timeout = _timedelta_to_millis(request_timeout)
                 if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
                     raise c_err_to_py(err)
@@ -2474,7 +2476,7 @@ cdef class Sender:
         return self._auto_flush_mode.byte_count
     
     @property
-    def auto_flush_interval(self) -> Optional[timedelta]:
+    def auto_flush_interval(self) -> Optional[datetime.timedelta]:
         """
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
@@ -2482,7 +2484,7 @@ cdef class Sender:
             return None
         if self._auto_flush_mode.interval == -1:
             return None
-        return timedelta(milliseconds=self._auto_flush_mode.interval)
+        return cp_timedelta(milliseconds=self._auto_flush_mode.interval)
 
     @property
     def protocol_version(self) -> int:
@@ -2586,8 +2588,8 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]]=None,
-            at: Union[TimestampNanos, datetime, ServerTimestampType]):
+                Union[bool, int, float, str, TimestampMicros, datetime.datetime, np.ndarray]]]=None,
+            at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
 
@@ -2623,7 +2625,7 @@ cdef class Sender:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
         """
         Write a Pandas DataFrame to the internal buffer.
 
