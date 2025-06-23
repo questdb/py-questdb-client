@@ -15,7 +15,7 @@ recursive-include src *.py
 recursive-include src *.md
 recursive-include src *.pxi
 recursive-include src *.c
-graft pystr-to-utf8
+graft rpyutils
 graft c-questdb-client
 prune c-questdb-client/src/tests/json_tests.rs
 prune c-questdb-client/.git

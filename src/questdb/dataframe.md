@@ -344,7 +344,7 @@ but this would require invoking the Python interpreter and the creation of a
 gargantuan amount of little temporary objects.
 
 This is such a common use case that we do the encoding in a supporting Rust
-library. See `pystr-to-utf8` in the source tree.
+library. See `rpyutils/src/pystr_to_utf8.rs` in the source tree.
 
 It accumulates strings in a address-stable buffer (internally a `Vec<String>`)
 and allows us to borrow its memory.
