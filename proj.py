@@ -87,7 +87,7 @@ def build_fuzzing():
 
 @command
 def test(all=False, patch_path='1', *args):
-    _run('cargo', 'test', cwd=PROJ_ROOT / 'pystr-to-utf8')
+    _run('cargo', 'test', cwd=PROJ_ROOT / 'rpyutils')
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
     if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
