@@ -762,7 +762,7 @@ cdef ssize_t _dataframe_resolve_at(
         at_nanos = at
         at_value_out[0] = at_nanos._value
         return -1
-    elif isinstance(at, datetime):
+    elif isinstance(at, cp_datetime):
         if at.timestamp() < 0:
             raise ValueError(
                 'Bad argument `at`: Cannot use a datetime before the ' +
