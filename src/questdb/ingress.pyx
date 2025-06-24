@@ -104,7 +104,7 @@ cnp.import_array()
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '3.0.0rc1'
+VERSION = '3.0.0'
 
 WARN_HIGH_RECONNECTS = True
 
