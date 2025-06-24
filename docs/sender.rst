@@ -404,6 +404,98 @@ Read more setup details in the
 `Enterprise quickstart <https://questdb.io/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
 and the `role-based access control <https://questdb.io/docs/operations/rbac/>`_ guides.
 
+.. _sender_good_practices:
+
+Good Practices
+==============
+
+Create tables in advance
+------------------------
+
+If you're not happy with the default :ref:`table auto creation <sender_auto_creation>`
+logic, create the tables in advance. This will allow you to:
+
+* Specify the column types explicitly.
+
+* Configure de-duplication rules for the table.
+
+Specify your own timestamps
+---------------------------
+
+Always specify your own timestamps using the ``at`` parameter.
+
+If you use the ``ServerTimestamp`` option, QuestDB will not be able to
+deduplicate rows, should you ever need to send them again.
+
+Instead, if you don't have an a timestamp immediately available, use
+``TimestampNanos.now()`` to set the timestamp to the current time.
+
+This is lighter-weight than using a fully-fledged ``datetime.datetime`` object.
+
+Prefer ILP/HTTP
+---------------
+
+Use the ILP/HTTP protocol instead of ILP/TCP for better error reporting and
+transaction control.
+
+.. _sender_tips_connection_reuse:
+
+Reuse Sender Objects
+--------------------
+
+Create longer-lived sender objects, as these are not automatically pooled.
+
+Instead of creating a new sender object for every request, create a single
+sender object and reuse it across multiple requests.
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        # Use the sender object for multiple requests
+        sender.row(...)
+        sender.row(...) # remember auto-flush may trigger after any row
+        sender.row(...)
+        sender.flush() # you can flush explicitly at any point too
+        # ...
+        sender.row(...)
+        sender.dataframe(...) # auto-flush may trigger within a dataframe too
+        sender.flush()
+
+Use transactions
+----------------
+
+Use ref:`transactions <sender_transaction>` if you want to ensure that a group
+of rows is sent as a single transaction.
+
+This feature will guarantee that the rows are sent to the server as one,
+even if you're using auto-flushing.
+
+Tune for Performance
+--------------------
+
+If you need better performance:
+
+* Tune for larger batches of rows. Tweak the auto-flush settings, or
+  call :func:`Sender.flush <questdb.ingress.Sender.flush>` less frequently.
+
+* Use the :func:`Sender.dataframe <questdb.ingress.Sender.dataframe>` method To
+  send dataframes instead of appending rows one by one.
+
+* Try multi-threading: The ``Sender`` logic is designed to release the Python
+  GIL whenever possible, so you should notice an uplift in performance if you
+  were bottlenecked by network I/O.
+
+* Avoid sending data which is very much out of order: The server will re-order
+  data by timestamp as it arrives. This is generally cheap for data that only
+  affects the recent past, but if you are sending data that is very much out of
+  order (for example, from different days), you may want to consider
+  re-ordering it before sending. For bulk data uploads of historical data,
+  consider using the `CSV import <https://questdb.com/docs/guides/import-csv>`_
+  feature for best performance.
+
 .. _sender_advanced:
 
 Advanced Usage

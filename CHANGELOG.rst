@@ -49,7 +49,7 @@ additionally:
 * Warns at most every 10 minutes when burst of reconnections are detected.
   This is to warn about code patterns that may lead to performance issues, such as
 
-  ..code-block:: python
+  .. code-block:: python
 
     # Don't do this! Sender objects should be reused.
     for row_fields in data:

@@ -2451,7 +2451,8 @@ cdef class Sender:
                     f"Detected a burst of reconnections. "
                     "This may indicate an inefficient coding pattern where the sender is "
                     "frequently created and destroyed. "
-                    "Consider reusing sender instance whenever possible.",
+                    "Consider reusing sender instance whenever possible."
+                    "See: https://py-questdb-client.readthedocs.io/en/latest/sender.html#reuse-sender-objects",
                     UserWarning,
                     stacklevel=1
                 )
