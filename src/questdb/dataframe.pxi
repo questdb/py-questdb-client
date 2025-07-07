@@ -762,7 +762,7 @@ cdef ssize_t _dataframe_resolve_at(
         at_nanos = at
         at_value_out[0] = at_nanos._value
         return -1
-    elif isinstance(at, datetime):
+    elif isinstance(at, cp_datetime):
         if at.timestamp() < 0:
             raise ValueError(
                 'Bad argument `at`: Cannot use a datetime before the ' +
@@ -2064,18 +2064,30 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
             f'Only float64 numpy arrays are supported, got dtype: {arr_descr}')
     cdef:
         size_t rank = PyArray_NDIM(arr)
-        const uint8_t* data_ptr = <const uint8_t *> PyArray_DATA(arr)
+        const double* data_ptr = <const double *> PyArray_DATA(arr)
         line_sender_error * err = NULL
-    if not line_sender_buffer_column_f64_arr_byte_strides(
-            ls_buf,
-            col.name,
-            rank,
-            <const size_t*> PyArray_DIMS(arr),
-            <const ssize_t*> PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
-            data_ptr,
-            PyArray_NBYTES(arr),
-            &err):
-        raise c_err_to_py(err)
+
+    if PyArray_FLAGS(arr) & NPY_ARRAY_C_CONTIGUOUS != 0:
+        if not line_sender_buffer_column_f64_arr_c_major(
+                ls_buf,
+                col.name,
+                rank,
+                <const size_t *> PyArray_DIMS(arr),
+                data_ptr,
+                PyArray_SIZE(arr),
+                &err):
+            raise c_err_to_py(err)
+    else:
+        if not line_sender_buffer_column_f64_arr_byte_strides(
+                ls_buf,
+                col.name,
+                rank,
+                <const size_t*> PyArray_DIMS(arr),
+                <const ssize_t*> PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+                data_ptr,
+                PyArray_SIZE(arr),
+                &err):
+            raise c_err_to_py(err)
 
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,

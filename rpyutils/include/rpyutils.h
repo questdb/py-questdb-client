@@ -108,6 +108,10 @@ bool qdb_ucs4_to_utf8(struct qdb_pystr_buf *b,
                       const char **buf_out,
                       uint32_t *bad_codepoint_out);
 
+uint32_t qdb_active_senders_track_established(int* warn);  // bint* warn
+
+void qdb_active_senders_track_closed(uint32_t slot);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif // __cplusplus

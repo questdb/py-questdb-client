@@ -41,6 +41,7 @@ __all__ = [
     'TimestampMicros',
     'TimestampNanos',
     'TlsCa',
+    'WARN_HIGH_RECONNECTS'
 ]
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
@@ -51,7 +52,8 @@ from libc.string cimport strncmp, memset
 from libc.math cimport isnan
 from libc.errno cimport errno
 # from libc.stdio cimport stderr, fprintf
-from cpython.datetime cimport datetime, timedelta
+from cpython.datetime cimport datetime as cp_datetime
+from cpython.datetime cimport timedelta as cp_timedelta
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
@@ -60,7 +62,7 @@ from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
 from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from .line_sender cimport *
-from .pystr_to_utf8 cimport *
+from .rpyutils cimport *
 from .conf_str cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
@@ -74,7 +76,6 @@ ctypedef int void_int
 import cython
 include "dataframe.pxi"
 
-
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
     Iterable
@@ -82,9 +83,15 @@ import pathlib
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import sys
+import datetime
 import os
+import threading
+import collections
+import time
+import heapq
+import warnings
 
-import numpy as np
+import numpy
 cimport numpy as cnp
 from numpy cimport NPY_DOUBLE, PyArrayObject
 
@@ -97,7 +104,9 @@ cnp.import_array()
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '3.0.0rc1'
+VERSION = '3.0.0'
+
+WARN_HIGH_RECONNECTS = True
 
 
 cdef bint _has_gil(PyThreadState** gs):
@@ -131,9 +140,7 @@ class IngressErrorCode(Enum):
     HttpNotSupported = line_sender_error_http_not_supported
     ServerFlushError = line_sender_error_server_flush_error
     ConfigError = line_sender_error_config_error
-    ArrayLargeDimError = line_sender_error_array_large_dim
-    ArrayInternalError = line_sender_error_array_view_internal_error
-    ArrayWriteToBufferError = line_sender_error_array_view_write_to_buffer_error
+    ArrayError = line_sender_error_array_error
     ProtocolVersionError = line_sender_error_protocol_version_error
     BadDataFrame = <int>line_sender_error_protocol_version_error + 1
 
@@ -177,12 +184,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ServerFlushError
     elif code == line_sender_error_config_error:
         return IngressErrorCode.ConfigError
-    elif code == line_sender_error_array_large_dim:
-        return IngressErrorCode.ArrayLargeDimError
-    elif code == line_sender_error_array_view_internal_error:
-        return IngressErrorCode.ArrayInternalError
-    elif code == line_sender_error_array_view_write_to_buffer_error:
-        return IngressErrorCode.ArrayWriteToBufferError
+    elif code == line_sender_error_array_error:
+        return IngressErrorCode.ArrayError
     elif code == line_sender_error_protocol_version_error:
         return IngressErrorCode.ProtocolVersionError
     else:
@@ -386,7 +389,7 @@ cdef void_int str_to_column_name_copy(
         raise c_err_to_py(err)
 
 
-cdef int64_t datetime_to_micros(datetime dt):
+cdef int64_t datetime_to_micros(cp_datetime dt):
     """
     Convert a :class:`datetime.datetime` to microseconds since the epoch.
     """
@@ -396,7 +399,7 @@ cdef int64_t datetime_to_micros(datetime dt):
         <int64_t>(dt.microsecond))
 
 
-cdef int64_t datetime_to_nanos(datetime dt):
+cdef int64_t datetime_to_nanos(cp_datetime dt):
     """
     Convert a `datetime.datetime` to nanoseconds since the epoch.
     """
@@ -469,11 +472,11 @@ cdef class TimestampMicros:
         self._value = value
 
     @classmethod
-    def from_datetime(cls, dt: datetime):
+    def from_datetime(cls, dt: datetime.datetime):
         """
         Construct a ``TimestampMicros`` from a :class:`datetime.datetime` object.
         """
-        if not isinstance(dt, datetime):
+        if not isinstance(dt, cp_datetime):
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_micros(dt))
 
@@ -534,11 +537,11 @@ cdef class TimestampNanos:
         self._value = value
 
     @classmethod
-    def from_datetime(cls, dt: datetime):
+    def from_datetime(cls, dt: datetime.datetime):
         """
         Construct a ``TimestampNanos`` from a ``datetime.datetime`` object.
         """
-        if not isinstance(dt, datetime):
+        if not isinstance(dt, cp_datetime):
             raise TypeError('dt must be a datetime object.')
         return cls(datetime_to_nanos(dt))
 
@@ -593,7 +596,7 @@ cdef class SenderTransaction:
 
     To create a transaction:
 
-    .. code_block:: python
+    .. code-block:: python
 
         with sender.transaction('table_name') as txn:
             txn.row(..)
@@ -645,13 +648,15 @@ cdef class SenderTransaction:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]
                 ]=None,
-            at: Union[ServerTimestampType, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
         Write a row for the table in the transaction.
 
         The table name is taken from the transaction.
+
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
         """
         if at is None:
             raise IngressError(
@@ -678,7 +683,7 @@ cdef class SenderTransaction:
             df,  # : pd.DataFrame
             *,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
         """
         Write a dataframe for the table in the transaction.
 
@@ -777,12 +782,15 @@ cdef class Buffer:
 
 
     Buffer Constructor Arguments:
+      * protocol_version (``int``): The protocol version to use.
       * ``init_buf_size`` (``int``): Initial capacity of the buffer in bytes.
         Defaults to ``65536`` (64KiB).
       * ``max_name_len`` (``int``): Maximum length of a column name.
         Defaults to ``127`` which is the same default value as QuestDB.
         This should match the ``cairo.max.file.name.length`` setting of the
         QuestDB instance you're connecting to.
+
+    **Note**: Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
 
     .. code-block:: python
 
@@ -964,26 +972,37 @@ cdef class Buffer:
             self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
         if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
             raise IngressError(
-                IngressErrorCode.ArrayWriteToBufferError,
+                IngressErrorCode.ArrayError,
                 f'Only float64 numpy arrays are supported, got dtype: {arr.dtype}')
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
-            const uint8_t * data_ptr = <const uint8_t*> cnp.PyArray_DATA(arr)
+            const double * data_ptr = <const double*> cnp.PyArray_DATA(arr)
             line_sender_error * err = NULL
 
-        if not line_sender_buffer_column_f64_arr_byte_strides(
-                self._impl,
-                c_name,
-                rank,
-                <const size_t*> cnp.PyArray_DIMS(arr),
-                <const ssize_t*> cnp.PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
-                data_ptr,
-                cnp.PyArray_NBYTES(arr),
-                &err):
-            raise c_err_to_py(err)
+        if cnp.PyArray_FLAGS(arr) & cnp.NPY_ARRAY_C_CONTIGUOUS != 0:
+            if not line_sender_buffer_column_f64_arr_c_major(
+                    self._impl,
+                    c_name,
+                    rank,
+                    <const size_t*> cnp.PyArray_DIMS(arr),
+                    data_ptr,
+                    cnp.PyArray_SIZE(arr),
+                    &err):
+                raise c_err_to_py(err)
+        else:
+            if not line_sender_buffer_column_f64_arr_byte_strides(
+                    self._impl,
+                    c_name,
+                    rank,
+                    <const size_t*> cnp.PyArray_DIMS(arr),
+                    <const ssize_t*> cnp.PyArray_STRIDES(arr), # N.B.: Strides expressed as byte jumps
+                    data_ptr,
+                    cnp.PyArray_SIZE(arr),
+                    &err):
+                raise c_err_to_py(err)
 
     cdef inline void_int _column_dt(
-            self, line_sender_column_name c_name, datetime dt) except -1:
+            self, line_sender_column_name c_name, cp_datetime dt) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_ts_micros(
                 self._impl, c_name, datetime_to_micros(dt), &err):
@@ -1004,7 +1023,7 @@ cdef class Buffer:
             self._column_ts(c_name, value)
         elif PyArray_CheckExact(<PyObject *> value):
             self._column_numpy(c_name, value)
-        elif isinstance(value, datetime):
+        elif isinstance(value, cp_datetime):
             self._column_dt(c_name, value)
         else:
             valid = ', '.join((
@@ -1014,7 +1033,7 @@ cdef class Buffer:
                 'str',
                 'TimestampMicros',
                 'datetime.datetime'
-                'np.ndarray'))
+                'numpy.ndarray'))
             raise TypeError(
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
@@ -1031,7 +1050,7 @@ cdef class Buffer:
         if not line_sender_buffer_at_nanos(self._impl, ts._value, &err):
             raise c_err_to_py(err)
 
-    cdef inline void_int _at_dt(self, datetime dt) except -1:
+    cdef inline void_int _at_dt(self, cp_datetime dt) except -1:
         cdef int64_t value = datetime_to_nanos(dt)
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at_nanos(self._impl, value, &err):
@@ -1047,7 +1066,7 @@ cdef class Buffer:
             self._at_now()
         elif isinstance(ts, TimestampNanos):
             self._at_ts(ts)
-        elif isinstance(ts, datetime):
+        elif isinstance(ts, cp_datetime):
             self._at_dt(ts)
         else:
             raise TypeError(
@@ -1096,9 +1115,9 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]
                 ]=None,
-            at: Union[ServerTimestampType, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
         Add a single row (line) to the buffer.
 
@@ -1115,7 +1134,7 @@ cdef class Buffer:
                     'col4': 'xyz',
                     'col5': TimestampMicros(123456789),
                     'col6': datetime(2019, 1, 1, 12, 0, 0),
-                    'col7': np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                    'col7': numpy.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
                     'col8': None},
                 at=TimestampNanos(123456789))
 
@@ -1159,12 +1178,14 @@ cdef class Buffer:
               - `FLOAT <https://questdb.io/docs/reference/api/ilp/columnset-types#float>`_
             * - ``str``
               - `STRING <https://questdb.io/docs/reference/api/ilp/columnset-types#string>`_
-            * - ``np.ndarray``
+            * - ``numpy.ndarray``
               - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``None``
               - *Column is skipped and not serialized.*
+
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -1210,7 +1231,7 @@ cdef class Buffer:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
         """
         Add a pandas DataFrame to the buffer.
 
@@ -1498,7 +1519,7 @@ _FLUSH_FMT = ('{} - See https://py-questdb-client.readthedocs.io/en/'
     '/troubleshooting.html#inspecting-and-debugging-errors#flush-failed')
 
 
-cdef uint64_t _timedelta_to_millis(object timedelta):
+cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     """
     Convert a timedelta to milliseconds.
     """
@@ -1591,7 +1612,7 @@ cdef void_int _parse_auto_flush(
             auto_flush_interval = int(auto_flush_interval)
     elif auto_flush_interval is False or isinstance(auto_flush_interval, int):
         pass
-    elif isinstance(auto_flush_interval, timedelta):
+    elif isinstance(auto_flush_interval, cp_timedelta):
         auto_flush_interval = _timedelta_to_millis(auto_flush_interval)
     else:
         raise TypeError(
@@ -1818,6 +1839,7 @@ cdef class Sender:
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
+    cdef int64_t _slot_id
 
     cdef void_int _set_sender_fields(
             self,
@@ -1923,7 +1945,7 @@ cdef class Sender:
         if auth_timeout is not None:
             if isinstance(auth_timeout, int):
                 c_auth_timeout = auth_timeout
-            elif isinstance(auth_timeout, timedelta):
+            elif isinstance(auth_timeout, cp_timedelta):
                 c_auth_timeout = _timedelta_to_millis(auth_timeout)
             else:
                 raise TypeError(
@@ -1971,7 +1993,7 @@ cdef class Sender:
                 c_retry_timeout = retry_timeout
                 if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
                     raise c_err_to_py(err)
-            elif isinstance(retry_timeout, timedelta):
+            elif isinstance(retry_timeout, cp_timedelta):
                 c_retry_timeout = _timedelta_to_millis(retry_timeout)
                 if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
                     raise c_err_to_py(err)
@@ -1995,7 +2017,7 @@ cdef class Sender:
                 c_request_timeout = request_timeout
                 if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
                     raise c_err_to_py(err)
-            elif isinstance(request_timeout, timedelta):
+            elif isinstance(request_timeout, cp_timedelta):
                 c_request_timeout = _timedelta_to_millis(request_timeout)
                 if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
                     raise c_err_to_py(err)
@@ -2024,6 +2046,7 @@ cdef class Sender:
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._in_txn = False
+        self._slot_id = -1
 
     def __init__(
             self,
@@ -2350,7 +2373,7 @@ cdef class Sender:
         return self._auto_flush_mode.byte_count
     
     @property
-    def auto_flush_interval(self) -> Optional[timedelta]:
+    def auto_flush_interval(self) -> Optional[datetime.timedelta]:
         """
         Time interval threshold for the auto-flush logic, or None if disabled.
         """
@@ -2358,7 +2381,7 @@ cdef class Sender:
             return None
         if self._auto_flush_mode.interval == -1:
             return None
-        return timedelta(milliseconds=self._auto_flush_mode.interval)
+        return cp_timedelta(milliseconds=self._auto_flush_mode.interval)
 
     @property
     def protocol_version(self) -> int:
@@ -2418,6 +2441,22 @@ cdef class Sender:
         self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
         self._last_flush_ms[0] = line_sender_now_micros() // 1000
 
+        # Track and warn about overly quick reconnections to the server.
+        cdef bint warn = False
+        if WARN_HIGH_RECONNECTS:
+            self._slot_id = <int32_t> qdb_active_senders_track_established(&warn)
+            if warn:
+                warnings.warn(
+                    "questdb.ingress.Sender: "
+                    f"Detected a burst of reconnections. "
+                    "This may indicate an inefficient coding pattern where the sender is "
+                    "frequently created and destroyed. "
+                    "Consider reusing sender instance whenever possible."
+                    "See: https://py-questdb-client.readthedocs.io/en/latest/sender.html#reuse-sender-objects",
+                    UserWarning,
+                    stacklevel=1
+                )
+
     def __enter__(self) -> Sender:
         """Call :func:`Sender.establish` at the start of a ``with`` block."""
         self.establish()
@@ -2459,8 +2498,8 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]]=None,
-            at: Union[TimestampNanos, datetime, ServerTimestampType]):
+                Union[bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]]=None,
+            at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
 
@@ -2468,6 +2507,8 @@ cdef class Sender:
         in the constructor.
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
+
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
         """
         if self._in_txn:
             raise IngressError(
@@ -2494,7 +2535,7 @@ cdef class Sender:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
         """
         Write a Pandas DataFrame to the internal buffer.
 
@@ -2658,6 +2699,9 @@ cdef class Sender:
         self._opts = NULL
         line_sender_close(self._impl)
         self._impl = NULL
+        if self._slot_id != -1:
+            qdb_active_senders_track_closed(<uint32_t>self._slot_id)
+            self._slot_id = -1
 
     cpdef close(self, bint flush=True):
         """

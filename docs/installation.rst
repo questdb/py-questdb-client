@@ -6,7 +6,9 @@ Dependency
 ==========
 
 The Python QuestDB client does not have any additional run-time dependencies and
-will run on any version of Python >= 3.8 on most platforms and architectures.
+will run on any version of Python >= 3.9 on most platforms and architectures.
+
+From version 3.0.0, this library depends on ``numpy>=1.21.0``.
 
 Optional Dependencies
 ---------------------
@@ -16,12 +18,10 @@ dependencies to be installed:
 
 * ``pandas``
 * ``pyarrow``
-* ``numpy``
 
 These are bundled as the ``dataframe`` extra.
 
-Without this option, the ``questdb`` package has no dependencies other than
-to the Python standard library.
+Without this option, you may still ingest data row-by-row.
 
 PIP
 ---

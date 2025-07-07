@@ -5,6 +5,76 @@ Changelog
 
 =========
 
+3.0.0 (2025-07-07)
+------------------
+
+Features
+~~~~~~~~
+
+This is the first major release of the QuestDB Python client library
+which supports n-dimensional arrays of doubles for QuestDB servers 9.0.0 and up.
+
+.. code-block:: python
+
+        import numpy as np
+
+        # Create 2D numpy array
+        array_2d = np.array([
+            [1.1, 2.2, 3.3],
+            [4.4, 5.5, 6.6]], dtype=np.float64)
+
+        sender.row(
+            'table',
+            columns={'array_2d': array_2d},
+            at=timestamp)
+
+The array data is sent over a new protocol version (2) that is auto-negotiated
+when using HTTP(s), or can be specified explicitly via the ``protocol_version=2``
+parameter when using TCP(s).
+
+We recommend using HTTP(s), but here is an TCP example, should you need it::
+
+  tcp::addr=localhost:9009;protocol_version=2;
+
+When using ``protocol_version=2`` (with either TCP(s) or HTTP(s)), the sender
+will now also serialize ``float`` (double-precision) columns as binary.
+You might see a performance uplift if this is a dominant data type in your
+ingestion workload.
+
+When compared to 2.0.4, this release includes all the changes from 3.0.0rc1 and
+additionally:
+
+* Has optimised ingestion performance from C-style contiguous NumPy arrays.
+
+* Warns at most every 10 minutes when burst of reconnections are detected.
+  This is to warn about code patterns that may lead to performance issues, such as
+
+  .. code-block:: python
+
+    # Don't do this! Sender objects should be reused.
+    for row_fields in data:
+        with Sender.from_conf(conf) as sender:
+            sender.row(**row_fields)
+
+  This feature can be disabled in code by setting:
+
+  .. code-block:: python
+
+    import questdb.ingress as qi
+    qi.WARN_HIGH_RECONNECTS = False
+
+* Fixed ILP/TCP connection shutdown on Windows where some rows could be
+  lost when closing the ``Sender``, even if explicitly flushed.
+
+* Added a "Good Practices" section to the "Sending Data over ILP" section of
+  the documentation.
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+Refer to the release notes for 3.0.0rc1 for the breaking changes introduced
+in this release compared to 2.x.x.
+
+
 3.0.0rc1 (2025-06-02)
 ---------------------
 
@@ -15,6 +85,10 @@ Features
 ~~~~~~~~
 * Array Data Type Support. Adds native support for NumPy arrays
   (currently only for ``np.float64`` element type and up to 32 dimensions).
+
+.. note::
+    **Server Requirement**: This feature requires QuestDB server version 9.0.0 or higher.
+    Ensure your server is upgraded before ingesting array types, otherwise data ingestion will fail.
 
 .. code-block:: python
 

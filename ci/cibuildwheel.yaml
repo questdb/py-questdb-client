@@ -122,6 +122,7 @@ stages:
             displayName: Build wheels
             env:
               CIBW_BUILD: pp*
+              CIBW_ENABLE: pypy pypy-eol
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 

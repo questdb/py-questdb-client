@@ -1,7 +1,7 @@
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, intptr_t
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, uintptr_t
 
-cdef extern from "pystr_to_utf8.h":
+cdef extern from "rpyutils.h":
 
   cdef struct qdb_pystr_buf:
     pass
@@ -58,3 +58,7 @@ cdef extern from "pystr_to_utf8.h":
                         size_t *size_out,
                         const char **buf_out,
                         uint32_t *bad_codepoint_out)
+
+  uint32_t qdb_active_senders_track_established(bint *warn)
+
+  void qdb_active_senders_track_closed(uint32_t slot)

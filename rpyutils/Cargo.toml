@@ -1,0 +1,12 @@
+[package]
+name = "rpyutils"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "rpyutils"
+crate-type = ["staticlib"]
+
+[dev-dependencies]
+rand = "0.9.1"

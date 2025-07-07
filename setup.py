@@ -41,17 +41,17 @@ def ingress_extension():
     extra_objects = []
 
     questdb_rs_ffi_dir = PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'
-    pystr_to_utf8_dir = PROJ_ROOT / 'pystr-to-utf8'
+    rpyutils_dir = PROJ_ROOT / 'rpyutils'
     questdb_client_lib_dir = None
-    pystr_to_utf8_lib_dir = None
+    rpyutils_lib_dir = None
     if PLATFORM == 'win32' and MODE == '32bit':
         questdb_client_lib_dir = \
             questdb_rs_ffi_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
-        pystr_to_utf8_lib_dir = \
-            pystr_to_utf8_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
+        rpyutils_lib_dir = \
+            rpyutils_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
     else:
         questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
-        pystr_to_utf8_lib_dir = pystr_to_utf8_dir / 'target' / 'release'
+        rpyutils_lib_dir = rpyutils_dir / 'target' / 'release'
         if INSTRUMENT_FUZZING:
             extra_compile_args.append('-fsanitize=fuzzer-no-link')
             extra_link_args.append('-fsanitize=fuzzer-no-link')
@@ -77,14 +77,14 @@ def ingress_extension():
         str(loc / f'{lib_prefix}{name}{lib_suffix}')
         for loc, name in (
             (questdb_client_lib_dir, 'questdb_client'),
-            (pystr_to_utf8_lib_dir, 'pystr_to_utf8'))]
+            (rpyutils_lib_dir, 'rpyutils'))]
 
     return Extension(
         "questdb.ingress",
         ["src/questdb/ingress.pyx"],
         include_dirs=[
             "c-questdb-client/include",
-            "pystr-to-utf8/include",
+            "rpyutils/include",
             np.get_include()],
         library_dirs=lib_paths,
         libraries=libraries,
@@ -150,7 +150,7 @@ def cargo_build():
 
     subprocess.check_call(
         cargo_args,
-        cwd=str(PROJ_ROOT / 'pystr-to-utf8'),
+        cwd=str(PROJ_ROOT / 'rpyutils'),
         env=env)
 
 
@@ -171,7 +171,7 @@ def readme():
 
 setup(
     name='questdb',
-    version='3.0.0rc1',
+    version='3.0.0',
     platforms=['any'],
     python_requires='>=3.8',
     install_requires=[],

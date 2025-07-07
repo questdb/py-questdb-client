@@ -5,6 +5,11 @@ import os
 
 from questdb.ingress import *
 
+autodoc_mock_imports = ["_cython"]
+autodoc_type_aliases = {
+    'datetime': 'datetime.datetime',
+}
+
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
@@ -23,7 +28,7 @@ project = 'questdb'
 year = '2024'
 author = 'QuestDB'
 copyright = '{0}, {1}'.format(year, author)
-version = release = '3.0.0rc1'
+version = release = '3.0.0'
 
 github_repo_url = 'https://github.com/questdb/py-questdb-client'
 

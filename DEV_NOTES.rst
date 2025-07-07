@@ -55,7 +55,6 @@ The development requirements are these if you prefer to install them one by one:
     python3 -m pip install wheel
     python3 -m pip install twine
     python3 -m pip install cibuildwheel
-    python3 -m pip install bump2version
 
 
 Building and packaging

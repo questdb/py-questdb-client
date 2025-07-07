@@ -5,7 +5,7 @@ QuestDB Client Library for Python
 This is the official Python client library for `QuestDB <https://questdb.io>`_.
 
 This client library implements QuestDB's variant of the
-`Ingestion Line Protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_
+`InfluxDB Line Protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_
 (ILP) over HTTP and TCP.
 
 ILP provides the fastest way to insert data into QuestDB.
@@ -18,20 +18,11 @@ and full-connection encryption with
 Install
 =======
 
-The latest *stable* version of the library is **2.0.4** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
+The latest version of the library is **3.0.0** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
 
 ::
 
     python3 -m pip install -U questdb[dataframe]
-
-
-The latest *pre-release* version of the library is **3.0.0r1** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
-This release supports NumPy float64 arrays which are transmitted over a new
-protocol version supported by QuestDB 8.4.0 or later.
-
-:: 
-
-    python3 -m pip install --pre -U questdb[dataframe]
 
 Quickstart
 ==========
@@ -53,6 +44,7 @@ The most common way to insert data is from a Pandas dataframe.
         'amount': [0.00044, 0.001],
 
         # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
+        # Note that requires QuestDB server >= 9.0.0 for array support
         'ord_book_bids': [
             np.array([2615.54, 2618.63]),
             np.array([39269.98, 39270.00])
@@ -82,6 +74,7 @@ You can also send individual rows. This only requires a more minimal installatio
                 'amount': 0.00044,
 
                 # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
+                # Note that requires QuestDB server >= 9.0.0 for array support
                 'ord_book_bids': np.array([2615.54, 2618.63]),
             },
             at=TimestampNanos.now())

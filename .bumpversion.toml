@@ -1,0 +1,39 @@
+[tool.bumpversion]
+current_version = "3.0.0"
+commit = false
+tag = false
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = "version = \"{current_version}\""
+replace = "version = \"{new_version}\""
+
+[[tool.bumpversion.files]]
+filename = "setup.py"
+search = "version='{current_version}'"
+replace = "version='{new_version}'"
+
+[[tool.bumpversion.files]]
+filename = "README.rst"
+search = "library is {current_version}"
+replace = "library is {new_version}"
+
+[[tool.bumpversion.files]]
+filename = "docs/conf.py"
+search = "version = release = '{current_version}'"
+replace = "version = release = '{new_version}'"
+
+[[tool.bumpversion.files]]
+filename = "src/questdb/__init__.py"
+search = "__version__ = '{current_version}'"
+replace = "__version__ = '{new_version}'"
+
+[[tool.bumpversion.files]]
+filename = "src/questdb/ingress.pyx"
+search = "VERSION = '{current_version}'"
+replace = "VERSION = '{new_version}'"
+
+[[tool.bumpversion.files]]
+filename = ".bumpversion.toml"
+search = "current_version = \"{current_version}\""
+replace = "current_version = \"{new_version}\""

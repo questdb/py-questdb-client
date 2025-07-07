@@ -21,8 +21,7 @@ The format of the configuration string is::
 
 .. note::
 
-    * The keys are case-sensitive.
-    * The trailing semicolon is mandatory.
+    The keys are case-sensitive.
 
 The valid protocols are:
 
@@ -228,7 +227,13 @@ The :ref:`sender_advanced` documentation should help you.
 Protocol Version
 ================
 
-Specifies the version of InfluxDB Line Protocol to use. Valid options are:
+Specifies the version of InfluxDB Line Protocol to use.
+
+Here is a configuration string with ``protocol_version=2`` for ``TCP``::
+
+    tcp::addr=localhost:9000;protocol_version=2;
+
+Valid options are:
 
 * ``1`` - Text-based format compatible with InfluxDB database when used over HTTP.
 
@@ -239,6 +244,9 @@ Specifies the version of InfluxDB Line Protocol to use. Valid options are:
   HTTP/HTTPS: Auto-detects server capability during handshake (supports version negotiation)
 
   TCP/TCPS: Defaults to version 1 for compatibility
+
+.. note::
+    Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
 
 .. _sender_conf_buffer:
 

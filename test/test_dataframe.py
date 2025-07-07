@@ -1581,7 +1581,7 @@ class TestPandasBase:
             # need to, so - as for now - we just test that we raise a nice error.
             with self.assertRaisesRegex(
                     qi.IngressError,
-                    "Unsupported dtype int16\[pyarrow\] for column 'a'.*github"):
+                    r"Unsupported dtype int16\[pyarrow\] for column 'a'.*github"):
                 _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
 
         @unittest.skipIf(not fastparquet, 'fastparquet not installed')

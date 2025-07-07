@@ -73,6 +73,7 @@ def main(args):
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')
+    pip_install('packaging')
     if args.pandas_version is not None and args.pandas_version != '':
         install_old_pandas_and_numpy(args)
     else:
@@ -92,9 +93,7 @@ def main(args):
         import pandas
         import numpy
         import pyarrow
-        if (sys.version_info >= (3, 8) and sys.version_info < (3, 13)):
-            # As of this commit, fastparquet does not have a binary built for 3.13
-            import fastparquet
+        import fastparquet
 
 
 if __name__ == "__main__":

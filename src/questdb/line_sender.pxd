@@ -40,9 +40,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_http_not_supported,
         line_sender_error_server_flush_error,
         line_sender_error_config_error,
-        line_sender_error_array_large_dim
-        line_sender_error_array_view_internal_error
-        line_sender_error_array_view_write_to_buffer_error
+        line_sender_error_array_error
         line_sender_error_protocol_version_error
 
     cdef enum line_sender_protocol:
@@ -230,14 +228,24 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_buffer_column_f64_arr_c_major(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        size_t rank,
+        const size_t* shapes,
+        const double* data,
+        size_t data_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint line_sender_buffer_column_f64_arr_byte_strides(
         line_sender_buffer* buffer,
         line_sender_column_name name,
         size_t rank,
         const size_t* shapes,
         const ssize_t* strides,
-        const uint8_t* data_buffer,
-        size_t data_buffer_len,
+        const double* data,
+        size_t data_len,
         line_sender_error** err_out
         ) noexcept nogil
 

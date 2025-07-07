@@ -264,44 +264,6 @@ completely disabled:
 See the :ref:`sender_conf_auto_flush` section for more details. and note that
 ``auto_flush_interval`` :ref:`does NOT start a timer <sender_conf_auto_flush_interval>`.
 
-.. _sender_protocol_version:
-
-Protocol Version
-================
-
-Specifies the version of InfluxDB Line Protocol to use for sender.
-
-Valid options are:
-
-* ``1`` - Text-based format compatible with InfluxDB database when used over HTTP.
-* ``2`` - Array support and binary format serialization for 64-bit floats (version specific to QuestDB).
-* ``auto`` (default) - Automatic version selection based on connection type.
-
-Behavior details:
-
-^^^^^^^^^^^^^^^^^
-
-+----------------+--------------------------------------------------------------+
-| Value          | Behavior                                                     |
-+================+==============================================================+
-|                | - Plain text serialization                                   |
-|     ``1``      | - Compatible with InfluxDB servers                           |
-|                | - No array type support                                      |
-+----------------+--------------------------------------------------------------+
-|     ``2``      | - Binary encoding for f64                                    |
-|                | - Full support for array                                     |
-+----------------+--------------------------------------------------------------+
-|                | - **HTTP/HTTPS**: Auto-detects server capability during      |
-|     ``auto``   |   handshake (supports version negotiation)                   |
-|                | - **TCP/TCPS**: Defaults to version 1 for compatibility      |
-+----------------+--------------------------------------------------------------+
-
-Here is a configuration string with ``protocol_version=2`` for ``TCP``:
-
-``tcp::addr=localhost:9000;protocol_version=2;``
-
-See the :ref:`sender_conf_protocol_version` section for more details.
-
 Error Reporting
 ===============
 
@@ -400,6 +362,98 @@ to the authenticated user.
 Read more setup details in the
 `Enterprise quickstart <https://questdb.io/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
 and the `role-based access control <https://questdb.io/docs/operations/rbac/>`_ guides.
+
+.. _sender_good_practices:
+
+Good Practices
+==============
+
+Create tables in advance
+------------------------
+
+If you're not happy with the default :ref:`table auto creation <sender_auto_creation>`
+logic, create the tables in advance. This will allow you to:
+
+* Specify the column types explicitly.
+
+* Configure de-duplication rules for the table.
+
+Specify your own timestamps
+---------------------------
+
+Always specify your own timestamps using the ``at`` parameter.
+
+If you use the ``ServerTimestamp`` option, QuestDB will not be able to
+deduplicate rows, should you ever need to send them again.
+
+Instead, if you don't have an a timestamp immediately available, use
+``TimestampNanos.now()`` to set the timestamp to the current time.
+
+This is lighter-weight than using a fully-fledged ``datetime.datetime`` object.
+
+Prefer ILP/HTTP
+---------------
+
+Use the ILP/HTTP protocol instead of ILP/TCP for better error reporting and
+transaction control.
+
+.. _sender_tips_connection_reuse:
+
+Reuse Sender Objects
+--------------------
+
+Create longer-lived sender objects, as these are not automatically pooled.
+
+Instead of creating a new sender object for every request, create a single
+sender object and reuse it across multiple requests.
+
+.. code-block:: python
+
+    from questdb.ingress import Sender
+
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        # Use the sender object for multiple requests
+        sender.row(...)
+        sender.row(...) # remember auto-flush may trigger after any row
+        sender.row(...)
+        sender.flush() # you can flush explicitly at any point too
+        # ...
+        sender.row(...)
+        sender.dataframe(...) # auto-flush may trigger within a dataframe too
+        sender.flush()
+
+Use transactions
+----------------
+
+Use :ref:`transactions <sender_transaction>` if you want to ensure that a group
+of rows is sent as a single transaction.
+
+This feature will guarantee that the rows are sent to the server as one,
+even if you're using auto-flushing.
+
+Tune for Performance
+--------------------
+
+If you need better performance:
+
+* Tune for larger batches of rows. Tweak the auto-flush settings, or
+  call :func:`Sender.flush <questdb.ingress.Sender.flush>` less frequently.
+
+* Use the :func:`Sender.dataframe <questdb.ingress.Sender.dataframe>` method To
+  send dataframes instead of appending rows one by one.
+
+* Try multi-threading: The ``Sender`` logic is designed to release the Python
+  GIL whenever possible, so you should notice an uplift in performance if you
+  were bottlenecked by network I/O.
+
+* Avoid sending data which is very much out of order: The server will re-order
+  data by timestamp as it arrives. This is generally cheap for data that only
+  affects the recent past, but if you are sending data that is very much out of
+  order (for example, from different days), you may want to consider
+  re-ordering it before sending. For bulk data uploads of historical data,
+  consider using the `CSV import <https://questdb.com/docs/guides/import-csv>`_
+  feature for best performance.
 
 .. _sender_advanced:
 
@@ -671,6 +725,46 @@ auto-flush interval::
         ...
 
 
+.. _sender_protocol_version:
+
+Protocol Version
+================
+
+Explicitly specifies the version of InfluxDB Line Protocol to use for sender.
+
+Valid options are:
+
+* ``protocol_version=1``
+* ``protocol_version=2``
+* ``protocol_version=auto`` (default, if unspecified)
+
+Behavior details:
+
++----------------+--------------------------------------------------------------+
+| Value          | Behavior                                                     |
++================+==============================================================+
+|                | - Plain text serialization                                   |
+|     ``1``      | - Compatible with InfluxDB servers                           |
+|                | - No array type support                                      |
++----------------+--------------------------------------------------------------+
+|     ``2``      | - Binary encoding for f64                                    |
+|                | - Full support for array                                     |
++----------------+--------------------------------------------------------------+
+|                | - **HTTP/HTTPS**: Auto-detects server capability during      |
+|     ``auto``   |   handshake (supports version negotiation)                   |
+|                | - **TCP/TCPS**: Defaults to version 1 for compatibility      |
++----------------+--------------------------------------------------------------+
+
+Here is a configuration string with ``protocol_version=2`` for ``TCP``::
+
+    tcp::addr=localhost:9000;protocol_version=2;
+
+See the :ref:`sender_conf_protocol_version` section for more details.
+
+.. note::
+    Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
+
+
 .. _sender_which_protocol:
 
 ILP/TCP or ILP/HTTP
@@ -678,13 +772,34 @@ ILP/TCP or ILP/HTTP
 
 The sender supports ``tcp``, ``tcps``, ``http``, and ``https`` protocols.
 
-You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
-cases as it provides better feedback on errors and transaction control.
+**You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
+cases as it provides better feedback on errors and transaction control.**
 
 ILP/HTTP is available from:
 
 * QuestDB 7.3.10 and later.
 * QuestDB Enterprise 1.2.7 and later.
+
+ILP/HTTP Also supports :ref:`protocol version <sender_protocol_version>`
+auto-detection.
+
++----------------+--------------------------------------------------------------+
+| Protocol       | Protocol version auto-detection                              |
++================+==============================================================+
+| ILP/HTTP       | **Yes**: The client will communcate to the server using the  |
+|                | latest version supported by both client and the server.      |
++----------------+--------------------------------------------------------------+
+| ILP/TCP        | **No**: You need to                                          |
+|                | :ref:`configure <sender_conf_protocol_version>`              |
+|                | ``protocol_version=N`` to to match a version supported by    |
+|                | the server.                                                  |
++----------------+--------------------------------------------------------------+
+
+.. note::
+
+    The client will disable features that require a newer
+    protocol versions than the one used to communicate with the server.
+
 
 Since TCP does not block for a response it is useful for high-throughput
 scenarios in higher latency networks or on older versions of QuestDB which do
