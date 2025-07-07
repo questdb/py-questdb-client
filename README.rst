@@ -18,20 +18,11 @@ and full-connection encryption with
 Install
 =======
 
-The latest *stable* version of the library is **2.0.4** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
+The latest version of the library is **3.0.0** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
 
 ::
 
     python3 -m pip install -U questdb[dataframe]
-
-
-The latest *pre-release* version of the library is **3.0.0r1** (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
-This release supports NumPy float64 arrays which are transmitted over a new
-protocol version supported by QuestDB 9.0.0 or later.
-
-:: 
-
-    python3 -m pip install --pre -U questdb[dataframe]
 
 Quickstart
 ==========
