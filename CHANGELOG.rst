@@ -12,7 +12,7 @@ Features
 ~~~~~~~~
 
 This is the first major release of the QuestDB Python client library
-which supports n-dimensional arrays of doubles for QuestDB servers 8.4.0 and up.
+which supports n-dimensional arrays of doubles for QuestDB servers 9.0.0 and up.
 
 .. code-block:: python
 
@@ -81,7 +81,7 @@ Features
   (currently only for ``np.float64`` element type and up to 32 dimensions).
 
 .. note::
-    **Server Requirement**: This feature requires QuestDB server version 8.4.0 or higher.
+    **Server Requirement**: This feature requires QuestDB server version 9.0.0 or higher.
     Ensure your server is upgraded before ingesting array types, otherwise data ingestion will fail.
 
 .. code-block:: python

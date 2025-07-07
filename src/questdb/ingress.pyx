@@ -656,7 +656,7 @@ cdef class SenderTransaction:
 
         The table name is taken from the transaction.
 
-        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 8.4.0 or higher.
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
         """
         if at is None:
             raise IngressError(
@@ -790,7 +790,7 @@ cdef class Buffer:
         This should match the ``cairo.max.file.name.length`` setting of the
         QuestDB instance you're connecting to.
 
-    **Note**: Protocol version ``2`` requires QuestDB server version 8.4.0 or higher.
+    **Note**: Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
 
     .. code-block:: python
 
@@ -1185,7 +1185,7 @@ cdef class Buffer:
             * - ``None``
               - *Column is skipped and not serialized.*
 
-        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 8.4.0 or higher.
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -2508,7 +2508,7 @@ cdef class Sender:
 
         Refer to the :func:`Buffer.row` documentation for details on arguments.
 
-        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 8.4.0 or higher.
+        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
         """
         if self._in_txn:
             raise IngressError(
