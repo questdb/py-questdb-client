@@ -57,7 +57,7 @@ stages:
             displayName: "Compile QuestDB"
             inputs:
               mavenPOMFile: 'questdb/pom.xml'
-              jdkVersionOption: '1.11'
+              jdkVersionOption: '1.17'
               options: "-DskipTests -Pbuild-web-console"
             condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
