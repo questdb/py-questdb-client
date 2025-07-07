@@ -5,7 +5,7 @@ Changelog
 
 =========
 
-3.0.0 (2025-xx-xx)
+3.0.0 (2025-07-07)
 ------------------
 
 Features
@@ -62,6 +62,12 @@ additionally:
 
     import questdb.ingress as qi
     qi.WARN_HIGH_RECONNECTS = False
+
+* Fixed ILP/TCP connection shutdown on Windows where some rows could be
+  lost when closing the ``Sender``, even if explicitly flushed.
+
+* Added a "Good Practices" section to the "Sending Data over ILP" section of
+  the documentation.
 
 Breaking Changes
 ~~~~~~~~~~~~~~~~

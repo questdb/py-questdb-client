@@ -264,47 +264,6 @@ completely disabled:
 See the :ref:`sender_conf_auto_flush` section for more details. and note that
 ``auto_flush_interval`` :ref:`does NOT start a timer <sender_conf_auto_flush_interval>`.
 
-.. _sender_protocol_version:
-
-Protocol Version
-================
-
-Specifies the version of InfluxDB Line Protocol to use for sender.
-
-Valid options are:
-
-* ``1`` - Text-based format compatible with InfluxDB database when used over HTTP.
-* ``2`` - Array support and binary format serialization for 64-bit floats (version specific to QuestDB).
-* ``auto`` (default) - Automatic version selection based on connection type.
-
-Behavior details:
-
-^^^^^^^^^^^^^^^^^
-
-+----------------+--------------------------------------------------------------+
-| Value          | Behavior                                                     |
-+================+==============================================================+
-|                | - Plain text serialization                                   |
-|     ``1``      | - Compatible with InfluxDB servers                           |
-|                | - No array type support                                      |
-+----------------+--------------------------------------------------------------+
-|     ``2``      | - Binary encoding for f64                                    |
-|                | - Full support for array                                     |
-+----------------+--------------------------------------------------------------+
-|                | - **HTTP/HTTPS**: Auto-detects server capability during      |
-|     ``auto``   |   handshake (supports version negotiation)                   |
-|                | - **TCP/TCPS**: Defaults to version 1 for compatibility      |
-+----------------+--------------------------------------------------------------+
-
-Here is a configuration string with ``protocol_version=2`` for ``TCP``:
-
-``tcp::addr=localhost:9000;protocol_version=2;``
-
-See the :ref:`sender_conf_protocol_version` section for more details.
-
-.. note::
-    Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
-
 Error Reporting
 ===============
 
@@ -467,7 +426,7 @@ sender object and reuse it across multiple requests.
 Use transactions
 ----------------
 
-Use ref:`transactions <sender_transaction>` if you want to ensure that a group
+Use :ref:`transactions <sender_transaction>` if you want to ensure that a group
 of rows is sent as a single transaction.
 
 This feature will guarantee that the rows are sent to the server as one,
@@ -766,6 +725,46 @@ auto-flush interval::
         ...
 
 
+.. _sender_protocol_version:
+
+Protocol Version
+================
+
+Explicitly specifies the version of InfluxDB Line Protocol to use for sender.
+
+Valid options are:
+
+* ``protocol_version=1``
+* ``protocol_version=2``
+* ``protocol_version=auto`` (default, if unspecified)
+
+Behavior details:
+
++----------------+--------------------------------------------------------------+
+| Value          | Behavior                                                     |
++================+==============================================================+
+|                | - Plain text serialization                                   |
+|     ``1``      | - Compatible with InfluxDB servers                           |
+|                | - No array type support                                      |
++----------------+--------------------------------------------------------------+
+|     ``2``      | - Binary encoding for f64                                    |
+|                | - Full support for array                                     |
++----------------+--------------------------------------------------------------+
+|                | - **HTTP/HTTPS**: Auto-detects server capability during      |
+|     ``auto``   |   handshake (supports version negotiation)                   |
+|                | - **TCP/TCPS**: Defaults to version 1 for compatibility      |
++----------------+--------------------------------------------------------------+
+
+Here is a configuration string with ``protocol_version=2`` for ``TCP``::
+
+    tcp::addr=localhost:9000;protocol_version=2;
+
+See the :ref:`sender_conf_protocol_version` section for more details.
+
+.. note::
+    Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
+
+
 .. _sender_which_protocol:
 
 ILP/TCP or ILP/HTTP
@@ -773,13 +772,34 @@ ILP/TCP or ILP/HTTP
 
 The sender supports ``tcp``, ``tcps``, ``http``, and ``https`` protocols.
 
-You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
-cases as it provides better feedback on errors and transaction control.
+**You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
+cases as it provides better feedback on errors and transaction control.**
 
 ILP/HTTP is available from:
 
 * QuestDB 7.3.10 and later.
 * QuestDB Enterprise 1.2.7 and later.
+
+ILP/HTTP Also supports :ref:`protocol version <sender_protocol_version>`
+auto-detection.
+
++----------------+--------------------------------------------------------------+
+| Protocol       | Protocol version auto-detection                              |
++================+==============================================================+
+| ILP/HTTP       | **Yes**: The client will communcate to the server using the  |
+|                | latest version supported by both client and the server.      |
++----------------+--------------------------------------------------------------+
+| ILP/TCP        | **No**: You need to                                          |
+|                | :ref:`configure <sender_conf_protocol_version>`              |
+|                | ``protocol_version=N`` to to match a version supported by    |
+|                | the server.                                                  |
++----------------+--------------------------------------------------------------+
+
+.. note::
+
+    The client will disable features that require a newer
+    protocol versions than the one used to communicate with the server.
+
 
 Since TCP does not block for a response it is useful for high-throughput
 scenarios in higher latency networks or on older versions of QuestDB which do
