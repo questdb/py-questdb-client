@@ -73,6 +73,7 @@ def main(args):
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')
+    pip_install('packaging')
     if args.pandas_version is not None and args.pandas_version != '':
         install_old_pandas_and_numpy(args)
     else:

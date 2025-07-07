@@ -13,19 +13,18 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Cython",
     "Programming Language :: Rust",
-    "License :: OSI Approved :: Apache Software License",
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Networking",
     "Topic :: Database :: Front-Ends",
     "Topic :: Scientific/Engineering"
 ]
+license = "Apache-2.0"
+license-files = ["LICENSE.txt"]
 dependencies = ["numpy>=1.21.0"]  # Keep in sync with build-system.requires
-[project.license]
-text = "Apache License 2.0"
 
 [[project.authors]]
 name = "Adam Cimarosti"
-email = "adam@questdb.io"
+email = "adam@questdb.com"
 
 [project.optional-dependencies]
 publish = ["twine", "wheel"]
@@ -42,11 +41,17 @@ Community = "http://community.questdb.io"
 
 [build-system]
 requires = [
-    # Setuptools 18.0 and above properly handles Cython extensions.
-    "setuptools>=45.2.0",
-    "wheel>=0.34.2",
-    "cython>=0.29.24",
-    "numpy>=1.21.0",  # keep in sync with project.dependencies
+    # Keep in sync with `dev_requirements.txt`
+    # as well as `ci/pip_install_deps.py`.
+
+    # Tools should be up to date.
+    "setuptools>=80.9.0",
+    "packaging>=25.0",
+    "wheel>=0.45.1",
+    "cython>=3.1.2",
+
+    # This is the oldest version we're happy to support.
+    "numpy>=1.21.0",
 ]
 
 
