@@ -149,11 +149,12 @@ class TestBases:
                 'col4': 0.5,
                 'col5': 'val',
                 'col6': qi.TimestampMicros(12345),
-                'col7': two_h_after_epoch,
-                'col8': None}, at=qi.ServerTimestamp)
+                'col7': qi.TimestampNanos(12345678),
+                'col8': two_h_after_epoch,
+                'col9': None}, at=qi.ServerTimestamp)
             exp = (
                 b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5, self.version == 1) +
-                b',col5="val",col6=12345t,col7=7200000000t\n')
+                b',col5="val",col6=12345000n,col7=12345678n,col8=7200000000000n\n')
             self.assertEqual(bytes(buf), exp)
 
         def test_none_symbol(self):

@@ -648,7 +648,7 @@ cdef class SenderTransaction:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray]]
                 ]=None,
             at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
@@ -962,10 +962,16 @@ cdef class Buffer:
         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
 
-    cdef inline void_int _column_ts(
+    cdef inline void_int _column_ts_micros(
             self, line_sender_column_name c_name, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_column_ts_micros(self._impl, c_name, ts._value, &err):
+            raise c_err_to_py(err)
+
+    cdef inline void_int _column_ts_nanos(
+            self, line_sender_column_name c_name, TimestampNanos ts) except -1:
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_column_ts_nanos(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_numpy(
@@ -1020,11 +1026,13 @@ cdef class Buffer:
         elif PyUnicode_CheckExact(<PyObject*>value):
             self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
-            self._column_ts(c_name, value)
+            self._column_ts_micros(c_name, value)
         elif PyArray_CheckExact(<PyObject *> value):
             self._column_numpy(c_name, value)
         elif isinstance(value, cp_datetime):
             self._column_dt(c_name, value)
+        elif isinstance(value, TimestampNanos):
+            self._column_ts_nanos(c_name, value)
         else:
             valid = ', '.join((
                 'bool',
@@ -1115,7 +1123,7 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray]]
                 ]=None,
             at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """

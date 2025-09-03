@@ -839,12 +839,12 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a=1546300800000000t,b="a"\n' +
-                b'tbl1 a=1546300801000000t,b="b"\n' +
-                b'tbl1 a=1546300802000000t,b="c"\n' +
-                b'tbl1 a=1546300803000000t,b="d"\n' +
-                b'tbl1 a=1546300804000000t,b="e"\n' +
-                b'tbl1 a=1546300805000000t,b="f"\n' +
+                b'tbl1 a=1546300800000000000n,b="a"\n' +
+                b'tbl1 a=1546300801000000000n,b="b"\n' +
+                b'tbl1 a=1546300802000000000n,b="c"\n' +
+                b'tbl1 a=1546300803000000000n,b="d"\n' +
+                b'tbl1 a=1546300804000000000n,b="e"\n' +
+                b'tbl1 a=1546300805000000000n,b="f"\n' +
                 b'tbl1 b="g"\n' +
                 b'tbl1 b="h"\n' +
                 b'tbl1 b="i"\n')
@@ -856,9 +856,9 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a=0t\n' +
-                b'tbl1 a=1000000t\n' +
-                b'tbl1 a=2000000t\n')
+                b'tbl1 a=0n\n' +
+                b'tbl1 a=1000000000n\n' +
+                b'tbl1 a=2000000000n\n')
 
         def test_datetime64_tz_arrow_col(self):
             df = pd.DataFrame({
@@ -878,10 +878,10 @@ class TestPandasBase:
             self.assertEqual(
                 buf,
                 # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-                b'tbl1,b=sym1 a=1546318800000000t\n' +
-                b'tbl1,b=sym2 a=1546318801000000t\n' +
+                b'tbl1,b=sym1 a=1546318800000000000n\n' +
+                b'tbl1,b=sym2 a=1546318801000000000n\n' +
                 b'tbl1,b=sym3\n' +
-                b'tbl1,b=sym4 a=1546318803000000t\n')
+                b'tbl1,b=sym4 a=1546318803000000000n\n')
 
             # Not epoch 0.
             df = pd.DataFrame({
@@ -900,9 +900,9 @@ class TestPandasBase:
             self.assertEqual(
                 buf,
                 # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-                b'tbl1,b=sym1 a=18000000000t\n' +
-                b'tbl1,b=sym2 a=18001000000t\n' +
-                b'tbl1,b=sym3 a=18002000000t\n')
+                b'tbl1,b=sym1 a=18000000000000n\n' +
+                b'tbl1,b=sym2 a=18001000000000n\n' +
+                b'tbl1,b=sym3 a=18002000000000n\n')
 
             # Actual epoch 0.
             df = pd.DataFrame({
@@ -920,9 +920,9 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1,b=sym1 a=0t\n' +
-                b'tbl1,b=sym2 a=1000000t\n' +
-                b'tbl1,b=sym3 a=2000000t\n')
+                b'tbl1,b=sym1 a=0n\n' +
+                b'tbl1,b=sym2 a=1000000000n\n' +
+                b'tbl1,b=sym3 a=2000000000n\n')
 
             df2 = pd.DataFrame({
                 'a': [
@@ -936,8 +936,8 @@ class TestPandasBase:
             # Mostly, here assert that negative timestamps are allowed.
             self.assertIn(
                 buf,
-                [b'tbl1,b=sym1 a=-2208970800000000t\n',
-                 b'tbl1,b=sym1 a=-2208971040000000t\n'])
+                [b'tbl1,b=sym1 a=-2208970800000000000n\n',
+                 b'tbl1,b=sym1 a=-2208971040000000000n\n'])
 
         def test_datetime64_numpy_at(self):
             df = pd.DataFrame({
