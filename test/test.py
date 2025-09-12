@@ -154,7 +154,7 @@ class TestBases:
                 'col9': None}, at=qi.ServerTimestamp)
             exp = (
                 b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5, self.version == 1) +
-                b',col5="val",col6=12345000n,col7=12345678n,col8=7200000000000n\n')
+                b',col5="val",col6=12345t,col7=12345678n,col8=7200000000t\n')
             self.assertEqual(bytes(buf), exp)
 
         def test_none_symbol(self):

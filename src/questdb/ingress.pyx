@@ -1027,12 +1027,12 @@ cdef class Buffer:
             self._column_str(c_name, value)
         elif isinstance(value, TimestampMicros):
             self._column_ts_micros(c_name, value)
+        elif isinstance(value, TimestampNanos):
+            self._column_ts_nanos(c_name, value)
         elif PyArray_CheckExact(<PyObject *> value):
             self._column_numpy(c_name, value)
         elif isinstance(value, cp_datetime):
             self._column_dt(c_name, value)
-        elif isinstance(value, TimestampNanos):
-            self._column_ts_nanos(c_name, value)
         else:
             valid = ', '.join((
                 'bool',
