@@ -5,6 +5,42 @@ Changelog
 
 =========
 
+3.1.0 (2025-09-30)
+------------------
+
+Features
+~~~~~~~~
+
+From QuestDB 9.1.0 you can use ``CREATE TABLE`` SQL statements with
+``TIMESTAMP_NANO`` column types, and/or configure the database to use nanosecond
+precision designated timestamp columns by setting the
+``line.timestamp.default.column.type=TIMESTAMP_NANO`` config option in
+``server.conf``.
+
+This client release adds support for sending nanoseconds timestamps to the
+server without loss of precision.
+
+The change is backwards compatible with older QuestDB releases and does not
+introduce new APIs, but the sender/buffer's ``.row()`` API can now additionally
+accept nanosecond precision.
+
+.. code-block:: python
+
+    conf = f'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        sender.row(
+            'trade_executions',
+            symbols={
+                'product': 'VOD.L',
+                'parent_order': '65d1ba36-390e-49a2-93e3-a05ef004b5ff'
+                'side': 'buy'},
+            columns={
+                'order_sent': TimestampNanos(1759246702031355012)},
+            at=TimestampNanos(1759246702909423071))
+
+If you're using dataframes, nanosecond timestamps are now also transferred with
+full precision.
+
 3.0.0 (2025-07-07)
 ------------------
 
