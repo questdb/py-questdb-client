@@ -5,16 +5,16 @@ Changelog
 
 =========
 
-3.1.0 (2025-10-02)
+3.1.0 (2025-10-06)
 ------------------
 
 Features
 ~~~~~~~~
 
 From QuestDB 9.1.0 you can use ``CREATE TABLE`` SQL statements with
-``TIMESTAMP_NANO`` column types, and/or configure the database to use nanosecond
+``TIMESTAMP_NS`` column types, and/or configure the database to use nanosecond
 precision designated timestamp columns by setting the
-``line.timestamp.default.column.type=TIMESTAMP_NANO`` config option in
+``line.timestamp.default.column.type=TIMESTAMP_NS`` config option in
 ``server.conf``.
 
 This client release adds support for sending nanoseconds timestamps to the
