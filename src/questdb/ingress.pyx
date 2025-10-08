@@ -1010,6 +1010,8 @@ cdef class Buffer:
     cdef inline void_int _column_dt(
             self, line_sender_column_name c_name, cp_datetime dt) except -1:
         cdef line_sender_error* err = NULL
+        # We limit ourselves to micros, since this is the maxium precision
+        # exposed by the datetime library in Python.
         if not line_sender_buffer_column_ts_micros(
                 self._impl, c_name, datetime_to_micros(dt), &err):
             raise c_err_to_py(err)
