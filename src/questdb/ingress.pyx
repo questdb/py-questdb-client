@@ -1055,15 +1055,20 @@ cdef class Buffer:
             if sender != NULL:
                 may_flush_on_row_complete(self, <Sender><object>sender)
 
-    cdef inline void_int _at_ts(self, TimestampNanos ts) except -1:
+    cdef inline void_int _at_ts_us(self, TimestampMicros ts) except -1:
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_at_micros(self._impl, ts._value, &err):
+            raise c_err_to_py(err)
+
+    cdef inline void_int _at_ts_ns(self, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_at_nanos(self._impl, ts._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _at_dt(self, cp_datetime dt) except -1:
-        cdef int64_t value = datetime_to_nanos(dt)
+        cdef int64_t value = datetime_to_micros(dt)
         cdef line_sender_error* err = NULL
-        if not line_sender_buffer_at_nanos(self._impl, value, &err):
+        if not line_sender_buffer_at_micros(self._impl, value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _at_now(self) except -1:
@@ -1074,8 +1079,10 @@ cdef class Buffer:
     cdef inline void_int _at(self, object ts) except -1:
         if ts is None:
             self._at_now()
+        elif isinstance(ts, TimestampMicros):
+            self._at_ts_us(ts)
         elif isinstance(ts, TimestampNanos):
-            self._at_ts(ts)
+            self._at_ts_ns(ts)
         elif isinstance(ts, cp_datetime):
             self._at_dt(ts)
         else:

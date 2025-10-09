@@ -76,6 +76,23 @@ class TestBases:
     """
 
     class TestBuffer(unittest.TestCase, TimestampEncodingMixin):
+        def _test_buffer_row_ts(self, ts):
+            buffer = qi.Buffer(protocol_version=self.version)
+            buffer.row('trades', columns={'t': ts}, at=ts)
+            ec = self.enc_ts
+            ed = self.enc_des_ts
+            exp = f'trades t={ec(ts)} {ed(ts)}\n'.encode()
+            self.assertEqual(bytes(buffer), exp)
+
+        def test_buffer_row_ts_micros(self):
+            self._test_buffer_row_ts(qi.TimestampMicros(10001))
+
+        def test_buffer_row_ts_nanos(self):
+            self._test_buffer_row_ts(qi.TimestampNanos(10000333))
+
+        def test_buffer_row_ts_datetime(self):
+            self._test_buffer_row_ts(datetime.datetime.now())
+
         def test_buffer_row_at_disallows_none(self):
             with self.assertRaisesRegex(
                     qi.IngressError,
