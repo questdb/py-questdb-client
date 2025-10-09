@@ -5,24 +5,20 @@ Changelog
 
 =========
 
-3.1.0 (2025-10-06)
+4.0.0 (2025-10-09)
 ------------------
 
-Features
-~~~~~~~~
+New Breaking Change Feature
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 From QuestDB 9.1.0 you can use ``CREATE TABLE`` SQL statements with
-``TIMESTAMP_NS`` column types, and/or configure the database to use nanosecond
-precision designated timestamp columns by setting the
-``line.timestamp.default.column.type=TIMESTAMP_NS`` config option in
-``server.conf``.
+``TIMESTAMP_NS`` column types, or rely on column auto-creation.
 
 This client release adds support for sending nanoseconds timestamps to the
 server without loss of precision.
 
-The change is backwards compatible with older QuestDB releases and does not
-introduce new APIs, but the sender/buffer's ``.row()`` API can now additionally
-accept nanosecond precision.
+This release does not introduce new APIs, instead enhancing the sender/buffer's
+``.row()`` API to additionally accept nanosecond precision.
 
 .. code-block:: python
 
@@ -40,6 +36,15 @@ accept nanosecond precision.
 
 If you're using dataframes, nanosecond timestamps are now also transferred with
 full precision.
+
+The change is backwards compatible with older QuestDB releases which will simply
+continue using the ``TIMESTAMP`` column, even when nanoseconds are specified in
+the client.
+
+This is a breaking change because it introduces new breaking timestamp
+`column auto-creation <https://questdb.com/docs/reference/api/ilp/overview/#table-and-column-auto-creation>`
+behaviour. For full details and upgrade advice, see the
+`nanosecond PR on GitHub <https://github.com/questdb/py-questdb-client/pull/113>`_.
 
 3.0.0 (2025-07-07)
 ------------------
