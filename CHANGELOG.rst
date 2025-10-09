@@ -5,13 +5,13 @@ Changelog
 
 =========
 
-4.0.0 (2025-10-09)
+4.0.0 (2025-10-10)
 ------------------
 
 New Breaking Change Feature
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-From QuestDB 9.1.0 you can use ``CREATE TABLE`` SQL statements with
+From QuestDB 9.1.0 onwards you can use ``CREATE TABLE`` SQL statements with
 ``TIMESTAMP_NS`` column types, or rely on column auto-creation.
 
 This client release adds support for sending nanoseconds timestamps to the
@@ -22,7 +22,8 @@ This release does not introduce new APIs, instead enhancing the sender/buffer's
 
 .. code-block:: python
 
-    conf = f'http::addr=localhost:9000;'
+    conf = 'http::addr=localhost:9000;'
+    # or `conf = 'tcp::addr=localhost:9009;protocol_version=2;'`
     with Sender.from_conf(conf) as sender:
         sender.row(
             'trade_executions',
