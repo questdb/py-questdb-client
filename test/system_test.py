@@ -27,7 +27,7 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '8.3.2'
+QUESTDB_VERSION = '9.1.0'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
@@ -211,13 +211,14 @@ class TestWithDatabase(unittest.TestCase):
                 return
 
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        exp_ts_type = 'TIMESTAMP' if self.qdb_plain.version <= (9, 1, 0) else 'TIMESTAMP_NS'
         exp_columns = [
             {'name': 'name_a', 'type': 'SYMBOL'},
             {'name': 'name_b', 'type': 'BOOLEAN'},
             {'name': 'name_c', 'type': 'LONG'},
             {'name': 'name_d', 'type': 'DOUBLE'},
             {'name': 'name_e', 'type': 'VARCHAR'},
-            {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+            {'name': 'timestamp', 'type': exp_ts_type}]
         self.assertEqual(resp['columns'], exp_columns)
 
         exp_dataset = [  # Comparison excludes timestamp column.
