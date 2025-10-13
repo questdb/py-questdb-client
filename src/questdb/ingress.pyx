@@ -142,7 +142,8 @@ class IngressErrorCode(Enum):
     ConfigError = line_sender_error_config_error
     ArrayError = line_sender_error_array_error
     ProtocolVersionError = line_sender_error_protocol_version_error
-    BadDataFrame = <int>line_sender_error_protocol_version_error + 1
+    DecimalError = line_sender_error_invalid_decimal
+    BadDataFrame = <int>line_sender_error_invalid_decimal + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -188,6 +189,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ArrayError
     elif code == line_sender_error_protocol_version_error:
         return IngressErrorCode.ProtocolVersionError
+    elif code == line_sender_error_invalid_decimal:
+        return IngressErrorCode.DecimalError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -1442,6 +1445,9 @@ cdef class Buffer:
             * - ``'datetime64[ns, tz]'``
               - Y
               - ``TIMESTAMP`` **ζ**
+            * - ``'object'`` (``Decimal`` objects)
+              - Y (``NaN``)
+              - ``DECIMAL``
 
         .. note::
 

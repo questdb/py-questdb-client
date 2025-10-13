@@ -93,12 +93,67 @@ We need to extract:
 * 64-bit floats
 * UTF-8 string buffers
 * Nanosecond-precision UTC unix epoch 64-bit signed int timestamps
+* decimals
 
 ```python
 import pandas as pd
 import pyarrow as pa
 import datetime as dt
 ```
+
+### Decimals
+
+Decimals aren't natively supported by pandas nor numpy, they use the `decimal.Decimal` objects.
+
+#### Pandas
+
+Decimals stored as Python objects in an 'object' dtype column.
+
+```python
+>>> df = pd.DataFrame({ 'decimals': [Decimal('123.456')] })
+>>> df.dtypes
+decimals    object
+dtype: object
+```
+
+#### Numpy
+
+Similarly, numpy stores decimals as Python objects.
+
+```python
+>>> arr = numpy.array([Decimal('123.456')])
+>>> arr
+array([Decimal('123.456')], dtype=object)
+```
+
+#### PyArrow
+
+PyArrow provides native decimal support with configurable precision and scale.
+The data is stored in a fixed-width binary format.
+
+```python
+import pyarrow as pa
+from decimal import Decimal
+
+# Create decimal array: decimal128(precision, scale)
+# precision = total digits, scale = digits after decimal point
+decimal_array = pa.array(
+    [Decimal('123.456'), Decimal('789.012'), Decimal('-456.789'), None],
+    type=pa.decimal128(10, 3)  # 10 total digits, 3 after decimal
+)
+
+# Use in DataFrame with ArrowDtype
+df = pd.DataFrame({
+    'prices': pd.array(
+        [Decimal('123.45'), Decimal('678.90'), None],
+        dtype=pd.ArrowDtype(pa.decimal128(10, 2))
+    )
+})
+```
+
+Notes:
+- 4 datatypes: `decimal32`, `decimal64`, `decimal128` and `decimal256`
+- Nulls are supported via Arrow's validity bitmap
 
 ### Booleans
 

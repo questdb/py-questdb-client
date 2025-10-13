@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+from decimal import Decimal
 
 class IngressErrorCode(Enum):
     """Category of Error."""
@@ -57,6 +58,7 @@ class IngressErrorCode(Enum):
     ConfigError = ...
     ArrayError = ...
     ProtocolVersionError = ...
+    DecimalError = ...
     BadDataFrame = ...
 
 
@@ -202,7 +204,7 @@ class SenderTransaction:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray, Decimal]]
         ] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> SenderTransaction:
@@ -381,7 +383,7 @@ class Buffer:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray, Decimal]]
         ] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> Buffer:
@@ -402,7 +404,8 @@ class Buffer:
                     'col5': TimestampMicros(123456789),
                     'col6': datetime(2019, 1, 1, 12, 0, 0),
                     'col7': np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
-                    'col8': None},
+                    'col8': None,
+                    'col9': Decimal('123.456')},
                 at=TimestampNanos(123456789))
 
             # Only symbols specified. Designated timestamp assigned by the db.
@@ -449,6 +452,8 @@ class Buffer:
               - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
+            * - ``Decimal``
+              - `DECIMAL <https://questdb.io/docs/reference/api/ilp/columnset-types#decimal>`_
             * - ``None``
               - *Column is skipped and not serialized.*
 
@@ -701,6 +706,9 @@ class Buffer:
             * - ``'datetime64[ns, tz]'``
               - Y
               - ``TIMESTAMP`` **ζ**
+            * - ``'object'`` (``Decimal`` objects)
+              - Y (``NaN``)
+              - ``DECIMAL``
 
         .. note::
 

@@ -40,8 +40,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_http_not_supported,
         line_sender_error_server_flush_error,
         line_sender_error_config_error,
-        line_sender_error_array_error
-        line_sender_error_protocol_version_error
+        line_sender_error_array_error,
+        line_sender_error_protocol_version_error,
+        line_sender_error_invalid_decimal
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,
@@ -260,6 +261,13 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_buffer* buffer,
         line_sender_column_name name,
         int64_t micros,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_decimal_str(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        line_sender_utf8 value,
         line_sender_error** err_out
         ) noexcept nogil
 
