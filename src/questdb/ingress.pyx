@@ -827,10 +827,10 @@ cdef class Buffer:
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
-        if protocol_version not in (1, 2):
+        if protocol_version not in range(1, 4):
             raise IngressError(
                 IngressErrorCode.ProtocolVersionError,
-                'Invalid protocol version. Supported versions are 1 and 2.')
+                'Invalid protocol version. Supported versions are 1-3.')
         self._cinit_impl(protocol_version, init_buf_size, max_name_len)
 
     cdef inline _cinit_impl(self, line_sender_protocol_version version, size_t init_buf_size, size_t max_name_len):
