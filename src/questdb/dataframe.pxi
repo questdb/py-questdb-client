@@ -2,6 +2,9 @@
 
 from decimal import Decimal
 
+from cpython.bytes cimport PyBytes_AsString
+from .mpdecimal_compat cimport decimal_pyobj_to_binary
+
 # Auto-flush settings.
 # The individual `interval`, `row_count` and `byte_count`
 # settings are set to `-1` when disabled.
@@ -2172,15 +2175,39 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal_pyobj(
     cdef line_sender_error* err = NULL
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
-    cdef line_sender_utf8 value_utf8
+    cdef unsigned int scale = 0
+    cdef object mantissa
+    cdef const uint8_t* mantissa_ptr
+    cdef Py_ssize_t mantissa_len
 
     if _dataframe_is_null_pyobj(cell):
-        pass
-    else:
-        decimal_str = str(<object>cell)
-        str_to_utf8(b, <PyObject *>decimal_str, &value_utf8)
-        if not line_sender_buffer_column_dec_str(ls_buf, col.name, value_utf8, &err):
+        return 0
+
+    # Convert the Python Decimal into (scale, mantissa) bytes; returns None for special values.
+    mantissa = decimal_pyobj_to_binary(
+        cell,
+        &scale,
+        IngressError,
+        IngressErrorCode.BadDataFrame)
+    if mantissa is None:
+        if not line_sender_buffer_column_dec(ls_buf, col.name, 0, NULL, 0, &err):
             raise c_err_to_py(err)
+        return 0
+    
+    if len(mantissa) > 127:
+        raise IngressError(
+            IngressErrorCode.BadDataFrame,
+            'Decimal mantissa too large; maximum supported size is 127 bytes.')
+
+    mantissa_ptr = <const uint8_t*>PyBytes_AsString(<bytes>mantissa)
+    if mantissa_ptr is NULL:
+        raise MemoryError()
+    mantissa_len = PyBytes_GET_SIZE(mantissa)
+
+    if not line_sender_buffer_column_dec(ls_buf, col.name, scale, mantissa_ptr, <size_t>mantissa_len, &err):
+        raise c_err_to_py(err)
+
+    return 0
 
 
 cdef void_int _dataframe_serialize_cell_column_decimal__decimal32_arrow(

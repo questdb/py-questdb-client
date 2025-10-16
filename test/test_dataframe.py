@@ -83,6 +83,27 @@ DF3 = pd.DataFrame({
 
 DECIMAL_BINARY_FORMAT_TYPE = 23
 
+
+def _decode_decimal_payload(line: bytes, prefix: bytes = b'tbl dec=') -> tuple[int, bytes]:
+    """Extract (scale, mantissa-bytes) from a serialized decimal line."""
+    if not line.startswith(prefix):
+        raise AssertionError(f'Unexpected decimal prefix in line: {line!r}')
+    payload = line[len(prefix):]
+    if len(payload) < 4:
+        raise AssertionError(f'Invalid decimal payload length: {len(payload)}')
+    if payload[0] != ord('='):
+        raise AssertionError(f'Unexpected decimal type marker: {payload[0]}')
+    if payload[1] != DECIMAL_BINARY_FORMAT_TYPE:
+        raise AssertionError(f'Unexpected decimal format type: {payload[1]}')
+    scale = payload[2]
+    byte_width = payload[3]
+    mantissa = payload[4:]
+    if len(mantissa) != byte_width:
+        raise AssertionError(
+            f'Expected {byte_width} mantissa bytes, got {len(mantissa)}')
+    return scale, mantissa
+
+
 def _decimal_from_unscaled(unscaled, scale: int):
     if unscaled is None:
         return None
@@ -551,9 +572,35 @@ class TestPandasBase:
                     _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
                 return
             buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
-            self.assertEqual(
-                buf.splitlines(),
-                [b'tbl dec=123.45d', b'tbl dec=-0.5d'])
+            decoded = [_decode_decimal_payload(line) for line in buf.splitlines()]
+            expected = [Decimal('123.45'), Decimal('-0.5')]
+            self.assertEqual(len(decoded), len(expected))
+            for (scale, mantissa), expected_value in zip(decoded, expected):
+                unscaled = int.from_bytes(mantissa, byteorder='big', signed=True)
+                self.assertEqual(Decimal(unscaled).scaleb(-scale), expected_value)
+
+        def test_decimal_pyobj_trailing_zeros_and_integer(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('1.2300'), Decimal('1000')]})
+            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+            decoded = [_decode_decimal_payload(line) for line in buf.splitlines()]
+            expected = [Decimal('1.23'), Decimal('1000')]
+            self.assertEqual(len(decoded), len(expected))
+            for (scale, mantissa), expected_value in zip(decoded, expected):
+                unscaled = int.from_bytes(mantissa, byteorder='big', signed=True)
+                self.assertEqual(Decimal(unscaled).scaleb(-scale), expected_value)
+
+        def test_decimal_pyobj_special_values(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('NaN'), Decimal('Infinity'), Decimal('-Infinity')]})
+            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+            decoded = [_decode_decimal_payload(line) for line in buf.splitlines()]
+            self.assertEqual(len(decoded), 3)
+            for scale, mantissa in decoded:
+                self.assertEqual(scale, 0)
+                self.assertEqual(len(mantissa), 0)
 
         def test_decimal_arrow_columns(self):
             if self.version < 3:
