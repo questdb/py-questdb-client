@@ -42,6 +42,7 @@ except ImportError:
 if pd is not None:
     from test_dataframe import TestPandasProtocolVersionV1
     from test_dataframe import TestPandasProtocolVersionV2
+    from test_dataframe import TestPandasProtocolVersionV3
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
@@ -393,8 +394,8 @@ class TestBases:
                 '0',
                 'automatic',
                 0,
-                3,
-                '3',
+                4,
+                '4',
                 1.5,
                 '1.5',
                 '2.0',
@@ -403,8 +404,8 @@ class TestBases:
             for version in bad_versions:
                 with self.assertRaisesRegex(
                         qi.IngressError,
-                        '"protocol_version" must be None, "auto", 1 or 2'):
-                    self.builder('tcp', '127.0.0.1', 12345, protocol_version='3')
+                        '"protocol_version" must be None, "auto", 1-3'):
+                    self.builder('tcp', '127.0.0.1', 12345, protocol_version=version)
                     self.fail('Should not have reached here - constructing sender')
 
             bad_versions.append(None)
@@ -1443,7 +1444,7 @@ class TestBufferProtocolVersionV1(TestBases.TestBuffer):
 
 
 class TestBufferProtocolVersionV2(TestBases.TestBuffer):
-    name = 'protocol version 1'
+    name = 'protocol version 2'
     version = 2
 
 

@@ -8,6 +8,7 @@ import datetime as dt
 import functools
 import tempfile
 import pathlib
+from decimal import Decimal
 from test_tools import _float_binary_bytes, _array_binary_bytes
 
 BROKEN_TIMEZONES = True
@@ -79,6 +80,23 @@ DF3 = pd.DataFrame({
         pd.Timestamp('20180311'),
         pd.Timestamp('20180312')]}
 )
+
+DECIMAL_BINARY_FORMAT_TYPE = 23
+
+def _decimal_from_unscaled(unscaled, scale: int):
+    if unscaled is None:
+        return None
+    return Decimal(unscaled).scaleb(-scale)
+
+
+def _decimal_binary_payload(unscaled, scale: int, byte_width: int) -> bytes:
+    if unscaled is None:
+        return b'=' + bytes([DECIMAL_BINARY_FORMAT_TYPE, 0, 0])
+    return (
+        b'=' +
+        bytes([DECIMAL_BINARY_FORMAT_TYPE, scale, byte_width]) +
+        int(unscaled).to_bytes(byte_width, byteorder='big', signed=True)
+    )
 
 
 def with_tmp_dir(func):
@@ -524,6 +542,57 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(float('NAN'), self.version == 1) + b'\n' +
                 b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == 1) + b'\n')
 
+        def test_decimal_pyobj_column(self):
+            df = pd.DataFrame({'dec': [Decimal('123.45'), Decimal('-0.5')]})
+            if self.version < 3:
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        'does not support the decimal datatype'):
+                    _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                return
+            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+            self.assertEqual(
+                buf.splitlines(),
+                [b'tbl dec=123.45d', b'tbl dec=-0.5d'])
+
+        def test_decimal_arrow_columns(self):
+            if self.version < 3:
+                arr = pd.array(
+                    [Decimal('1.23')],
+                    dtype=pd.ArrowDtype(pa.decimal128(10, 2)))
+                df = pd.DataFrame({'dec': arr, 'count': [0]})
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        'does not support the decimal datatype'):
+                    _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                return
+
+            arrow_cases = [
+                (pa.decimal32(7, 2), [12345, -6789]),
+                (pa.decimal64(14, 4), [123456789, -987654321]),
+                (pa.decimal128(38, 6), [123456789012345, -987654321012345, None]),
+                (pa.decimal256(76, 10), [1234567890123456789012345, -987654321098765432109876, None]),
+            ]
+
+            for arrow_type, unscaled_values in arrow_cases:
+                values = [_decimal_from_unscaled(unscaled, arrow_type.scale) for unscaled in unscaled_values]
+                arr = pd.array(values, dtype=pd.ArrowDtype(arrow_type))
+                counts = list(range(len(values)))
+                df = pd.DataFrame({'dec': arr, 'count': counts})
+                buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                offset = 0
+                prefix = b'tbl dec='
+                for unscaled, count in zip(unscaled_values, counts):
+                    suffix = f',count={count}i\n'.encode('ascii')
+                    end = buf.index(suffix, offset)
+                    line = buf[offset:end + len(suffix)]
+                    self.assertTrue(line.startswith(prefix), line)
+                    payload = line[len(prefix):len(line) - len(suffix)] if len(suffix) else line[len(prefix):]
+                    expected_payload = _decimal_binary_payload(unscaled, arrow_type.scale, arrow_type.byte_width)
+                    self.assertEqual(payload, expected_payload)
+                    offset = end + len(suffix)
+                self.assertEqual(offset, len(buf))
+
         def test_u8_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -839,12 +908,12 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a=1546300800000000t,b="a"\n' +
-                b'tbl1 a=1546300801000000t,b="b"\n' +
-                b'tbl1 a=1546300802000000t,b="c"\n' +
-                b'tbl1 a=1546300803000000t,b="d"\n' +
-                b'tbl1 a=1546300804000000t,b="e"\n' +
-                b'tbl1 a=1546300805000000t,b="f"\n' +
+                b'tbl1 a=1546300800000000000n,b="a"\n' +
+                b'tbl1 a=1546300801000000000n,b="b"\n' +
+                b'tbl1 a=1546300802000000000n,b="c"\n' +
+                b'tbl1 a=1546300803000000000n,b="d"\n' +
+                b'tbl1 a=1546300804000000000n,b="e"\n' +
+                b'tbl1 a=1546300805000000000n,b="f"\n' +
                 b'tbl1 b="g"\n' +
                 b'tbl1 b="h"\n' +
                 b'tbl1 b="i"\n')
@@ -856,9 +925,9 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a=0t\n' +
-                b'tbl1 a=1000000t\n' +
-                b'tbl1 a=2000000t\n')
+                b'tbl1 a=0n\n' +
+                b'tbl1 a=1000000000n\n' +
+                b'tbl1 a=2000000000n\n')
 
         def test_datetime64_tz_arrow_col(self):
             df = pd.DataFrame({
@@ -878,10 +947,10 @@ class TestPandasBase:
             self.assertEqual(
                 buf,
                 # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-                b'tbl1,b=sym1 a=1546318800000000t\n' +
-                b'tbl1,b=sym2 a=1546318801000000t\n' +
+                b'tbl1,b=sym1 a=1546318800000000000n\n' +
+                b'tbl1,b=sym2 a=1546318801000000000n\n' +
                 b'tbl1,b=sym3\n' +
-                b'tbl1,b=sym4 a=1546318803000000t\n')
+                b'tbl1,b=sym4 a=1546318803000000000n\n')
 
             # Not epoch 0.
             df = pd.DataFrame({
@@ -900,9 +969,9 @@ class TestPandasBase:
             self.assertEqual(
                 buf,
                 # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-                b'tbl1,b=sym1 a=18000000000t\n' +
-                b'tbl1,b=sym2 a=18001000000t\n' +
-                b'tbl1,b=sym3 a=18002000000t\n')
+                b'tbl1,b=sym1 a=18000000000000n\n' +
+                b'tbl1,b=sym2 a=18001000000000n\n' +
+                b'tbl1,b=sym3 a=18002000000000n\n')
 
             # Actual epoch 0.
             df = pd.DataFrame({
@@ -920,9 +989,9 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1,b=sym1 a=0t\n' +
-                b'tbl1,b=sym2 a=1000000t\n' +
-                b'tbl1,b=sym3 a=2000000t\n')
+                b'tbl1,b=sym1 a=0n\n' +
+                b'tbl1,b=sym2 a=1000000000n\n' +
+                b'tbl1,b=sym3 a=2000000000n\n')
 
             df2 = pd.DataFrame({
                 'a': [
@@ -936,8 +1005,8 @@ class TestPandasBase:
             # Mostly, here assert that negative timestamps are allowed.
             self.assertIn(
                 buf,
-                [b'tbl1,b=sym1 a=-2208970800000000t\n',
-                 b'tbl1,b=sym1 a=-2208971040000000t\n'])
+                [b'tbl1,b=sym1 a=-2208970800000000000n\n',
+                 b'tbl1,b=sym1 a=-2208971040000000000n\n'])
 
         def test_datetime64_numpy_at(self):
             df = pd.DataFrame({
@@ -1581,7 +1650,7 @@ class TestPandasBase:
             # need to, so - as for now - we just test that we raise a nice error.
             with self.assertRaisesRegex(
                     qi.IngressError,
-                    r"Unsupported dtype int16\[pyarrow\] for column 'a'.*github"):
+                    r"Unsupported arrow type int16 for column 'a'.*github"):
                 _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
 
         @unittest.skipIf(not fastparquet, 'fastparquet not installed')
@@ -1678,6 +1747,11 @@ class TestPandasProtocolVersionV1(TestPandasBase.TestPandas):
 class TestPandasProtocolVersionV2(TestPandasBase.TestPandas):
     name = 'protocol version 2'
     version = 2
+
+
+class TestPandasProtocolVersionV3(TestPandasBase.TestPandas):
+    name = 'protocol version 3'
+    version = 3
 
 
 if __name__ == '__main__':

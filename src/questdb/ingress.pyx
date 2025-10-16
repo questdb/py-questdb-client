@@ -1942,10 +1942,14 @@ cdef class Sender:
                 if not line_sender_opts_protocol_version(
                         self._opts, line_sender_protocol_version_2, &err):
                     raise c_err_to_py(err)
+            elif (protocol_version == 3) or (protocol_version == '3'):
+                if not line_sender_opts_protocol_version(
+                        self._opts, line_sender_protocol_version_3, &err):
+                    raise c_err_to_py(err)
             else:
                 raise IngressError(
                     IngressErrorCode.ConfigError,
-                    '"protocol_version" must be None, "auto", 1 or 2' +
+                    '"protocol_version" must be None, "auto", 1-3' +
                     f' not {protocol_version!r}')
 
         if auth_timeout is not None:
