@@ -14,7 +14,10 @@ import numpy as np
 
 import patch_path
 
-from test_tools import _float_binary_bytes, _array_binary_bytes
+from test_tools import (
+    _float_binary_bytes,
+    _array_binary_bytes,
+    TimestampEncodingMixin)
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
@@ -72,7 +75,24 @@ class TestBases:
     The discoverable subclasses can drive extra parameters.
     """
 
-    class TestBuffer(unittest.TestCase):
+    class TestBuffer(unittest.TestCase, TimestampEncodingMixin):
+        def _test_buffer_row_ts(self, ts):
+            buffer = qi.Buffer(protocol_version=self.version)
+            buffer.row('trades', columns={'t': ts}, at=ts)
+            ec = self.enc_ts
+            ed = self.enc_des_ts
+            exp = f'trades t={ec(ts)} {ed(ts)}\n'.encode()
+            self.assertEqual(bytes(buffer), exp)
+
+        def test_buffer_row_ts_micros(self):
+            self._test_buffer_row_ts(qi.TimestampMicros(10001))
+
+        def test_buffer_row_ts_nanos(self):
+            self._test_buffer_row_ts(qi.TimestampNanos(10000333))
+
+        def test_buffer_row_ts_datetime(self):
+            self._test_buffer_row_ts(datetime.datetime.now())
+
         def test_buffer_row_at_disallows_none(self):
             with self.assertRaisesRegex(
                     qi.IngressError,
@@ -149,11 +169,14 @@ class TestBases:
                 'col4': 0.5,
                 'col5': 'val',
                 'col6': qi.TimestampMicros(12345),
-                'col7': two_h_after_epoch,
-                'col8': None}, at=qi.ServerTimestamp)
+                'col7': qi.TimestampNanos(12345678),
+                'col8': two_h_after_epoch,
+                'col9': None}, at=qi.ServerTimestamp)
+            et = self.enc_ts_t
+            en = self.enc_ts_n
             exp = (
                 b'tbl1 col1=t,col2=f,col3=-1i,col4' + _float_binary_bytes(0.5, self.version == 1) +
-                b',col5="val",col6=12345t,col7=7200000000t\n')
+                f',col5="val",col6={et(12345)},col7={en(12345678)},col8={et(7200000000)}\n'.encode())
             self.assertEqual(bytes(buf), exp)
 
         def test_none_symbol(self):
@@ -300,7 +323,7 @@ class TestBases:
             with self.assertRaises(OverflowError):
                 buf.row('tbl1', columns={'num': -2 ** 63 - 1}, at=qi.ServerTimestamp)
 
-    class TestSender(unittest.TestCase):
+    class TestSender(unittest.TestCase, TimestampEncodingMixin):
         def test_transaction_row_at_disallows_none(self):
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
@@ -384,8 +407,8 @@ class TestBases:
                 msgs = server.recv()
                 self.assertEqual(msgs, [
                     (b'tab1,t1=val1,t2=val2 '
-                     b'f1=t,f2=12345i,f3' + _float_binary_bytes(10.75) + b',f4="val3" '
-                     b'111222233333'),
+                     b'f1=t,f2=12345i,f3' + _float_binary_bytes(10.75) + b',f4="val3" ' +
+                     self.enc_des_ts_n(111222233333, v=2).encode()),
                     b'tab1,tag3=value\\ 3,tag4=value:4 field5=f'])
                 
         def test_bad_protocol_versions(self):
@@ -513,8 +536,8 @@ class TestBases:
                     columns={'price': '111222233343i', 'qty': 2.5},
                     at=qi.TimestampNanos(111222233343))
                 exp = (
-                    b'line_sender_buffer_example2,id=Hola price="111222233333i",qty' + _float_binary_bytes(3.5) + b' 111222233333\n'
-                    b'line_sender_example,id=Adios price="111222233343i",qty' + _float_binary_bytes(2.5) + b' 111222233343\n')
+                    b'line_sender_buffer_example2,id=Hola price="111222233333i",qty' + _float_binary_bytes(3.5) + b' 111222233333n\n'
+                    b'line_sender_example,id=Adios price="111222233343i",qty' + _float_binary_bytes(2.5) + b' 111222233343n\n')
                 self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 msgs = server.recv()
@@ -755,9 +778,10 @@ class TestBases:
 
         def test_transaction_basic(self):
             ts = qi.TimestampNanos.now()
+            e = lambda ts: self.enc_des_ts(ts, v=2)
             expected = (
-                    f'table_name,sym1=val1 {ts.value}\n' +
-                    f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+                    f'table_name,sym1=val1 {e(ts)}\n' +
+                    f'table_name,sym2=val2 {e(ts)}\n').encode('utf-8')
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with sender.transaction('table_name') as txn:
                     self.assertIs(txn.row(symbols={'sym1': 'val1'}, at=ts), txn)
@@ -768,9 +792,10 @@ class TestBases:
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_transaction_basic_df(self):
             ts = qi.TimestampNanos.now()
+            e = lambda num: self.enc_des_ts(num, v=2)
             expected = (
-                    f'table_name,sym1=val1 {ts.value}\n' +
-                    f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+                    f'table_name,sym1=val1 {e(ts)}\n' +
+                    f'table_name,sym2=val2 {e(ts)}\n').encode('utf-8')
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with sender.transaction('table_name') as txn:
                     df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
@@ -780,9 +805,10 @@ class TestBases:
 
         def test_transaction_no_auto_flush(self):
             ts = qi.TimestampNanos.now()
+            e = lambda ts: self.enc_des_ts(ts, v=2)
             expected = (
-                    f'table_name,sym1=val1 {ts.value}\n' +
-                    f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+                    f'table_name,sym1=val1 {e(ts)}\n' +
+                    f'table_name,sym2=val2 {e(ts)}\n').encode('utf-8')
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=False) as sender:
                 with sender.transaction('table_name') as txn:
                     txn.row(symbols={'sym1': 'val1'}, at=ts)
@@ -793,9 +819,10 @@ class TestBases:
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_transaction_no_auto_flush_df(self):
             ts = qi.TimestampNanos.now()
+            e = lambda ts: self.enc_des_ts(ts, v=2)
             expected = (
-                    f'table_name,sym1=val1 {ts.value}\n' +
-                    f'table_name,sym2=val2 {ts.value}\n').encode('utf-8')
+                    f'table_name,sym1=val1 {e(ts)}\n' +
+                    f'table_name,sym2=val2 {e(ts)}\n').encode('utf-8')
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=False) as sender:
                 with sender.transaction('table_name') as txn:
                     df = pd.DataFrame({'sym1': ['val1', None], 'sym2': [None, 'val2']})
@@ -805,12 +832,13 @@ class TestBases:
 
         def test_transaction_auto_flush_pending_buf(self):
             ts = qi.TimestampNanos.now()
+            e = lambda ts: self.enc_des_ts(ts, v=2)
             expected1 = (
-                    f'tbl1,sym1=val1 {ts.value}\n' +
-                    f'tbl1,sym2=val2 {ts.value}\n').encode('utf-8')
+                    f'tbl1,sym1=val1 {e(ts)}\n' +
+                    f'tbl1,sym2=val2 {e(ts)}\n').encode('utf-8')
             expected2 = (
-                    f'tbl2,sym3=val3 {ts.value}\n' +
-                    f'tbl2,sym4=val4 {ts.value}\n').encode('utf-8')
+                    f'tbl2,sym3=val3 {e(ts)}\n' +
+                    f'tbl2,sym4=val4 {e(ts)}\n').encode('utf-8')
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=True) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
@@ -835,11 +863,12 @@ class TestBases:
 
         def test_transaction_immediate_auto_flush(self):
             ts = qi.TimestampNanos.now()
-            expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
-            expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
+            e = lambda num: self.enc_des_ts(num, v=2)
+            expected1 = f'tbl1,sym1=val1 {e(ts)}\n'.encode('utf-8')
+            expected2 = f'tbl2,sym2=val2 {e(ts)}\n'.encode('utf-8')
             expected3 = (
-                    f'tbl3,sym3=val3 {ts.value}\n' +
-                    f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
+                    f'tbl3,sym3=val3 {e(ts)}\n' +
+                    f'tbl3,sym4=val4 {e(ts)}\n').encode('utf-8')
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush_rows=1) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
@@ -855,11 +884,12 @@ class TestBases:
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_transaction_immediate_auto_flush_df(self):
             ts = qi.TimestampNanos.now()
-            expected1 = f'tbl1,sym1=val1 {ts.value}\n'.encode('utf-8')
-            expected2 = f'tbl2,sym2=val2 {ts.value}\n'.encode('utf-8')
+            e = lambda ts: self.enc_des_ts(ts, v=2)
+            expected1 = f'tbl1,sym1=val1 {e(ts)}\n'.encode('utf-8')
+            expected2 = f'tbl2,sym2=val2 {e(ts)}\n'.encode('utf-8')
             expected3 = (
-                    f'tbl3,sym3=val3 {ts.value}\n' +
-                    f'tbl3,sym4=val4 {ts.value}\n').encode('utf-8')
+                    f'tbl3,sym3=val3 {e(ts)}\n' +
+                    f'tbl3,sym4=val4 {e(ts)}\n').encode('utf-8')
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush_rows=1) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl2', symbols={'sym2': 'val2'}, at=ts), sender)
@@ -1132,8 +1162,9 @@ class TestBases:
                     symbols={'id': 'Hola'},
                     columns={'price': '111222233333i', 'qty': 3.5},
                     at=qi.TimestampNanos(111222233333))
+                e = lambda num: self.enc_des_ts_n(num, v=expected_version)
                 exp = b'line_sender_buffer_old_server2,id=Hola price="111222233333i",qty' + _float_binary_bytes(
-                    3.5, expected_version == 1) + b' 111222233333\n'
+                    3.5, expected_version == 1) + f' {e(111222233333)}\n'.encode()
                 self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 self.assertEqual(len(server.requests), 1)
@@ -1183,7 +1214,7 @@ class TestBases:
                     symbols={'id': 'Hola'},
                     columns={'qty': 3.5},
                     at=qi.TimestampNanos(111222233333))
-                exp = b'line_sender_buffer_tcp_v1,id=Hola qty' + _float_binary_bytes(3.5) + b' 111222233333\n'
+                exp = b'line_sender_buffer_tcp_v1,id=Hola qty' + _float_binary_bytes(3.5) + b' 111222233333n\n'
                 self.assertEqual(bytes(buffer), exp)
                 sender.flush(buffer)
                 self.assertEqual(server.recv()[0] + b'\n', exp)
@@ -1209,7 +1240,7 @@ class TestBases:
                     'array_test',
                     columns={'array': arr},
                     at=qi.TimestampNanos(11111))
-                exp = b'array_test array=' + _array_binary_bytes(arr) + b' 11111\n'
+                exp = b'array_test array=' + _array_binary_bytes(arr) + b' 11111n\n'
                 sender.flush()
                 self.assertEqual(len(server.requests), 1)
                 self.assertEqual(server.requests[0], exp)
@@ -1222,7 +1253,7 @@ class TestBases:
                     'array_test',
                     columns={'array': arr},
                     at=qi.TimestampNanos(11111))
-                exp = b'array_test array=' + _array_binary_bytes(arr) + b' 11111\n'
+                exp = b'array_test array=' + _array_binary_bytes(arr) + b' 11111n\n'
                 self.assertEqual(bytes(sender), exp)
                 sender.flush()
                 self.assertEqual(server.recv()[0] + b'\n', exp)

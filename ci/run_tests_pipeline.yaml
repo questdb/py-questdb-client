@@ -28,7 +28,7 @@ stages:
         pool:
           name: $(poolName)
           vmImage: $(imageName)
-        timeoutInMinutes: 45
+        timeoutInMinutes: 90
         steps:
           - checkout: self
             fetchDepth: 1
@@ -63,18 +63,18 @@ stages:
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
-              JAVA_HOME: $(JAVA_HOME_11_X64)
+              JAVA_HOME: $(JAVA_HOME_17_X64)
           - script: python3 proj.py test 1
             displayName: "Test vs master"
             env:
-              JAVA_HOME: $(JAVA_HOME_11_X64)
+              JAVA_HOME: $(JAVA_HOME_17_X64)
               QDB_REPO_PATH: './questdb'
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:
           name: "Azure Pipelines"
           vmImage: "ubuntu-latest"
-        timeoutInMinutes: 45
+        timeoutInMinutes: 90
         steps:
           - checkout: self
             fetchDepth: 1
@@ -98,7 +98,7 @@ stages:
         pool:
           name: "Azure Pipelines"
           vmImage: "ubuntu-latest"
-        timeoutInMinutes: 45
+        timeoutInMinutes: 90
         steps:
           - checkout: self
             fetchDepth: 1

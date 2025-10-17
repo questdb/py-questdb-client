@@ -8,7 +8,7 @@ import datetime as dt
 import functools
 import tempfile
 import pathlib
-from test_tools import _float_binary_bytes, _array_binary_bytes
+from test_tools import _float_binary_bytes, _array_binary_bytes, TimestampEncodingMixin
 
 BROKEN_TIMEZONES = True
 
@@ -89,7 +89,7 @@ def with_tmp_dir(func):
     return wrapper
 
 class TestPandasBase:
-    class TestPandas(unittest.TestCase):
+    class TestPandas(unittest.TestCase, TimestampEncodingMixin):
         def test_mandatory_at_dataframe(self):
             with self.assertRaisesRegex(TypeError, "needs keyword-only argument at"):
                 _dataframe(self.version, [])
@@ -204,11 +204,12 @@ class TestPandasBase:
                 table_name_col='T',
                 symbols=['A', 'B', 'C', 'D'],
                 at=-1)
-            self.assertEqual(
-                buf,
-                b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == 1) +  b',F=1i 1520640000000000000\n' +
-                b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == 1) + b',F=2i 1520726400000000000\n' +
-                b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == 1) + b',F=3i 1520812800000000000\n')
+            e = self.enc_des_ts_n
+            exp = (
+                b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == 1) +  f',F=1i {e(1520640000000000000)}\n'.encode() +
+                b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == 1) + f',F=2i {e(1520726400000000000)}\n'.encode() +
+                b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == 1) + f',F=3i {e(1520812800000000000)}\n'.encode())
+            self.assertEqual(buf, exp)
 
         def test_basic_with_arrays(self):
             if self.version == 1:
@@ -219,11 +220,12 @@ class TestPandasBase:
                 table_name_col='T',
                 symbols=['A', 'B', 'C', 'D'],
                 at=-1)
-            self.assertEqual(
-                buf,
-                b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == 1) +  b',F=1i,G=' + _array_binary_bytes(np.array([1.0])) + b' 1520640000000000000\n' +
-                b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == 1) + b',F=2i,G=' + _array_binary_bytes(np.array([10.0])) + b' 1520726400000000000\n' +
-                b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == 1) + b',F=3i,G=' + _array_binary_bytes(np.array([100.0])) + b' 1520812800000000000\n')
+            e = self.enc_des_ts_n
+            exp = (
+                b't1,A=a1,B=b1,C=b1,D=a1 E' +  _float_binary_bytes(1.0, self.version == 1) +  b',F=1i,G=' + _array_binary_bytes(np.array([1.0])) + f' {e(1520640000000000000)}\n'.encode() +
+                b't2,A=a2,D=a2 E' + _float_binary_bytes(2.0, self.version == 1) + b',F=2i,G=' + _array_binary_bytes(np.array([10.0])) + f' {e(1520726400000000000)}\n'.encode() +
+                b't1,A=a3,B=b3,C=b3,D=a3 E' + _float_binary_bytes(3.0, self.version == 1) + b',F=3i,G=' + _array_binary_bytes(np.array([100.0])) + f' {e(1520812800000000000)}\n'.encode())
+            self.assertEqual(buf, exp)
 
         def test_named_dataframe(self):
             df = pd.DataFrame({
@@ -276,13 +278,14 @@ class TestPandasBase:
             t6 = qi.TimestampNanos.from_datetime(t2)
             t7 = qi.TimestampNanos.from_datetime(t3)
             timestamps = [t1, t2, t3, t4, t5, t6, t7]
+            e = self.enc_des_ts_n
             for ts in timestamps:
                 buf = _dataframe(self.version, df, table_name='tbl1', at=ts)
                 self.assertEqual(
                     buf,
-                    b'tbl1 a=1i,b="a" 1520640000000000000\n' +
-                    b'tbl1 a=2i,b="b" 1520640000000000000\n' +
-                    b'tbl1 a=3i,b="c" 1520640000000000000\n')
+                    f'tbl1 a=1i,b="a" {e(1520640000000000000)}\n'.encode() +
+                    f'tbl1 a=2i,b="b" {e(1520640000000000000)}\n'.encode() +
+                    f'tbl1 a=3i,b="c" {e(1520640000000000000)}\n'.encode())
 
         @unittest.skipIf(BROKEN_TIMEZONES, 'requires accurate timezones')
         def test_at_neg(self):
@@ -313,13 +316,14 @@ class TestPandasBase:
             e7 = qi.TimestampNanos.from_datetime(e3)
             edge_timestamps = [e1, e2, e3, e4, e5, e6, e7]
 
+            e = self.enc_des_ts_n
             for ts in edge_timestamps:
                 buf = _dataframe(self.version, df, table_name='tbl1', at=ts)
                 self.assertEqual(
                     buf,
-                    b'tbl1 a=1i,b="a" 0\n' +
-                    b'tbl1 a=2i,b="b" 0\n' +
-                    b'tbl1 a=3i,b="c" 0\n')
+                    f'tbl1 a=1i,b="a" {e(0)}\n'.encode() +
+                    f'tbl1 a=2i,b="b" {e(0)}\n'.encode() +
+                    f'tbl1 a=3i,b="c" {e(0)}\n'.encode())
 
         def test_single_at_col(self):
             df = pd.DataFrame({'timestamp': pd.to_datetime(['2023-01-01'])})
@@ -837,17 +841,18 @@ class TestPandasBase:
                     dtype='datetime64[ns]'),
                 'b': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']})
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
-            self.assertEqual(
-                buf,
-                b'tbl1 a=1546300800000000t,b="a"\n' +
-                b'tbl1 a=1546300801000000t,b="b"\n' +
-                b'tbl1 a=1546300802000000t,b="c"\n' +
-                b'tbl1 a=1546300803000000t,b="d"\n' +
-                b'tbl1 a=1546300804000000t,b="e"\n' +
-                b'tbl1 a=1546300805000000t,b="f"\n' +
+            e = self.enc_ts_n
+            exp = (
+                f'tbl1 a={e(1546300800000000000)},b="a"\n'.encode() +
+                f'tbl1 a={e(1546300801000000000)},b="b"\n'.encode() +
+                f'tbl1 a={e(1546300802000000000)},b="c"\n'.encode() +
+                f'tbl1 a={e(1546300803000000000)},b="d"\n'.encode() +
+                f'tbl1 a={e(1546300804000000000)},b="e"\n'.encode() +
+                f'tbl1 a={e(1546300805000000000)},b="f"\n'.encode() +
                 b'tbl1 b="g"\n' +
                 b'tbl1 b="h"\n' +
                 b'tbl1 b="i"\n')
+            self.assertEqual(buf, exp)
 
             df = pd.DataFrame({'a': pd.Series([
                     pd.Timestamp('1970-01-01 00:00:00'),
@@ -856,9 +861,9 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1 a=0t\n' +
-                b'tbl1 a=1000000t\n' +
-                b'tbl1 a=2000000t\n')
+                f'tbl1 a={e(0)}\n'.encode() +
+                f'tbl1 a={e(1000000000)}\n'.encode() +
+                f'tbl1 a={e(2000000000)}\n'.encode())
 
         def test_datetime64_tz_arrow_col(self):
             df = pd.DataFrame({
@@ -875,13 +880,14 @@ class TestPandasBase:
                         hour=0, minute=0, second=3, tz=_TZ)],
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
+            e = self.enc_ts_n
             self.assertEqual(
                 buf,
                 # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-                b'tbl1,b=sym1 a=1546318800000000t\n' +
-                b'tbl1,b=sym2 a=1546318801000000t\n' +
+                f'tbl1,b=sym1 a={e(1546318800000000000)}\n'.encode() +
+                f'tbl1,b=sym2 a={e(1546318801000000000)}\n'.encode() +
                 b'tbl1,b=sym3\n' +
-                b'tbl1,b=sym4 a=1546318803000000t\n')
+                f'tbl1,b=sym4 a={e(1546318803000000000)}\n'.encode())
 
             # Not epoch 0.
             df = pd.DataFrame({
@@ -900,9 +906,9 @@ class TestPandasBase:
             self.assertEqual(
                 buf,
                 # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-                b'tbl1,b=sym1 a=18000000000t\n' +
-                b'tbl1,b=sym2 a=18001000000t\n' +
-                b'tbl1,b=sym3 a=18002000000t\n')
+                f'tbl1,b=sym1 a={e(18000000000000)}\n'.encode() +
+                f'tbl1,b=sym2 a={e(18001000000000)}\n'.encode() +
+                f'tbl1,b=sym3 a={e(18002000000000)}\n'.encode())
 
             # Actual epoch 0.
             df = pd.DataFrame({
@@ -920,9 +926,9 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
-                b'tbl1,b=sym1 a=0t\n' +
-                b'tbl1,b=sym2 a=1000000t\n' +
-                b'tbl1,b=sym3 a=2000000t\n')
+                f'tbl1,b=sym1 a={e(0)}\n'.encode() +
+                f'tbl1,b=sym2 a={e(1000000000)}\n'.encode() +
+                f'tbl1,b=sym3 a={e(2000000000)}\n'.encode())
 
             df2 = pd.DataFrame({
                 'a': [
@@ -936,8 +942,8 @@ class TestPandasBase:
             # Mostly, here assert that negative timestamps are allowed.
             self.assertIn(
                 buf,
-                [b'tbl1,b=sym1 a=-2208970800000000t\n',
-                 b'tbl1,b=sym1 a=-2208971040000000t\n'])
+                [f'tbl1,b=sym1 a={e(-2208970800000000000)}\n'.encode(),
+                 f'tbl1,b=sym1 a={e(-2208971040000000000)}\n'.encode()])
 
         def test_datetime64_numpy_at(self):
             df = pd.DataFrame({
@@ -954,18 +960,18 @@ class TestPandasBase:
                     dtype='datetime64[ns]'),
                 'b': [1, 2, 3, 4, 5, 6, 7, 8, 9]})
             buf = _dataframe(self.version, df, table_name='tbl1', at='a')
-            self.assertEqual(
-                buf,
-                b'tbl1 b=1i 1546300800000000000\n' +
-                b'tbl1 b=2i 1546300801000000000\n' +
-                b'tbl1 b=3i 1546300802000000000\n' +
-                b'tbl1 b=4i 1546300803000000000\n' +
-                b'tbl1 b=5i 1546300804000000000\n' +
-                b'tbl1 b=6i 1546300805000000000\n' +
+            e = self.enc_des_ts_n
+            exp = (
+                f'tbl1 b=1i {e(1546300800000000000)}\n'.encode() +
+                f'tbl1 b=2i {e(1546300801000000000)}\n'.encode() +
+                f'tbl1 b=3i {e(1546300802000000000)}\n'.encode() +
+                f'tbl1 b=4i {e(1546300803000000000)}\n'.encode() +
+                f'tbl1 b=5i {e(1546300804000000000)}\n'.encode() +
+                f'tbl1 b=6i {e(1546300805000000000)}\n'.encode() +
                 b'tbl1 b=7i\n' +
                 b'tbl1 b=8i\n' +
                 b'tbl1 b=9i\n')
-
+            self.assertEqual(buf, exp)
             df = pd.DataFrame({
                 'a': pd.Series([
                         pd.Timestamp('1970-01-01 00:00:00'),
@@ -976,9 +982,9 @@ class TestPandasBase:
             buf = _dataframe(self.version, df, table_name='tbl1', at='a')
             self.assertEqual(
                 buf,
-                b'tbl1 b=1i 0\n' +
-                b'tbl1 b=2i 1000000000\n' +
-                b'tbl1 b=3i 2000000000\n')
+                f'tbl1 b=1i {e(0)}\n'.encode() +
+                f'tbl1 b=2i {e(1000000000)}\n'.encode() +
+                f'tbl1 b=3i {e(2000000000)}\n'.encode())
 
         def test_datetime64_tz_arrow_at(self):
             df = pd.DataFrame({
@@ -995,13 +1001,14 @@ class TestPandasBase:
                         hour=0, minute=0, second=3, tz=_TZ)],
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at='a')
-            self.assertEqual(
-                buf,
+            e = self.enc_des_ts_n
+            exp = (
                 # Note how these are 5hr offset from `test_datetime64_numpy_col`.
-                b'tbl1,b=sym1 1546318800000000000\n' +
-                b'tbl1,b=sym2 1546318801000000000\n' +
+                f'tbl1,b=sym1 {e(1546318800000000000)}\n'.encode() +
+                f'tbl1,b=sym2 {e(1546318801000000000)}\n'.encode() +
                 b'tbl1,b=sym3\n' +
-                b'tbl1,b=sym4 1546318803000000000\n')
+                f'tbl1,b=sym4 {e(1546318803000000000)}\n'.encode())
+            self.assertEqual(buf, exp)
 
             df2 = pd.DataFrame({
                 'a': [
