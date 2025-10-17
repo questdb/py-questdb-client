@@ -65,7 +65,10 @@ skip = [
     # Skip all 32-bit builds, except for Windows.
     # Those builds are named `*win32*` in cibuildwheel.
     "*i686*",
-    "cp314-*"
+
+    # Skip Python 3.14 builds until the dependencies catch up
+    "cp314-*",
+    "cp314t-*"
 ]
 
 # [tool.cibuildwheel.windows]
