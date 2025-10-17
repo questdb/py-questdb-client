@@ -5,7 +5,7 @@ Changelog
 
 =========
 
-4.0.0 (2025-10-10)
+4.0.0 (2025-10-17)
 ------------------
 
 New Breaking Change Feature
