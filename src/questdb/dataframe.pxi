@@ -150,10 +150,10 @@ cdef enum col_source_t:
     col_source_dt64ns_tz_arrow =        502000
     col_source_arr_f64_numpyobj =       601100
     col_source_decimal_pyobj =          701100
-    col_source_decimal32_arrow =        702100
-    col_source_decimal64_arrow =        703100
-    col_source_decimal128_arrow =       704100
-    col_source_decimal256_arrow =       705100
+    col_source_decimal32_arrow =        702000
+    col_source_decimal64_arrow =        703000
+    col_source_decimal128_arrow =       704000
+    col_source_decimal256_arrow =       705000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
