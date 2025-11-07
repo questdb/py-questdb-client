@@ -117,11 +117,12 @@ class Server:
 SETTINGS_WITH_PROTOCOL_VERSION_V1 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITH_PROTOCOL_VERSION_V2 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[2],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITH_PROTOCOL_VERSION_V3 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[3],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
-SETTINGS_WITH_PROTOCOL_VERSION_V1_V2 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1,2],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
+SETTINGS_WITH_PROTOCOL_VERSION_V4 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[4],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
+SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1,2,3],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITHOUT_PROTOCOL_VERSION = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
 
 class HttpServer:
-    def __init__(self, settings=SETTINGS_WITH_PROTOCOL_VERSION_V1_V2, delay_seconds=0):
+    def __init__(self, settings=SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3, delay_seconds=0):
         self.delay_seconds = delay_seconds
         self.requests = []
         self.responses = []
