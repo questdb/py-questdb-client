@@ -2167,30 +2167,21 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
                 &err):
             raise c_err_to_py(err)
 
-
-cdef void_int _dataframe_serialize_cell_column_decimal__decimal_pyobj(
-        line_sender_buffer* ls_buf,
-        qdb_pystr_buf* b,
-        col_t* col) except -1:
+cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_column_name c_name, PyObject* value) except -1:
     cdef line_sender_error* err = NULL
-    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
-    cdef PyObject* cell = access[col.cursor.offset]
     cdef unsigned int scale = 0
     cdef object mantissa
     cdef const uint8_t* mantissa_ptr
     cdef Py_ssize_t mantissa_len
 
-    if _dataframe_is_null_pyobj(cell):
-        return 0
-
     # Convert the Python Decimal into (scale, mantissa) bytes; returns None for special values.
     mantissa = decimal_pyobj_to_binary(
-        cell,
+        value,
         &scale,
         IngressError,
         IngressErrorCode.BadDataFrame)
     if mantissa is None:
-        if not line_sender_buffer_column_dec(ls_buf, col.name, 0, NULL, 0, &err):
+        if not line_sender_buffer_column_dec(buf, c_name, 0, NULL, 0, &err):
             raise c_err_to_py(err)
         return 0
     
@@ -2204,10 +2195,23 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal_pyobj(
         raise MemoryError()
     mantissa_len = PyBytes_GET_SIZE(mantissa)
 
-    if not line_sender_buffer_column_dec(ls_buf, col.name, scale, mantissa_ptr, <size_t>mantissa_len, &err):
+    if not line_sender_buffer_column_dec(buf, c_name, scale, mantissa_ptr, <size_t>mantissa_len, &err):
         raise c_err_to_py(err)
 
     return 0
+
+
+cdef void_int _dataframe_serialize_cell_column_decimal__decimal_pyobj(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col) except -1:
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+
+    if _dataframe_is_null_pyobj(cell):
+        return 0
+
+    return serialize_decimal_py_obj(ls_buf, col.name, cell)
 
 
 cdef void_int _dataframe_serialize_cell_column_decimal__decimal32_arrow(

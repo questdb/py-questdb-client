@@ -944,6 +944,10 @@ cdef class Buffer:
         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
 
+    cdef inline void_int _column_decimal(
+            self, line_sender_column_name c_name, object value) except -1:
+        return serialize_decimal_py_obj(self._impl, c_name, <PyObject*>value)
+
     cdef inline void_int _column_i64(
             self, line_sender_column_name c_name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
@@ -1038,6 +1042,8 @@ cdef class Buffer:
             self._column_numpy(c_name, value)
         elif isinstance(value, cp_datetime):
             self._column_dt(c_name, value)
+        elif isinstance(value, Decimal):
+            self._column_decimal(c_name, value)
         else:
             valid = ', '.join((
                 'bool',
@@ -1192,6 +1198,8 @@ cdef class Buffer:
               - Serialized as ILP type
             * - ``bool``
               - `BOOLEAN <https://questdb.io/docs/reference/api/ilp/columnset-types#boolean>`_
+            * - ``decimal``
+              - `DECIMAL <https://questdb.io/docs/reference/api/ilp/columnset-types#decimal>`_
             * - ``int``
               - `INTEGER <https://questdb.io/docs/reference/api/ilp/columnset-types#integer>`_
             * - ``float``
