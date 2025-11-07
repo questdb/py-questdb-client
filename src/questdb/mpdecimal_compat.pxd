@@ -68,4 +68,4 @@ cdef inline object decimal_pyobj_to_binary(
         unscaled_obj = -unscaled_obj
 
     encoded_scale[0] = <unsigned int>scale_value
-    return unscaled_obj.to_bytes((unscaled_obj.bit_length() + 7) // 8 + 1, byteorder='big', signed=True)
+    return unscaled_obj.to_bytes((unscaled_obj.bit_length() + 8) // 8, byteorder='big', signed=True)
