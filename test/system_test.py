@@ -8,6 +8,8 @@ import unittest
 import uuid
 import pathlib
 import numpy as np
+import decimal
+import pyarrow as pa
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
@@ -27,10 +29,11 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.1.0'
+QUESTDB_VERSION = '9.1.1'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
+FIRST_DECIMAL_RELEASE = (9, 2, 0)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -74,6 +77,10 @@ class TestWithDatabase(unittest.TestCase):
         cls.qdb_auth = QuestDbFixture(
             QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
         cls.qdb_auth.start()
+
+        if os.environ.get('TEST_QUESTDB_INTEGRATION_FORCE_MAX_VERSION') == '1':
+            cls.qdb_plain.version = (999, 999, 999)
+            cls.qdb_auth.version = (999, 999, 999)
 
     @classmethod
     def tearDownClass(cls):
@@ -251,7 +258,6 @@ class TestWithDatabase(unittest.TestCase):
                     'f64_arr2': array2,
                     'f64_arr3': array3},
                 at=qi.ServerTimestamp)
-
         resp = self.qdb_plain.retry_check_table(table_name)
         exp_columns = [{'dim': 3, 'elemType': 'DOUBLE', 'name': 'f64_arr1', 'type': 'ARRAY'},
                        {'dim': 3, 'elemType': 'DOUBLE', 'name': 'f64_arr2', 'type': 'ARRAY'},
@@ -263,6 +269,62 @@ class TestWithDatabase(unittest.TestCase):
                           [[[7.7, 8.8], [5.5, 6.6]], [[3.3, 4.4], [1.1, 2.2]]]]]
         scrubbed_data = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_data, expected_data)
+
+    def test_decimal_py_obj(self):
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        pending = None
+        with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
+            sender.row(
+                table_name,
+                columns={
+                    'dec_col': decimal.Decimal('12345.678')},
+                at=qi.ServerTimestamp)
+            pending = bytes(sender)
+        
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1, log_ctx=pending)
+        exp_columns = [{'name': 'dec_col', 'type': 'DECIMAL(18,3)'},
+                       {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        expected_data = [['12345.678']]
+        scrubbed_data = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed_data, expected_data)
+
+    @unittest.skipIf(not pa, 'pyarrow not installed')
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_decimal_pyarrow(self):
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        df = pd.DataFrame({
+            'prices': pd.array(
+                [
+                    decimal.Decimal('-99999.99'),
+                    decimal.Decimal('-678'),
+                    None
+                ],
+                dtype=pd.ArrowDtype(pa.decimal128(18, 2))
+            )
+        })
+
+        table_name = uuid.uuid4().hex
+        pending = None
+        with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
+            sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
+            pending = bytes(sender)
+
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1, log_ctx=pending)
+        exp_columns = [{'name': 'prices', 'type': 'DECIMAL(18,3)'},
+                       {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        expected_data = [
+            ['-99999.990'],
+            ['-678.000'],
+            [None]
+        ]
+        scrubbed_data = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed_data, expected_data)
+        
 
 if __name__ == '__main__':
     unittest.main()
