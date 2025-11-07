@@ -434,6 +434,7 @@ class TestBases:
             bad_versions.append(None)
             for version in bad_versions:
                 with self.assertRaises(Exception) as capture:
+                    print("Testing bad protocol version:", version)
                     qi.Buffer(protocol_version=version)
                     self.fail('Should not have reached here - constructing buffer')
 
