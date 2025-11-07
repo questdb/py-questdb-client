@@ -212,9 +212,7 @@ class TestWithDatabase(unittest.TestCase):
 
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
 
-        # Re-enable the line below once https://github.com/questdb/questdb/pull/6220 is merged
-        # exp_ts_type = 'TIMESTAMP' if self.qdb_plain.version <= (9, 1, 0) else 'TIMESTAMP_NS'
-        exp_ts_type = 'TIMESTAMP'
+        exp_ts_type = 'TIMESTAMP' if self.qdb_plain.version <= (9, 1, 0) else 'TIMESTAMP_NS'
 
         exp_columns = [
             {'name': 'name_a', 'type': 'SYMBOL'},
