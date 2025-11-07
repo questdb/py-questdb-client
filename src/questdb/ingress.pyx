@@ -827,6 +827,7 @@ cdef class Buffer:
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
+        print('Buffer protocol_version:', protocol_version)
         if protocol_version not in range(1, 4):
             raise IngressError(
                 IngressErrorCode.ProtocolVersionError,

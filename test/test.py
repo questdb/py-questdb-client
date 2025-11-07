@@ -436,6 +436,7 @@ class TestBases:
                 with self.assertRaises(Exception) as capture:
                     print("Testing bad protocol version:", version)
                     qi.Buffer(protocol_version=version)
+                    print("Should not have reached here - constructed buffer", version)
                     self.fail('Should not have reached here - constructing buffer')
 
                 self.assertIn(type(capture.exception), (qi.IngressError, TypeError))
