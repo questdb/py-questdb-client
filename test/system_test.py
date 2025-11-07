@@ -9,7 +9,6 @@ import uuid
 import pathlib
 import numpy as np
 import decimal
-import pyarrow as pa
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
@@ -24,6 +23,7 @@ try:
     import pyarrow
 except ImportError:
     pd = None
+    pyarrow = None
 
 
 import questdb.ingress as qi
@@ -219,7 +219,7 @@ class TestWithDatabase(unittest.TestCase):
 
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
 
-        exp_ts_type = 'TIMESTAMP' if self.qdb_plain.version <= (9, 1, 0) else 'TIMESTAMP_NS'
+        exp_ts_type = 'TIMESTAMP' if self.qdb_plain.version < (9, 1, 0) else 'TIMESTAMP_NS'
 
         exp_columns = [
             {'name': 'name_a', 'type': 'SYMBOL'},
@@ -291,7 +291,7 @@ class TestWithDatabase(unittest.TestCase):
         scrubbed_data = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_data, expected_data)
 
-    @unittest.skipIf(not pa, 'pyarrow not installed')
+    @unittest.skipIf(not pyarrow, 'pyarrow not installed')
     @unittest.skipIf(not pd, 'pandas not installed')
     def test_decimal_pyarrow(self):
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
@@ -303,7 +303,7 @@ class TestWithDatabase(unittest.TestCase):
                     decimal.Decimal('-678'),
                     None
                 ],
-                dtype=pd.ArrowDtype(pa.decimal128(18, 2))
+                dtype=pd.ArrowDtype(pyarrow.decimal128(18, 2))
             )
         })
 
