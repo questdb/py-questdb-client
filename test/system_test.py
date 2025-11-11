@@ -273,7 +273,10 @@ class TestWithDatabase(unittest.TestCase):
     def test_decimal_py_obj(self):
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+
         table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(f'CREATE TABLE {table_name} (prices DECIMAL(18,3), timestamp TIMESTAMP) TIMESTAMP(timestamp) PARTITION BY DAY;')
+
         pending = None
         with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
             sender.row(
@@ -296,6 +299,10 @@ class TestWithDatabase(unittest.TestCase):
     def test_decimal_pyarrow(self):
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(f'CREATE TABLE {table_name} (prices DECIMAL(18,3), timestamp TIMESTAMP) TIMESTAMP(timestamp) PARTITION BY DAY;')
+
         df = pd.DataFrame({
             'prices': pd.array(
                 [
@@ -307,7 +314,6 @@ class TestWithDatabase(unittest.TestCase):
             )
         })
 
-        table_name = uuid.uuid4().hex
         pending = None
         with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
             sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
