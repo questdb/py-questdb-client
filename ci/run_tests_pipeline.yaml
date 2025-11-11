@@ -60,17 +60,6 @@ stages:
               jdkVersionOption: "1.17"
               options: "-DskipTests -Pbuild-web-console"
             condition: eq(variables.vsQuestDbMaster, true)
-          - script: |
-              git clone --depth 1 --branch rd_decimal_integration https://github.com/questdb/questdb.git questdb-decimal
-            displayName: git clone questdb decimal branch
-            condition: eq(variables.vsQuestDbMaster, true)
-          - task: Maven@3
-            displayName: "Compile QuestDB decimal branch"
-            inputs:
-              mavenPOMFile: "questdb-decimal/pom.xml"
-              jdkVersionOption: "1.17"
-              options: "-DskipTests -Pbuild-web-console"
-            condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
@@ -86,7 +75,7 @@ stages:
             displayName: "Test vs decimal"
             env:
               JAVA_HOME: $(JAVA_HOME_17_X64)
-              QDB_REPO_PATH: "./questdb-decimal"
+              QDB_REPO_PATH: "./questdb"
               TEST_QUESTDB_INTEGRATION_FORCE_MAX_VERSION: "1"
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
