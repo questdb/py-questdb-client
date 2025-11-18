@@ -127,7 +127,7 @@ stages:
             inputs: {pathtoPublish: 'wheelhouse'}
 
       - job: macos_x64
-        pool: {vmImage: 'macOS-13'}
+        pool: {vmImage: 'macOS-14'}
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
