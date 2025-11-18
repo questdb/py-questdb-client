@@ -70,14 +70,6 @@ stages:
               JAVA_HOME: $(JAVA_HOME_17_X64)
               QDB_REPO_PATH: "./questdb"
             condition: eq(variables.vsQuestDbMaster, true)
-          # Remove before merging decimal support PR
-          - script: python3 proj.py test 1
-            displayName: "Test vs decimal"
-            env:
-              JAVA_HOME: $(JAVA_HOME_17_X64)
-              QDB_REPO_PATH: "./questdb"
-              TEST_QUESTDB_INTEGRATION_FORCE_MAX_VERSION: "1"
-            condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:
           name: "Azure Pipelines"
