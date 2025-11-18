@@ -78,10 +78,6 @@ class TestWithDatabase(unittest.TestCase):
             QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
         cls.qdb_auth.start()
 
-        if os.environ.get('TEST_QUESTDB_INTEGRATION_FORCE_MAX_VERSION') == '1':
-            cls.qdb_plain.version = (999, 999, 999)
-            cls.qdb_auth.version = (999, 999, 999)
-
     @classmethod
     def tearDownClass(cls):
         if cls.qdb_auth:
