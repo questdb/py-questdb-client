@@ -1,5 +1,4 @@
-#ifndef MPDECIMAL_COMPAT_H
-#define MPDECIMAL_COMPAT_H
+#pragma once
 
 #include <Python.h>
 #include <stdint.h>
@@ -52,5 +51,3 @@ enum {
 };
 
 static const mpd_uint_t MPD_RADIX = MPD_RADIX_CONST;
-
-#endif /* MPDECIMAL_COMPAT_H */
