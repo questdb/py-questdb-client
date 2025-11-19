@@ -29,7 +29,7 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.1.1'
+QUESTDB_VERSION = '9.2.0'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
