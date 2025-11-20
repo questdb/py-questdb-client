@@ -78,6 +78,7 @@ def ingress_extension():
         for loc, name in (
             (questdb_client_lib_dir, 'questdb_client'),
             (rpyutils_lib_dir, 'rpyutils'))]
+    depends = list(extra_objects)
 
     return Extension(
         "questdb.ingress",
@@ -91,6 +92,7 @@ def ingress_extension():
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
         extra_objects=extra_objects,
+        depends=depends,
         define_macros = [
             ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')
         ]
