@@ -2170,32 +2170,19 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
 cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_column_name c_name, PyObject* value) except -1:
     cdef line_sender_error* err = NULL
     cdef unsigned int scale = 0
-    cdef object mantissa
-    cdef const uint8_t* mantissa_ptr
-    cdef Py_ssize_t mantissa_len
+    cdef uint8_t[32] unscaled
+    cdef int unscaled_length
 
-    # Convert the Python Decimal into (scale, mantissa) bytes; returns None for special values.
-    mantissa = decimal_pyobj_to_binary(
+    unscaled_length = decimal_pyobj_to_binary(
         value,
+        unscaled,
         &scale,
         IngressError,
         IngressErrorCode.BadDataFrame)
-    if mantissa is None:
-        if not line_sender_buffer_column_dec(buf, c_name, 0, NULL, 0, &err):
-            raise c_err_to_py(err)
+    if unscaled_length == 0:
         return 0
-    
-    if len(mantissa) > 127:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
-            'Decimal mantissa too large; maximum supported size is 127 bytes.')
 
-    mantissa_ptr = <const uint8_t*>PyBytes_AsString(<bytes>mantissa)
-    if mantissa_ptr is NULL:
-        raise MemoryError()
-    mantissa_len = PyBytes_GET_SIZE(mantissa)
-
-    if not line_sender_buffer_column_dec(buf, c_name, scale, mantissa_ptr, <size_t>mantissa_len, &err):
+    if not line_sender_buffer_column_dec(buf, c_name, scale, unscaled, <size_t>unscaled_length, &err):
         raise c_err_to_py(err)
 
     return 0

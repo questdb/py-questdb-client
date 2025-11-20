@@ -112,6 +112,17 @@ uint32_t qdb_active_senders_track_established(int* warn);  // bint* warn
 
 void qdb_active_senders_track_closed(uint32_t slot);
 
+/**
+ * Converts an mpdecimal limb array to its big-endian two's complement bytes.
+ */
+bool qdb_mpd_to_bigendian(const size_t *limbs,
+                          size_t limbs_len,
+                          size_t radix,
+                          uint32_t exp,
+                          bool negative,
+                          uint8_t *out,
+                          size_t *out_size);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif // __cplusplus

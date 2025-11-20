@@ -103,6 +103,19 @@ def _decode_decimal_payload(line: bytes, prefix: bytes = b'tbl dec=') -> tuple[i
             f'Expected {byte_width} mantissa bytes, got {len(mantissa)}')
     return scale, mantissa
 
+def _unwrap_decimal(decimal: Decimal):
+    (sign, digits, exponent) = decimal.as_tuple()
+    unscaled = 0
+    scale = 0
+    for digit in digits:
+        unscaled  = unscaled * 10 + digit
+    if exponent > 0:
+        unscaled = unscaled * pow(10, exponent)
+    else:
+        scale = -exponent
+    if sign == 1:
+        unscaled = -unscaled
+    return scale, unscaled
 
 def _decimal_from_unscaled(unscaled, scale: int):
     if unscaled is None:
@@ -568,20 +581,38 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == 1) + b'\n')
 
         def test_decimal_pyobj_column(self):
-            df = pd.DataFrame({'dec': [Decimal('123.45'), Decimal('-0.5')]})
+            decimals = [
+                Decimal('123.45'),
+                Decimal('-0.5'),
+                Decimal('0'),
+                Decimal('57896044618658097711785492504343953926634992332820282019728792003956564819967'), # Maximum value: 2²⁵⁵-1
+                Decimal('-57896044618658097711785492504343953926634992332820282019728792003956564819968'), # Minimum value: -2²⁵⁵
+                Decimal('170141183460469231731687303715884105727'), # 2¹²⁷-1
+                Decimal('-170141183460469231731687303715884105728'), # -2¹²⁷
+                Decimal('9223372036854775807'), # 2⁶³-1
+                Decimal('-9223372036854775808'), # -2⁶³
+                Decimal('2147483647'), # 2³¹-1
+                Decimal('-2147483648'), # -2³¹
+            ]
             if self.version < 3:
                 with self.assertRaisesRegex(
                         qi.IngressError,
                         'does not support the decimal datatype'):
-                    _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                    _dataframe(self.version, pd.DataFrame({'dec': [Decimal('123')]}), table_name='tbl', at=qi.ServerTimestamp)
                 return
-            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
-            decoded = [_decode_decimal_payload(line) for line in buf.splitlines()]
-            expected = [Decimal('123.45'), Decimal('-0.5')]
-            self.assertEqual(len(decoded), len(expected))
-            for (scale, mantissa), expected_value in zip(decoded, expected):
-                unscaled = int.from_bytes(mantissa, byteorder='big', signed=True)
-                self.assertEqual(Decimal(unscaled).scaleb(-scale), expected_value)
+            for decimal in decimals:
+                df = pd.DataFrame({'dec': [decimal]})
+                try:
+                    buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                    (scale, mantissa) = _decode_decimal_payload(buf.splitlines()[0])
+                    unscaled = int.from_bytes(mantissa, byteorder='big', signed=True)
+
+                    (expected_scale, expected_unscaled) = _unwrap_decimal(decimal)
+
+                    self.assertEqual(scale, expected_scale)
+                    self.assertEqual(unscaled, expected_unscaled)
+                except Exception as ex:
+                    self.fail(f'Failed to serialize {decimal}: {ex}')
 
         def test_decimal_pyobj_trailing_zeros_and_integer(self):
             if self.version < 3:
@@ -599,12 +630,11 @@ class TestPandasBase:
             if self.version < 3:
                 self.skipTest('decimal datatype requires ILP version 3 or later')
             df = pd.DataFrame({'dec': [Decimal('NaN'), Decimal('Infinity'), Decimal('-Infinity')]})
-            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
-            decoded = [_decode_decimal_payload(line) for line in buf.splitlines()]
-            self.assertEqual(len(decoded), 3)
-            for scale, mantissa in decoded:
-                self.assertEqual(scale, 0)
-                self.assertEqual(len(mantissa), 0)
+            try:
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                self.fail("special values shouldn't be encoded")
+            except qi.IngressError:
+                pass
 
         def test_decimal_arrow_columns(self):
             if self.version < 3:

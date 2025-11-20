@@ -1,6 +1,7 @@
-from libc.stdint cimport uint8_t
+from libc.stdint cimport uint8_t, uint32_t
 from libc.stddef cimport size_t
 from cpython.object cimport PyObject
+from .rpyutils cimport *
 
 # Mirror the subset of libmpdec types that CPython embeds in Decimal objects.
 ctypedef size_t mpd_uint_t
@@ -21,51 +22,46 @@ cdef extern from "mpdecimal_compat.h":
     const uint8_t MPD_FLAG_SIGN
     const uint8_t MPD_FLAG_SPECIAL_MASK
 
-cdef inline object decimal_pyobj_to_binary(
+# Converts a decimal.Decimal python object to it's two's complement representation
+# Returns 0 if no value has to be written, otherwise it returns the number of bytes to be sent
+# from the unscaled array (which needs to be at least 32 bytes large).
+cdef inline int decimal_pyobj_to_binary(
         PyObject* cell,
-        unsigned int* encoded_scale,
+        unsigned char* unscaled,
+        unsigned int* scale,
         object ingress_error_cls,
-        object bad_dataframe_code) except *:
+        object bad_dataframe_code) noexcept:
     """Convert a Python ``Decimal`` to ILP binary components."""
     cdef mpd_t* mpd
     cdef mpd_uint_t* digits_ptr
     cdef unsigned long long flag_low
-    cdef Py_ssize_t idx
-    cdef Py_ssize_t scale_value
-    cdef object unscaled_obj
+    cdef uint32_t exp
+    cdef Py_ssize_t out_size
 
     mpd = decimal_mpd(cell)
 
     flag_low = mpd.flags & 0xFF
     if (flag_low & MPD_FLAG_SPECIAL_MASK) != 0:
-        # NaN/Inf values propagate as ILP nulls (caller will emit empty payload).
-        encoded_scale[0] = 0
-        return None
+        # NaN/Nulls don't have to be propagated, they end up
+        return 0
 
     digits_ptr = decimal_digits(cell)
 
-    if mpd.len <= 0:
-        unscaled_obj = 0
-    else:
-        unscaled_obj = digits_ptr[mpd.len - 1]
-        for idx in range(mpd.len - 2, -1, -1):
-            # Each limb stores MPD_RADIX (10^9 or 10^19) digits in little-endian order.
-            unscaled_obj = unscaled_obj * MPD_RADIX + digits_ptr[idx]
-
     if mpd.exp >= 0:
         # Decimal ILP does not support negative scales; adjust the unscaled value instead.
-        if mpd.exp != 0:
-            unscaled_obj = unscaled_obj * (10 ** mpd.exp)
-        scale_value = 0
+        exp = mpd.exp
+        scale[0] = 0
     else:
-        scale_value = -mpd.exp
-        if scale_value > 76:
+        exp = 0
+        if -mpd.exp > 76:
             raise ingress_error_cls(
                 bad_dataframe_code,
-                f'Decimal scale {scale_value} exceeds the maximum supported scale of 76')
+                f'Decimal scale {-mpd.exp} exceeds the maximum supported scale of 76')
+        scale[0] = -mpd.exp
 
-    if (flag_low & MPD_FLAG_SIGN) != 0:
-        unscaled_obj = -unscaled_obj
+    if not qdb_mpd_to_bigendian(digits_ptr, mpd.len, MPD_RADIX, exp, (flag_low & MPD_FLAG_SIGN) != 0, unscaled, <size_t *>&out_size):
+        raise ingress_error_cls(
+            bad_dataframe_code,
+            'Decimal mantissa too large; maximum supported size is 32 bytes.')
 
-    encoded_scale[0] = <unsigned int>scale_value
-    return unscaled_obj.to_bytes((unscaled_obj.bit_length() + 8) // 8, byteorder='big', signed=True)
+    return out_size
