@@ -56,13 +56,13 @@ cdef bint should_auto_flush(
 
     return False
 
-cdef inline uint32_t bswap32(uint32_t value):
+cdef inline uint32_t bswap32(uint32_t value) noexcept:
     return (((value & 0xFF000000u) >> 24u) |
       ((value & 0x00FF0000u) >>  8u) |
       ((value & 0x0000FF00u) <<  8u) |
       ((value & 0x000000FFu) << 24u))
 
-cdef inline uint64_t bswap64(uint64_t value):
+cdef inline uint64_t bswap64(uint64_t value) noexcept:
     return (((value & 0xFF00000000000000u) >> 56u) |
       ((value & 0x00FF000000000000u) >> 40u) |
       ((value & 0x0000FF0000000000u) >> 24u) |
@@ -150,10 +150,10 @@ cdef enum col_source_t:
     col_source_dt64ns_tz_arrow =        502000
     col_source_arr_f64_numpyobj =       601100
     col_source_decimal_pyobj =          701100
-    col_source_decimal32_arrow =        702100
-    col_source_decimal64_arrow =        703100
-    col_source_decimal128_arrow =       704100
-    col_source_decimal256_arrow =       705100
+    col_source_decimal32_arrow =        702000
+    col_source_decimal64_arrow =        703000
+    col_source_decimal128_arrow =       704000
+    col_source_decimal256_arrow =       705000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -2222,16 +2222,11 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal32_arrow(
     cdef line_sender_error* err = NULL
     cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
     cdef uint32_t value
-    if not valid:
-        if not line_sender_buffer_column_dec(ls_buf, col.name, 0, NULL, 0, &err):
-            _ensure_has_gil(gs)
-            raise c_err_to_py(err)
-    else:
+    if valid:
         value = bswap32((<uint32_t*>col.cursor.chunk.buffers[1])[col.cursor.offset])
         if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> &value, sizeof(value), &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
-    return 0
 
 cdef void_int _dataframe_serialize_cell_column_decimal__decimal64_arrow(
         line_sender_buffer* ls_buf,
@@ -2241,16 +2236,11 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal64_arrow(
     cdef line_sender_error* err = NULL
     cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
     cdef uint64_t value
-    if not valid:
-        if not line_sender_buffer_column_dec(ls_buf, col.name, 0, NULL, 0, &err):
-            _ensure_has_gil(gs)
-            raise c_err_to_py(err)
-    else:
+    if valid:
         value = bswap64((<uint64_t*>col.cursor.chunk.buffers[1])[col.cursor.offset])
         if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> &value, sizeof(value), &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
-    return 0
 
 cdef void_int _dataframe_serialize_cell_column_decimal__decimal128_arrow(
         line_sender_buffer* ls_buf,
@@ -2261,18 +2251,13 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal128_arrow(
     cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
     cdef uint64_t *cell
     cdef uint64_t[2] value
-    if not valid:
-        if not line_sender_buffer_column_dec(ls_buf, col.name, 0, NULL, 0, &err):
-            _ensure_has_gil(gs)
-            raise c_err_to_py(err)
-    else:
+    if valid:
         cell = &(<uint64_t*>col.cursor.chunk.buffers[1])[col.cursor.offset << 1]
         value[0] = bswap64(cell[1])
         value[1] = bswap64(cell[0])
         if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> value, 16, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
-    return 0
 
 cdef void_int _dataframe_serialize_cell_column_decimal__decimal256_arrow(
         line_sender_buffer* ls_buf,
@@ -2283,11 +2268,7 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal256_arrow(
     cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
     cdef uint64_t *cell
     cdef uint64_t[4] value
-    if not valid:
-        if not line_sender_buffer_column_dec(ls_buf, col.name, 0, NULL, 0, &err):
-            _ensure_has_gil(gs)
-            raise c_err_to_py(err)
-    else:
+    if valid:
         cell = &(<uint64_t*>col.cursor.chunk.buffers[1])[col.cursor.offset << 2]
         value[0] = bswap64(cell[3])
         value[1] = bswap64(cell[2])
@@ -2296,8 +2277,6 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal256_arrow(
         if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> value, 32, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
-    return 0
-
 
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,

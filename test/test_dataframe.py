@@ -635,6 +635,14 @@ class TestPandasBase:
                 prefix = b'tbl dec='
                 for unscaled, count in zip(unscaled_values, counts):
                     suffix = f',count={count}i\n'.encode('ascii')
+                    if unscaled is None:
+                        # If the decimal is invalid, we shouldn't have encoded it
+                        try:
+                            buf.index(suffix, offset)
+                            self.fail("There shouldn't be any other fields")
+                        except ValueError:
+                            continue
+                
                     end = buf.index(suffix, offset)
                     line = buf[offset:end + len(suffix)]
                     self.assertTrue(line.startswith(prefix), line)
@@ -642,7 +650,6 @@ class TestPandasBase:
                     expected_payload = _decimal_binary_payload(unscaled, arrow_type.scale, arrow_type.byte_width)
                     self.assertEqual(payload, expected_payload)
                     offset = end + len(suffix)
-                self.assertEqual(offset, len(buf))
 
         def test_u8_arrow_col(self):
             df = pd.DataFrame({
