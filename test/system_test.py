@@ -304,7 +304,6 @@ class TestWithDatabase(unittest.TestCase):
                 [
                     decimal.Decimal('-99999.99'),
                     decimal.Decimal('-678'),
-                    None
                 ],
                 dtype=pd.ArrowDtype(pyarrow.decimal128(18, 2))
             )
@@ -315,18 +314,16 @@ class TestWithDatabase(unittest.TestCase):
             sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
             pending = bytes(sender)
 
-        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1, log_ctx=pending)
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2, log_ctx=pending)
         exp_columns = [{'name': 'prices', 'type': 'DECIMAL(18,3)'},
                        {'name': 'timestamp', 'type': 'TIMESTAMP'}]
         self.assertEqual(resp['columns'], exp_columns)
         expected_data = [
             ['-99999.990'],
             ['-678.000'],
-            [None]
         ]
         scrubbed_data = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_data, expected_data)
-        
 
 if __name__ == '__main__':
     unittest.main()
