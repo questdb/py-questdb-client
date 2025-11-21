@@ -636,6 +636,26 @@ class TestPandasBase:
             except qi.IngressError:
                 pass
 
+        def test_decimal_pyobj_overflow(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('57896044618658097711785492504343953926634992332820282019728792003956564819968')]})
+
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    '.*Decimal mantissa too large; maximum supported size is 32 bytes.*'):
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+
+        def test_decimal_pyobj_scale_too_big(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('1.2e-100')]})
+
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    '.*exceeds the maximum supported scale of 76.*'):
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+
         def test_decimal_arrow_columns(self):
             if self.version < 3:
                 arr = pd.array(
