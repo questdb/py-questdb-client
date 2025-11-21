@@ -2533,7 +2533,7 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]]=None,
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]]=None,
             at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
