@@ -1051,7 +1051,7 @@ cdef class Buffer:
                 'float',
                 'str',
                 'TimestampMicros',
-                'datetime.datetime'
+                'datetime.datetime',
                 'numpy.ndarray'))
             raise TypeError(
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
