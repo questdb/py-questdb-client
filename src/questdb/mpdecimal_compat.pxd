@@ -42,7 +42,7 @@ cdef inline int decimal_pyobj_to_binary(
 
     flag_low = mpd.flags & 0xFF
     if (flag_low & MPD_FLAG_SPECIAL_MASK) != 0:
-        # NaN/Nulls don't have to be propagated, they end up
+        # NaN and Infinity are not propagated to the server
         return 0
 
     digits_ptr = decimal_digits(cell)
