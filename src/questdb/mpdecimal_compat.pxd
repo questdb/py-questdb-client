@@ -30,13 +30,13 @@ cdef inline int decimal_pyobj_to_binary(
         unsigned char* unscaled,
         unsigned int* scale,
         object ingress_error_cls,
-        object bad_dataframe_code) noexcept:
+        object bad_dataframe_code) except -1:
     """Convert a Python ``Decimal`` to ILP binary components."""
     cdef mpd_t* mpd
     cdef mpd_uint_t* digits_ptr
     cdef unsigned long long flag_low
     cdef uint32_t exp
-    cdef Py_ssize_t out_size
+    cdef size_t out_size
 
     mpd = decimal_mpd(cell)
 
@@ -59,9 +59,9 @@ cdef inline int decimal_pyobj_to_binary(
                 f'Decimal scale {-mpd.exp} exceeds the maximum supported scale of 76')
         scale[0] = -mpd.exp
 
-    if not qdb_mpd_to_bigendian(digits_ptr, mpd.len, MPD_RADIX, exp, (flag_low & MPD_FLAG_SIGN) != 0, unscaled, <size_t *>&out_size):
+    if not qdb_mpd_to_bigendian(digits_ptr, mpd.len, MPD_RADIX, exp, (flag_low & MPD_FLAG_SIGN) != 0, unscaled, &out_size):
         raise ingress_error_cls(
             bad_dataframe_code,
             'Decimal mantissa too large; maximum supported size is 32 bytes.')
 
-    return out_size
+    return <int>out_size
