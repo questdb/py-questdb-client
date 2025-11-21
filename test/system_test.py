@@ -8,6 +8,7 @@ import unittest
 import uuid
 import pathlib
 import numpy as np
+import decimal
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
@@ -22,15 +23,17 @@ try:
     import pyarrow
 except ImportError:
     pd = None
+    pyarrow = None
 
 
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.1.0'
+QUESTDB_VERSION = '9.2.0'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
+FIRST_DECIMAL_RELEASE = (9, 2, 0)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -212,9 +215,7 @@ class TestWithDatabase(unittest.TestCase):
 
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
 
-        # Re-enable the line below once https://github.com/questdb/questdb/pull/6220 is merged
-        # exp_ts_type = 'TIMESTAMP' if self.qdb_plain.version <= (9, 1, 0) else 'TIMESTAMP_NS'
-        exp_ts_type = 'TIMESTAMP'
+        exp_ts_type = 'TIMESTAMP' if self.qdb_plain.version < (9, 1, 0) else 'TIMESTAMP_NS'
 
         exp_columns = [
             {'name': 'name_a', 'type': 'SYMBOL'},
@@ -253,7 +254,6 @@ class TestWithDatabase(unittest.TestCase):
                     'f64_arr2': array2,
                     'f64_arr3': array3},
                 at=qi.ServerTimestamp)
-
         resp = self.qdb_plain.retry_check_table(table_name)
         exp_columns = [{'dim': 3, 'elemType': 'DOUBLE', 'name': 'f64_arr1', 'type': 'ARRAY'},
                        {'dim': 3, 'elemType': 'DOUBLE', 'name': 'f64_arr2', 'type': 'ARRAY'},
@@ -263,6 +263,65 @@ class TestWithDatabase(unittest.TestCase):
         expected_data = [[[[[1.1, 2.2], [3.3, 4.4]], [[5.5, 6.6], [7.7, 8.8]]],
                           [[[1.1, 5.5], [3.3, 7.7]], [[2.2, 6.6], [4.4, 8.8]]],
                           [[[7.7, 8.8], [5.5, 6.6]], [[3.3, 4.4], [1.1, 2.2]]]]]
+        scrubbed_data = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed_data, expected_data)
+
+    def test_decimal_py_obj(self):
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(f'CREATE TABLE {table_name} (dec_col DECIMAL(18,3), timestamp TIMESTAMP) TIMESTAMP(timestamp) PARTITION BY DAY;')
+
+        pending = None
+        with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
+            sender.row(
+                table_name,
+                columns={
+                    'dec_col': decimal.Decimal('12345.678')},
+                at=qi.ServerTimestamp)
+            pending = bytes(sender)
+        
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1, log_ctx=pending)
+        exp_columns = [{'name': 'dec_col', 'type': 'DECIMAL(18,3)'},
+                       {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        expected_data = [['12345.678']]
+        scrubbed_data = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed_data, expected_data)
+
+    @unittest.skipIf(not pyarrow, 'pyarrow not installed')
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_decimal_pyarrow(self):
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(f'CREATE TABLE {table_name} (prices DECIMAL(18,3), timestamp TIMESTAMP) TIMESTAMP(timestamp) PARTITION BY DAY;')
+
+        df = pd.DataFrame({
+            'prices': pd.array(
+                [
+                    decimal.Decimal('-99999.99'),
+                    decimal.Decimal('-678'),
+                ],
+                dtype=pd.ArrowDtype(pyarrow.decimal128(18, 2))
+            )
+        })
+
+        pending = None
+        with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
+            sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
+            pending = bytes(sender)
+
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2, log_ctx=pending)
+        exp_columns = [{'name': 'prices', 'type': 'DECIMAL(18,3)'},
+                       {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        expected_data = [
+            ['-99999.990'],
+            ['-678.000'],
+        ]
         scrubbed_data = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_data, expected_data)
 

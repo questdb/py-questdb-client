@@ -24,7 +24,7 @@ sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
 from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
-                         SETTINGS_WITH_PROTOCOL_VERSION_V1_V2,SETTINGS_WITH_PROTOCOL_VERSION_V3)
+                         SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 
 import questdb.ingress as qi
 
@@ -45,6 +45,7 @@ except ImportError:
 if pd is not None:
     from test_dataframe import TestPandasProtocolVersionV1
     from test_dataframe import TestPandasProtocolVersionV2
+    from test_dataframe import TestPandasProtocolVersionV3
 else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
@@ -416,9 +417,8 @@ class TestBases:
                 '0',
                 'automatic',
                 0,
-                3,
-                '3',
-                1.5,
+                4,
+                '4',
                 '1.5',
                 '2.0',
             ]
@@ -426,8 +426,8 @@ class TestBases:
             for version in bad_versions:
                 with self.assertRaisesRegex(
                         qi.IngressError,
-                        '"protocol_version" must be None, "auto", 1 or 2'):
-                    self.builder('tcp', '127.0.0.1', 12345, protocol_version='3')
+                        '"protocol_version" must be None, "auto", 1-3'):
+                    self.builder('tcp', '127.0.0.1', 12345, protocol_version=version)
                     self.fail('Should not have reached here - constructing sender')
 
             bad_versions.append(None)
@@ -1147,8 +1147,8 @@ class TestBases:
         def test_http_auto_protocol_version_only_v2(self):
             self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V2, 2)
 
-        def test_http_auto_protocol_version_v1_v2(self):
-            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1_V2, 2)
+        def test_http_auto_protocol_version_v1_v2_v3(self):
+            self._test_sender_http_auto_protocol_version(SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3, 3)
 
         def test_http_auto_protocol_version_without_version(self):
             self._test_sender_http_auto_protocol_version(SETTINGS_WITHOUT_PROTOCOL_VERSION, 1)
@@ -1171,8 +1171,8 @@ class TestBases:
                 self.assertEqual(server.requests[0], exp)
 
         def test_http_auto_protocol_version_unsupported_client(self):
-            with self.assertRaisesRegex(qi.IngressError, 'Server does not support current client'):
-                with HttpServer(SETTINGS_WITH_PROTOCOL_VERSION_V3) as server, self.builder('http', '127.0.0.1', server.port) as sender:
+            with self.assertRaisesRegex(qi.IngressError, r'Server does not support any of the client protocol versions.*'):
+                with HttpServer(SETTINGS_WITH_PROTOCOL_VERSION_V4) as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row('tbl1', columns={'x': 42})
 
         def test_specify_line_protocol_explicitly(self):
@@ -1474,7 +1474,7 @@ class TestBufferProtocolVersionV1(TestBases.TestBuffer):
 
 
 class TestBufferProtocolVersionV2(TestBases.TestBuffer):
-    name = 'protocol version 1'
+    name = 'protocol version 2'
     version = 2
 
 

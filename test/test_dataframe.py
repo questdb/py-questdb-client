@@ -8,6 +8,7 @@ import datetime as dt
 import functools
 import tempfile
 import pathlib
+from decimal import Decimal
 from test_tools import _float_binary_bytes, _array_binary_bytes, TimestampEncodingMixin
 
 BROKEN_TIMEZONES = True
@@ -79,6 +80,57 @@ DF3 = pd.DataFrame({
         pd.Timestamp('20180311'),
         pd.Timestamp('20180312')]}
 )
+
+DECIMAL_BINARY_FORMAT_TYPE = 23
+
+
+def _decode_decimal_payload(line: bytes, prefix: bytes = b'tbl dec=') -> tuple[int, bytes]:
+    """Extract (scale, mantissa-bytes) from a serialized decimal line."""
+    if not line.startswith(prefix):
+        raise AssertionError(f'Unexpected decimal prefix in line: {line!r}')
+    payload = line[len(prefix):]
+    if len(payload) < 4:
+        raise AssertionError(f'Invalid decimal payload length: {len(payload)}')
+    if payload[0] != ord('='):
+        raise AssertionError(f'Unexpected decimal type marker: {payload[0]}')
+    if payload[1] != DECIMAL_BINARY_FORMAT_TYPE:
+        raise AssertionError(f'Unexpected decimal format type: {payload[1]}')
+    scale = payload[2]
+    byte_width = payload[3]
+    mantissa = payload[4:]
+    if len(mantissa) != byte_width:
+        raise AssertionError(
+            f'Expected {byte_width} mantissa bytes, got {len(mantissa)}')
+    return scale, mantissa
+
+def _unwrap_decimal(decimal: Decimal):
+    (sign, digits, exponent) = decimal.as_tuple()
+    unscaled = 0
+    scale = 0
+    for digit in digits:
+        unscaled  = unscaled * 10 + digit
+    if exponent > 0:
+        unscaled = unscaled * pow(10, exponent)
+    else:
+        scale = -exponent
+    if sign == 1:
+        unscaled = -unscaled
+    return scale, unscaled
+
+def _decimal_from_unscaled(unscaled, scale: int):
+    if unscaled is None:
+        return None
+    return Decimal(unscaled).scaleb(-scale)
+
+
+def _decimal_binary_payload(unscaled, scale: int, byte_width: int) -> bytes:
+    if unscaled is None:
+        return b'=' + bytes([DECIMAL_BINARY_FORMAT_TYPE, 0, 0])
+    return (
+        b'=' +
+        bytes([DECIMAL_BINARY_FORMAT_TYPE, scale, byte_width]) +
+        int(unscaled).to_bytes(byte_width, byteorder='big', signed=True)
+    )
 
 
 def with_tmp_dir(func):
@@ -527,6 +579,127 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(float('-inf'), self.version == 1) + b'\n' +
                 b'tbl1 a' + _float_binary_bytes(float('NAN'), self.version == 1) + b'\n' +
                 b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == 1) + b'\n')
+
+        def test_decimal_pyobj_column(self):
+            decimals = [
+                Decimal('123.45'),
+                Decimal('-0.5'),
+                Decimal('0'),
+                Decimal('57896044618658097711785492504343953926634992332820282019728792003956564819967'), # Maximum value: 2²⁵⁵-1
+                Decimal('-57896044618658097711785492504343953926634992332820282019728792003956564819968'), # Minimum value: -2²⁵⁵
+                Decimal('170141183460469231731687303715884105727'), # 2¹²⁷-1
+                Decimal('-170141183460469231731687303715884105728'), # -2¹²⁷
+                Decimal('9223372036854775807'), # 2⁶³-1
+                Decimal('-9223372036854775808'), # -2⁶³
+                Decimal('2147483647'), # 2³¹-1
+                Decimal('-2147483648'), # -2³¹
+            ]
+            if self.version < 3:
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        'does not support the decimal datatype'):
+                    _dataframe(self.version, pd.DataFrame({'dec': [Decimal('123')]}), table_name='tbl', at=qi.ServerTimestamp)
+                return
+            for decimal in decimals:
+                df = pd.DataFrame({'dec': [decimal]})
+                try:
+                    buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                    (scale, mantissa) = _decode_decimal_payload(buf.splitlines()[0])
+                    unscaled = int.from_bytes(mantissa, byteorder='big', signed=True)
+
+                    (expected_scale, expected_unscaled) = _unwrap_decimal(decimal)
+
+                    self.assertEqual(scale, expected_scale)
+                    self.assertEqual(unscaled, expected_unscaled)
+                except Exception as ex:
+                    self.fail(f'Failed to serialize {decimal}: {ex}')
+
+        def test_decimal_pyobj_trailing_zeros_and_integer(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('1.2300'), Decimal('1000')]})
+            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+            decoded = [_decode_decimal_payload(line) for line in buf.splitlines()]
+            expected = [Decimal('1.23'), Decimal('1000')]
+            self.assertEqual(len(decoded), len(expected))
+            for (scale, mantissa), expected_value in zip(decoded, expected):
+                unscaled = int.from_bytes(mantissa, byteorder='big', signed=True)
+                self.assertEqual(Decimal(unscaled).scaleb(-scale), expected_value)
+
+        def test_decimal_pyobj_special_values(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('NaN'), Decimal('Infinity'), Decimal('-Infinity')]})
+            try:
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                self.fail("special values shouldn't be encoded")
+            except qi.IngressError:
+                pass
+
+        def test_decimal_pyobj_overflow(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('57896044618658097711785492504343953926634992332820282019728792003956564819968')]})
+
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    '.*Decimal mantissa too large; maximum supported size is 32 bytes.*'):
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+
+        def test_decimal_pyobj_scale_too_big(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({'dec': [Decimal('1.2e-100')]})
+
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    '.*exceeds the maximum supported scale of 76.*'):
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+
+        def test_decimal_arrow_columns(self):
+            if self.version < 3:
+                arr = pd.array(
+                    [Decimal('1.23')],
+                    dtype=pd.ArrowDtype(pa.decimal128(10, 2)))
+                df = pd.DataFrame({'dec': arr, 'count': [0]})
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        'does not support the decimal datatype'):
+                    _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                return
+
+            arrow_cases = [
+                (pa.decimal32(7, 2), [12345, -6789]),
+                (pa.decimal64(14, 4), [123456789, -987654321]),
+                (pa.decimal128(38, 6), [123456789012345, -987654321012345, None]),
+                (pa.decimal256(76, 10), [1234567890123456789012345, -987654321098765432109876, None]),
+            ]
+
+            for arrow_type, unscaled_values in arrow_cases:
+                values = [_decimal_from_unscaled(unscaled, arrow_type.scale) for unscaled in unscaled_values]
+                arr = pd.array(values, dtype=pd.ArrowDtype(arrow_type))
+                counts = list(range(len(values)))
+                df = pd.DataFrame({'dec': arr, 'count': counts})
+                buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+                offset = 0
+                prefix = b'tbl dec='
+                for unscaled, count in zip(unscaled_values, counts):
+                    suffix = f',count={count}i\n'.encode('ascii')
+                    if unscaled is None:
+                        # If the decimal is invalid, we shouldn't have encoded it
+                        try:
+                            buf.index(suffix, offset)
+                            self.fail("There shouldn't be any other fields")
+                        except ValueError:
+                            continue
+                
+                    end = buf.index(suffix, offset)
+                    line = buf[offset:end + len(suffix)]
+                    self.assertTrue(line.startswith(prefix), line)
+                    payload = line[len(prefix):len(line) - len(suffix)] if len(suffix) else line[len(prefix):]
+                    expected_payload = _decimal_binary_payload(unscaled, arrow_type.scale, arrow_type.byte_width)
+                    self.assertEqual(payload, expected_payload)
+                    offset = end + len(suffix)
 
         def test_u8_arrow_col(self):
             df = pd.DataFrame({
@@ -1588,7 +1761,7 @@ class TestPandasBase:
             # need to, so - as for now - we just test that we raise a nice error.
             with self.assertRaisesRegex(
                     qi.IngressError,
-                    r"Unsupported dtype int16\[pyarrow\] for column 'a'.*github"):
+                    r"Unsupported arrow type int16 for column 'a'.*github"):
                 _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
 
         @unittest.skipIf(not fastparquet, 'fastparquet not installed')
@@ -1685,6 +1858,11 @@ class TestPandasProtocolVersionV1(TestPandasBase.TestPandas):
 class TestPandasProtocolVersionV2(TestPandasBase.TestPandas):
     name = 'protocol version 2'
     version = 2
+
+
+class TestPandasProtocolVersionV3(TestPandasBase.TestPandas):
+    name = 'protocol version 3'
+    version = 3
 
 
 if __name__ == '__main__':

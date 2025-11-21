@@ -10,3 +10,6 @@ crate-type = ["staticlib"]
 
 [dev-dependencies]
 rand = "0.9.1"
+
+[dependencies]
+i256 = "0.2.3"

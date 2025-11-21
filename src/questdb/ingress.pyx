@@ -142,7 +142,8 @@ class IngressErrorCode(Enum):
     ConfigError = line_sender_error_config_error
     ArrayError = line_sender_error_array_error
     ProtocolVersionError = line_sender_error_protocol_version_error
-    BadDataFrame = <int>line_sender_error_protocol_version_error + 1
+    DecimalError = line_sender_error_invalid_decimal
+    BadDataFrame = <int>line_sender_error_invalid_decimal + 1
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -188,6 +189,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ArrayError
     elif code == line_sender_error_protocol_version_error:
         return IngressErrorCode.ProtocolVersionError
+    elif code == line_sender_error_invalid_decimal:
+        return IngressErrorCode.DecimalError
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -824,10 +827,10 @@ cdef class Buffer:
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
-        if protocol_version not in (1, 2):
+        if protocol_version not in range(1, 4):
             raise IngressError(
                 IngressErrorCode.ProtocolVersionError,
-                'Invalid protocol version. Supported versions are 1 and 2.')
+                'Invalid protocol version. Supported versions are 1-3.')
         self._cinit_impl(protocol_version, init_buf_size, max_name_len)
 
     cdef inline _cinit_impl(self, line_sender_protocol_version version, size_t init_buf_size, size_t max_name_len):
@@ -941,6 +944,10 @@ cdef class Buffer:
         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
 
+    cdef inline void_int _column_decimal(
+            self, line_sender_column_name c_name, object value) except -1:
+        return serialize_decimal_py_obj(self._impl, c_name, <PyObject*>value)
+
     cdef inline void_int _column_i64(
             self, line_sender_column_name c_name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
@@ -1035,6 +1042,8 @@ cdef class Buffer:
             self._column_numpy(c_name, value)
         elif isinstance(value, cp_datetime):
             self._column_dt(c_name, value)
+        elif isinstance(value, Decimal):
+            self._column_decimal(c_name, value)
         else:
             valid = ', '.join((
                 'bool',
@@ -1189,6 +1198,8 @@ cdef class Buffer:
               - Serialized as ILP type
             * - ``bool``
               - `BOOLEAN <https://questdb.io/docs/reference/api/ilp/columnset-types#boolean>`_
+            * - ``decimal``
+              - `DECIMAL <https://questdb.io/docs/reference/api/ilp/columnset-types#decimal>`_
             * - ``int``
               - `INTEGER <https://questdb.io/docs/reference/api/ilp/columnset-types#integer>`_
             * - ``float``
@@ -1459,6 +1470,9 @@ cdef class Buffer:
             * - ``'datetime64[ns, tz]'``
               - Y
               - ``TIMESTAMP`` **ζ**
+            * - ``'object'`` (``Decimal`` objects)
+              - Y (``NaN``)
+              - ``DECIMAL``
 
         .. note::
 
@@ -1953,10 +1967,14 @@ cdef class Sender:
                 if not line_sender_opts_protocol_version(
                         self._opts, line_sender_protocol_version_2, &err):
                     raise c_err_to_py(err)
+            elif (protocol_version == 3) or (protocol_version == '3'):
+                if not line_sender_opts_protocol_version(
+                        self._opts, line_sender_protocol_version_3, &err):
+                    raise c_err_to_py(err)
             else:
                 raise IngressError(
                     IngressErrorCode.ConfigError,
-                    '"protocol_version" must be None, "auto", 1 or 2' +
+                    '"protocol_version" must be None, "auto", 1-3' +
                     f' not {protocol_version!r}')
 
         if auth_timeout is not None:

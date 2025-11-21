@@ -1,5 +1,10 @@
 # See: dataframe.md for technical overview.
 
+from decimal import Decimal
+
+from cpython.bytes cimport PyBytes_AsString
+from .mpdecimal_compat cimport decimal_pyobj_to_binary
+
 # Auto-flush settings.
 # The individual `interval`, `row_count` and `byte_count`
 # settings are set to `-1` when disabled.
@@ -51,6 +56,21 @@ cdef bint should_auto_flush(
 
     return False
 
+cdef inline uint32_t bswap32(uint32_t value) noexcept:
+    return (((value & 0xFF000000u) >> 24u) |
+      ((value & 0x00FF0000u) >>  8u) |
+      ((value & 0x0000FF00u) <<  8u) |
+      ((value & 0x000000FFu) << 24u))
+
+cdef inline uint64_t bswap64(uint64_t value) noexcept:
+    return (((value & 0xFF00000000000000u) >> 56u) |
+      ((value & 0x00FF000000000000u) >> 40u) |
+      ((value & 0x0000FF0000000000u) >> 24u) |
+      ((value & 0x000000FF00000000u) >>  8u) |
+      ((value & 0x00000000FF000000u) <<  8u) |
+      ((value & 0x0000000000FF0000u) << 24u) |
+      ((value & 0x000000000000FF00u) << 40u) |
+      ((value & 0x00000000000000FFu) << 56u))
 
 cdef struct col_chunks_t:
     size_t n_chunks
@@ -73,7 +93,8 @@ cdef enum col_target_t:
     col_target_column_str = 6
     col_target_column_ts = 7
     col_target_column_arr_f64 = 8
-    col_target_at = 9
+    col_target_column_decimal = 9
+    col_target_at = 10
 
 
 cdef dict _TARGET_NAMES = {
@@ -86,6 +107,7 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_str: "string",
     col_target_t.col_target_column_ts: "timestamp",
     col_target_t.col_target_column_arr_f64: "array",
+    col_target_t.col_target_column_decimal: "decimal",
     col_target_t.col_target_at: "designated timestamp",
 }
 
@@ -127,6 +149,11 @@ cdef enum col_source_t:
     col_source_dt64ns_numpy =           501000
     col_source_dt64ns_tz_arrow =        502000
     col_source_arr_f64_numpyobj =       601100
+    col_source_decimal_pyobj =          701100
+    col_source_decimal32_arrow =        702000
+    col_source_decimal64_arrow =        703000
+    col_source_decimal128_arrow =       704000
+    col_source_decimal256_arrow =       705000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -149,6 +176,7 @@ cdef dict _PYOBJ_SOURCE_DESCR = {
     col_source_t.col_source_int_pyobj: "int",
     col_source_t.col_source_float_pyobj: "float",
     col_source_t.col_source_str_pyobj: "str",
+    col_source_t.col_source_decimal_pyobj: "Decimal",
 }
 
 
@@ -218,6 +246,13 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_column_arr_f64: {
         col_source_t.col_source_arr_f64_numpyobj,
     },
+    col_target_t.col_target_column_decimal: {
+        col_source_t.col_source_decimal_pyobj,
+        col_source_t.col_source_decimal32_arrow,
+        col_source_t.col_source_decimal64_arrow,
+        col_source_t.col_source_decimal128_arrow,
+        col_source_t.col_source_decimal256_arrow,
+    },
     col_target_t.col_target_at: {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
@@ -233,7 +268,8 @@ cdef tuple _FIELD_TARGETS = (
     col_target_t.col_target_column_f64,
     col_target_t.col_target_column_str,
     col_target_t.col_target_column_ts,
-    col_target_t.col_target_column_arr_f64)
+    col_target_t.col_target_column_arr_f64,
+    col_target_t.col_target_column_decimal)
 
 
 # Targets that map directly from a meta target.
@@ -358,6 +394,17 @@ cdef enum col_dispatch_code_t:
     col_dispatch_code_column_arr_f64__arr_f64_numpyobj = \
         col_target_t.col_target_column_arr_f64 + col_source_t.col_source_arr_f64_numpyobj
 
+    col_dispatch_code_column_decimal__decimal_pyobj = \
+        col_target_t.col_target_column_decimal + col_source_t.col_source_decimal_pyobj
+    col_dispatch_code_column_decimal__decimal32_arrow = \
+        col_target_t.col_target_column_decimal + col_source_t.col_source_decimal32_arrow
+    col_dispatch_code_column_decimal__decimal64_arrow = \
+        col_target_t.col_target_column_decimal + col_source_t.col_source_decimal64_arrow
+    col_dispatch_code_column_decimal__decimal128_arrow = \
+        col_target_t.col_target_column_decimal + col_source_t.col_source_decimal128_arrow
+    col_dispatch_code_column_decimal__decimal256_arrow = \
+        col_target_t.col_target_column_decimal + col_source_t.col_source_decimal256_arrow
+
 
 # Int values in order for sorting (as needed for API's sequential coupling).
 cdef enum meta_target_t:
@@ -382,6 +429,7 @@ cdef struct col_t:
     line_sender_column_name name
     col_cursor_t cursor
     col_setup_t* setup  # Grouping to reduce size of struct.
+    uint8_t scale # For arrow decimal types only, else 0.
 
 
 cdef void col_t_release(col_t* col) noexcept:
@@ -905,6 +953,30 @@ cdef void_int _dataframe_category_series_as_arrow(
             'Expected a category of strings, ' +
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
+cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
+    _dataframe_series_as_arrow(pandas_col, col)
+    if arrowtype.id == _PYARROW.lib.Type_DECIMAL32:
+        col.setup.source = col_source_t.col_source_decimal32_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_DECIMAL64:
+        col.setup.source = col_source_t.col_source_decimal64_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_DECIMAL128:
+        col.setup.source = col_source_t.col_source_decimal128_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_DECIMAL256:
+        col.setup.source = col_source_t.col_source_decimal256_arrow
+    else:
+        raise IngressError(
+            IngressErrorCode.BadDataFrame,
+            f'Unsupported arrow type {arrowtype} for column {pandas_col.name!r}. ' +
+            'Raise an issue if you think it should be supported: ' +
+            'https://github.com/questdb/py-questdb-client/issues.')
+    if arrowtype.scale < 0 or arrowtype.scale > 76:
+        raise IngressError(
+            IngressErrorCode.BadDataFrame,
+            f'Bad column {pandas_col.name!r}: ' +
+            f'Unsupported decimal scale {arrowtype.scale}: ' +
+            'Must be in the range 0 to 76 inclusive.')
+    col.scale = <uint8_t>arrowtype.scale
+    return 0
 
 cdef inline bint _dataframe_is_float_nan(PyObject* obj) noexcept:
     return PyFloat_CheckExact(obj) and isnan(PyFloat_AS_DOUBLE(obj))
@@ -971,6 +1043,8 @@ cdef void_int _dataframe_series_sniff_pyobj(
                     'Unsupported object column containing bytes.' +
                     'If this is a string column, decode it first. ' +
                     'See: https://stackoverflow.com/questions/40389764/')
+            elif isinstance(<object>obj, Decimal):
+                col.setup.source = col_source_t.col_source_decimal_pyobj
             else:
                 raise IngressError(
                     IngressErrorCode.BadDataFrame,
@@ -1086,13 +1160,14 @@ cdef void_int _dataframe_resolve_source_and_buffers(
         _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_OBJECT):
         _dataframe_series_sniff_pyobj(pandas_col, col)
+    elif isinstance(dtype, _PANDAS.ArrowDtype):
+        _dataframe_series_resolve_arrow(pandas_col, dtype.pyarrow_dtype, col)
     else:
         raise IngressError(
             IngressErrorCode.BadDataFrame,
             f'Unsupported dtype {dtype} for column {pandas_col.name!r}. ' +
             'Raise an issue if you think it should be supported: ' +
             'https://github.com/questdb/py-questdb-client/issues.')
-
 
 cdef void_int _dataframe_resolve_target(
         PandasCol pandas_col, col_t* col) except -1:
@@ -1225,7 +1300,8 @@ cdef void_int _dataframe_resolve_args(
 cdef inline bint _dataframe_arrow_get_bool(col_cursor_t* cursor) noexcept nogil:
     return (
         (<uint8_t*>cursor.chunk.buffers[1])[cursor.offset // 8] &
-        (1 << (cursor.offset % 8)))
+        (1 << (cursor.offset % 8))
+    )
 
 
 cdef inline bint _dataframe_arrow_is_valid(col_cursor_t* cursor) noexcept nogil:
@@ -1234,7 +1310,9 @@ cdef inline bint _dataframe_arrow_is_valid(col_cursor_t* cursor) noexcept nogil:
         cursor.chunk.null_count == 0 or
         (
             (<uint8_t*>cursor.chunk.buffers[0])[cursor.offset // 8] &
-            (1 << (cursor.offset % 8))))
+            (1 << (cursor.offset % 8))
+        )
+    )
 
 
 cdef inline void _dataframe_arrow_get_cat_value(
@@ -2089,6 +2167,104 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
                 &err):
             raise c_err_to_py(err)
 
+cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_column_name c_name, PyObject* value) except -1:
+    cdef line_sender_error* err = NULL
+    cdef unsigned int scale = 0
+    cdef uint8_t[32] unscaled
+    cdef int unscaled_length
+
+    unscaled_length = decimal_pyobj_to_binary(
+        value,
+        unscaled,
+        &scale,
+        IngressError,
+        IngressErrorCode.BadDataFrame)
+    if unscaled_length == 0:
+        return 0
+
+    if not line_sender_buffer_column_dec(buf, c_name, scale, unscaled, <size_t>unscaled_length, &err):
+        raise c_err_to_py(err)
+
+    return 0
+
+
+cdef void_int _dataframe_serialize_cell_column_decimal__decimal_pyobj(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col) except -1:
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+
+    if _dataframe_is_null_pyobj(cell):
+        return 0
+
+    return serialize_decimal_py_obj(ls_buf, col.name, cell)
+
+
+cdef void_int _dataframe_serialize_cell_column_decimal__decimal32_arrow(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
+    cdef uint32_t value
+    if valid:
+        value = bswap32((<uint32_t*>col.cursor.chunk.buffers[1])[col.cursor.offset])
+        if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> &value, sizeof(value), &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
+cdef void_int _dataframe_serialize_cell_column_decimal__decimal64_arrow(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
+    cdef uint64_t value
+    if valid:
+        value = bswap64((<uint64_t*>col.cursor.chunk.buffers[1])[col.cursor.offset])
+        if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> &value, sizeof(value), &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
+cdef void_int _dataframe_serialize_cell_column_decimal__decimal128_arrow(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
+    cdef uint64_t *cell
+    cdef uint64_t[2] value
+    if valid:
+        cell = &(<uint64_t*>col.cursor.chunk.buffers[1])[col.cursor.offset << 1]
+        value[0] = bswap64(cell[1])
+        value[1] = bswap64(cell[0])
+        if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> value, 16, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
+cdef void_int _dataframe_serialize_cell_column_decimal__decimal256_arrow(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
+    cdef uint64_t *cell
+    cdef uint64_t[4] value
+    if valid:
+        cell = &(<uint64_t*>col.cursor.chunk.buffers[1])[col.cursor.offset << 2]
+        value[0] = bswap64(cell[3])
+        value[1] = bswap64(cell[2])
+        value[2] = bswap64(cell[1])
+        value[3] = bswap64(cell[0])
+        if not line_sender_buffer_column_dec(ls_buf, col.name, col.scale, <uint8_t *> value, 32, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
@@ -2247,6 +2423,16 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_arr_f64__arr_f64_numpyobj:
         _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal_pyobj:
+        _dataframe_serialize_cell_column_decimal__decimal_pyobj(ls_buf, b, col)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal32_arrow:
+        _dataframe_serialize_cell_column_decimal__decimal32_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal64_arrow:
+        _dataframe_serialize_cell_column_decimal__decimal64_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal128_arrow:
+        _dataframe_serialize_cell_column_decimal__decimal128_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal256_arrow:
+        _dataframe_serialize_cell_column_decimal__decimal256_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
         _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:

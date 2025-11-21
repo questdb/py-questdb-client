@@ -23,4 +23,5 @@
  ******************************************************************************/
 
 mod active_senders;
+mod mpd_to_bigendian;
 mod pystr_to_utf8;

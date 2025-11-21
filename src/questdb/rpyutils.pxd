@@ -62,3 +62,11 @@ cdef extern from "rpyutils.h":
   uint32_t qdb_active_senders_track_established(bint *warn)
 
   void qdb_active_senders_track_closed(uint32_t slot)
+
+  bint qdb_mpd_to_bigendian(const size_t *limbs,
+                            size_t limbs_len,
+                            size_t radix,
+                            uint32_t exp,
+                            bint negative,
+                            uint8_t *out,
+                            size_t *out_size);

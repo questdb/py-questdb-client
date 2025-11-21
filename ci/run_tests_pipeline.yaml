@@ -36,7 +36,7 @@ stages:
             submodules: true
           - task: UsePythonVersion@0
             inputs:
-              versionSpec: '3.12'
+              versionSpec: "3.12"
           - script: |
               python3 --version
               python3 -m pip install cython
@@ -44,20 +44,20 @@ stages:
           - script: python3 ci/pip_install_deps.py
             displayName: "Install pandas latest"
             condition: eq(variables.pandasVersion, '')
-          - script:  python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
+          - script: python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
             displayName: "Install pandas older"
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
           - script: |
               git clone --depth 1 https://github.com/questdb/questdb.git
-            displayName: git clone questdb
+            displayName: git clone questdb master
             condition: eq(variables.vsQuestDbMaster, true)
           - task: Maven@3
-            displayName: "Compile QuestDB"
+            displayName: "Compile QuestDB master"
             inputs:
-              mavenPOMFile: 'questdb/pom.xml'
-              jdkVersionOption: '1.17'
+              mavenPOMFile: "questdb/pom.xml"
+              jdkVersionOption: "1.17"
               options: "-DskipTests -Pbuild-web-console"
             condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
@@ -68,7 +68,7 @@ stages:
             displayName: "Test vs master"
             env:
               JAVA_HOME: $(JAVA_HOME_17_X64)
-              QDB_REPO_PATH: './questdb'
+              QDB_REPO_PATH: "./questdb"
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:
@@ -82,7 +82,7 @@ stages:
             submodules: true
           - task: UsePythonVersion@0
             inputs:
-              versionSpec: '3.9'
+              versionSpec: "3.9"
           - script: |
               python3 --version
               python3 -m pip install uv
@@ -106,7 +106,7 @@ stages:
             submodules: true
           - task: UsePythonVersion@0
             inputs:
-              versionSpec: '3.11'
+              versionSpec: "3.11"
           - script: |
               python3 --version
               python3 -m pip install uv
