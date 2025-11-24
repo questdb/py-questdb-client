@@ -1033,7 +1033,7 @@ class Sender:
         *,
         symbols: Optional[Dict[str, str]] = None,
         columns: Optional[
-            Dict[str, Union[bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
         ] = None,
         at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:
