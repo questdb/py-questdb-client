@@ -1868,6 +1868,11 @@ class TestPandasBase:
                     dtype="timestamp[ns][pyarrow]"
                 ),
 
+                "b": pd.Series(
+                    pa.array([True, False, True, True, False], type=pa.bool_()),
+                    dtype="bool[pyarrow]"
+                ),
+
                 "sensor_large": pd.Series(
                     pa.LargeStringArray.from_pandas(
                         ["alpha", None, "gamma", "delta", "epsilon"]
@@ -1912,13 +1917,13 @@ class TestPandasBase:
 
             exp = (
                 b'tbl1 ts2=' + fts(1704067200000000000) +
-                b',sensor_large="alpha",sensor_small="foo",value_f64' +
+                b',b=t,sensor_large="alpha",sensor_small="foo",value_f64' +
                 _float_binary_bytes(1.1, self.version == 1) +
                 b',value_i64=10i 1704067200000000000' +
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067201000000000) +
-                b',sensor_small="bar",value_f32' +
+                b',b=f,sensor_small="bar",value_f32' +
                 _float_binary_bytes(20.0, self.version == 1) +
                 b',value_f64' +
                 _float_binary_bytes(2.2, self.version == 1) +
@@ -1926,7 +1931,7 @@ class TestPandasBase:
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067202000000000) +
-                b',sensor_large="gamma",value_f32' +
+                b',b=t,sensor_large="gamma",value_f32' +
                 _float_binary_bytes(30.25, self.version == 1) +
                 b',value_f64' +
                 _float_binary_bytes(3.3, self.version == 1) +
@@ -1934,20 +1939,20 @@ class TestPandasBase:
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067203000000000) +
-                b',sensor_large="delta",sensor_small="baz",value_f32' +
+                b',b=t,sensor_large="delta",sensor_small="baz",value_f32' +
                 _float_binary_bytes(40.5, self.version == 1) +
                 b',value_i64=40i 1704067203000000000' +
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067204000000000) +
-                b',sensor_large="epsilon",sensor_small="qux",value_f32' +
+                b',b=f,sensor_large="epsilon",sensor_small="qux",value_f32' +
                 _float_binary_bytes(50.75, self.version == 1) +
                 b',value_f64' +
                 _float_binary_bytes(5.5, self.version == 1) +
                 b' 1704067204000000000' +
                 tsls)
             act = _dataframe(self.version, df, table_name='tbl1', at='ts')
-            print(f'{act!r}')
+            # print(f'{act!r}')
             self.assertEqual(act, exp)
 
 class TestPandasProtocolVersionV1(TestPandasBase.TestPandas):

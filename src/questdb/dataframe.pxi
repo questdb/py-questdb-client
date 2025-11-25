@@ -973,6 +973,8 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif arrowtype.id == _PYARROW.lib.Type_DECIMAL256:
         col.setup.source = col_source_t.col_source_decimal256_arrow
         is_decimal_col = True
+    elif arrowtype.id == _PYARROW.lib.Type_BOOL:
+        col.setup.source = col_source_t.col_source_bool_arrow
     elif arrowtype.id == _PYARROW.lib.Type_TIMESTAMP:
         if arrowtype.unit != "ns":
             raise IngressError(
