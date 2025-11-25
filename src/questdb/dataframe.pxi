@@ -781,7 +781,7 @@ cdef int64_t _AT_IS_SERVER_NOW = -2
 cdef int64_t _AT_IS_SET_BY_COLUMN = -1
 
 
-cdef str _SUPPORTED_DATETIMES = 'datetime64[ns] or datetime64[ns, tz]'
+cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[ns, tz] or timestamp[ns][pyarrow]'
 
 
 cdef object _dataframe_is_supported_datetime(object dtype):
@@ -790,6 +790,11 @@ cdef object _dataframe_is_supported_datetime(object dtype):
         return True
     if isinstance(dtype, _PANDAS.DatetimeTZDtype):
         return dtype.unit == 'ns'
+    elif isinstance(dtype, _PANDAS.ArrowDtype):
+        arrow_type = dtype.pyarrow_dtype
+        return (
+            (arrow_type.id == _PYARROW.lib.Type_TIMESTAMP) and
+            (arrow_type.unit == 'ns'))
     return False
 
 
@@ -954,28 +959,52 @@ cdef void_int _dataframe_category_series_as_arrow(
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
+    cdef bint is_decimal_col = False
     _dataframe_series_as_arrow(pandas_col, col)
     if arrowtype.id == _PYARROW.lib.Type_DECIMAL32:
         col.setup.source = col_source_t.col_source_decimal32_arrow
+        is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_DECIMAL64:
         col.setup.source = col_source_t.col_source_decimal64_arrow
+        is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_DECIMAL128:
         col.setup.source = col_source_t.col_source_decimal128_arrow
+        is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_DECIMAL256:
         col.setup.source = col_source_t.col_source_decimal256_arrow
+        is_decimal_col = True
+    elif arrowtype.id == _PYARROW.lib.Type_TIMESTAMP:
+        if arrowtype.unit != "ns":
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f"Unsupported timestamp unit {arrowtype.unit!r} "
+                f"for column {pandas_col.name!r}: only 'ns' is supported."
+            )
+        # N.B.: Even if there's a timezone set,
+        # the data is recorded as UTC, so we're good.
+        col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
+        col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_DOUBLE:
+        col.setup.source = col_source_t.col_source_f64_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_INT64:
+        col.setup.source = col_source_t.col_source_i64_arrow
     else:
         raise IngressError(
             IngressErrorCode.BadDataFrame,
             f'Unsupported arrow type {arrowtype} for column {pandas_col.name!r}. ' +
             'Raise an issue if you think it should be supported: ' +
             'https://github.com/questdb/py-questdb-client/issues.')
-    if arrowtype.scale < 0 or arrowtype.scale > 76:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: ' +
-            f'Unsupported decimal scale {arrowtype.scale}: ' +
-            'Must be in the range 0 to 76 inclusive.')
-    col.scale = <uint8_t>arrowtype.scale
+    if is_decimal_col:
+        if arrowtype.scale < 0 or arrowtype.scale > 76:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f'Bad column {pandas_col.name!r}: ' +
+                f'Unsupported decimal scale {arrowtype.scale}: ' +
+                'Must be in the range 0 to 76 inclusive.')
+        col.scale = <uint8_t>arrowtype.scale
+    else:
+        col.scale = 0
     return 0
 
 cdef inline bint _dataframe_is_float_nan(PyObject* obj) noexcept:
