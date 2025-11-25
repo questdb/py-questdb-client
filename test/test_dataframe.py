@@ -1756,14 +1756,6 @@ class TestPandasBase:
             pandarrow_b = pd.array(chunked_b, dtype='int32[pyarrow]')
             df = pd.DataFrame({'a': pandarrow_a, 'b': pandarrow_b})
 
-            # Note that this dtype is experimental (currently),
-            # so we don't support it yet.. but we have everything in place should we
-            # need to, so - as for now - we just test that we raise a nice error.
-            with self.assertRaisesRegex(
-                    qi.IngressError,
-                    r"Unsupported arrow type int16 for column 'a'.*github"):
-                _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
-
         @unittest.skipIf(not fastparquet, 'fastparquet not installed')
         @with_tmp_dir
         def test_parquet_roundtrip(self, tmpdir):
@@ -1850,6 +1842,84 @@ class TestPandasBase:
                     b'tbl1 a=' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
                 
+        def test_numpy_micros_col(self):
+            df = pd.DataFrame({
+                'x': [1, 2, 3],
+                'ts1': pd.Series([
+                    pd.Timestamp(2023, 2, 1, 10, 0, 0),
+                    pd.Timestamp(2023, 2, 2, 12, 30, 15),
+                    pd.Timestamp(2023, 2, 3, 15, 45, 30)
+                ], dtype='datetime64[us]'),
+                'ts2': pd.Series([
+                    pd.Timestamp(2023, 2, 1, 10, 0, 0),
+                    None,
+                    pd.Timestamp(2023, 2, 3, 15, 45, 30)
+                ], dtype='datetime64[us]')
+            })
+
+            # print(df)
+            # print(df.dtypes)
+
+            act = _dataframe(self.version, df, table_name='tbl1', at='ts2')
+
+            # format designated timestamp micros
+            def fdtm(value):
+                if self.version >= 2:
+                    return f'{value}t\n'.encode()
+                else:
+                    value = value * 1000
+                    return f'{value}\n'.encode()
+                
+            exp = (
+                b'tbl1 x=1i,ts1=1675245600000000t ' + fdtm(1675245600000000) +
+                b'tbl1 x=2i,ts1=1675341015000000t\n' +
+                b'tbl1 x=3i,ts1=1675439130000000t ' + fdtm(1675439130000000))
+            
+            # print(repr(exp))
+            # print(repr(act))
+            self.assertEqual(exp, act)
+                
+        def test_arrow_micros_col(self):
+            df = pd.DataFrame({
+                'x': [1, 2, 3],
+                'ts1': pd.Series(
+                    pa.array(
+                        [
+                            pd.Timestamp("2024-01-01 00:00:00.123456"),
+                            pd.Timestamp("2024-01-01 00:00:01.654321"),
+                            pd.Timestamp("2024-01-01 00:00:02.111111"),
+                        ],
+                        type=pa.timestamp("us")
+                    ),
+                    dtype="timestamp[us][pyarrow]"),
+                'ts2': pd.Series(
+                    pa.array(
+                        [
+                            pd.Timestamp("2024-01-01 00:00:00.123456"),
+                            pd.Timestamp("2024-01-01 00:00:01.654321"),
+                            None
+                        ],
+                        type=pa.timestamp("us")
+                    ),
+                    dtype="timestamp[us][pyarrow]"),
+            })
+            act = _dataframe(self.version, df, table_name='tbl1', at='ts2')
+            # format designated timestamp micros
+            def fdtm(value):
+                if self.version >= 2:
+                    return f'{value}t\n'.encode()
+                else:
+                    value = value * 1000
+                    return f'{value}\n'.encode()
+                
+            exp = (
+                b'tbl1 x=1i,ts1=1704067200123456t ' + fdtm(1704067200123456) +
+                b'tbl1 x=2i,ts1=1704067201654321t ' + fdtm(1704067201654321) +
+                b'tbl1 x=3i,ts1=1704067202111111t\n')
+            # print(repr(exp))
+            # print(repr(act))
+            self.assertEqual(exp, act)
+
         def test_arrow_types(self):
             df = pd.DataFrame({
                 "ts": pd.Series(

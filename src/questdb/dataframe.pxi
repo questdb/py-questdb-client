@@ -148,12 +148,14 @@ cdef enum col_source_t:
     col_source_str_lrg_utf8_arrow =     406000
     col_source_dt64ns_numpy =           501000
     col_source_dt64ns_tz_arrow =        502000
-    col_source_arr_f64_numpyobj =       601100
-    col_source_decimal_pyobj =          701100
-    col_source_decimal32_arrow =        702000
-    col_source_decimal64_arrow =        703000
-    col_source_decimal128_arrow =       704000
-    col_source_decimal256_arrow =       705000
+    col_source_dt64us_numpy =           601000
+    col_source_dt64us_tz_arrow =        602000
+    col_source_arr_f64_numpyobj =       701100
+    col_source_decimal_pyobj =          801100
+    col_source_decimal32_arrow =        802000
+    col_source_decimal64_arrow =        803000
+    col_source_decimal128_arrow =       804000
+    col_source_decimal256_arrow =       805000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -242,6 +244,8 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_column_ts: {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
+        col_source_t.col_source_dt64us_numpy,
+        col_source_t.col_source_dt64us_tz_arrow
     },
     col_target_t.col_target_column_arr_f64: {
         col_source_t.col_source_arr_f64_numpyobj,
@@ -256,6 +260,8 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_at: {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
+        col_source_t.col_source_dt64us_numpy,
+        col_source_t.col_source_dt64us_tz_arrow,
     },
 }
 
@@ -386,10 +392,21 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_ts + \
         col_source_t.col_source_dt64ns_tz_arrow
 
+    col_dispatch_code_column_ts__dt64us_numpy = \
+        col_target_t.col_target_column_ts + col_source_t.col_source_dt64us_numpy
+    col_dispatch_code_column_ts__dt64us_tz_arrow = \
+        col_target_t.col_target_column_ts + \
+        col_source_t.col_source_dt64us_tz_arrow
+
     col_dispatch_code_at__dt64ns_numpy = \
         col_target_t.col_target_at + col_source_t.col_source_dt64ns_numpy
     col_dispatch_code_at__dt64ns_tz_arrow = \
         col_target_t.col_target_at + col_source_t.col_source_dt64ns_tz_arrow
+
+    col_dispatch_code_at__dt64us_numpy = \
+        col_target_t.col_target_at + col_source_t.col_source_dt64us_numpy
+    col_dispatch_code_at__dt64us_tz_arrow = \
+        col_target_t.col_target_at + col_source_t.col_source_dt64us_tz_arrow
 
     col_dispatch_code_column_arr_f64__arr_f64_numpyobj = \
         col_target_t.col_target_column_arr_f64 + col_source_t.col_source_arr_f64_numpyobj
@@ -508,6 +525,7 @@ cdef object _NUMPY_INT64 = None
 cdef object _NUMPY_FLOAT32 = None
 cdef object _NUMPY_FLOAT64 = None
 cdef object _NUMPY_DATETIME64_NS = None
+cdef object _NUMPY_DATETIME64_US = None
 cdef object _NUMPY_OBJECT = None
 cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
@@ -541,6 +559,7 @@ cdef object _dataframe_may_import_deps():
     global _NUMPY_FLOAT32
     global _NUMPY_FLOAT64
     global _NUMPY_DATETIME64_NS
+    global _NUMPY_DATETIME64_US
     global _NUMPY_OBJECT
     if _NUMPY is not None:
         return
@@ -567,6 +586,7 @@ cdef object _dataframe_may_import_deps():
     _NUMPY_FLOAT32 = type(_NUMPY.dtype('float32'))
     _NUMPY_FLOAT64 = type(_NUMPY.dtype('float64'))
     _NUMPY_DATETIME64_NS = type(_NUMPY.dtype('datetime64[ns]'))
+    _NUMPY_DATETIME64_US = type(_NUMPY.dtype('datetime64[us]'))
     _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
@@ -788,13 +808,16 @@ cdef object _dataframe_is_supported_datetime(object dtype):
     if (isinstance(dtype, _NUMPY_DATETIME64_NS) and
             (str(dtype) == 'datetime64[ns]')):
         return True
-    if isinstance(dtype, _PANDAS.DatetimeTZDtype):
+    elif (isinstance(dtype, _NUMPY_DATETIME64_US) and
+            (str(dtype) == 'datetime64[us]')):
+        return True
+    elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
         return dtype.unit == 'ns'
     elif isinstance(dtype, _PANDAS.ArrowDtype):
         arrow_type = dtype.pyarrow_dtype
         return (
             (arrow_type.id == _PYARROW.lib.Type_TIMESTAMP) and
-            (arrow_type.unit == 'ns'))
+            (arrow_type.unit in ('us', 'ns')))
     return False
 
 
@@ -976,15 +999,18 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif arrowtype.id == _PYARROW.lib.Type_BOOL:
         col.setup.source = col_source_t.col_source_bool_arrow
     elif arrowtype.id == _PYARROW.lib.Type_TIMESTAMP:
-        if arrowtype.unit != "ns":
+        # N.B.: Even if there's a timezone set,
+        # the data is recorded as UTC, so we're good.
+        if arrowtype.unit == 'us':
+            col.setup.source = col_source_t.col_source_dt64us_tz_arrow
+        elif arrowtype.unit == 'ns':
+            col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
+        else:
             raise IngressError(
                 IngressErrorCode.BadDataFrame,
                 f"Unsupported timestamp unit {arrowtype.unit!r} "
-                f"for column {pandas_col.name!r}: only 'ns' is supported."
+                f"for column {pandas_col.name!r}: only 'us' and 'ns' are supported."
             )
-        # N.B.: Even if there's a timezone set,
-        # the data is recorded as UTC, so we're good.
-        col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
     elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
         col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
     elif arrowtype.id == _PYARROW.lib.Type_FLOAT:
@@ -1191,10 +1217,32 @@ cdef void_int _dataframe_resolve_source_and_buffers(
         _dataframe_category_series_as_arrow(pandas_col, col)
     elif (isinstance(dtype, _NUMPY_DATETIME64_NS) and
             _dataframe_is_supported_datetime(dtype)):
-        col.setup.source = col_source_t.col_source_dt64ns_numpy
+        unit = dtype.name.split('[')[-1].strip(']')
+        if unit == 'ns':
+            col.setup.source = col_source_t.col_source_dt64ns_numpy
+        elif unit == 'us':
+            col.setup.source = col_source_t.col_source_dt64us_numpy
+        else:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                'Unsupported unit for datetime64 numpy column type ' +
+                f'for column {pandas_col.name} of dtype {dtype}. ' +
+                f' Must be "us" or "ns", not {unit}')
+        _dataframe_series_as_pybuf(pandas_col, col)
+    elif (isinstance(dtype, _NUMPY_DATETIME64_US) and
+            _dataframe_is_supported_datetime(dtype)):
+        col.setup.source = col_source_t.col_source_dt64us_numpy
         _dataframe_series_as_pybuf(pandas_col, col)
     elif (isinstance(dtype, _PANDAS.DatetimeTZDtype) and
             _dataframe_is_supported_datetime(dtype)):
+        if dtype.unit != 'ns':
+            # Docs say this should always be nanos, but best assert.
+            # https://pandas.pydata.org/docs/reference/api/pandas.DatetimeTZDtype.html
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f'Unsupported dtype {dtype} unit {dtype.unit} for column {pandas_col.name!r}. ' +
+                'Raise an issue if you think it should be supported: ' +
+                'https://github.com/questdb/py-questdb-client/issues.')
         col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
         _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_OBJECT):
@@ -2165,6 +2213,21 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_numpy(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
+
+cdef void_int _dataframe_serialize_cell_column_ts__dt64us_numpy(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
+    cdef int64_t cell = access[col.cursor.offset]
+    if cell != _NAT:
+        if not line_sender_buffer_column_ts_micros(ls_buf, col.name, cell, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
+
 cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
@@ -2304,6 +2367,7 @@ cdef void_int _dataframe_serialize_cell_column_decimal__decimal256_arrow(
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
+
 cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
@@ -2317,6 +2381,23 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(
         access = <int64_t*>col.cursor.chunk.buffers[1]
         cell = access[col.cursor.offset]
         if not line_sender_buffer_column_ts_nanos(ls_buf, col.name, cell, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
+
+cdef void_int _dataframe_serialize_cell_column_ts__dt64us_tz_arrow(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
+    cdef int64_t cell
+    cdef int64_t* access
+    if valid:
+        access = <int64_t*>col.cursor.chunk.buffers[1]
+        cell = access[col.cursor.offset]
+        if not line_sender_buffer_column_ts_micros(ls_buf, col.name, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
 
@@ -2340,6 +2421,25 @@ cdef void_int _dataframe_serialize_cell_at_dt64ns_numpy(
             raise c_err_to_py(err)
 
 
+cdef void_int _dataframe_serialize_cell_at_dt64us_numpy(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef int64_t* access = <int64_t*>col.cursor.chunk.buffers[1]
+    cdef int64_t cell = access[col.cursor.offset]
+    if cell == _NAT:
+        if not line_sender_buffer_at_now(ls_buf, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+    else:
+        # Note: ls_buf will validate against negative numbers.
+        if not line_sender_buffer_at_micros(ls_buf, cell, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
+
 cdef void_int _dataframe_serialize_cell_at_dt64ns_tz_arrow(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
@@ -2354,6 +2454,28 @@ cdef void_int _dataframe_serialize_cell_at_dt64ns_tz_arrow(
         cell = access[col.cursor.offset]
         # Note: ls_buf will validate against negative numbers.
         if not line_sender_buffer_at_nanos(ls_buf, cell, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+    else:
+        if not line_sender_buffer_at_now(ls_buf, &err):
+            _ensure_has_gil(gs)
+            raise c_err_to_py(err)
+
+
+cdef void_int _dataframe_serialize_cell_at_dt64us_tz_arrow(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col,
+        PyThreadState** gs) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint valid = _dataframe_arrow_is_valid(&col.cursor)
+    cdef int64_t* access
+    cdef int64_t cell
+    if valid:
+        access = <int64_t*>col.cursor.chunk.buffers[1]
+        cell = access[col.cursor.offset]
+        # Note: ls_buf will validate against negative numbers.
+        if not line_sender_buffer_at_micros(ls_buf, cell, &err):
             _ensure_has_gil(gs)
             raise c_err_to_py(err)
     else:
@@ -2460,6 +2582,8 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_str__str_i32_cat(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_numpy:
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64us_numpy:
+        _dataframe_serialize_cell_column_ts__dt64us_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_arr_f64__arr_f64_numpyobj:
         _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal_pyobj:
@@ -2474,10 +2598,16 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_decimal__decimal256_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64ns_tz_arrow:
         _dataframe_serialize_cell_column_ts__dt64ns_tz_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64us_tz_arrow:
+        _dataframe_serialize_cell_column_ts__dt64us_tz_arrow(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_numpy:
         _dataframe_serialize_cell_at_dt64ns_numpy(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64us_numpy:
+        _dataframe_serialize_cell_at_dt64us_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64ns_tz_arrow:
         _dataframe_serialize_cell_at_dt64ns_tz_arrow(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_at__dt64us_tz_arrow:
+        _dataframe_serialize_cell_at_dt64us_tz_arrow(ls_buf, b, col, gs)
     else:
         _ensure_has_gil(gs)
         raise RuntimeError(f"Unknown column dispatch code: {dc}")
