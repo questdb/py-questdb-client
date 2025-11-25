@@ -1852,7 +1852,6 @@ class TestPandasBase:
                 
         def test_arrow_types(self):
             df = pd.DataFrame({
-                # Timestamp (no nulls)
                 "ts": pd.Series(
                     pa.array(
                         pd.date_range("2024-01-01", periods=5, freq="s"),
@@ -1861,7 +1860,14 @@ class TestPandasBase:
                     dtype="timestamp[ns][pyarrow]"
                 ),
 
-                # large_string[pyarrow] — one null (row 1)
+                "ts2": pd.Series(
+                    pa.array(
+                        pd.date_range("2024-01-01", periods=5, freq="s"),
+                        type=pa.timestamp("ns")
+                    ),
+                    dtype="timestamp[ns][pyarrow]"
+                ),
+
                 "sensor_large": pd.Series(
                     pa.LargeStringArray.from_pandas(
                         ["alpha", None, "gamma", "delta", "epsilon"]
@@ -1869,19 +1875,21 @@ class TestPandasBase:
                     dtype="large_string[pyarrow]"
                 ),
 
-                # string[pyarrow] — one null (row 2)
                 "sensor_small": pd.Series(
                     pa.array(["foo", "bar", None, "baz", "qux"], type=pa.string()),
                     dtype="string[pyarrow]"
                 ),
 
-                # float64[pyarrow] — one null (row 3)
+                "value_f32": pd.Series(
+                    pa.array([None, 20.0, 30.25, 40.5, 50.75], type=pa.float32()),
+                    dtype="float64[pyarrow]"
+                ),
+
                 "value_f64": pd.Series(
                     pa.array([1.1, 2.2, 3.3, None, 5.5], type=pa.float64()),
                     dtype="float64[pyarrow]"
                 ),
 
-                # int64[pyarrow] — one null (row 4)
                 "value_i64": pd.Series(
                     pa.array([10, 20, 30, 40, None], type=pa.int64()),
                     dtype="int64[pyarrow]"
@@ -1891,15 +1899,53 @@ class TestPandasBase:
             # print(df)
             # print(df.dtypes)
 
+            # format a timestamp
+            def fts(value):
+                if self.version >= 2:
+                    return f'{value}n'.encode()
+                else:
+                    value = value // 1000
+                    return f'{value}t'.encode()
+
             # designated timestamp suffix and line ending
-            tss = b'n\n' if self.version >= 2 else b'\n'
+            tsls = b'n\n' if self.version >= 2 else b'\n'
 
             exp = (
-                b'tbl1 sensor_large="alpha",sensor_small="foo",value_f64' + _float_binary_bytes(1.1, self.version == 1) + b',value_i64=10i 1704067200000000000' + tss +
-                b'tbl1 sensor_small="bar",value_f64' + _float_binary_bytes(2.2, self.version == 1) + b',value_i64=20i 1704067201000000000' + tss +
-                b'tbl1 sensor_large="gamma",value_f64' + _float_binary_bytes(3.3, self.version == 1) + b',value_i64=30i 1704067202000000000' + tss +
-                b'tbl1 sensor_large="delta",sensor_small="baz",value_i64=40i 1704067203000000000' + tss +
-                b'tbl1 sensor_large="epsilon",sensor_small="qux",value_f64' + _float_binary_bytes(5.5, self.version == 1) + b' 1704067204000000000' + tss)
+                b'tbl1 ts2=' + fts(1704067200000000000) +
+                b',sensor_large="alpha",sensor_small="foo",value_f64' +
+                _float_binary_bytes(1.1, self.version == 1) +
+                b',value_i64=10i 1704067200000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067201000000000) +
+                b',sensor_small="bar",value_f32' +
+                _float_binary_bytes(20.0, self.version == 1) +
+                b',value_f64' +
+                _float_binary_bytes(2.2, self.version == 1) +
+                b',value_i64=20i 1704067201000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067202000000000) +
+                b',sensor_large="gamma",value_f32' +
+                _float_binary_bytes(30.25, self.version == 1) +
+                b',value_f64' +
+                _float_binary_bytes(3.3, self.version == 1) +
+                b',value_i64=30i 1704067202000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067203000000000) +
+                b',sensor_large="delta",sensor_small="baz",value_f32' +
+                _float_binary_bytes(40.5, self.version == 1) +
+                b',value_i64=40i 1704067203000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067204000000000) +
+                b',sensor_large="epsilon",sensor_small="qux",value_f32' +
+                _float_binary_bytes(50.75, self.version == 1) +
+                b',value_f64' +
+                _float_binary_bytes(5.5, self.version == 1) +
+                b' 1704067204000000000' +
+                tsls)
             act = _dataframe(self.version, df, table_name='tbl1', at='ts')
             print(f'{act!r}')
             self.assertEqual(act, exp)
