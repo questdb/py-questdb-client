@@ -987,8 +987,16 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
     elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
         col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_FLOAT:
+        col.setup.source = col_source_t.col_source_f32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_DOUBLE:
         col.setup.source = col_source_t.col_source_f64_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_INT8:
+        col.setup.source = col_source_t.col_source_i8_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_INT16:
+        col.setup.source = col_source_t.col_source_i16_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_INT32:
+        col.setup.source = col_source_t.col_source_i32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_INT64:
         col.setup.source = col_source_t.col_source_i64_arrow
     else:

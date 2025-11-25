@@ -1895,6 +1895,16 @@ class TestPandasBase:
                     dtype="float64[pyarrow]"
                 ),
 
+                "value_i8": pd.Series(
+                    pa.array([1, None, 3, 4, 5], type=pa.int8()),
+                    dtype="int8[pyarrow]"
+                ),
+
+                "value_i16": pd.Series(
+                    pa.array([100, 200, 300, 400, None], type=pa.int16()),
+                    dtype="int16[pyarrow]"
+                ),
+
                 "value_i64": pd.Series(
                     pa.array([10, 20, 30, 40, None], type=pa.int64()),
                     dtype="int64[pyarrow]"
@@ -1919,7 +1929,7 @@ class TestPandasBase:
                 b'tbl1 ts2=' + fts(1704067200000000000) +
                 b',b=t,sensor_large="alpha",sensor_small="foo",value_f64' +
                 _float_binary_bytes(1.1, self.version == 1) +
-                b',value_i64=10i 1704067200000000000' +
+                b',value_i8=1i,value_i16=100i,value_i64=10i 1704067200000000000' +
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067201000000000) +
@@ -1927,7 +1937,7 @@ class TestPandasBase:
                 _float_binary_bytes(20.0, self.version == 1) +
                 b',value_f64' +
                 _float_binary_bytes(2.2, self.version == 1) +
-                b',value_i64=20i 1704067201000000000' +
+                b',value_i16=200i,value_i64=20i 1704067201000000000' +
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067202000000000) +
@@ -1935,13 +1945,13 @@ class TestPandasBase:
                 _float_binary_bytes(30.25, self.version == 1) +
                 b',value_f64' +
                 _float_binary_bytes(3.3, self.version == 1) +
-                b',value_i64=30i 1704067202000000000' +
+                b',value_i8=3i,value_i16=300i,value_i64=30i 1704067202000000000' +
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067203000000000) +
                 b',b=t,sensor_large="delta",sensor_small="baz",value_f32' +
                 _float_binary_bytes(40.5, self.version == 1) +
-                b',value_i64=40i 1704067203000000000' +
+                b',value_i8=4i,value_i16=400i,value_i64=40i 1704067203000000000' +
                 tsls +
 
                 b'tbl1 ts2=' + fts(1704067204000000000) +
@@ -1949,7 +1959,7 @@ class TestPandasBase:
                 _float_binary_bytes(50.75, self.version == 1) +
                 b',value_f64' +
                 _float_binary_bytes(5.5, self.version == 1) +
-                b' 1704067204000000000' +
+                b',value_i8=5i 1704067204000000000' +
                 tsls)
             act = _dataframe(self.version, df, table_name='tbl1', at='ts')
             # print(f'{act!r}')
