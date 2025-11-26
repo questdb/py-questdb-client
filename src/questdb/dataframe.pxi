@@ -1149,7 +1149,15 @@ cdef void_int _dataframe_series_sniff_pyobj(
 cdef void_int _dataframe_resolve_source_and_buffers(
         PandasCol pandas_col, col_t* col) except -1:
     cdef object dtype = pandas_col.dtype
-    if isinstance(dtype, _NUMPY_BOOL):
+    cdef int ts_col_source = _dataframe_classify_timestamp_dtype(dtype)
+    if ts_col_source != 0:
+        col.setup.source = <col_source_t>ts_col_source
+        if ((col.setup.source == col_source_t.col_source_dt64ns_numpy) or
+            (col.setup.source == col_source_t.col_source_dt64us_numpy)):
+            _dataframe_series_as_pybuf(pandas_col, col)
+        else:
+            _dataframe_series_as_arrow(pandas_col, col)
+    elif isinstance(dtype, _NUMPY_BOOL):
         col.setup.source = col_source_t.col_source_bool_numpy
         _dataframe_series_as_pybuf(pandas_col, col)
     elif isinstance(dtype, _PANDAS.BooleanDtype):
@@ -1238,13 +1246,6 @@ cdef void_int _dataframe_resolve_source_and_buffers(
                 f'for column {pandas_col.name} of dtype {dtype}.')
     elif isinstance(dtype, _PANDAS.CategoricalDtype):
         _dataframe_category_series_as_arrow(pandas_col, col)
-    elif _dataframe_classify_timestamp_dtype(dtype) != 0:
-        col.setup.source = <col_source_t>_dataframe_classify_timestamp_dtype(dtype)
-        if ((col.setup.source == col_source_t.col_source_dt64ns_numpy) or
-            (col.setup.source == col_source_t.col_source_dt64us_numpy)):
-            _dataframe_series_as_pybuf(pandas_col, col)
-        else:
-            _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_OBJECT):
         _dataframe_series_sniff_pyobj(pandas_col, col)
     elif isinstance(dtype, _PANDAS.ArrowDtype):
