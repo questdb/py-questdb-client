@@ -1949,7 +1949,7 @@ class TestPandasBase:
 
                 "value_f32": pd.Series(
                     pa.array([None, 20.0, 30.25, 40.5, 50.75], type=pa.float32()),
-                    dtype="float64[pyarrow]"
+                    dtype="float32[pyarrow]"
                 ),
 
                 "value_f64": pd.Series(
