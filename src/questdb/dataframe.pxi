@@ -812,7 +812,16 @@ cdef object _dataframe_is_supported_datetime(object dtype):
             (str(dtype) == 'datetime64[us]')):
         return True
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
-        return dtype.unit == 'ns'
+        # Docs say this should always be nanos, but best assert in case the API changes in the future.
+        # https://pandas.pydata.org/docs/reference/api/pandas.DatetimeTZDtype.html
+        if dtype.unit == 'ns':
+            return True
+        else:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f'Unsupported dtype {dtype} unit {dtype.unit}. ' +
+                'Raise an issue if you think it should be supported: ' +
+                'https://github.com/questdb/py-questdb-client/issues.')
     elif isinstance(dtype, _PANDAS.ArrowDtype):
         arrow_type = dtype.pyarrow_dtype
         return (
@@ -1235,14 +1244,7 @@ cdef void_int _dataframe_resolve_source_and_buffers(
         _dataframe_series_as_pybuf(pandas_col, col)
     elif (isinstance(dtype, _PANDAS.DatetimeTZDtype) and
             _dataframe_is_supported_datetime(dtype)):
-        if dtype.unit != 'ns':
-            # Docs say this should always be nanos, but best assert.
-            # https://pandas.pydata.org/docs/reference/api/pandas.DatetimeTZDtype.html
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
-                f'Unsupported dtype {dtype} unit {dtype.unit} for column {pandas_col.name!r}. ' +
-                'Raise an issue if you think it should be supported: ' +
-                'https://github.com/questdb/py-questdb-client/issues.')
+        # N.B.: We've already asserted this is 'ns'.
         col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
         _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_OBJECT):
