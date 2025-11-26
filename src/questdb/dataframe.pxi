@@ -838,7 +838,7 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
             else:
                 raise IngressError(
                     IngressErrorCode.BadDataFrame,
-                    f'Unsupported arrow dtype {dtype} unit {dtype.unit}. ' +
+                    f'Unsupported arrow dtype {dtype} unit {arrow_type.unit}. ' +
                     'Raise an issue if you think it should be supported: ' +
                     'https://github.com/questdb/py-questdb-client/issues.')
     return 0
