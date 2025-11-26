@@ -1859,7 +1859,7 @@ class TestPandasBase:
 
             act = _dataframe(self.version, df, table_name='tbl1', at='ts2')
 
-            # format designated timestamp micros
+            # format designated timestamp micros
             def fdtm(value):
                 if self.version >= 2:
                     return f'{value}t\n'.encode()
@@ -1898,7 +1898,8 @@ class TestPandasBase:
                     dtype="timestamp[us][pyarrow]"),
             })
             act = _dataframe(self.version, df, table_name='tbl1', at='ts2')
-            # format designated timestamp micros
+
+            # format designated timestamp micros
             def fdtm(value):
                 if self.version >= 2:
                     return f'{value}t\n'.encode()
