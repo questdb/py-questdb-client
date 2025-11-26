@@ -1756,14 +1756,6 @@ class TestPandasBase:
             pandarrow_b = pd.array(chunked_b, dtype='int32[pyarrow]')
             df = pd.DataFrame({'a': pandarrow_a, 'b': pandarrow_b})
 
-            # Note that this dtype is experimental (currently),
-            # so we don't support it yet.. but we have everything in place should we
-            # need to, so - as for now - we just test that we raise a nice error.
-            with self.assertRaisesRegex(
-                    qi.IngressError,
-                    r"Unsupported arrow type int16 for column 'a'.*github"):
-                _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
-
         @unittest.skipIf(not fastparquet, 'fastparquet not installed')
         @with_tmp_dir
         def test_parquet_roundtrip(self, tmpdir):
@@ -1849,6 +1841,219 @@ class TestPandasBase:
                     b'tbl1 a=' + _array_binary_bytes(np.array([1.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
+                
+        def test_numpy_micros_col(self):
+            df = pd.DataFrame({
+                'x': [1, 2, 3],
+                'ts1': pd.Series([
+                    pd.Timestamp(2023, 2, 1, 10, 0, 0),
+                    pd.Timestamp(2023, 2, 2, 12, 30, 15),
+                    pd.Timestamp(2023, 2, 3, 15, 45, 30)
+                ], dtype='datetime64[us]'),
+                'ts2': pd.Series([
+                    pd.Timestamp(2023, 2, 1, 10, 0, 0),
+                    None,
+                    pd.Timestamp(2023, 2, 3, 15, 45, 30)
+                ], dtype='datetime64[us]')
+            })
+
+            act = _dataframe(self.version, df, table_name='tbl1', at='ts2')
+
+            # format designated timestamp micros
+            def fdtm(value):
+                if self.version >= 2:
+                    return f'{value}t\n'.encode()
+                else:
+                    value = value * 1000
+                    return f'{value}\n'.encode()
+                
+            exp = (
+                b'tbl1 x=1i,ts1=1675245600000000t ' + fdtm(1675245600000000) +
+                b'tbl1 x=2i,ts1=1675341015000000t\n' +
+                b'tbl1 x=3i,ts1=1675439130000000t ' + fdtm(1675439130000000))
+            self.assertEqual(exp, act)
+                
+        def test_arrow_micros_col(self):
+            df = pd.DataFrame({
+                'x': [1, 2, 3],
+                'ts1': pd.Series(
+                    pa.array(
+                        [
+                            pd.Timestamp("2024-01-01 00:00:00.123456"),
+                            pd.Timestamp("2024-01-01 00:00:01.654321"),
+                            pd.Timestamp("2024-01-01 00:00:02.111111"),
+                        ],
+                        type=pa.timestamp("us")
+                    ),
+                    dtype="timestamp[us][pyarrow]"),
+                'ts2': pd.Series(
+                    pa.array(
+                        [
+                            pd.Timestamp("2024-01-01 00:00:00.123456"),
+                            pd.Timestamp("2024-01-01 00:00:01.654321"),
+                            None
+                        ],
+                        type=pa.timestamp("us")
+                    ),
+                    dtype="timestamp[us][pyarrow]"),
+            })
+            act = _dataframe(self.version, df, table_name='tbl1', at='ts2')
+
+            # format designated timestamp micros
+            def fdtm(value):
+                if self.version >= 2:
+                    return f'{value}t\n'.encode()
+                else:
+                    value = value * 1000
+                    return f'{value}\n'.encode()
+                
+            exp = (
+                b'tbl1 x=1i,ts1=1704067200123456t ' + fdtm(1704067200123456) +
+                b'tbl1 x=2i,ts1=1704067201654321t ' + fdtm(1704067201654321) +
+                b'tbl1 x=3i,ts1=1704067202111111t\n')
+            self.assertEqual(exp, act)
+
+        def test_arrow_types(self):
+            df = pd.DataFrame({
+                "ts": pd.Series(
+                    pa.array(
+                        pd.date_range("2024-01-01", periods=5, freq="s"),
+                        type=pa.timestamp("ns")
+                    ),
+                    dtype="timestamp[ns][pyarrow]"
+                ),
+
+                "ts2": pd.Series(
+                    pa.array(
+                        pd.date_range("2024-01-01", periods=5, freq="s"),
+                        type=pa.timestamp("ns")
+                    ),
+                    dtype="timestamp[ns][pyarrow]"
+                ),
+
+                "b": pd.Series(
+                    pa.array([True, False, True, True, False], type=pa.bool_()),
+                    dtype="bool[pyarrow]"
+                ),
+
+                "sensor_large": pd.Series(
+                    pa.LargeStringArray.from_pandas(
+                        ["alpha", None, "gamma", "delta", "epsilon"]
+                    ),
+                    dtype="large_string[pyarrow]"
+                ),
+
+                "sensor_small": pd.Series(
+                    pa.array(["foo", "bar", None, "baz", "qux"], type=pa.string()),
+                    dtype="string[pyarrow]"
+                ),
+
+                "value_f32": pd.Series(
+                    pa.array([None, 20.0, 30.25, 40.5, 50.75], type=pa.float32()),
+                    dtype="float32[pyarrow]"
+                ),
+
+                "value_f64": pd.Series(
+                    pa.array([1.1, 2.2, 3.3, None, 5.5], type=pa.float64()),
+                    dtype="float64[pyarrow]"
+                ),
+
+                "value_i8": pd.Series(
+                    pa.array([1, None, 3, 4, 5], type=pa.int8()),
+                    dtype="int8[pyarrow]"
+                ),
+
+                "value_i16": pd.Series(
+                    pa.array([100, 200, 300, 400, None], type=pa.int16()),
+                    dtype="int16[pyarrow]"
+                ),
+
+                "value_i32": pd.Series(
+                    pa.array([1000, 2000, None, 4000, 5000], type=pa.int32()),
+                    dtype="int32[pyarrow]"
+                ),
+
+                "value_i64": pd.Series(
+                    pa.array([10, 20, 30, 40, None], type=pa.int64()),
+                    dtype="int64[pyarrow]"
+                ),
+            })
+
+            # format a timestamp
+            def fts(value):
+                if self.version >= 2:
+                    return f'{value}n'.encode()
+                else:
+                    value = value // 1000
+                    return f'{value}t'.encode()
+
+            # designated timestamp suffix and line ending
+            tsls = b'n\n' if self.version >= 2 else b'\n'
+
+            exp = (
+                b'tbl1 ts2=' + fts(1704067200000000000) +
+                b',b=t,sensor_large="alpha",sensor_small="foo",value_f64' +
+                _float_binary_bytes(1.1, self.version == 1) +
+                b',value_i8=1i,value_i16=100i,value_i32=1000i,value_i64=10i 1704067200000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067201000000000) +
+                b',b=f,sensor_small="bar",value_f32' +
+                _float_binary_bytes(20.0, self.version == 1) +
+                b',value_f64' +
+                _float_binary_bytes(2.2, self.version == 1) +
+                b',value_i16=200i,value_i32=2000i,value_i64=20i 1704067201000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067202000000000) +
+                b',b=t,sensor_large="gamma",value_f32' +
+                _float_binary_bytes(30.25, self.version == 1) +
+                b',value_f64' +
+                _float_binary_bytes(3.3, self.version == 1) +
+                b',value_i8=3i,value_i16=300i,value_i64=30i 1704067202000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067203000000000) +
+                b',b=t,sensor_large="delta",sensor_small="baz",value_f32' +
+                _float_binary_bytes(40.5, self.version == 1) +
+                b',value_i8=4i,value_i16=400i,value_i32=4000i,value_i64=40i 1704067203000000000' +
+                tsls +
+
+                b'tbl1 ts2=' + fts(1704067204000000000) +
+                b',b=f,sensor_large="epsilon",sensor_small="qux",value_f32' +
+                _float_binary_bytes(50.75, self.version == 1) +
+                b',value_f64' +
+                _float_binary_bytes(5.5, self.version == 1) +
+                b',value_i8=5i,value_i32=5000i 1704067204000000000' +
+                tsls)
+            act = _dataframe(self.version, df, table_name='tbl1', at='ts')
+            self.assertEqual(act, exp)
+
+        def test_arrow_strings_as_symbols(self):
+            df = pd.DataFrame({
+                "sym_large": pd.Series(
+                    pa.LargeStringArray.from_pandas(
+                        ["alpha", None, "gamma", "delta", "epsilon"]
+                    ),
+                    dtype="large_string[pyarrow]"
+                ),
+
+                "sym_small": pd.Series(
+                    pa.array(["foo", "bar", None, "baz", "qux"], type=pa.string()),
+                    dtype="string[pyarrow]"
+                )
+            })
+
+            act = _dataframe(self.version, df, table_name='tbl1', symbols=('sym_large', 'sym_small'), at=qi.ServerTimestamp)
+            exp = (
+                b'tbl1,sym_large=alpha,sym_small=foo\n'
+                b'tbl1,sym_small=bar\n'
+                b'tbl1,sym_large=gamma\n'
+                b'tbl1,sym_large=delta,sym_small=baz\n'
+                b'tbl1,sym_large=epsilon,sym_small=qux\n'
+            )
+            self.assertEqual(exp, act)
+
 
 class TestPandasProtocolVersionV1(TestPandasBase.TestPandas):
     name = 'protocol version 1'
