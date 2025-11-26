@@ -804,30 +804,44 @@ cdef int64_t _AT_IS_SET_BY_COLUMN = -1
 cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[us], datetime64[ns, tz], timestamp[ns][pyarrow], or timestamp[us][pyarrow]'
 
 
-cdef object _dataframe_is_supported_datetime(object dtype):
-    if (isinstance(dtype, _NUMPY_DATETIME64_NS) and
-            (str(dtype) == 'datetime64[ns]')):
-        return True
-    elif (isinstance(dtype, _NUMPY_DATETIME64_US) and
-            (str(dtype) == 'datetime64[us]')):
-        return True
+cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
+    """
+    Classify the dtype and determine if it's supported for use as a timestamp.
+
+    Returns:
+        > 0 - a value castable to a `col_source_t`.
+        0 - dtype is not a supported timestamp datatype.
+    """
+    cdef object arrow_type
+    if isinstance(dtype, _NUMPY_DATETIME64_NS) and str(dtype) == "datetime64[ns]":
+        return col_source_t.col_source_dt64ns_numpy
+    elif isinstance(dtype, _NUMPY_DATETIME64_US) and str(dtype) == "datetime64[us]":
+        return col_source_t.col_source_dt64us_numpy
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
         # Docs say this should always be nanos, but best assert in case the API changes in the future.
         # https://pandas.pydata.org/docs/reference/api/pandas.DatetimeTZDtype.html
         if dtype.unit == 'ns':
-            return True
+            return col_source_t.col_source_dt64ns_tz_arrow
         else:
             raise IngressError(
                 IngressErrorCode.BadDataFrame,
-                f'Unsupported dtype {dtype} unit {dtype.unit}. ' +
+                f'Unsupported pandas dtype {dtype} unit {dtype.unit}. ' +
                 'Raise an issue if you think it should be supported: ' +
                 'https://github.com/questdb/py-questdb-client/issues.')
     elif isinstance(dtype, _PANDAS.ArrowDtype):
         arrow_type = dtype.pyarrow_dtype
-        return (
-            (arrow_type.id == _PYARROW.lib.Type_TIMESTAMP) and
-            (arrow_type.unit in ('us', 'ns')))
-    return False
+        if arrow_type.id == _PYARROW.lib.Type_TIMESTAMP:
+            if arrow_type.unit == "ns":
+                return col_source_t.col_source_dt64ns_tz_arrow
+            elif arrow_type.unit == "us":
+                return col_source_t.col_source_dt64us_tz_arrow
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Unsupported arrow dtype {dtype} unit {dtype.unit}. ' +
+                    'Raise an issue if you think it should be supported: ' +
+                    'https://github.com/questdb/py-questdb-client/issues.')
+    return 0
 
 
 cdef ssize_t _dataframe_resolve_at(
@@ -864,7 +878,7 @@ cdef ssize_t _dataframe_resolve_at(
             'Must be one of: None, TimestampNanos, datetime, ' +
             'int (column index), str (colum name)')
     dtype = df.dtypes.iloc[col_index]
-    if _dataframe_is_supported_datetime(dtype):
+    if _dataframe_classify_timestamp_dtype(dtype) != 0:
         at_value_out[0] = _AT_IS_SET_BY_COLUMN
         col = &cols.d[col_index]
         col.setup.meta_target = meta_target_t.meta_target_at
@@ -1224,29 +1238,13 @@ cdef void_int _dataframe_resolve_source_and_buffers(
                 f'for column {pandas_col.name} of dtype {dtype}.')
     elif isinstance(dtype, _PANDAS.CategoricalDtype):
         _dataframe_category_series_as_arrow(pandas_col, col)
-    elif (isinstance(dtype, _NUMPY_DATETIME64_NS) and
-            _dataframe_is_supported_datetime(dtype)):
-        unit = dtype.name.split('[')[-1].strip(']')
-        if unit == 'ns':
-            col.setup.source = col_source_t.col_source_dt64ns_numpy
-        elif unit == 'us':
-            col.setup.source = col_source_t.col_source_dt64us_numpy
+    elif _dataframe_classify_timestamp_dtype(dtype) != 0:
+        col.setup.source = <col_source_t>_dataframe_classify_timestamp_dtype(dtype)
+        if ((col.setup.source == col_source_t.col_source_dt64ns_numpy) or
+            (col.setup.source == col_source_t.col_source_dt64us_numpy)):
+            _dataframe_series_as_pybuf(pandas_col, col)
         else:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
-                'Unsupported unit for datetime64 numpy column type ' +
-                f'for column {pandas_col.name} of dtype {dtype}. ' +
-                f' Must be "us" or "ns", not {unit}')
-        _dataframe_series_as_pybuf(pandas_col, col)
-    elif (isinstance(dtype, _NUMPY_DATETIME64_US) and
-            _dataframe_is_supported_datetime(dtype)):
-        col.setup.source = col_source_t.col_source_dt64us_numpy
-        _dataframe_series_as_pybuf(pandas_col, col)
-    elif (isinstance(dtype, _PANDAS.DatetimeTZDtype) and
-            _dataframe_is_supported_datetime(dtype)):
-        # N.B.: We've already asserted this is 'ns'.
-        col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
-        _dataframe_series_as_arrow(pandas_col, col)
+            _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_OBJECT):
         _dataframe_series_sniff_pyobj(pandas_col, col)
     elif isinstance(dtype, _PANDAS.ArrowDtype):
