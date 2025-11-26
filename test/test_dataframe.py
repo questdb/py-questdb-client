@@ -1857,9 +1857,6 @@ class TestPandasBase:
                 ], dtype='datetime64[us]')
             })
 
-            # print(df)
-            # print(df.dtypes)
-
             act = _dataframe(self.version, df, table_name='tbl1', at='ts2')
 
             # format designated timestamp micros
@@ -1874,9 +1871,6 @@ class TestPandasBase:
                 b'tbl1 x=1i,ts1=1675245600000000t ' + fdtm(1675245600000000) +
                 b'tbl1 x=2i,ts1=1675341015000000t\n' +
                 b'tbl1 x=3i,ts1=1675439130000000t ' + fdtm(1675439130000000))
-            
-            # print(repr(exp))
-            # print(repr(act))
             self.assertEqual(exp, act)
                 
         def test_arrow_micros_col(self):
@@ -1916,8 +1910,6 @@ class TestPandasBase:
                 b'tbl1 x=1i,ts1=1704067200123456t ' + fdtm(1704067200123456) +
                 b'tbl1 x=2i,ts1=1704067201654321t ' + fdtm(1704067201654321) +
                 b'tbl1 x=3i,ts1=1704067202111111t\n')
-            # print(repr(exp))
-            # print(repr(act))
             self.assertEqual(exp, act)
 
         def test_arrow_types(self):
@@ -1986,9 +1978,6 @@ class TestPandasBase:
                 ),
             })
 
-            # print(df)
-            # print(df.dtypes)
-
             # format a timestamp
             def fts(value):
                 if self.version >= 2:
@@ -2037,8 +2026,33 @@ class TestPandasBase:
                 b',value_i8=5i,value_i32=5000i 1704067204000000000' +
                 tsls)
             act = _dataframe(self.version, df, table_name='tbl1', at='ts')
-            # print(f'{act!r}')
             self.assertEqual(act, exp)
+
+        def test_arrow_strings_as_symbols(self):
+            df = pd.DataFrame({
+                "sym_large": pd.Series(
+                    pa.LargeStringArray.from_pandas(
+                        ["alpha", None, "gamma", "delta", "epsilon"]
+                    ),
+                    dtype="large_string[pyarrow]"
+                ),
+
+                "sym_small": pd.Series(
+                    pa.array(["foo", "bar", None, "baz", "qux"], type=pa.string()),
+                    dtype="string[pyarrow]"
+                )
+            })
+
+            act = _dataframe(self.version, df, table_name='tbl1', symbols=('sym_large', 'sym_small'), at=qi.ServerTimestamp)
+            exp = (
+                b'tbl1,sym_large=alpha,sym_small=foo\n'
+                b'tbl1,sym_small=bar\n'
+                b'tbl1,sym_large=gamma\n'
+                b'tbl1,sym_large=delta,sym_small=baz\n'
+                b'tbl1,sym_large=epsilon,sym_small=qux\n'
+            )
+            self.assertEqual(exp, act)
+
 
 class TestPandasProtocolVersionV1(TestPandasBase.TestPandas):
     name = 'protocol version 1'
