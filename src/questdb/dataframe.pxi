@@ -1021,19 +1021,6 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_BOOL:
         col.setup.source = col_source_t.col_source_bool_arrow
-    elif arrowtype.id == _PYARROW.lib.Type_TIMESTAMP:
-        # N.B.: Even if there's a timezone set,
-        # the data is recorded as UTC, so we're good.
-        if arrowtype.unit == 'us':
-            col.setup.source = col_source_t.col_source_dt64us_tz_arrow
-        elif arrowtype.unit == 'ns':
-            col.setup.source = col_source_t.col_source_dt64ns_tz_arrow
-        else:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
-                f"Unsupported timestamp unit {arrowtype.unit!r} "
-                f"for column {pandas_col.name!r}: only 'us' and 'ns' are supported."
-            )
     elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
         col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
     elif arrowtype.id == _PYARROW.lib.Type_FLOAT:
