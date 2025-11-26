@@ -801,7 +801,7 @@ cdef int64_t _AT_IS_SERVER_NOW = -2
 cdef int64_t _AT_IS_SET_BY_COLUMN = -1
 
 
-cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[ns, tz] or timestamp[ns][pyarrow]'
+cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[us], datetime64[ns, tz], timestamp[ns][pyarrow], or timestamp[us][pyarrow]'
 
 
 cdef object _dataframe_is_supported_datetime(object dtype):
