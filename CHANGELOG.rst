@@ -11,7 +11,8 @@ Changelog
 Features
 ~~~~~~~~
 
-**Decimal Data Type Support**
+Decimal Data Type Support
+*************************
 
 This release adds support for ingesting data into QuestDB's native
 ``DECIMAL(precision, scale)`` column type introduced in QuestDB 9.2.0.
@@ -108,7 +109,8 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
     with Sender.from_conf(conf) as sender:
         sender.dataframe(df, table_name='prices', at=TimestampNanos.now())
 
-**Additional Arrow Data Type Support**
+Additional Arrow Data Type Support
+**********************************
 
 Added support for additional PyArrow column types commonly encountered when
 deserializing from Parquet files or converting Polars dataframes to Pandas:
@@ -117,7 +119,8 @@ deserializing from Parquet files or converting Polars dataframes to Pandas:
 * ``string``, ``large_string`` (including as symbol types)
 * ``timestamp[us]`` with timezone support for microsecond-precision timestamps
 
-**Microsecond Timestamp Precision**
+Microsecond Timestamp Precision
+*******************************
 
 Microsecond-precision timestamp columns (``datetime64[us]`` in NumPy and
 ``timestamp[us]`` in PyArrow) are now fully supported. When using

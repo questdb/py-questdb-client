@@ -546,7 +546,7 @@ class Buffer:
 
             Only columns containing strings can be serialized as symbols.
 
-        :type symbols: str or bool or list of str or list of int
+        :type symbols: str or bool or list[str] or list[int]
 
         :param at: The designated timestamp of the rows.
 
