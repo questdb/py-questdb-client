@@ -158,7 +158,7 @@ floating-point rounding errors are unacceptable.
 Decimal ingestion requires :ref:`protocol version 3 <sender_conf_protocol_version>`
 (must be :ref:`configured explicitly for TCP/TCPS <sender_conf_protocol_version>`).
 Unlike other column types, ``DECIMAL`` columns cannot be auto-created and must be
-:ref:`pre-created <sender_auto_creation>` with the appropriate
+:ref:`pre-created <troubleshooting-decimal>` with the appropriate
 ``DECIMAL(precision, scale)`` definition. See the
 `QuestDB DECIMAL documentation <https://questdb.io/docs/reference/sql/datatypes/#decimal>`_
 and :ref:`troubleshooting guide <troubleshooting-flushing>` for more details.
@@ -171,6 +171,12 @@ To send decimal values, use Python's :class:`decimal.Decimal` type in the
     from decimal import Decimal
     from questdb.ingress import Sender, TimestampNanos
     import pandas as pd
+
+    # CREATE TABLE financial_data (
+    #     symbol SYMBOL,
+    #     price DECIMAL(18, 6),
+    #     timestamp TIMESTAMP_NS
+    # ) TIMESTAMP(timestamp) PARTITION BY DAY;
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:

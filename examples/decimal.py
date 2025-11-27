@@ -8,7 +8,7 @@ import pandas as pd
 #     symbol SYMBOL,
 #     price DECIMAL(18, 6),
 #     quantity DECIMAL(12, 4),
-#     timestamp TIMESTAMP
+#     timestamp TIMESTAMP_NS
 # ) TIMESTAMP(timestamp) PARTITION BY DAY;
 
 conf = 'http::addr=localhost:9000;'

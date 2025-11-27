@@ -130,7 +130,7 @@ First, create the table with ``DECIMAL`` columns:
         symbol SYMBOL,
         price DECIMAL(18, 6),
         quantity DECIMAL(12, 4),
-        timestamp TIMESTAMP
+        timestamp TIMESTAMP_NS
     ) TIMESTAMP(timestamp) PARTITION BY DAY;
 
 Then insert data using Python decimals:

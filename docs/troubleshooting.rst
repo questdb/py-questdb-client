@@ -43,13 +43,15 @@ You might be having issues with the :class:`Sender <questdb.ingress.Sender>`'s
 Errors during flushing
 ----------------------
 
+.. _troubleshooting-decimal:
+
 Decimal Column Errors
 ~~~~~~~~~~~~~~~~~~~~~
 
 If you're trying to ingest decimal data and encountering errors, check the
 following:
 
-**Table not pre-created**: Unlike other column types, ``DECIMAL`` columns cannot
+**Pre-create table**: Unlike other column types, ``DECIMAL`` columns cannot
 be auto-created. You must create the table with ``DECIMAL(precision, scale)``
 columns before sending data:
 
@@ -58,7 +60,7 @@ columns before sending data:
     CREATE TABLE my_table (
         symbol SYMBOL,
         price DECIMAL(18, 6),
-        timestamp TIMESTAMP
+        timestamp TIMESTAMP_NS
     ) TIMESTAMP(timestamp) PARTITION BY DAY;
 
 **Protocol version mismatch**: Decimal support requires protocol version 3,
