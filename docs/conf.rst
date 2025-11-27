@@ -239,6 +239,8 @@ Valid options are:
 
 * ``2`` - Array support and binary format serialization for 64-bit floats (version specific to QuestDB).
 
+* ``3`` - Decimal type support (requires QuestDB 9.2.0+). Also includes all features from version 2.
+
 * ``auto`` (default) - Automatic version selection based on protocol type.
 
   HTTP/HTTPS: Auto-detects server capability during handshake (supports version negotiation)
@@ -247,6 +249,9 @@ Valid options are:
 
 .. note::
     Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
+    
+    Protocol version ``3`` requires QuestDB server version 9.2.0 or higher and
+    is needed for ingesting data into ``DECIMAL`` columns.
 
 .. _sender_conf_buffer:
 

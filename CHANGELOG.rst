@@ -130,10 +130,6 @@ precision, including for the designated timestamp column.
 Bug fixes
 ~~~~~~~~~
 
-* Fixed error message formatting that was missing a comma between supported
-  types, which caused ``TimestampMicros`` and ``datetime.datetime`` to appear
-  concatenated in error messages.
-
 * Updated type hints to allow ``None`` as a valid column value in
   ``Sender.row()``. This brings the type annotations in line with the actual
   behavior, where ``None`` values have always been supported to represent NULL

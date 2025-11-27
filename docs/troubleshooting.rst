@@ -43,6 +43,43 @@ You might be having issues with the :class:`Sender <questdb.ingress.Sender>`'s
 Errors during flushing
 ----------------------
 
+Decimal Column Errors
+~~~~~~~~~~~~~~~~~~~~~
+
+If you're trying to ingest decimal data and encountering errors, check the
+following:
+
+**Table not pre-created**: Unlike other column types, ``DECIMAL`` columns cannot
+be auto-created. You must create the table with ``DECIMAL(precision, scale)``
+columns before sending data:
+
+.. code-block:: sql
+
+    CREATE TABLE my_table (
+        symbol SYMBOL,
+        price DECIMAL(18, 6),
+        timestamp TIMESTAMP
+    ) TIMESTAMP(timestamp) PARTITION BY DAY;
+
+**Protocol version mismatch**: Decimal support requires protocol version 3,
+which is only available on QuestDB server 9.2.0 or later.
+
+* For HTTP/HTTPS: Protocol version 3 is auto-negotiated. Ensure your server is
+  version 9.2.0 or later.
+
+* For TCP/TCPS: You must explicitly configure ``protocol_version=3`` in your
+  configuration string::
+
+      tcp::addr=localhost:9009;protocol_version=3;
+
+**Precision/scale mismatch**: Ensure the precision and scale of your Python
+:class:`decimal.Decimal` or PyArrow decimal values match the table definition.
+For example, if the table has ``DECIMAL(12, 6)``, values with more than 6
+decimal places or more than 12 total digits will cause errors.
+
+For more details on decimal types, see the
+`QuestDB DECIMAL documentation <https://questdb.io/docs/reference/sql/datatypes/#decimal>`_.
+
 ILP/TCP Server disconnects
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 

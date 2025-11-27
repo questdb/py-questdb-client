@@ -147,26 +147,87 @@ Here is an example of sending a row with a symbol and a string:
                 'amount': 0.00044}
             at=datetime.datetime(2021, 1, 1, 12, 0, 0))
 
-Populating Timestamps
----------------------
+Decimal Columns
+---------------
+
+Starting with QuestDB server version 9.2.0, you can ingest data into the
+database's native ``DECIMAL(precision, scale)`` column type. This is useful when
+you need exact precision for financial calculations or other scenarios where
+floating-point rounding errors are unacceptable.
+
+Decimal ingestion requires :ref:`protocol version 3 <sender_conf_protocol_version>`
+(must be :ref:`configured explicitly for TCP/TCPS <sender_conf_protocol_version>`).
+Unlike other column types, ``DECIMAL`` columns cannot be auto-created and must be
+:ref:`pre-created <sender_auto_creation>` with the appropriate
+``DECIMAL(precision, scale)`` definition. See the
+`QuestDB DECIMAL documentation <https://questdb.io/docs/reference/sql/datatypes/#decimal>`_
+and :ref:`troubleshooting guide <troubleshooting-flushing>` for more details.
+
+To send decimal values, use Python's :class:`decimal.Decimal` type in the
+``row`` method or pandas DataFrames:
+
+.. code-block:: python
+
+    from decimal import Decimal
+    from questdb.ingress import Sender, TimestampNanos
+    import pandas as pd
+
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        sender.row(
+            'prices',
+            symbols={'symbol': 'BTC-USD'},
+            columns={'price': Decimal('50123.456789')},
+            at=TimestampNanos.now())
+        
+        df = pd.DataFrame({
+            'symbol': ['BTC-USD', 'ETH-USD'],
+            'price': [Decimal('50123.456789'), Decimal('2615.123456')]
+        })
+        sender.dataframe(df, table_name='prices', symbols=['symbol'],
+                        at=TimestampNanos.now())
+
+When using pandas DataFrames, you can also use PyArrow decimal types for better
+performance:
+
+.. code-block:: python
+
+    import pyarrow as pa
+
+    df = pd.DataFrame({
+        'symbol': ['BTC-USD', 'ETH-USD'],
+        'price': pd.Series([50123.456789, 2615.123456],
+                          dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
+    })
+
+Populating Designated Timestamps
+--------------------------------
 
 The ``at`` parameter of the ``row`` and ``dataframe`` methods is used to specify
-the timestamp of the rows.
+the `designated timestamp <https://questdb.io/docs/concept/designated-timestamp/>`_
+of the rows. The designated timestamp column determines the order in which data
+is stored as rows and is used for
+`partitioning <https://questdb.com/docs/concept/partitions/>`.
 
 Set by client
 ~~~~~~~~~~~~~
 
 It can be either a :class:`TimestampNanos <questdb.ingress.TimestampNanos>`
-object or a
+object, a :class:`TimestampMicros <questdb.ingress.TimestampMicros>` object or a
 `datetime.datetime <https://docs.python.org/3/library/datetime.html>`_ object.
 
 In case of dataframes you can also specify the timestamp column name or index.
 If so, the column type should be a Pandas ``datetime64``, with or without
 timezone information.
 
-Note that all timestamps in QuestDB are stored as microseconds since the epoch,
-without timezone information. Any timezone information is dropped when the data
-is appended to the ILP buffer.
+QuestDB stores timestamps as either microseconds (``TIMESTAMP`` QuestDB column
+type) or nanoseconds (``TIMESTAMP_NS`` QuestDB column type) as a numeric value
+from unix epoch in UTC. Any timezone information is dropped when sent to
+the database.
+
+.. note::
+
+    Nanosecond timestamp support is only available from QuestDB 9.1.0 onwards.
 
 .. _sender_server_timestamp:
 
