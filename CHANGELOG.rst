@@ -138,7 +138,8 @@ Bug fixes
 Python Version Support
 ~~~~~~~~~~~~~~~~~~~~~~
 
-* Dropped support for Python 3.9, since it is now end of life.
+* Added support for Python 3.14 and 3.14t (free threaded).
+* Dropped support for Python 3.9 (end of life).
 
 4.0.0 (2025-10-17)
 ------------------
