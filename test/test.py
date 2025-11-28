@@ -1480,7 +1480,7 @@ class TestBufferProtocolVersionV2(TestBases.TestBuffer):
 
 class TestBufferProtocolVersionV3(TestBases.TestBuffer):
     name = 'protocol version 3'
-    version = 2
+    version = 3
 
 
 if __name__ == '__main__':
