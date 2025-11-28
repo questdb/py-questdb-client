@@ -65,6 +65,10 @@ skip = [
     # Skip all 32-bit builds, except for Windows.
     # Those builds are named `*win32*` in cibuildwheel.
     "*i686*",
+
+    # Temporarily skip the 3.14 free-threaded built on Windows.
+    # Pandas dependencies missing.
+    "*314t-win*"
 ]
 
 # [tool.cibuildwheel.windows]
