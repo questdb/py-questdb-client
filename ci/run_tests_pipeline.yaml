@@ -22,6 +22,9 @@ stages:
             mac:
               imageName: "macos-latest"
               poolName: "Azure Pipelines"
+            mac-arm64:
+              imageName: "macos-14"
+              poolName: "Azure Pipelines"
             windows-msvc-2019:
               imageName: "windows-2019"
               poolName: "Azure Pipelines"
