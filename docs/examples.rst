@@ -109,3 +109,44 @@ name.
 
 For details on all options, see the
 :func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` method.
+
+
+Decimal Types (QuestDB 9.2.0+)
+------------------------------
+
+The following example shows how to insert data with decimal precision using
+Python's :class:`decimal.Decimal` type.
+
+Requires QuestDB server 9.2.0+ and :ref:`protocol version 3 <sender_conf_protocol_version>`
+(must be :ref:`configured explicitly for TCP/TCPS <sender_conf_protocol_version>`).
+``DECIMAL`` columns must be :ref:`pre-created <sender_auto_creation>` (auto-creation not supported).
+See the :ref:`troubleshooting guide <troubleshooting-flushing>` for common errors.
+
+First, create the table with ``DECIMAL`` columns:
+
+.. code-block:: sql
+
+    CREATE TABLE financial_data (
+        symbol SYMBOL,
+        price DECIMAL(18, 6),
+        quantity DECIMAL(12, 4),
+        timestamp TIMESTAMP_NS
+    ) TIMESTAMP(timestamp) PARTITION BY DAY;
+
+Then insert data using Python decimals:
+
+.. literalinclude:: ../examples/decimal.py
+   :language: python
+
+For better performance with DataFrames, use PyArrow decimal types:
+
+.. literalinclude:: ../examples/decimal_arrow.py
+   :language: python
+
+.. note::
+
+    For HTTP/HTTPS, protocol version 3 is auto-negotiated.
+    For TCP/TCPS, explicitly configure: ``tcp::addr=localhost:9009;protocol_version=3;``
+
+For more details, see the
+`QuestDB DECIMAL documentation <https://questdb.com/docs/reference/sql/datatypes/#decimal>`_.

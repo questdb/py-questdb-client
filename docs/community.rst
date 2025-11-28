@@ -33,7 +33,7 @@ Chat to us
 ==========
 
 If you want to engage with us to discuss your changes or if you need help,
-there's a `#contributors` channel on our `slack <http://slack.questdb.io>`_ server
+there's a `#contributors` channel on our `slack <http://slack.questdb.com>`_ server
 just for that.
 
 Asking for help
@@ -46,4 +46,4 @@ We monitor the `questdb` tag and will get back to you.
 Stack overflow helps us to keep track of the questions and answers, and it helps
 other users who might have the same question.
 
-Alternatively, you can ask on our `slack <http://slack.questdb.io>`_ server.
+Alternatively, you can ask on our `slack <http://slack.questdb.com>`_ server.

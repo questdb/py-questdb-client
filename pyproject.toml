@@ -2,7 +2,7 @@
 # See: https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
 name = "questdb"
 requires-python = ">=3.9"
-version = "4.0.0"
+version = "4.1.0"
 description = "QuestDB client library for Python"
 readme = "README.rst"
 classifiers = [
@@ -32,12 +32,12 @@ ci = ["cibuildwheel"]
 dataframe = ["pandas", "pyarrow", "numpy"]
 
 [project.urls]
-Homepage = "https://questdb.io/"
+Homepage = "https://questdb.com/"
 Changelog = "https://py-questdb-client.readthedocs.io/en/latest/changelog.html"
 Documentation = "https://py-questdb-client.readthedocs.io/en/latest/index.html"
 Source = "https://github.com/questdb/py-questdb-client/"
 Tracker = "https://github.com/questdb/py-questdb-client/issues"
-Community = "http://community.questdb.io"
+Community = "http://community.questdb.com"
 
 [build-system]
 requires = [

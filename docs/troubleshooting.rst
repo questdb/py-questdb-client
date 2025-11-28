@@ -26,7 +26,7 @@ The default QuestDB configuration is more applicable for a production
 environment.
 
 For these and more configuration parameters refer to `database configuration
-<https://questdb.io/docs/reference/configuration/>`_ documentation.
+<https://questdb.com/docs/reference/configuration/>`_ documentation.
 
 
 Infrequent Flushing
@@ -42,6 +42,45 @@ You might be having issues with the :class:`Sender <questdb.ingress.Sender>`'s
 
 Errors during flushing
 ----------------------
+
+.. _troubleshooting-decimal:
+
+Decimal Column Errors
+~~~~~~~~~~~~~~~~~~~~~
+
+If you're trying to ingest decimal data and encountering errors, check the
+following:
+
+**Pre-create table**: Unlike other column types, ``DECIMAL`` columns cannot
+be auto-created. You must create the table with ``DECIMAL(precision, scale)``
+columns before sending data:
+
+.. code-block:: sql
+
+    CREATE TABLE my_table (
+        symbol SYMBOL,
+        price DECIMAL(18, 6),
+        timestamp TIMESTAMP_NS
+    ) TIMESTAMP(timestamp) PARTITION BY DAY;
+
+**Protocol version mismatch**: Decimal support requires protocol version 3,
+which is only available on QuestDB server 9.2.0 or later.
+
+* For HTTP/HTTPS: Protocol version 3 is auto-negotiated. Ensure your server is
+  version 9.2.0 or later.
+
+* For TCP/TCPS: You must explicitly configure ``protocol_version=3`` in your
+  configuration string::
+
+      tcp::addr=localhost:9009;protocol_version=3;
+
+**Precision/scale mismatch**: Ensure the precision and scale of your Python
+:class:`decimal.Decimal` or PyArrow decimal values match the table definition.
+For example, if the table has ``DECIMAL(12, 6)``, values with more than 6
+decimal places or more than 12 total digits will cause errors.
+
+For more details on decimal types, see the
+`QuestDB DECIMAL documentation <https://questdb.com/docs/reference/sql/datatypes/#decimal>`_.
 
 ILP/TCP Server disconnects
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -59,7 +98,7 @@ As an example, if a client were to insert a ``STRING`` value into a ``BOOLEAN``
 column, the QuestDB server would disconnect the client.
 
 To determine the root cause of a disconnect, inspect the `server logs
-<https://questdb.io/docs/concept/root-directory-structure#log-directory>`_.
+<https://questdb.com/docs/concept/root-directory-structure#log-directory>`_.
 
 .. note::
 
@@ -104,7 +143,7 @@ Alternatively, if you're constructing buffers explicitly:
 
 Note that to handle out-of-order messages efficiently, the QuestDB server will
 delay appling changes it receives over ILP after a configurable
-`commit lag <https://questdb.io/docs/guides/out-of-order-commit-lag>`_.
+`commit lag <https://questdb.com/docs/guides/out-of-order-commit-lag>`_.
 
 Due to this commit lag, the line that caused the error may not be the last line.
 
@@ -112,4 +151,4 @@ Due to this commit lag, the line that caused the error may not be the last line.
 Asking for help
 ===============
 
-The best way to get help is through our `Community Forum <https://community.questdb.io>`_.
+The best way to get help is through our `Community Forum <https://community.questdb.com>`_.

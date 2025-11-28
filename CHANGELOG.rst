@@ -5,6 +5,136 @@ Changelog
 
 =========
 
+4.1.0 (2025-11-28)
+------------------
+
+Features
+~~~~~~~~
+
+Decimal Data Type Support
+*************************
+
+This release adds support for ingesting data into QuestDB's native
+``DECIMAL(precision, scale)`` column type introduced in QuestDB 9.2.0.
+Use decimals when you need exact-precision values (e.g. prices, balances)
+without floating-point rounding issues.
+
+Decimal values can be sent using Python ``decimal.Decimal`` objects in both
+``row()`` and ``dataframe()`` methods. When sending dataframes, you can also use
+PyArrow decimal types for better performance.
+
+Sending decimals requires protocol version 3. When using HTTP, this protocol
+version is auto-negotiated. For TCP connections, you must explicitly specify
+``protocol_version=3`` in the configuration string:
+
+.. code-block:: python
+
+    # HTTP - protocol version 3 is auto-negotiated
+    conf = 'http::addr=localhost:9000;'
+    
+    # TCP - must specify protocol_version=3 explicitly
+    conf = 'tcp::addr=localhost:9009;protocol_version=3;'
+
+.. important::
+    **Server Requirement**: This feature requires QuestDB server version 9.2.0 or higher.
+    
+    Unlike other column types, DECIMAL columns **must be created in advance** via SQL
+    before ingesting data. Auto-creation is not supported for DECIMAL columns.
+    
+    For details on creating DECIMAL columns and working with this data type, see the
+    `QuestDB Decimal documentation <https://questdb.com/docs/concept/decimal/>`_.
+
+**Usage with Python Decimal objects:**
+
+.. code-block:: python
+
+    from decimal import Decimal
+    from questdb.ingress import Sender, TimestampNanos
+    
+    # First, create the table with DECIMAL column via SQL:
+    # CREATE TABLE trades (
+    #     symbol SYMBOL,
+    #     price DECIMAL(18,4),
+    #     amount DECIMAL(18,8),
+    #     timestamp TIMESTAMP
+    # ) TIMESTAMP(timestamp);
+    
+    conf = 'http::addr=localhost:9000;'
+    with Sender.from_conf(conf) as sender:
+        sender.row(
+            'trades',
+            symbols={'symbol': 'ETH-USD'},
+            columns={
+                'price': Decimal('2615.5400'),
+                'amount': Decimal('0.00044000')},
+            at=TimestampNanos.now())
+
+**Usage with Python Decimal objects in Pandas dataframes:**
+
+.. code-block:: python
+
+    import pandas as pd
+    from decimal import Decimal
+    
+    # Create DataFrame with Python Decimal objects
+    df = pd.DataFrame({
+        'symbol': ['ETH-USD', 'BTC-USD'],
+        'price': [Decimal('2615.5400'), Decimal('43210.1234')],
+        'volume': [Decimal('1234.56789012'), Decimal('98.76543210')]
+    })
+    
+    with Sender.from_conf(conf) as sender:
+        sender.dataframe(
+            df, 
+            table_name='trades',
+            symbols='symbol',
+            at=TimestampNanos.now())
+
+**Usage with PyArrow Decimal types in Pandas dataframes:**
+
+.. code-block:: python
+
+    import pandas as pd
+    import pyarrow as pa
+    from decimal import Decimal
+    
+    # Create DataFrame with Arrow decimal types
+    df = pd.DataFrame({
+        'prices': pd.array(
+            [Decimal('-99999.99'), Decimal('-678.00')],
+            dtype=pd.ArrowDtype(pa.decimal128(18, 2))
+        )
+    })
+    
+    with Sender.from_conf(conf) as sender:
+        sender.dataframe(df, table_name='prices', at=TimestampNanos.now())
+
+Additional Arrow Data Type Support
+**********************************
+
+Added support for additional PyArrow column types commonly encountered when
+deserializing from Parquet files or converting Polars dataframes to Pandas:
+
+* ``int16``, ``int32``, ``float32`` (float), ``bool``
+* ``string``, ``large_string`` (including as symbol types)
+* ``timestamp[us]`` with timezone support for microsecond-precision timestamps
+
+Microsecond Timestamp Precision
+*******************************
+
+Microsecond-precision timestamp columns (``datetime64[us]`` in NumPy and
+``timestamp[us]`` in PyArrow) are now fully supported. When using
+``protocol_version`` 2 or higher, microsecond timestamps are sent with full
+precision, including for the designated timestamp column.
+
+Bug fixes
+~~~~~~~~~
+
+* Updated type hints to allow ``None`` as a valid column value in
+  ``Sender.row()``. This brings the type annotations in line with the actual
+  behavior, where ``None`` values have always been supported to represent NULL
+  values.
+
 4.0.0 (2025-10-17)
 ------------------
 

@@ -1,5 +1,5 @@
 .. image:: logo.svg
-    :target: https://questdb.io/
+    :target: https://questdb.com/
     :alt: QuestDB
     :width: 400px
 
@@ -9,7 +9,7 @@ Contents
 ========
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
    installation
    sender

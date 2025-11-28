@@ -72,8 +72,8 @@ Authentication
 ==============
 
 If you're using QuestDB enterprise you can read up on creating and permissioning
-users in the `Enterprise quickstart <https://questdb.io/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
-and the `role-based access control <https://questdb.io/docs/operations/rbac/>`_ guides.
+users in the `Enterprise quickstart <https://questdb.com/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
+and the `role-based access control <https://questdb.com/docs/operations/rbac/>`_ guides.
 
 HTTP Bearer Token
 -----------------
@@ -106,7 +106,7 @@ TLS
 
 TLS in enabled by selecting the ``tcps`` or ``https`` protocol.
 
-See the `QuestDB enterprise TLS documentation <https://questdb.io/docs/operations/tls/>`_
+See the `QuestDB enterprise TLS documentation <https://questdb.com/docs/operations/tls/>`_
 on how to enable this feature in the server.
 
 Open source QuestDB does not offer TLS support out of the box, but you can
@@ -154,7 +154,7 @@ For more details on using self-signed test certificates, see:
 
 * For Open Source QuestDB: https://github.com/questdb/c-questdb-client/blob/main/tls_certs/README.md#self-signed-certificates
 
-* For QuestDB Enterprise: https://questdb.io/docs/operations/tls/#demo-certificates
+* For QuestDB Enterprise: https://questdb.com/docs/operations/tls/#demo-certificates
 
 .. _sender_conf_auto_flush:
 
@@ -239,6 +239,8 @@ Valid options are:
 
 * ``2`` - Array support and binary format serialization for 64-bit floats (version specific to QuestDB).
 
+* ``3`` - Decimal type support (requires QuestDB 9.2.0+). Also includes all features from version 2.
+
 * ``auto`` (default) - Automatic version selection based on protocol type.
 
   HTTP/HTTPS: Auto-detects server capability during handshake (supports version negotiation)
@@ -247,6 +249,9 @@ Valid options are:
 
 .. note::
     Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
+    
+    Protocol version ``3`` requires QuestDB server version 9.2.0 or higher and
+    is needed for ingesting data into ``DECIMAL`` columns.
 
 .. _sender_conf_buffer:
 

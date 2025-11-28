@@ -429,7 +429,7 @@ class Buffer:
         values to ``columns`` are going to be encoded as the ``STRING`` type.
 
         Refer to the
-        `QuestDB documentation <https://questdb.io/docs/concept/symbol/>`_ to
+        `QuestDB documentation <https://questdb.com/docs/concept/symbol/>`_ to
         understand the difference between the ``SYMBOL`` and ``STRING`` types
         (TL;DR: symbols are interned strings).
 
@@ -441,19 +441,19 @@ class Buffer:
             * - Python type
               - Serialized as ILP type
             * - ``bool``
-              - `BOOLEAN <https://questdb.io/docs/reference/api/ilp/columnset-types#boolean>`_
+              - `BOOLEAN <https://questdb.com/docs/reference/api/ilp/columnset-types#boolean>`_
             * - ``int``
-              - `INTEGER <https://questdb.io/docs/reference/api/ilp/columnset-types#integer>`_
+              - `INTEGER <https://questdb.com/docs/reference/api/ilp/columnset-types#integer>`_
             * - ``float``
-              - `FLOAT <https://questdb.io/docs/reference/api/ilp/columnset-types#float>`_
+              - `FLOAT <https://questdb.com/docs/reference/api/ilp/columnset-types#float>`_
             * - ``str``
-              - `STRING <https://questdb.io/docs/reference/api/ilp/columnset-types#string>`_
+              - `STRING <https://questdb.com/docs/reference/api/ilp/columnset-types#string>`_
             * - ``np.ndarray``
-              - `ARRAY <https://questdb.io/docs/reference/api/ilp/columnset-types#array>`_
+              - `ARRAY <https://questdb.com/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
-              - `TIMESTAMP <https://questdb.io/docs/reference/api/ilp/columnset-types#timestamp>`_
+              - `TIMESTAMP <https://questdb.com/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``Decimal``
-              - `DECIMAL <https://questdb.io/docs/reference/api/ilp/columnset-types#decimal>`_
+              - `DECIMAL <https://questdb.com/docs/reference/api/ilp/columnset-types#decimal>`_
             * - ``None``
               - *Column is skipped and not serialized.*
 
@@ -546,7 +546,7 @@ class Buffer:
 
             Only columns containing strings can be serialized as symbols.
 
-        :type symbols: str or bool or list of str or list of int
+        :type symbols: str or bool or list[str] or list[int]
 
         :param at: The designated timestamp of the rows.
 
@@ -608,7 +608,7 @@ class Buffer:
 
         **Pandas to ILP datatype mappings**
 
-        .. seealso:: https://questdb.io/docs/reference/api/ilp/columnset-types/
+        .. seealso:: https://questdb.com/docs/reference/api/ilp/columnset-types/
 
         .. list-table:: Pandas Mappings
             :header-rows: 1
