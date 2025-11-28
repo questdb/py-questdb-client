@@ -172,7 +172,7 @@ To send decimal values, use Python's :class:`decimal.Decimal` type in the
     from questdb.ingress import Sender, TimestampNanos
     import pandas as pd
 
-    # CREATE TABLE financial_data (
+    # CREATE TABLE prices (
     #     symbol SYMBOL,
     #     price DECIMAL(18, 6),
     #     timestamp TIMESTAMP_NS
