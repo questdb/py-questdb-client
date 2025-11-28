@@ -88,12 +88,17 @@ def main(args):
     is_64bits = sys.maxsize > 2 ** 32
     is_cpython = platform.python_implementation() == 'CPython'
     is_final = sys.version_info.releaselevel == 'final'
+    py_version = (sys.version_info.major, sys.version_info.minor)
     if on_linux_is_glibc and is_64bits and is_cpython and is_final:
         # Ensure that we've managed to install the expected dependencies.
         import pandas
         import numpy
         import pyarrow
-        import fastparquet
+
+        # Temporarily don't require fastparquet on 3.14
+        # Compat will still be tested on older releases.
+        if py_version < (3, 14):
+            import fastparquet
 
 
 if __name__ == "__main__":

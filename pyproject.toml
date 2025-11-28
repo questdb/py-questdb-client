@@ -1,7 +1,7 @@
 [project]
 # See: https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
 name = "questdb"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 version = "4.1.0"
 description = "QuestDB client library for Python"
 readme = "README.rst"
@@ -66,9 +66,9 @@ skip = [
     # Those builds are named `*win32*` in cibuildwheel.
     "*i686*",
 
-    # Skip Python 3.14 builds until the dependencies catch up
-    "cp314-*",
-    "cp314t-*"
+    # Temporarily skip the 3.14 free-threaded built on Windows.
+    # Pandas dependencies missing.
+    "*314t-win*"
 ]
 
 # [tool.cibuildwheel.windows]

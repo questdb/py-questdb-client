@@ -1478,6 +1478,11 @@ class TestBufferProtocolVersionV2(TestBases.TestBuffer):
     version = 2
 
 
+class TestBufferProtocolVersionV3(TestBases.TestBuffer):
+    name = 'protocol version 3'
+    version = 3
+
+
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile
