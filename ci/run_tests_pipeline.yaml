@@ -112,7 +112,7 @@ stages:
               python3 -m pip install uv
               sudo apt-get install -y libopenblas-dev pkg-config
             displayName: "Install uv"
-          - script: uv run --python python run --with 'numpy==2.0.0' test/test.py -v TestBufferProtocolVersionV2
+          - script: uv run --python python --with 'numpy==2.0.0' test/test.py -v TestBufferProtocolVersionV2
             displayName: "Test vs numpy 2.0"
           - script: uv run --python python --with 'numpy==2.2.0' test/test.py -v TestBufferProtocolVersionV2
             displayName: "Test vs numpy 2.2"
