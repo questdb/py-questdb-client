@@ -149,4 +149,4 @@ For better performance with DataFrames, use PyArrow decimal types:
     For TCP/TCPS, explicitly configure: ``tcp::addr=localhost:9009;protocol_version=3;``
 
 For more details, see the
-`QuestDB DECIMAL documentation <https://questdb.io/docs/reference/sql/datatypes/#decimal>`_.
+`QuestDB DECIMAL documentation <https://questdb.com/docs/reference/sql/datatypes/#decimal>`_.

@@ -2,10 +2,10 @@
 QuestDB Client Library for Python
 =================================
 
-This is the official Python client library for `QuestDB <https://questdb.io>`_.
+This is the official Python client library for `QuestDB <https://questdb.com>`_.
 
 This client library implements QuestDB's variant of the
-`InfluxDB Line Protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_
+`InfluxDB Line Protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_
 (ILP) over HTTP and TCP.
 
 ILP provides the fastest way to insert data into QuestDB.
@@ -27,7 +27,7 @@ The latest version of the library is 4.1.0 (`changelog <https://py-questdb-clien
 Quickstart
 ==========
 
-Start by `setting up QuestDB <https://questdb.io/docs/quick-start/>`_ .
+Start by `setting up QuestDB <https://questdb.com/docs/quick-start/>`_ .
 Once set up, you can use this library to insert data.
 
 The most common way to insert data is from a Pandas dataframe.
@@ -98,7 +98,7 @@ guide.
 Links
 =====
 
-* `Core database documentation <https://questdb.io/docs/>`_
+* `Core database documentation <https://questdb.com/docs/>`_
 
 * `Python library documentation <https://py-questdb-client.readthedocs.io/>`_
 
@@ -109,10 +109,10 @@ Links
 Community
 =========
 
-Stop by our `Community Forum <https://community.questdb.io>`_ to 
+Stop by our `Community Forum <https://community.questdb.com>`_ to 
 chat with the QuestDB team.
 
-You can also `sign up to our mailing list <https://questdb.io/contributors/>`_
+You can also `sign up to our mailing list <https://questdb.com/contributors/>`_
 to get notified of new releases.
 
 

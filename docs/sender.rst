@@ -9,7 +9,7 @@ Overview
 
 The :class:`Sender <questdb.ingress.Sender>` class is a client that inserts
 rows into QuestDB via the
-`ILP protocol <https://questdb.io/docs/reference/api/ilp/overview/>`_, with
+`ILP protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_, with
 support for both ILP over TCP and the newer and recommended ILP over HTTP.
 The sender also supports TLS and authentication.
 
@@ -160,7 +160,7 @@ Decimal ingestion requires :ref:`protocol version 3 <sender_conf_protocol_versio
 Unlike other column types, ``DECIMAL`` columns cannot be auto-created and must be
 :ref:`pre-created <troubleshooting-decimal>` with the appropriate
 ``DECIMAL(precision, scale)`` definition. See the
-`QuestDB DECIMAL documentation <https://questdb.io/docs/reference/sql/datatypes/#decimal>`_
+`QuestDB DECIMAL documentation <https://questdb.com/docs/reference/sql/datatypes/#decimal>`_
 and :ref:`troubleshooting guide <troubleshooting-flushing>` for more details.
 
 To send decimal values, use Python's :class:`decimal.Decimal` type in the
@@ -210,7 +210,7 @@ Populating Designated Timestamps
 --------------------------------
 
 The ``at`` parameter of the ``row`` and ``dataframe`` methods is used to specify
-the `designated timestamp <https://questdb.io/docs/concept/designated-timestamp/>`_
+the `designated timestamp <https://questdb.com/docs/concept/designated-timestamp/>`_
 of the rows. The designated timestamp column determines the order in which data
 is stored as rows and is used for
 `partitioning <https://questdb.com/docs/concept/partitions/>`.
@@ -427,8 +427,8 @@ to the authenticated user.
     GRANT add column, insert ON table1, table2 TO ingest;
 
 Read more setup details in the
-`Enterprise quickstart <https://questdb.io/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
-and the `role-based access control <https://questdb.io/docs/operations/rbac/>`_ guides.
+`Enterprise quickstart <https://questdb.com/docs/guides/enterprise-quick-start/#4-ingest-data-influxdb-line-protocol>`_
+and the `role-based access control <https://questdb.com/docs/operations/rbac/>`_ guides.
 
 .. _sender_good_practices:
 

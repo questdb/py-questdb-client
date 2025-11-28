@@ -1,5 +1,5 @@
 .. image:: logo.svg
-    :target: https://questdb.io/
+    :target: https://questdb.com/
     :alt: QuestDB
     :width: 400px
 
