@@ -1,7 +1,7 @@
 [project]
 # See: https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
 name = "questdb"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 version = "4.1.0"
 description = "QuestDB client library for Python"
 readme = "README.rst"

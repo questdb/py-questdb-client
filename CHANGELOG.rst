@@ -135,6 +135,11 @@ Bug fixes
   behavior, where ``None`` values have always been supported to represent NULL
   values.
 
+Python Version Support
+~~~~~~~~~~~~~~~~~~~~~~
+
+* Dropped support for Python 3.9, since it is now end of life.
+
 4.0.0 (2025-10-17)
 ------------------
 
