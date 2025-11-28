@@ -803,6 +803,7 @@ Valid options are:
 
 * ``protocol_version=1``
 * ``protocol_version=2``
+* ``protocol_version=3``
 * ``protocol_version=auto`` (default, if unspecified)
 
 Behavior details:
@@ -816,21 +817,21 @@ Behavior details:
 +----------------+--------------------------------------------------------------+
 |     ``2``      | - Binary encoding for f64                                    |
 |                | - Full support for array                                     |
+|                | - requires QuestDB server version 9.0.0 or higher            |
++----------------+--------------------------------------------------------------+
+|     ``3``      | - Decimal support                                            |
+|                | - requires QuestDB server version 9.2.0 or higher            |
 +----------------+--------------------------------------------------------------+
 |                | - **HTTP/HTTPS**: Auto-detects server capability during      |
 |     ``auto``   |   handshake (supports version negotiation)                   |
 |                | - **TCP/TCPS**: Defaults to version 1 for compatibility      |
 +----------------+--------------------------------------------------------------+
 
-Here is a configuration string with ``protocol_version=2`` for ``TCP``::
+Here is a configuration string with ``protocol_version=3`` for ``TCP``::
 
-    tcp::addr=localhost:9000;protocol_version=2;
+    tcp::addr=localhost:9000;protocol_version=3;
 
 See the :ref:`sender_conf_protocol_version` section for more details.
-
-.. note::
-    Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
-
 
 .. _sender_which_protocol:
 
