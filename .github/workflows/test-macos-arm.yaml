@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Test on macOS ARM
-    runs-on: macos-13-xlarge  # ARM64 runner
+    runs-on: macos-14  # ARM64 (M1) runner
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -52,7 +52,7 @@ jobs:
 
   test-numpy-compat:
     name: Test numpy compatibility
-    runs-on: macos-13-xlarge  # ARM64 runner
+    runs-on: macos-14  # ARM64 (M1) runner
     timeout-minutes: 90
     strategy:
       fail-fast: false
