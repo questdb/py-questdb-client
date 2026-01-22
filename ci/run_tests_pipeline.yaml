@@ -19,8 +19,11 @@ stages:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               vsQuestDbMaster: true
-            mac:
+            mac-latest:
               imageName: "macos-latest"
+              poolName: "Azure Pipelines"
+            mac-14:
+              imageName: "macos-14"
               poolName: "Azure Pipelines"
             windows-msvc-2019:
               imageName: "windows-2019"
