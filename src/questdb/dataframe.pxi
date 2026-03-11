@@ -801,7 +801,7 @@ cdef int64_t _AT_IS_SERVER_NOW = -2
 cdef int64_t _AT_IS_SET_BY_COLUMN = -1
 
 
-cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[us], datetime64[ns, tz], timestamp[ns][pyarrow], or timestamp[us][pyarrow]'
+cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[us], datetime64[ns, tz], datetime64[us, tz], timestamp[ns][pyarrow], or timestamp[us][pyarrow]'
 
 
 cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
@@ -818,10 +818,10 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
     elif isinstance(dtype, _NUMPY_DATETIME64_US) and str(dtype) == "datetime64[us]":
         return col_source_t.col_source_dt64us_numpy
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
-        # Docs say this should always be nanos, but best assert in case the API changes in the future.
-        # https://pandas.pydata.org/docs/reference/api/pandas.DatetimeTZDtype.html
         if dtype.unit == 'ns':
             return col_source_t.col_source_dt64ns_tz_arrow
+        elif dtype.unit == 'us':
+            return col_source_t.col_source_dt64us_tz_arrow
         else:
             raise IngressError(
                 IngressErrorCode.BadDataFrame,
@@ -944,24 +944,21 @@ cdef void_int _dataframe_series_as_pybuf(
     mapped.dictionary = NULL
     mapped.release = _dataframe_free_mapped_arrow  # to cleanup allocated array.
 
-cdef void_int _dataframe_series_as_arrow(
-        PandasCol pandas_col,
-        col_t* col) except -1:
+cdef list _dataframe_series_to_arrow_chunks(PandasCol pandas_col):
     cdef object array
-    cdef list chunks
-    cdef size_t n_chunks
-    cdef size_t chunk_index
     array = _PYARROW.Array.from_pandas(pandas_col.series)
     if isinstance(array, _PYARROW.ChunkedArray):
-        chunks = array.chunks
+        return array.chunks
     else:
-        chunks = [array]
+        return [array]
 
-    n_chunks = len(chunks)
+
+cdef void_int _dataframe_export_arrow_chunks(
+        list chunks, col_t* col) except -1:
+    cdef size_t n_chunks = len(chunks)
+    cdef size_t chunk_index
     _dataframe_alloc_chunks(n_chunks, col)
-
     for chunk_index in range(n_chunks):
-        array = chunks[chunk_index]
         if chunk_index == 0:
             chunks[chunk_index]._export_to_c(
                 <uintptr_t>&col.setup.chunks.chunks[chunk_index],
@@ -969,6 +966,13 @@ cdef void_int _dataframe_series_as_arrow(
         else:
             chunks[chunk_index]._export_to_c(
                 <uintptr_t>&col.setup.chunks.chunks[chunk_index])
+
+
+cdef void_int _dataframe_series_as_arrow(
+        PandasCol pandas_col,
+        col_t* col) except -1:
+    _dataframe_export_arrow_chunks(
+        _dataframe_series_to_arrow_chunks(pandas_col), col)
     
 
 cdef const char* _ARROW_FMT_INT8 = "c"
@@ -981,7 +985,20 @@ cdef const char* _ARROW_FMT_LRG_UTF8_STRING = 'U'
 cdef void_int _dataframe_category_series_as_arrow(
         PandasCol pandas_col, col_t* col) except -1:
     cdef const char* format
-    _dataframe_series_as_arrow(pandas_col, col)
+    cdef list chunks = _dataframe_series_to_arrow_chunks(pandas_col)
+
+    # Pandas 3.x with pyarrow may produce large_string ('U') dictionary
+    # values. Cast to regular string ('u') so our existing category
+    # accessors (which use int32 offsets) work unchanged.
+    if (len(chunks) > 0 and
+            hasattr(chunks[0].type, 'value_type') and
+            chunks[0].type.value_type == _PYARROW.large_string()):
+        target_type = _PYARROW.dictionary(
+            chunks[0].type.index_type, _PYARROW.string())
+        chunks = [chunk.cast(target_type) for chunk in chunks]
+
+    _dataframe_export_arrow_chunks(chunks, col)
+
     format = col.setup.arrow_schema.format
     if strncmp(format, _ARROW_FMT_INT8, 1) == 0:
         col.setup.source = col_source_t.col_source_str_i8_cat

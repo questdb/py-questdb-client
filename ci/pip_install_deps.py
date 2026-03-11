@@ -61,13 +61,33 @@ def ensure_timezone():
         pip_install('pytz')
 
 
-def install_old_pandas_and_numpy(args):
-    try_pip_install('pandas', args.pandas_version)
+def install_pandas2_and_numpy(pandas_version=None):
+    if pandas_version is not None:
+        try_pip_install('pandas', pandas_version)
+    else:
+        try_pip_install('pandas>=2,<3')
     try_pip_install('numpy<2')
 
-def install_new_pandas_and_numpy():
-    try_pip_install('pandas>2')
-    try_pip_install('numpy>2')
+
+def install_pandas3_and_numpy():
+    try_pip_install('pandas>=3')
+    try_pip_install('numpy>=2')
+
+
+def should_use_pandas3(py_version=None):
+    if py_version is None:
+        py_version = sys.version_info[:2]
+    return py_version >= (3, 11)
+
+
+def install_default_pandas_and_numpy():
+    # Pandas 3 currently requires Python 3.11+, so keep 3.10 wheel tests on
+    # the pandas 2 / numpy 1.x-compatible path unless explicitly overridden.
+    if should_use_pandas3():
+        install_pandas3_and_numpy()
+    else:
+        install_pandas2_and_numpy()
+
 
 def main(args):
     ensure_timezone()
@@ -75,9 +95,9 @@ def main(args):
     pip_install('setuptools')
     pip_install('packaging')
     if args.pandas_version is not None and args.pandas_version != '':
-        install_old_pandas_and_numpy(args)
+        install_pandas2_and_numpy(args.pandas_version)
     else:
-        install_new_pandas_and_numpy()
+        install_default_pandas_and_numpy()
 
     try_pip_install('fastparquet>=2023.10.1')
     try_pip_install('pyarrow')

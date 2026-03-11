@@ -28,6 +28,11 @@ import pandas as pd
 import numpy as np
 import pyarrow as pa
 
+# Pandas 3.x defaults tz-aware timestamps to microsecond resolution.
+# Pin to nanoseconds where tests expect nanosecond precision.
+_NS_TZ_DTYPE = pd.DatetimeTZDtype(tz=_TZ, unit='ns')
+_US_TZ_DTYPE = pd.DatetimeTZDtype(tz=_TZ, unit='us')
+
 try:
     import fastparquet
 except ImportError:
@@ -58,10 +63,10 @@ DF2 = pd.DataFrame({
     'D': pd.Series(['a1', 'a2', 'a3'], dtype='string'),
     'E': [1.0, 2.0, 3.0],
     'F': [1, 2, 3],
-    'G': [
+    'G': pd.Series([
         pd.Timestamp('20180310'),
         pd.Timestamp('20180311'),
-        pd.Timestamp('20180312')]})
+        pd.Timestamp('20180312')], dtype='datetime64[ns]')})
 
 DF3 = pd.DataFrame({
     'T': ['t1', 't2', 't1'],
@@ -75,10 +80,10 @@ DF3 = pd.DataFrame({
         np.array([1.0]),
         np.array([10.0]),
         np.array([100.0])],
-    'H': [
+    'H': pd.Series([
         pd.Timestamp('20180310'),
         pd.Timestamp('20180311'),
-        pd.Timestamp('20180312')]}
+        pd.Timestamp('20180312')], dtype='datetime64[ns]')}
 )
 
 DECIMAL_BINARY_FORMAT_TYPE = 23
@@ -1030,7 +1035,8 @@ class TestPandasBase:
             df = pd.DataFrame({'a': pd.Series([
                     pd.Timestamp('1970-01-01 00:00:00'),
                     pd.Timestamp('1970-01-01 00:00:01'),
-                    pd.Timestamp('1970-01-01 00:00:02')])})
+                    pd.Timestamp('1970-01-01 00:00:02')],
+                    dtype='datetime64[ns]')})
             buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             self.assertEqual(
                 buf,
@@ -1040,7 +1046,7 @@ class TestPandasBase:
 
         def test_datetime64_tz_arrow_col(self):
             df = pd.DataFrame({
-                'a': [
+                'a': pd.array([
                     pd.Timestamp(
                         year=2019, month=1, day=1,
                         hour=0, minute=0, second=0, tz=_TZ),
@@ -1051,6 +1057,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=2019, month=1, day=1,
                         hour=0, minute=0, second=3, tz=_TZ)],
+                    dtype=_NS_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             e = self.enc_ts_n
@@ -1064,7 +1071,7 @@ class TestPandasBase:
 
             # Not epoch 0.
             df = pd.DataFrame({
-                'a': [
+                'a': pd.array([
                     pd.Timestamp(
                         year=1970, month=1, day=1,
                         hour=0, minute=0, second=0, tz=_TZ),
@@ -1074,6 +1081,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=1970, month=1, day=1,
                         hour=0, minute=0, second=2, tz=_TZ)],
+                    dtype=_NS_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             self.assertEqual(
@@ -1085,7 +1093,7 @@ class TestPandasBase:
 
             # Actual epoch 0.
             df = pd.DataFrame({
-                'a': [
+                'a': pd.array([
                     pd.Timestamp(
                         year=1969, month=12, day=31,
                         hour=19, minute=0, second=0, tz=_TZ),
@@ -1095,6 +1103,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=1969, month=12, day=31,
                         hour=19, minute=0, second=2, tz=_TZ)],
+                    dtype=_NS_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             self.assertEqual(
@@ -1104,10 +1113,11 @@ class TestPandasBase:
                 f'tbl1,b=sym3 a={e(2000000000)}\n'.encode())
 
             df2 = pd.DataFrame({
-                'a': [
+                'a': pd.array([
                     pd.Timestamp(
                         year=1900, month=1, day=1,
                         hour=0, minute=0, second=0, tz=_TZ)],
+                    dtype=_NS_TZ_DTYPE),
                 'b': ['sym1']})
             buf = _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
 
@@ -1117,6 +1127,31 @@ class TestPandasBase:
                 buf,
                 [f'tbl1,b=sym1 a={e(-2208970800000000000)}\n'.encode(),
                  f'tbl1,b=sym1 a={e(-2208971040000000000)}\n'.encode()])
+
+        def test_datetime64_tz_arrow_micros_col(self):
+            df = pd.DataFrame({
+                'a': pd.array([
+                    pd.Timestamp(
+                        year=2024, month=1, day=1,
+                        hour=0, minute=0, second=0, microsecond=123456, tz=_TZ),
+                    pd.Timestamp(
+                        year=2024, month=1, day=1,
+                        hour=0, minute=0, second=1, microsecond=654321, tz=_TZ),
+                    None,
+                    pd.Timestamp(
+                        year=2024, month=1, day=1,
+                        hour=0, minute=0, second=3, microsecond=111111, tz=_TZ)],
+                    dtype=_US_TZ_DTYPE),
+                'b': ['sym1', 'sym2', 'sym3', 'sym4']})
+            buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
+            e = self.enc_ts_t
+            self.assertEqual(
+                buf,
+                # Note how these are 5hr offset from `test_arrow_micros_col`.
+                f'tbl1,b=sym1 a={e(1704085200123456)}\n'.encode() +
+                f'tbl1,b=sym2 a={e(1704085201654321)}\n'.encode() +
+                b'tbl1,b=sym3\n' +
+                f'tbl1,b=sym4 a={e(1704085203111111)}\n'.encode())
 
         def test_datetime64_numpy_at(self):
             df = pd.DataFrame({
@@ -1161,7 +1196,7 @@ class TestPandasBase:
 
         def test_datetime64_tz_arrow_at(self):
             df = pd.DataFrame({
-                'a': [
+                'a': pd.array([
                     pd.Timestamp(
                         year=2019, month=1, day=1,
                         hour=0, minute=0, second=0, tz=_TZ),
@@ -1172,6 +1207,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=2019, month=1, day=1,
                         hour=0, minute=0, second=3, tz=_TZ)],
+                    dtype=_NS_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at='a')
             e = self.enc_des_ts_n
@@ -1184,10 +1220,47 @@ class TestPandasBase:
             self.assertEqual(buf, exp)
 
             df2 = pd.DataFrame({
-                'a': [
+                'a': pd.array([
                     pd.Timestamp(
                         year=1900, month=1, day=1,
                         hour=0, minute=0, second=0, tz=_TZ)],
+                    dtype=_NS_TZ_DTYPE),
+                'b': ['sym1']})
+            with self.assertRaisesRegex(
+                    qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
+                _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at='a')
+
+        def test_datetime64_tz_arrow_micros_at(self):
+            df = pd.DataFrame({
+                'a': pd.array([
+                    pd.Timestamp(
+                        year=2024, month=1, day=1,
+                        hour=0, minute=0, second=0, microsecond=123456, tz=_TZ),
+                    pd.Timestamp(
+                        year=2024, month=1, day=1,
+                        hour=0, minute=0, second=1, microsecond=654321, tz=_TZ),
+                    None,
+                    pd.Timestamp(
+                        year=2024, month=1, day=1,
+                        hour=0, minute=0, second=3, microsecond=111111, tz=_TZ)],
+                    dtype=_US_TZ_DTYPE),
+                'b': ['sym1', 'sym2', 'sym3', 'sym4']})
+            buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at='a')
+            e = self.enc_des_ts_t
+            exp = (
+                # Note how these are 5hr offset from `test_arrow_micros_col`.
+                f'tbl1,b=sym1 {e(1704085200123456)}\n'.encode() +
+                f'tbl1,b=sym2 {e(1704085201654321)}\n'.encode() +
+                b'tbl1,b=sym3\n' +
+                f'tbl1,b=sym4 {e(1704085203111111)}\n'.encode())
+            self.assertEqual(buf, exp)
+
+            df2 = pd.DataFrame({
+                'a': pd.array([
+                    pd.Timestamp(
+                        year=1900, month=1, day=1,
+                        hour=0, minute=0, second=0, microsecond=123456, tz=_TZ)],
+                    dtype=_US_TZ_DTYPE),
                 'b': ['sym1']})
             with self.assertRaisesRegex(
                     qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
@@ -1220,7 +1293,7 @@ class TestPandasBase:
                     table_name_col='a', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
+                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', None], dtype=dtype),
@@ -1228,7 +1301,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
+                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', float('nan')], dtype=dtype),
@@ -1236,7 +1309,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*Expected a table name, got a null.*'):
+                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', pd.NA], dtype=dtype),
@@ -1767,11 +1840,13 @@ class TestPandasBase:
                 'b': pd.Series([10, 20, 30, None, 50], dtype='UInt8'),
                 'c': [0.5, float('nan'), 2.5, 3.5, None]})
             df.to_parquet(pa_parquet_path, engine='pyarrow')
-            df.to_parquet(fp_parquet_path, engine='fastparquet')
+            try:
+                df.to_parquet(fp_parquet_path, engine='fastparquet')
+                fp_wrote = True
+            except (ValueError, TypeError):
+                # fastparquet may not support pandas 3.x arrow-backed strings.
+                fp_wrote = False
             pa2pa_df = pd.read_parquet(pa_parquet_path, engine='pyarrow')
-            pa2fp_df = pd.read_parquet(pa_parquet_path, engine='fastparquet')
-            fp2pa_df = pd.read_parquet(fp_parquet_path, engine='pyarrow')
-            fp2fp_df = pd.read_parquet(fp_parquet_path, engine='fastparquet')
 
             exp_dtypes = ['category', 'int16', 'UInt8', 'float64']
             self.assertEqual(list(df.dtypes), exp_dtypes)
@@ -1796,9 +1871,13 @@ class TestPandasBase:
             fallback_df = df.astype({'s': 'object', 'b': 'float64'})
 
             df_eq(df, pa2pa_df, exp_dtypes)
-            df_eq(df, pa2fp_df, exp_dtypes)
-            df_eq(fallback_df, fp2pa_df, fallback_exp_dtypes)
-            df_eq(df, fp2fp_df, exp_dtypes)
+            if fp_wrote:
+                pa2fp_df = pd.read_parquet(pa_parquet_path, engine='fastparquet')
+                fp2pa_df = pd.read_parquet(fp_parquet_path, engine='pyarrow')
+                fp2fp_df = pd.read_parquet(fp_parquet_path, engine='fastparquet')
+                df_eq(df, pa2fp_df, exp_dtypes)
+                df_eq(fallback_df, fp2pa_df, fallback_exp_dtypes)
+                df_eq(df, fp2fp_df, exp_dtypes)
 
             exp = (
                 b'tbl1,s=a a=1i,b=10i,c' + _float_binary_bytes(0.5, self.version == 1) + b'\n' +
@@ -1821,9 +1900,10 @@ class TestPandasBase:
 
             self.assertEqual(_dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp), exp)
             self.assertEqual(_dataframe(self.version, pa2pa_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
-            self.assertEqual(_dataframe(self.version, pa2fp_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
-            self.assertEqual(_dataframe(self.version, fp2pa_df, table_name='tbl1', at=qi.ServerTimestamp), fallback_exp)
-            self.assertEqual(_dataframe(self.version, fp2fp_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
+            if fp_wrote:
+                self.assertEqual(_dataframe(self.version, pa2fp_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
+                self.assertEqual(_dataframe(self.version, fp2pa_df, table_name='tbl1', at=qi.ServerTimestamp), fallback_exp)
+                self.assertEqual(_dataframe(self.version, fp2fp_df, table_name='tbl1', at=qi.ServerTimestamp), exp)
 
         def test_f64_np_array(self):
             df = pd.DataFrame({

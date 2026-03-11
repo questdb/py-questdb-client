@@ -8,13 +8,13 @@ stages:
         displayName: "on"
         strategy:
           matrix:
-            linux:
+            linux-pandas3:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
-            linux-old-pandas:
+            linux-pandas2:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
-              pandasVersion: "2.1.4"
+              pandasVersion: "2.3.3"
             linux-qdb-master:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
@@ -42,10 +42,10 @@ stages:
               python3 -m pip install cython
             displayName: "Install cython"
           - script: python3 ci/pip_install_deps.py
-            displayName: "Install pandas latest"
+            displayName: "Install pandas 3.x"
             condition: eq(variables.pandasVersion, '')
           - script: python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
-            displayName: "Install pandas older"
+            displayName: "Install pandas $(pandasVersion)"
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
