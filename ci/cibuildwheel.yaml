@@ -142,7 +142,7 @@ stages:
             inputs: {pathtoPublish: wheelhouse}
 
       - job: windows_i686
-        pool: {vmImage: 'windows-2019'}
+        pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
@@ -152,7 +152,7 @@ stages:
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
           - powershell: |
-              $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars32.bat"
+              $vsPath = Resolve-Path "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars32.bat"
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
 
               Get-Content env_vars.txt | ForEach-Object {
@@ -172,7 +172,7 @@ stages:
             inputs: {pathtoPublish: 'wheelhouse'}
 
       - job: windows_x86_64
-        pool: {vmImage: 'windows-2019'}
+        pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 90
         steps:
           - task: UsePythonVersion@0
@@ -182,7 +182,7 @@ stages:
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
           - powershell: |
-              $vsPath = Resolve-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\*\VC\Auxiliary\Build\vcvars64.bat"
+              $vsPath = Resolve-Path "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars64.bat"
               cmd /c "call `"$vsPath`" && set > env_vars.txt"
 
               Get-Content env_vars.txt | ForEach-Object {

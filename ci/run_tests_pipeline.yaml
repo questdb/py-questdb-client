@@ -22,8 +22,8 @@ stages:
             mac:
               imageName: "macos-latest"
               poolName: "Azure Pipelines"
-            windows-msvc-2019:
-              imageName: "windows-2019"
+            windows-msvc-2022:
+              imageName: "windows-2025"
               poolName: "Azure Pipelines"
         pool:
           name: $(poolName)
