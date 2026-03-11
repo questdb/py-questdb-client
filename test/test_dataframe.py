@@ -1044,6 +1044,24 @@ class TestPandasBase:
                 f'tbl1 a={e(1000000000)}\n'.encode() +
                 f'tbl1 a={e(2000000000)}\n'.encode())
 
+        def test_datetime64_numpy_seconds_col(self):
+            df = pd.DataFrame({
+                'a': pd.Series([
+                        pd.Timestamp('2024-01-01 00:00:00'),
+                        pd.Timestamp('2024-01-01 00:00:01'),
+                        None,
+                        pd.Timestamp('2024-01-01 00:00:03')],
+                    dtype='datetime64[s]'),
+                'b': ['a', 'b', 'c', 'd']})
+            buf = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
+            e = self.enc_ts_t
+            exp = (
+                f'tbl1 a={e(1704067200000000)},b="a"\n'.encode() +
+                f'tbl1 a={e(1704067201000000)},b="b"\n'.encode() +
+                b'tbl1 b="c"\n' +
+                f'tbl1 a={e(1704067203000000)},b="d"\n'.encode())
+            self.assertEqual(buf, exp)
+
         def test_datetime64_tz_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -1193,6 +1211,24 @@ class TestPandasBase:
                 f'tbl1 b=1i {e(0)}\n'.encode() +
                 f'tbl1 b=2i {e(1000000000)}\n'.encode() +
                 f'tbl1 b=3i {e(2000000000)}\n'.encode())
+
+        def test_datetime64_numpy_seconds_at(self):
+            df = pd.DataFrame({
+                'a': pd.Series([
+                        pd.Timestamp('2024-01-01 00:00:00'),
+                        pd.Timestamp('2024-01-01 00:00:01'),
+                        None,
+                        pd.Timestamp('2024-01-01 00:00:03')],
+                    dtype='datetime64[s]'),
+                'b': [1, 2, 3, 4]})
+            buf = _dataframe(self.version, df, table_name='tbl1', at='a')
+            e = self.enc_des_ts_t
+            exp = (
+                f'tbl1 b=1i {e(1704067200000000)}\n'.encode() +
+                f'tbl1 b=2i {e(1704067201000000)}\n'.encode() +
+                b'tbl1 b=3i\n' +
+                f'tbl1 b=4i {e(1704067203000000)}\n'.encode())
+            self.assertEqual(buf, exp)
 
         def test_datetime64_tz_arrow_at(self):
             df = pd.DataFrame({
