@@ -8,23 +8,33 @@ stages:
         displayName: "on"
         strategy:
           matrix:
-            linux:
+            linux-pandas3:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
-            linux-old-pandas:
+              pythonVersion: "3.12"
+            linux-pandas2:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
-              pandasVersion: "2.1.4"
+              pythonVersion: "3.12"
+              pandasVersion: "2.3.3"
+            linux-pandas310:
+              imageName: "ubuntu-latest"
+              poolName: "Azure Pipelines"
+              pythonVersion: "3.10"
+              pandasVersion: "2.3.3"
             linux-qdb-master:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
+              pythonVersion: "3.12"
               vsQuestDbMaster: true
             mac:
               imageName: "macos-latest"
               poolName: "Azure Pipelines"
-            windows-msvc-2019:
-              imageName: "windows-2019"
+              pythonVersion: "3.12"
+            windows-msvc-2022:
+              imageName: "windows-2025"
               poolName: "Azure Pipelines"
+              pythonVersion: "3.12"
         pool:
           name: $(poolName)
           vmImage: $(imageName)
@@ -36,16 +46,16 @@ stages:
             submodules: true
           - task: UsePythonVersion@0
             inputs:
-              versionSpec: "3.12"
+              versionSpec: "$(pythonVersion)"
           - script: |
               python3 --version
               python3 -m pip install cython
             displayName: "Install cython"
           - script: python3 ci/pip_install_deps.py
-            displayName: "Install pandas latest"
+            displayName: "Install pandas 3.x"
             condition: eq(variables.pandasVersion, '')
           - script: python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
-            displayName: "Install pandas older"
+            displayName: "Install pandas $(pandasVersion)"
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"

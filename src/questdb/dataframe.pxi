@@ -524,8 +524,7 @@ cdef object _NUMPY_UINT64 = None
 cdef object _NUMPY_INT64 = None
 cdef object _NUMPY_FLOAT32 = None
 cdef object _NUMPY_FLOAT64 = None
-cdef object _NUMPY_DATETIME64_NS = None
-cdef object _NUMPY_DATETIME64_US = None
+cdef object _NUMPY_DATETIME64 = None
 cdef object _NUMPY_OBJECT = None
 cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
@@ -558,8 +557,7 @@ cdef object _dataframe_may_import_deps():
     global _NUMPY_INT64
     global _NUMPY_FLOAT32
     global _NUMPY_FLOAT64
-    global _NUMPY_DATETIME64_NS
-    global _NUMPY_DATETIME64_US
+    global _NUMPY_DATETIME64
     global _NUMPY_OBJECT
     if _NUMPY is not None:
         return
@@ -585,8 +583,7 @@ cdef object _dataframe_may_import_deps():
     _NUMPY_INT64 = type(_NUMPY.dtype('int64'))
     _NUMPY_FLOAT32 = type(_NUMPY.dtype('float32'))
     _NUMPY_FLOAT64 = type(_NUMPY.dtype('float64'))
-    _NUMPY_DATETIME64_NS = type(_NUMPY.dtype('datetime64[ns]'))
-    _NUMPY_DATETIME64_US = type(_NUMPY.dtype('datetime64[us]'))
+    _NUMPY_DATETIME64 = type(_NUMPY.dtype('datetime64[ns]'))
     _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
@@ -801,7 +798,28 @@ cdef int64_t _AT_IS_SERVER_NOW = -2
 cdef int64_t _AT_IS_SET_BY_COLUMN = -1
 
 
-cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[us], datetime64[ns, tz], timestamp[ns][pyarrow], or timestamp[us][pyarrow]'
+cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[us], datetime64[ns, tz], datetime64[us, tz], timestamp[ns][pyarrow], or timestamp[us][pyarrow]'
+
+
+cdef int _dataframe_classify_numpy_timestamp_dtype(object dtype):
+    cdef str dtype_str = str(dtype)
+    # Pandas 3 may infer bare numpy.datetime64 values as coarser units such as
+    # datetime64[s]. We already serialize numpy timestamps via the existing
+    # microsecond or nanosecond buffer paths, so normalize these coarser units
+    # to microseconds before exporting the raw numpy buffer.
+    if dtype_str == 'datetime64[ns]':
+        return col_source_t.col_source_dt64ns_numpy
+    elif dtype_str in (
+            'datetime64[us]',
+            'datetime64[ms]',
+            'datetime64[s]',
+            'datetime64[m]',
+            'datetime64[h]',
+            'datetime64[D]',
+            'datetime64[W]'):
+        return col_source_t.col_source_dt64us_numpy
+    else:
+        return 0
 
 
 cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
@@ -813,15 +831,13 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
         0 - dtype is not a supported timestamp datatype.
     """
     cdef object arrow_type
-    if isinstance(dtype, _NUMPY_DATETIME64_NS) and str(dtype) == "datetime64[ns]":
-        return col_source_t.col_source_dt64ns_numpy
-    elif isinstance(dtype, _NUMPY_DATETIME64_US) and str(dtype) == "datetime64[us]":
-        return col_source_t.col_source_dt64us_numpy
+    if isinstance(dtype, _NUMPY_DATETIME64):
+        return _dataframe_classify_numpy_timestamp_dtype(dtype)
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
-        # Docs say this should always be nanos, but best assert in case the API changes in the future.
-        # https://pandas.pydata.org/docs/reference/api/pandas.DatetimeTZDtype.html
         if dtype.unit == 'ns':
             return col_source_t.col_source_dt64ns_tz_arrow
+        elif dtype.unit == 'us':
+            return col_source_t.col_source_dt64us_tz_arrow
         else:
             raise IngressError(
                 IngressErrorCode.BadDataFrame,
@@ -944,24 +960,21 @@ cdef void_int _dataframe_series_as_pybuf(
     mapped.dictionary = NULL
     mapped.release = _dataframe_free_mapped_arrow  # to cleanup allocated array.
 
-cdef void_int _dataframe_series_as_arrow(
-        PandasCol pandas_col,
-        col_t* col) except -1:
+cdef list _dataframe_series_to_arrow_chunks(PandasCol pandas_col):
     cdef object array
-    cdef list chunks
-    cdef size_t n_chunks
-    cdef size_t chunk_index
     array = _PYARROW.Array.from_pandas(pandas_col.series)
     if isinstance(array, _PYARROW.ChunkedArray):
-        chunks = array.chunks
+        return array.chunks
     else:
-        chunks = [array]
+        return [array]
 
-    n_chunks = len(chunks)
+
+cdef void_int _dataframe_export_arrow_chunks(
+        list chunks, col_t* col) except -1:
+    cdef size_t n_chunks = len(chunks)
+    cdef size_t chunk_index
     _dataframe_alloc_chunks(n_chunks, col)
-
     for chunk_index in range(n_chunks):
-        array = chunks[chunk_index]
         if chunk_index == 0:
             chunks[chunk_index]._export_to_c(
                 <uintptr_t>&col.setup.chunks.chunks[chunk_index],
@@ -969,6 +982,13 @@ cdef void_int _dataframe_series_as_arrow(
         else:
             chunks[chunk_index]._export_to_c(
                 <uintptr_t>&col.setup.chunks.chunks[chunk_index])
+
+
+cdef void_int _dataframe_series_as_arrow(
+        PandasCol pandas_col,
+        col_t* col) except -1:
+    _dataframe_export_arrow_chunks(
+        _dataframe_series_to_arrow_chunks(pandas_col), col)
     
 
 cdef const char* _ARROW_FMT_INT8 = "c"
@@ -981,7 +1001,20 @@ cdef const char* _ARROW_FMT_LRG_UTF8_STRING = 'U'
 cdef void_int _dataframe_category_series_as_arrow(
         PandasCol pandas_col, col_t* col) except -1:
     cdef const char* format
-    _dataframe_series_as_arrow(pandas_col, col)
+    cdef list chunks = _dataframe_series_to_arrow_chunks(pandas_col)
+
+    # Pandas 3.x with pyarrow may produce large_string ('U') dictionary
+    # values. Cast to regular string ('u') so our existing category
+    # accessors (which use int32 offsets) work unchanged.
+    if (len(chunks) > 0 and
+            hasattr(chunks[0].type, 'value_type') and
+            chunks[0].type.value_type == _PYARROW.large_string()):
+        target_type = _PYARROW.dictionary(
+            chunks[0].type.index_type, _PYARROW.string())
+        chunks = [chunk.cast(target_type) for chunk in chunks]
+
+    _dataframe_export_arrow_chunks(chunks, col)
+
     format = col.setup.arrow_schema.format
     if strncmp(format, _ARROW_FMT_INT8, 1) == 0:
         col.setup.source = col_source_t.col_source_str_i8_cat
@@ -1139,9 +1172,14 @@ cdef void_int _dataframe_resolve_source_and_buffers(
     cdef int ts_col_source = _dataframe_classify_timestamp_dtype(dtype)
     if ts_col_source != 0:
         col.setup.source = <col_source_t>ts_col_source
-        if ((col.setup.source == col_source_t.col_source_dt64ns_numpy) or
-            (col.setup.source == col_source_t.col_source_dt64us_numpy)):
+        if col.setup.source == col_source_t.col_source_dt64ns_numpy:
             _dataframe_series_as_pybuf(pandas_col, col)
+        elif col.setup.source == col_source_t.col_source_dt64us_numpy:
+            # NumPy-backed datetimes are serialized from the raw array buffer.
+            # This source type covers both native datetime64[us] columns and
+            # coarser numpy datetime64 units that we normalize to microseconds.
+            _dataframe_series_as_pybuf(
+                pandas_col, col, 'datetime64[us]')
         else:
             _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_BOOL):
