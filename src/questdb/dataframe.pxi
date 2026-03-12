@@ -524,8 +524,7 @@ cdef object _NUMPY_UINT64 = None
 cdef object _NUMPY_INT64 = None
 cdef object _NUMPY_FLOAT32 = None
 cdef object _NUMPY_FLOAT64 = None
-cdef object _NUMPY_DATETIME64_NS = None
-cdef object _NUMPY_DATETIME64_US = None
+cdef object _NUMPY_DATETIME64 = None
 cdef object _NUMPY_OBJECT = None
 cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
@@ -558,8 +557,7 @@ cdef object _dataframe_may_import_deps():
     global _NUMPY_INT64
     global _NUMPY_FLOAT32
     global _NUMPY_FLOAT64
-    global _NUMPY_DATETIME64_NS
-    global _NUMPY_DATETIME64_US
+    global _NUMPY_DATETIME64
     global _NUMPY_OBJECT
     if _NUMPY is not None:
         return
@@ -585,8 +583,7 @@ cdef object _dataframe_may_import_deps():
     _NUMPY_INT64 = type(_NUMPY.dtype('int64'))
     _NUMPY_FLOAT32 = type(_NUMPY.dtype('float32'))
     _NUMPY_FLOAT64 = type(_NUMPY.dtype('float64'))
-    _NUMPY_DATETIME64_NS = type(_NUMPY.dtype('datetime64[ns]'))
-    _NUMPY_DATETIME64_US = type(_NUMPY.dtype('datetime64[us]'))
+    _NUMPY_DATETIME64 = type(_NUMPY.dtype('datetime64[ns]'))
     _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
@@ -804,13 +801,15 @@ cdef int64_t _AT_IS_SET_BY_COLUMN = -1
 cdef str _SUPPORTED_DATETIMES = 'datetime64[ns], datetime64[us], datetime64[ns, tz], datetime64[us, tz], timestamp[ns][pyarrow], or timestamp[us][pyarrow]'
 
 
-cdef str _dataframe_numpy_timestamp_fallback_dtype(object dtype):
+cdef int _dataframe_classify_numpy_timestamp_dtype(object dtype):
     cdef str dtype_str = str(dtype)
     # Pandas 3 may infer bare numpy.datetime64 values as coarser units such as
     # datetime64[s]. We already serialize numpy timestamps via the existing
     # microsecond or nanosecond buffer paths, so normalize these coarser units
     # to microseconds before exporting the raw numpy buffer.
-    if dtype_str in (
+    if dtype_str == 'datetime64[ns]':
+        return col_source_t.col_source_dt64ns_numpy
+    elif dtype_str in (
             'datetime64[us]',
             'datetime64[ms]',
             'datetime64[s]',
@@ -818,11 +817,9 @@ cdef str _dataframe_numpy_timestamp_fallback_dtype(object dtype):
             'datetime64[h]',
             'datetime64[D]',
             'datetime64[W]'):
-        return 'datetime64[us]'
-    elif dtype_str == 'datetime64[ns]':
-        return None
+        return col_source_t.col_source_dt64us_numpy
     else:
-        return ''
+        return 0
 
 
 cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
@@ -834,13 +831,8 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
         0 - dtype is not a supported timestamp datatype.
     """
     cdef object arrow_type
-    cdef str fallback_dtype
-    if isinstance(dtype, _NUMPY_DATETIME64_NS):
-        fallback_dtype = _dataframe_numpy_timestamp_fallback_dtype(dtype)
-        if fallback_dtype == 'datetime64[us]':
-            return col_source_t.col_source_dt64us_numpy
-        elif fallback_dtype is None:
-            return col_source_t.col_source_dt64ns_numpy
+    if isinstance(dtype, _NUMPY_DATETIME64):
+        return _dataframe_classify_numpy_timestamp_dtype(dtype)
     elif isinstance(dtype, _PANDAS.DatetimeTZDtype):
         if dtype.unit == 'ns':
             return col_source_t.col_source_dt64ns_tz_arrow
@@ -1178,18 +1170,16 @@ cdef void_int _dataframe_resolve_source_and_buffers(
         PandasCol pandas_col, col_t* col) except -1:
     cdef object dtype = pandas_col.dtype
     cdef int ts_col_source = _dataframe_classify_timestamp_dtype(dtype)
-    cdef str fallback_dtype = None
     if ts_col_source != 0:
         col.setup.source = <col_source_t>ts_col_source
-        if ((col.setup.source == col_source_t.col_source_dt64ns_numpy) or
-            (col.setup.source == col_source_t.col_source_dt64us_numpy)):
-            fallback_dtype = _dataframe_numpy_timestamp_fallback_dtype(dtype)
-            # NumPy-backed datetimes are serialized from the raw array buffer,
-            # so any unit normalization has to happen before we expose that
-            # buffer through _dataframe_series_as_pybuf().
+        if col.setup.source == col_source_t.col_source_dt64ns_numpy:
+            _dataframe_series_as_pybuf(pandas_col, col)
+        elif col.setup.source == col_source_t.col_source_dt64us_numpy:
+            # NumPy-backed datetimes are serialized from the raw array buffer.
+            # This source type covers both native datetime64[us] columns and
+            # coarser numpy datetime64 units that we normalize to microseconds.
             _dataframe_series_as_pybuf(
-                pandas_col, col,
-                None if fallback_dtype == '' else fallback_dtype)
+                pandas_col, col, 'datetime64[us]')
         else:
             _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _NUMPY_BOOL):
