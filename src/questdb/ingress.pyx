@@ -1784,6 +1784,9 @@ cdef object parse_conf_str(
         str conf_str):
     """
     Parse a config string to a tuple of (Protocol, dict[str, str]).
+    The 'addr' key may appear multiple times for multi-url support;
+    all values are collected into a list under the '_addrs' key,
+    and the last 'addr' value is kept under the 'addr' key.
     """
     cdef size_t c_len1
     cdef const char* c_buf1
@@ -1794,6 +1797,7 @@ cdef object parse_conf_str(
     cdef str key
     cdef str value
     cdef dict params = {}
+    cdef list addrs = []
     cdef line_sender_utf8 c_conf_str_utf8
     cdef questdb_conf_str_parse_err* err
     cdef questdb_conf_str* c_conf_str
@@ -1812,6 +1816,8 @@ cdef object parse_conf_str(
     while questdb_conf_str_iter_next(c_iter, &c_buf1, &c_len1, &c_buf2, &c_len2):
         key = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
         value = PyUnicode_FromStringAndSize(c_buf2, <Py_ssize_t>c_len2)
+        if key == 'addr':
+            addrs.append(value)
         params[key] = value
 
     questdb_conf_str_iter_free(c_iter)
@@ -1848,6 +1854,13 @@ cdef object parse_conf_str(
         k: type_mappings.get(k, str)(v)
         for k, v in params.items()
     }
+
+    # Store the full list of addresses for multi-url support.
+    # This is set AFTER the type_mappings comprehension to avoid
+    # the list being converted to a string by the default str() coercion.
+    if addrs:
+        params['_addrs'] = addrs
+
     return (Protocol.parse(service), params)
 
 
@@ -2089,6 +2102,7 @@ cdef class Sender:
             str host,
             object port,
             *,
+            object addresses=None,
             str bind_interface=None,
             str username=None,
             str password=None,
@@ -2115,6 +2129,9 @@ cdef class Sender:
         cdef str port_str
         cdef line_sender_protocol c_protocol
         cdef line_sender_utf8 c_port
+        cdef line_sender_error* err = NULL
+        cdef line_sender_utf8 c_addr_host
+        cdef line_sender_utf8 c_addr_port
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         try:
             protocol = Protocol.parse(protocol)
@@ -2129,6 +2146,27 @@ cdef class Sender:
             str_to_utf8(b, <PyObject*>host, &c_host)
             str_to_utf8(b, <PyObject*>port_str, &c_port)
             self._opts = line_sender_opts_new_service(c_protocol, c_host, c_port)
+
+            if addresses is not None:
+                for addr_entry in addresses:
+                    if not isinstance(addr_entry, (tuple, list)) or len(addr_entry) != 2:
+                        raise TypeError(
+                            '"addresses" must be a list of (host, port) tuples')
+                    addr_host_str = str(addr_entry[0])
+                    addr_port_val = addr_entry[1]
+                    if isinstance(addr_port_val, int):
+                        addr_port_str = str(addr_port_val)
+                    elif isinstance(addr_port_val, str):
+                        addr_port_str = addr_port_val
+                    else:
+                        raise TypeError(
+                            f'address port must be an int or a str, '
+                            f'not {_fqn(type(addr_port_val))}')
+                    str_to_utf8(b, <PyObject*>addr_host_str, &c_addr_host)
+                    str_to_utf8(b, <PyObject*>addr_port_str, &c_addr_port)
+                    if not line_sender_opts_address(
+                            self._opts, c_addr_host, c_addr_port, &err):
+                        raise c_err_to_py(err)
 
             self._set_sender_fields(
                 b,
@@ -2248,11 +2286,16 @@ cdef class Sender:
 
             sender = Sender.__new__(Sender)
 
-            # Forward only the `addr=` parameter to the C API.
-            synthetic_conf_str = f'{protocol.tag}::addr={addr};'
+            # Forward addr parameter(s) to the C API.
+            # Multiple addr entries are supported for multi-url failover.
+            addrs = params.get('_addrs', [addr])
+            addr_parts = ';'.join(f'addr={a}' for a in addrs)
+            synthetic_conf_str = f'{protocol.tag}::{addr_parts};'
             str_to_utf8(b, <PyObject*>synthetic_conf_str, &c_synthetic_conf_str)
             sender._opts = line_sender_opts_from_conf(
                 c_synthetic_conf_str, &err)
+            if err != NULL:
+                raise c_err_to_py(err)
 
             sender._set_sender_fields(
                 b,
