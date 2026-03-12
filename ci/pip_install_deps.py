@@ -70,8 +70,8 @@ def install_pandas2_and_numpy(pandas_version=None):
 
 
 def install_pandas3_and_numpy():
-    try_pip_install('pandas>=3')
-    try_pip_install('numpy>=2')
+    try_pip_install('pandas>=3,<4')
+    try_pip_install('numpy>=2,<3')
 
 
 def should_use_pandas3(py_version=None):
