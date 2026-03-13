@@ -36,7 +36,7 @@ __all__ = [
 
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -831,7 +831,7 @@ class Sender:
         host: str,
         port: Union[int, str],
         *,
-        addresses: Optional[List[Tuple[str, Union[int, str]]]] = None,
+        addresses: Optional[Sequence[Sequence[Union[str, int]]]] = None,
         bind_interface: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
