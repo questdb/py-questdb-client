@@ -2148,11 +2148,15 @@ cdef class Sender:
             self._opts = line_sender_opts_new_service(c_protocol, c_host, c_port)
 
             if addresses is not None:
-                for addr_entry in addresses:
+                for addr_index, addr_entry in enumerate(addresses):
                     if not isinstance(addr_entry, (tuple, list)) or len(addr_entry) != 2:
                         raise TypeError(
-                            '"addresses" must be a list of (host, port) tuples')
-                    addr_host_str = str(addr_entry[0])
+                            f'addresses[{addr_index}] must be a (host, port) tuple')
+                    if not isinstance(addr_entry[0], str):
+                        raise TypeError(
+                            f'addresses[{addr_index}] host must be a str, '
+                            f'not {_fqn(type(addr_entry[0]))}')
+                    addr_host_str = addr_entry[0]
                     addr_port_val = addr_entry[1]
                     if isinstance(addr_port_val, int):
                         addr_port_str = str(addr_port_val)
@@ -2160,7 +2164,7 @@ cdef class Sender:
                         addr_port_str = addr_port_val
                     else:
                         raise TypeError(
-                            f'address port must be an int or a str, '
+                            f'addresses[{addr_index}] port must be an int or a str, '
                             f'not {_fqn(type(addr_port_val))}')
                     str_to_utf8(b, <PyObject*>addr_host_str, &c_addr_host)
                     str_to_utf8(b, <PyObject*>addr_port_str, &c_addr_port)

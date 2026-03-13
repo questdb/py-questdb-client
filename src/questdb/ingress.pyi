@@ -831,7 +831,7 @@ class Sender:
         host: str,
         port: Union[int, str],
         *,
-        addresses: Optional[Sequence[Sequence[Union[str, int]]]] = None,
+        addresses: Optional[Sequence[Tuple[str, Union[str, int]]]] = None,
         bind_interface: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,

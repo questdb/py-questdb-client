@@ -1743,6 +1743,48 @@ class TestMultiUrl(unittest.TestCase):
                 sender.flush()
                 self.assertEqual(len(server1.requests), 1)
 
+    def test_addresses_non_str_host_rejected(self):
+        """Test that a non-str host (e.g. int) in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[(42, 9000)],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+            self.assertIn('str', str(ctx.exception))
+
+    def test_addresses_none_host_rejected(self):
+        """Test that None as host in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[(None, 9000)],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+            self.assertIn('str', str(ctx.exception))
+
+    def test_addresses_three_element_tuple_rejected(self):
+        """Test that a 3-element tuple in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[('host', 9000, 'extra')],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+
+    def test_addresses_zero_element_tuple_rejected(self):
+        """Test that an empty tuple in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[()],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+
 
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
