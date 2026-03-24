@@ -1125,9 +1125,10 @@ class TestBases:
                     retry_timeout=0,
                     request_min_throughput=0,  # disable
                     protocol_version=2,
-                    request_timeout=datetime.timedelta(milliseconds=5)) as sender:
-                # wait for 50ms in the server to simulate a slow response
-                server.responses.append((50, 200, 'text/plain', b'OK'))
+                    request_timeout=datetime.timedelta(milliseconds=50)) as sender:
+                # Server waits 500ms before responding; the client should
+                # time out at 50ms, well before the response arrives.
+                server.responses.append((500, 200, 'text/plain', b'OK'))
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                 with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
                     sender.flush()
