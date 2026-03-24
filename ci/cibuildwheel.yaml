@@ -13,11 +13,12 @@ stages:
             fetchDepth: 1
             lfs: false
             submodules: true
-          # - task: UsePythonVersion@0
           - bash: |
               set -o errexit
-              python3 -m pip install --upgrade pip
-              python3 -m pip install cibuildwheel
+              sudo apt-get update
+              sudo apt-get install -y python3-pip python3-venv
+              python3 -m pip install --upgrade pip --break-system-packages
+              python3 -m pip install cibuildwheel --break-system-packages
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
