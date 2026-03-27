@@ -36,7 +36,7 @@ __all__ = [
 
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -831,6 +831,7 @@ class Sender:
         host: str,
         port: Union[int, str],
         *,
+        addresses: Optional[Sequence[Tuple[str, Union[str, int]]]] = None,
         bind_interface: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
@@ -852,7 +853,13 @@ class Sender:
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
-    ): ...
+    ):
+        """
+        :param addresses: Additional ``(host, port)`` pairs for failover
+            (HTTP/HTTPS only). On retriable errors the sender rotates through
+            all configured addresses in round-robin order.
+        """
+        ...
     @staticmethod
     def from_conf(
         conf_str: str,

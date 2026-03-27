@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import sys
+
+from questdb.ingress import TimestampNanos
+
 sys.dont_write_bytecode = True
 import os
 import shutil
@@ -29,7 +32,7 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.2.0'
+QUESTDB_VERSION = '9.3.0'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
@@ -324,6 +327,11 @@ class TestWithDatabase(unittest.TestCase):
         ]
         scrubbed_data = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_data, expected_data)
+
+    def test_sending_just_timestamps(self):
+        with qi.Sender('http', 'localhost', self.qdb_plain.http_server_port) as sender:
+            sender.row(table_name="just_timestamp_test", at=TimestampNanos.now())
+            sender.flush()
 
 if __name__ == '__main__':
     unittest.main()

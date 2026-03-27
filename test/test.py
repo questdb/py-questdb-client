@@ -1484,6 +1484,309 @@ class TestBufferProtocolVersionV3(TestBases.TestBuffer):
     version = 3
 
 
+class TestMultiUrl(unittest.TestCase):
+    """Tests for multi-URL failover support."""
+
+    def test_addresses_param_basic(self):
+        """Test that the addresses kwarg is accepted and creates a valid sender."""
+        with HttpServer() as server1, HttpServer() as server2:
+            with qi.Sender(
+                    'http', '127.0.0.1', server1.port,
+                    addresses=[('127.0.0.1', server2.port)],
+                    protocol_version='2',
+                    auto_flush=False) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server1.requests), 1)
+
+    def test_addresses_param_with_int_port(self):
+        """Test that addresses accept integer ports."""
+        with HttpServer() as server1, HttpServer() as server2:
+            with qi.Sender(
+                    'http', '127.0.0.1', server1.port,
+                    addresses=[('127.0.0.1', int(server2.port))],
+                    protocol_version='2',
+                    auto_flush=False) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+
+    def test_addresses_param_with_str_port(self):
+        """Test that addresses accept string ports."""
+        with HttpServer() as server1, HttpServer() as server2:
+            with qi.Sender(
+                    'http', '127.0.0.1', server1.port,
+                    addresses=[('127.0.0.1', str(server2.port))],
+                    protocol_version='2',
+                    auto_flush=False) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+
+    def test_addresses_param_none_is_no_op(self):
+        """Test that addresses=None works (single address, backward compat)."""
+        with HttpServer() as server:
+            with qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=None,
+                    protocol_version='2',
+                    auto_flush=False) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server.requests), 1)
+
+    def test_addresses_param_empty_list_is_no_op(self):
+        """Test that addresses=[] works (single address, no extras)."""
+        with HttpServer() as server:
+            with qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[],
+                    protocol_version='2',
+                    auto_flush=False) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server.requests), 1)
+
+    def test_addresses_param_bad_type_rejected(self):
+        """Test that non-tuple entries in addresses raise TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError):
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=['not-a-tuple'],
+                    protocol_version='2')
+
+    def test_addresses_param_bad_port_type_rejected(self):
+        """Test that non-int/str port in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError):
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[('host2', 3.14)],
+                    protocol_version='2')
+
+    def test_addresses_tcp_rejected(self):
+        """Test that TCP protocol rejects additional addresses."""
+        with self.assertRaises(qi.IngressError) as ctx:
+            qi.Sender(
+                'tcp', '127.0.0.1', 9009,
+                addresses=[('127.0.0.1', 9010)])
+        self.assertEqual(ctx.exception.code, qi.IngressErrorCode.ConfigError)
+
+    def test_multi_url_from_conf(self):
+        """Test multi-url via config string."""
+        with HttpServer() as server1, HttpServer() as server2:
+            conf = (
+                f'http::addr=127.0.0.1:{server1.port};'
+                f'addr=127.0.0.1:{server2.port};'
+                f'protocol_version=2;'
+            )
+            with qi.Sender.from_conf(conf, auto_flush=False) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server1.requests), 1)
+
+    def test_multi_url_failover(self):
+        """Test that a 500 on server1 causes failover to server2."""
+        with HttpServer() as server1, HttpServer() as server2:
+            conf = (
+                f'http::addr=127.0.0.1:{server1.port};'
+                f'addr=127.0.0.1:{server2.port};'
+                f'protocol_version=2;'
+                f'retry_timeout=5000;'
+            )
+            with qi.Sender.from_conf(conf, auto_flush=False) as sender:
+                # First request to server1 returns 500, retry goes to server2.
+                server1.responses.append(
+                    (0, 500, 'text/plain', b'server1 down'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                # server1 got the first attempt (500), server2 got the retry (200).
+                self.assertEqual(len(server1.requests), 1)
+                self.assertEqual(len(server2.requests), 1)
+
+    def test_multi_url_non_retriable_no_failover(self):
+        """Test that a 400 error does not trigger failover."""
+        with HttpServer() as server1, HttpServer() as server2:
+            conf = (
+                f'http::addr=127.0.0.1:{server1.port};'
+                f'addr=127.0.0.1:{server2.port};'
+                f'protocol_version=2;'
+                f'retry_timeout=5000;'
+            )
+            with qi.Sender.from_conf(conf, auto_flush=False) as sender:
+                server1.responses.append(
+                    (0, 400, 'text/plain', b'Bad Request'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                with self.assertRaises(qi.IngressError):
+                    sender.flush()
+                # Only server1 was contacted, no failover.
+                self.assertEqual(len(server1.requests), 1)
+                self.assertEqual(len(server2.requests), 0)
+
+    def test_multi_url_ipv6_from_conf(self):
+        """Test IPv6 bracket notation in config string parses correctly."""
+        # We can't actually connect to [::1] in all environments,
+        # but we can verify parsing works by checking it doesn't error
+        # on the conf string itself (it will fail at connect time).
+        sender = None
+        try:
+            sender = qi.Sender.from_conf(
+                'http::addr=[::1]:9000;addr=[::1]:9001;protocol_version=2;',
+                auto_flush=False)
+        except qi.IngressError as e:
+            # Connection errors are expected — we just care that
+            # config parsing succeeded (not a ConfigError).
+            self.assertNotEqual(e.code, qi.IngressErrorCode.ConfigError)
+        finally:
+            if sender is not None:
+                sender.close()
+
+    def test_multi_url_addresses_param_failover(self):
+        """Test failover using the programmatic addresses parameter."""
+        with HttpServer() as server1, HttpServer() as server2:
+            with qi.Sender(
+                    'http', '127.0.0.1', server1.port,
+                    addresses=[('127.0.0.1', server2.port)],
+                    protocol_version='2',
+                    retry_timeout=5000,
+                    auto_flush=False) as sender:
+                server1.responses.append(
+                    (0, 500, 'text/plain', b'server1 down'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server1.requests), 1)
+                self.assertEqual(len(server2.requests), 1)
+
+    def test_multi_url_multiple_addresses_param(self):
+        """Test specifying multiple extra addresses programmatically."""
+        with HttpServer() as s1, HttpServer() as s2, HttpServer() as s3:
+            with qi.Sender(
+                    'http', '127.0.0.1', s1.port,
+                    addresses=[
+                        ('127.0.0.1', s2.port),
+                        ('127.0.0.1', s3.port),
+                    ],
+                    protocol_version='2',
+                    retry_timeout=5000,
+                    auto_flush=False) as sender:
+                # s1 returns 500, s2 returns 500, s3 succeeds.
+                s1.responses.append(
+                    (0, 500, 'text/plain', b's1 down'))
+                s2.responses.append(
+                    (0, 500, 'text/plain', b's2 down'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(s1.requests), 1)
+                self.assertEqual(len(s2.requests), 1)
+                self.assertEqual(len(s3.requests), 1)
+
+    def test_addresses_tcps_rejected(self):
+        """Test that TCPS protocol also rejects additional addresses."""
+        with self.assertRaises(qi.IngressError) as ctx:
+            qi.Sender(
+                'tcps', '127.0.0.1', 9009,
+                addresses=[('127.0.0.1', 9010)])
+        self.assertEqual(ctx.exception.code, qi.IngressErrorCode.ConfigError)
+
+    def test_multi_url_all_servers_fail(self):
+        """All servers return 500 — should raise after retry_timeout."""
+        with HttpServer() as server1, HttpServer() as server2:
+            conf = (
+                f'http::addr=127.0.0.1:{server1.port};'
+                f'addr=127.0.0.1:{server2.port};'
+                f'protocol_version=2;'
+                f'retry_timeout=200;'
+            )
+            with qi.Sender.from_conf(conf, auto_flush=False) as sender:
+                # Pre-load enough 500 responses to outlast all retries.
+                for _ in range(20):
+                    server1.responses.append(
+                        (0, 500, 'text/plain', b'server1 down'))
+                    server2.responses.append(
+                        (0, 500, 'text/plain', b'server2 down'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                with self.assertRaises(qi.IngressError) as ctx:
+                    sender.flush()
+                self.assertEqual(
+                    ctx.exception.code,
+                    qi.IngressErrorCode.ServerFlushError)
+                # Both servers should have been contacted.
+                total = len(server1.requests) + len(server2.requests)
+                self.assertGreaterEqual(total, 2)
+
+    def test_multi_url_failover_body_content(self):
+        """Verify the failover server receives the same ILP data."""
+        with HttpServer() as server1, HttpServer() as server2:
+            conf = (
+                f'http::addr=127.0.0.1:{server1.port};'
+                f'addr=127.0.0.1:{server2.port};'
+                f'protocol_version=2;'
+                f'retry_timeout=5000;'
+            )
+            with qi.Sender.from_conf(conf, auto_flush=False) as sender:
+                server1.responses.append(
+                    (0, 500, 'text/plain', b'server1 down'))
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server2.requests), 1)
+                body = server2.requests[0]
+                self.assertIn(b'tbl1', body)
+                self.assertIn(b'x=42i', body)
+
+    def test_addresses_param_with_list_entries(self):
+        """Test that list entries (not just tuples) work in addresses."""
+        with HttpServer() as server1, HttpServer() as server2:
+            with qi.Sender(
+                    'http', '127.0.0.1', server1.port,
+                    addresses=[['127.0.0.1', server2.port]],
+                    protocol_version='2',
+                    auto_flush=False) as sender:
+                sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
+                sender.flush()
+                self.assertEqual(len(server1.requests), 1)
+
+    def test_addresses_non_str_host_rejected(self):
+        """Test that a non-str host (e.g. int) in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[(42, 9000)],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+            self.assertIn('str', str(ctx.exception))
+
+    def test_addresses_none_host_rejected(self):
+        """Test that None as host in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[(None, 9000)],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+            self.assertIn('str', str(ctx.exception))
+
+    def test_addresses_three_element_tuple_rejected(self):
+        """Test that a 3-element tuple in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[('host', 9000, 'extra')],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+
+    def test_addresses_zero_element_tuple_rejected(self):
+        """Test that an empty tuple in addresses raises TypeError."""
+        with HttpServer() as server:
+            with self.assertRaises(TypeError) as ctx:
+                qi.Sender(
+                    'http', '127.0.0.1', server.port,
+                    addresses=[()],
+                    protocol_version='2')
+            self.assertIn('addresses[0]', str(ctx.exception))
+
+
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile
