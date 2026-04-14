@@ -954,6 +954,160 @@ class TestWithDatabase(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 buf.row('t', columns={'a' * 33: 1}, at=qi.ServerTimestamp)
 
+    def test_qwp_udp_ilp_buffer_rejected(self):
+        self._require_qwp_udp()
+        buf = qi.Buffer.ilp(protocol_version=2)
+        buf.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
+        with self._mk_qwpudp_sender() as sender:
+            with self.assertRaisesRegex(
+                    qi.IngressError, 'QWP/UDP sender requires a QWP buffer'):
+                sender.flush(buf)
+
+    def test_qwp_udp_buffer_rejected_by_http(self):
+        self._require_qwp_udp()
+        buf = qi.Buffer.qwp()
+        buf.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
+        with qi.Sender(
+                qi.Protocol.Http, self.qdb_plain.host,
+                self.qdb_plain.http_server_port) as sender:
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'ILP sender requires an ILP buffer'):
+                sender.flush(buf)
+
+    def test_qwp_udp_wrong_port_silent(self):
+        """UDP flush to wrong port succeeds silently (fire-and-forget)."""
+        self._require_qwp_udp()
+        with qi.Sender(
+                qi.Protocol.QwpUdp,
+                self.qdb_plain.host, 19007) as sender:
+            sender.row('t', columns={'x': 1}, at=qi.TimestampNanos.now())
+            sender.flush()  # no error — data goes nowhere
+
+    def test_qwp_udp_unresolvable_host(self):
+        """Unresolvable host fails at establish()."""
+        self._require_qwp_udp()
+        with self.assertRaisesRegex(qi.IngressError, 'Could not resolve'):
+            with qi.Sender(
+                    qi.Protocol.QwpUdp,
+                    'this.host.does.not.exist.invalid', 9007) as sender:
+                pass
+
+    def test_qwp_udp_wide_row(self):
+        """50 columns + 5 symbols in a single row."""
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        cols = {f'col_{i:02d}': float(i) for i in range(50)}
+        syms = {f'sym_{i}': f'val_{i}' for i in range(5)}
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name, symbols=syms, columns=cols,
+                       at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        # 50 cols + 5 syms + 1 timestamp = 56
+        self.assertEqual(len(resp['columns']), 56)
+
+    def test_qwp_udp_row_ordering(self):
+        """100 rows with explicit timestamps, split across datagrams."""
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        n = 100
+        base_ts = 1_700_000_000_000_000_000
+        with self._mk_qwpudp_sender(
+                max_datagram_size=200, auto_flush=False) as sender:
+            for i in range(n):
+                sender.row(
+                    table_name, columns={'seq': i},
+                    at=qi.TimestampNanos(base_ts + i * 1000))
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=n)
+        seqs = sorted(row[0] for row in resp['dataset'])
+        self.assertEqual(seqs, list(range(n)))
+
+    def test_qwp_udp_tiny_datagram_rejected(self):
+        """max_datagram_size=1: row exceeds datagram, flush errors."""
+        self._require_qwp_udp()
+        with self._mk_qwpudp_sender(
+                max_datagram_size=1, auto_flush=False) as sender:
+            sender.row('t', columns={'x': 1}, at=qi.TimestampNanos.now())
+            with self.assertRaisesRegex(
+                    qi.IngressError, 'exceeds maximum datagram size'):
+                sender.flush()
+
+    def test_qwp_udp_rapid_fire_auto_flush(self):
+        """2000 rows with pure auto-flush, no explicit flush.
+        UDP may drop datagrams under load, so we accept >= 90% arrival."""
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        n = 2000
+        with self._mk_qwpudp_sender() as sender:
+            for i in range(n):
+                sender.row(
+                    table_name, columns={'seq': i},
+                    at=qi.TimestampNanos.now())
+        import time
+        time.sleep(3)
+        resp = self.qdb_plain.retry_check_table(
+            table_name, min_rows=int(n * 0.9))
+        self.assertGreaterEqual(resp['count'], int(n * 0.9))
+
+    def test_qwp_udp_protocol_version_in_conf_rejected(self):
+        self._require_qwp_udp()
+        conf = self._mk_qwpudp_conf(protocol_version=2)
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'protocol_version.*not supported.*QWP'):
+            qi.Sender.from_conf(conf)
+
+    def test_qwp_udp_concurrent_senders(self):
+        """Two senders from different threads to the same port."""
+        self._require_qwp_udp()
+        import threading
+        t1 = uuid.uuid4().hex
+        t2 = uuid.uuid4().hex
+        errors = []
+        def writer(table, n=50):
+            try:
+                with self._mk_qwpudp_sender() as sender:
+                    for i in range(n):
+                        sender.row(
+                            table, columns={'seq': i},
+                            at=qi.TimestampNanos.now())
+                    sender.flush()
+            except Exception as e:
+                errors.append(e)
+        th1 = threading.Thread(target=writer, args=(t1,))
+        th2 = threading.Thread(target=writer, args=(t2,))
+        th1.start()
+        th2.start()
+        th1.join()
+        th2.join()
+        self.assertEqual(errors, [])
+        r1 = self.qdb_plain.retry_check_table(t1, min_rows=50)
+        r2 = self.qdb_plain.retry_check_table(t2, min_rows=50)
+        self.assertEqual(r1['count'], 50)
+        self.assertEqual(r2['count'], 50)
+
+    def test_qwp_udp_double_establish_rejected(self):
+        self._require_qwp_udp()
+        sender = self._mk_qwpudp_sender()
+        sender.establish()
+        try:
+            with self.assertRaisesRegex(
+                    qi.IngressError, "establish.*can't be called"):
+                sender.establish()
+        finally:
+            sender.close(flush=False)
+
+    def test_qwp_udp_establish_after_close_rejected(self):
+        self._require_qwp_udp()
+        sender = self._mk_qwpudp_sender()
+        sender.establish()
+        sender.close(flush=False)
+        with self.assertRaisesRegex(
+                qi.IngressError, "establish.*can't be called"):
+            sender.establish()
+
     def test_qwp_udp_decimal_zero_and_negative(self):
         self._require_qwp_udp()
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
