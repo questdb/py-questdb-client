@@ -3,6 +3,7 @@
 import sys
 sys.dont_write_bytecode = True
 import os
+import datetime
 import importlib.util
 import shutil
 import unittest
@@ -468,6 +469,100 @@ class TestWithDatabase(unittest.TestCase):
         self.assertEqual(resp['columns'], exp_columns)
         scrubbed_dataset = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_dataset, [['a', True, 1, 1.5], ['b', False, 2, 2.5]])
+
+    def test_qwp_udp_timestamp_columns(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        ts_micros = qi.TimestampMicros(1_700_000_000_000_000)
+        ts_nanos = qi.TimestampNanos(1_700_000_000_123_456_789)
+        dt = datetime.datetime(2024, 6, 15, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name,
+                columns={
+                    'ts_micros': ts_micros,
+                    'ts_nanos': ts_nanos,
+                    'ts_dt': dt},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        col_types = {c['name']: c['type'] for c in resp['columns']}
+        self.assertEqual(col_types['ts_micros'], 'TIMESTAMP')
+        self.assertEqual(col_types['ts_nanos'], 'TIMESTAMP_NS')
+        self.assertEqual(col_types['ts_dt'], 'TIMESTAMP')
+        row = resp['dataset'][0]
+        # ts_micros: 1_700_000_000_000_000 micros
+        self.assertEqual(row[0], '2023-11-14T22:13:20.000000Z')
+        # ts_dt: 2024-06-15T12:00:00Z
+        self.assertEqual(row[2], '2024-06-15T12:00:00.000000Z')
+
+    def test_qwp_udp_f64_array(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_ARRAY_RELEASE:
+            self.skipTest('old server does not support array')
+        table_name = uuid.uuid4().hex
+        array1 = np.array([[1.1, 2.2], [3.3, 4.4]], dtype=np.float64)
+        array2 = array1.T  # non-contiguous
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name,
+                columns={
+                    'arr_c': array1,
+                    'arr_t': array2},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        exp_columns = [
+            {'dim': 2, 'elemType': 'DOUBLE', 'name': 'arr_c', 'type': 'ARRAY'},
+            {'dim': 2, 'elemType': 'DOUBLE', 'name': 'arr_t', 'type': 'ARRAY'},
+            {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        scrubbed = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed, [[[[1.1, 2.2], [3.3, 4.4]],
+                                     [[1.1, 3.3], [2.2, 4.4]]]])
+
+    def test_qwp_udp_decimal(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table_name} '
+            f'(price DECIMAL(18,3), timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name,
+                columns={'price': decimal.Decimal('12345.678')},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        exp_columns = [
+            {'name': 'price', 'type': 'DECIMAL(18,3)'},
+            {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        scrubbed = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed, [['12345.678']])
+
+    def test_qwp_udp_string_column(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name,
+                columns={'label': 'hello world', 'value': 42},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        col_types = {c['name']: c['type'] for c in resp['columns']}
+        self.assertEqual(col_types['label'], 'VARCHAR')
+        self.assertEqual(col_types['value'], 'LONG')
+        scrubbed = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed, [['hello world', 42]])
 
     def test_f64_arr(self):
         if self.qdb_plain.version < FIRST_ARRAY_RELEASE:
