@@ -564,6 +564,228 @@ class TestWithDatabase(unittest.TestCase):
         scrubbed = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed, [['hello world', 42]])
 
+    def test_qwp_udp_auto_flush_bytes_triggers(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender(
+                max_datagram_size=200,
+                auto_flush_rows=False,
+                auto_flush_interval=False) as sender:
+            self.assertEqual(sender.auto_flush_bytes, 200)
+            for i in range(20):
+                sender.row(
+                    table_name,
+                    symbols={'tag': f'v_{i}'},
+                    columns={'value': i},
+                    at=qi.TimestampNanos.now())
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=10)
+        self.assertGreaterEqual(resp['count'], 10)
+
+    def test_qwp_udp_auto_flush_rows_triggers(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender(
+                auto_flush_rows=5,
+                auto_flush_bytes=False,
+                auto_flush_interval=False) as sender:
+            for i in range(10):
+                sender.row(
+                    table_name,
+                    columns={'value': i},
+                    at=qi.TimestampNanos.now())
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=10)
+        self.assertEqual(resp['count'], 10)
+
+    def test_qwp_udp_auto_flush_disabled(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        sender = self._mk_qwpudp_sender(auto_flush=False)
+        sender.establish()
+        try:
+            for i in range(5):
+                sender.row(
+                    table_name,
+                    columns={'value': i},
+                    at=qi.TimestampNanos.now())
+            self.assertGreater(len(sender), 0)
+            sender.flush()
+        finally:
+            sender.close(flush=False)
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=5)
+        self.assertEqual(resp['count'], 5)
+
+    def test_qwp_udp_multi_table(self):
+        self._require_qwp_udp()
+        t1 = uuid.uuid4().hex
+        t2 = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(t1, columns={'x': 1}, at=qi.TimestampNanos.now())
+            sender.row(t2, columns={'y': 2}, at=qi.TimestampNanos.now())
+            sender.row(t1, columns={'x': 3}, at=qi.TimestampNanos.now())
+            sender.flush()
+        r1 = self.qdb_plain.retry_check_table(t1, min_rows=2)
+        r2 = self.qdb_plain.retry_check_table(t2, min_rows=1)
+        self.assertEqual(r1['count'], 2)
+        self.assertEqual(r2['count'], 1)
+
+    def test_qwp_udp_buffer_reuse_after_flush(self):
+        self._require_qwp_udp()
+        t1 = uuid.uuid4().hex
+        t2 = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            buf = sender.new_buffer()
+            buf.row(t1, columns={'batch': 1}, at=qi.TimestampNanos.now())
+            sender.flush(buf)
+            self.assertEqual(len(buf), 0)
+            buf.row(t2, columns={'batch': 2}, at=qi.TimestampNanos.now())
+            sender.flush(buf)
+        r1 = self.qdb_plain.retry_check_table(t1, min_rows=1)
+        r2 = self.qdb_plain.retry_check_table(t2, min_rows=1)
+        self.assertEqual([row[:-1] for row in r1['dataset']], [[1]])
+        self.assertEqual([row[:-1] for row in r2['dataset']], [[2]])
+
+    def test_qwp_udp_independent_buffers(self):
+        self._require_qwp_udp()
+        t1 = uuid.uuid4().hex
+        t2 = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            buf_a = sender.new_buffer()
+            buf_b = sender.new_buffer()
+            buf_a.row(t1, columns={'src': 'a'}, at=qi.TimestampNanos.now())
+            buf_b.row(t2, columns={'src': 'b'}, at=qi.TimestampNanos.now())
+            sender.flush(buf_a)
+            self.assertEqual(len(buf_a), 0)
+            self.assertGreater(len(buf_b), 0)
+            sender.flush(buf_b)
+        r1 = self.qdb_plain.retry_check_table(t1, min_rows=1)
+        r2 = self.qdb_plain.retry_check_table(t2, min_rows=1)
+        self.assertEqual([row[:-1] for row in r1['dataset']], [['a']])
+        self.assertEqual([row[:-1] for row in r2['dataset']], [['b']])
+
+    def test_qwp_udp_flush_clear_false(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            buf = sender.new_buffer()
+            buf.row(table_name, columns={'val': 99}, at=qi.TimestampNanos.now())
+            sender.flush(buf, clear=False)
+            self.assertGreater(len(buf), 0)
+            buf.clear()
+            self.assertEqual(len(buf), 0)
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        self.assertEqual([row[:-1] for row in resp['dataset']], [[99]])
+
+    def test_qwp_udp_unicode(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name,
+                symbols={'city': 'Zürich'},
+                columns={'greeting': '你好世界', 'emoji': '🚀'},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        row = resp['dataset'][0]
+        self.assertEqual(row[0], 'Zürich')
+        self.assertEqual(row[1], '你好世界')
+        self.assertEqual(row[2], '🚀')
+
+    def test_qwp_udp_none_columns_skipped(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name,
+                symbols={'tag': 'a', 'skip_sym': None},
+                columns={'present': 42, 'absent': None},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        col_names = [c['name'] for c in resp['columns']]
+        self.assertIn('present', col_names)
+        self.assertNotIn('absent', col_names)
+        self.assertNotIn('skip_sym', col_names)
+
+    def test_qwp_udp_empty_flush(self):
+        self._require_qwp_udp()
+        with self._mk_qwpudp_sender() as sender:
+            self.assertEqual(len(sender), 0)
+            sender.flush()
+            sender.flush()
+            buf = sender.new_buffer()
+            sender.flush(buf)
+
+    def test_qwp_udp_double_close(self):
+        self._require_qwp_udp()
+        sender = self._mk_qwpudp_sender()
+        sender.establish()
+        sender.close(flush=False)
+        sender.close(flush=False)
+
+    def test_qwp_udp_context_manager_flush_on_exit(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender(auto_flush=False) as sender:
+            sender.row(
+                table_name, columns={'val': 7},
+                at=qi.TimestampNanos.now())
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        self.assertEqual([row[:-1] for row in resp['dataset']], [[7]])
+
+    def test_qwp_udp_server_vs_explicit_timestamp(self):
+        self._require_qwp_udp()
+        t1 = uuid.uuid4().hex
+        t2 = uuid.uuid4().hex
+        explicit_ts = qi.TimestampNanos(1_700_000_000_000_000_000)
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(t1, columns={'x': 1}, at=qi.ServerTimestamp)
+            sender.row(t2, columns={'x': 2}, at=explicit_ts)
+            sender.flush()
+        r2 = self.qdb_plain.retry_check_table(t2, min_rows=1)
+        ts = r2['dataset'][0][1]
+        self.assertIn('2023-11-14', ts)
+
+    def test_qwp_udp_many_rows(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            for i in range(500):
+                sender.row(
+                    table_name,
+                    symbols={'batch': 'stress'},
+                    columns={'seq': i, 'payload': f'row_{i:04d}'},
+                    at=qi.TimestampNanos.now())
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=500)
+        self.assertEqual(resp['count'], 500)
+
+    def test_qwp_udp_max_name_len(self):
+        self._require_qwp_udp()
+        with self._mk_qwpudp_sender(max_name_len=20) as sender:
+            buf = sender.new_buffer()
+            buf.row('t', columns={'a' * 20: 1}, at=qi.ServerTimestamp)
+            self.assertGreater(len(buf), 0)
+
+            buf2 = sender.new_buffer()
+            with self.assertRaises(qi.IngressError):
+                buf2.row('t', columns={'a' * 21: 1}, at=qi.ServerTimestamp)
+
+    def test_qwp_udp_standalone_buffer_reuse(self):
+        self._require_qwp_udp()
+        t1 = uuid.uuid4().hex
+        t2 = uuid.uuid4().hex
+        buf = qi.Buffer.qwp()
+        buf.row(t1, columns={'round': 1}, at=qi.TimestampNanos.now())
+        with self._mk_qwpudp_sender() as sender:
+            sender.flush(buf)
+            self.assertEqual(len(buf), 0)
+            buf.row(t2, columns={'round': 2}, at=qi.TimestampNanos.now())
+            sender.flush(buf)
+        r1 = self.qdb_plain.retry_check_table(t1, min_rows=1)
+        r2 = self.qdb_plain.retry_check_table(t2, min_rows=1)
+        self.assertEqual([row[:-1] for row in r1['dataset']], [[1]])
+        self.assertEqual([row[:-1] for row in r2['dataset']], [[2]])
+
     def test_f64_arr(self):
         if self.qdb_plain.version < FIRST_ARRAY_RELEASE:
             self.skipTest('old server does not support array')
