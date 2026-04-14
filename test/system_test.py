@@ -786,6 +786,174 @@ class TestWithDatabase(unittest.TestCase):
         self.assertEqual([row[:-1] for row in r1['dataset']], [[1]])
         self.assertEqual([row[:-1] for row in r2['dataset']], [[2]])
 
+    def test_qwp_udp_auto_flush_interval(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        import time as _time
+        with self._mk_qwpudp_sender(
+                auto_flush_rows=False,
+                auto_flush_bytes=False,
+                auto_flush_interval=500) as sender:
+            sender.row(
+                table_name, columns={'seq': 1},
+                at=qi.TimestampNanos.now())
+            self.assertGreater(len(sender), 0)
+            _time.sleep(0.7)
+            sender.row(
+                table_name, columns={'seq': 2},
+                at=qi.TimestampNanos.now())
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        self.assertEqual(resp['count'], 2)
+
+    def test_qwp_udp_datagram_splitting(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender(
+                max_datagram_size=200,
+                auto_flush=False) as sender:
+            for i in range(30):
+                sender.row(
+                    table_name,
+                    symbols={'tag': f'val_{i:03d}'},
+                    columns={'seq': i, 'data': f'payload_{i:06d}'},
+                    at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=30)
+        self.assertEqual(resp['count'], 30)
+
+    def test_qwp_udp_interleave_with_http(self):
+        self._require_qwp_udp()
+        t_http = uuid.uuid4().hex
+        t_qwp = uuid.uuid4().hex
+        with qi.Sender(
+                qi.Protocol.Http, self.qdb_plain.host,
+                self.qdb_plain.http_server_port) as http_sender, \
+             self._mk_qwpudp_sender() as qwp_sender:
+            http_sender.row(
+                t_http, columns={'src': 'http', 'val': 1},
+                at=qi.TimestampNanos.now())
+            qwp_sender.row(
+                t_qwp, columns={'src': 'qwp', 'val': 2},
+                at=qi.TimestampNanos.now())
+            qwp_sender.flush()
+        r_http = self.qdb_plain.retry_check_table(t_http, min_rows=1)
+        r_qwp = self.qdb_plain.retry_check_table(t_qwp, min_rows=1)
+        self.assertEqual(r_http['dataset'][0][0], 'http')
+        self.assertEqual(r_qwp['dataset'][0][0], 'qwp')
+
+    def test_qwp_udp_from_env(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        old = os.environ.get('QDB_CLIENT_CONF')
+        os.environ['QDB_CLIENT_CONF'] = self._mk_qwpudp_conf()
+        try:
+            with qi.Sender.from_env() as sender:
+                sender.row(
+                    table_name, columns={'val': 123},
+                    at=qi.TimestampNanos.now())
+                sender.flush()
+        finally:
+            if old is None:
+                del os.environ['QDB_CLIENT_CONF']
+            else:
+                os.environ['QDB_CLIENT_CONF'] = old
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        self.assertEqual(
+            [row[:-1] for row in resp['dataset']], [[123]])
+
+    def test_qwp_udp_sender_reuse(self):
+        self._require_qwp_udp()
+        t1 = uuid.uuid4().hex
+        t2 = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(t1, columns={'session': 1},
+                       at=qi.TimestampNanos.now())
+            sender.flush()
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(t2, columns={'session': 2},
+                       at=qi.TimestampNanos.now())
+            sender.flush()
+        r1 = self.qdb_plain.retry_check_table(t1, min_rows=1)
+        r2 = self.qdb_plain.retry_check_table(t2, min_rows=1)
+        self.assertEqual([row[:-1] for row in r1['dataset']], [[1]])
+        self.assertEqual([row[:-1] for row in r2['dataset']], [[2]])
+
+    def test_qwp_udp_large_string(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        big_str = 'x' * 1000
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name, columns={'payload': big_str},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        self.assertEqual(resp['dataset'][0][0], big_str)
+
+    def test_qwp_udp_symbols_only(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                table_name,
+                symbols={'exchange': 'NYSE', 'ticker': 'AAPL'},
+                at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        col_types = {c['name']: c['type'] for c in resp['columns']}
+        self.assertEqual(col_types['exchange'], 'SYMBOL')
+        self.assertEqual(col_types['ticker'], 'SYMBOL')
+        self.assertEqual(resp['dataset'][0][0], 'NYSE')
+        self.assertEqual(resp['dataset'][0][1], 'AAPL')
+
+    def test_qwp_udp_mixed_timestamps(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        explicit = qi.TimestampNanos(1_700_000_000_000_000_000)
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name, columns={'seq': 1},
+                       at=qi.ServerTimestamp)
+            sender.row(table_name, columns={'seq': 2}, at=explicit)
+            sender.row(table_name, columns={'seq': 3},
+                       at=qi.ServerTimestamp)
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        self.assertEqual(resp['count'], 3)
+        rows = sorted(resp['dataset'], key=lambda row: row[0])
+        self.assertIn('2023-11-14', rows[1][1])
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_qwp_udp_dataframe_ts_column(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        df = pd.DataFrame({
+            'sensor': ['A', 'B'],
+            'temp': [22.5, 23.1],
+            'ts': pd.to_datetime(
+                ['2024-01-01 12:00:00', '2024-01-01 12:01:00'],
+                utc=True),
+        })
+        with self._mk_qwpudp_sender() as sender:
+            sender.dataframe(df, table_name=table_name, at='ts')
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        self.assertEqual(resp['count'], 2)
+        col_names = [c['name'] for c in resp['columns']]
+        self.assertIn('timestamp', col_names)
+        for row in resp['dataset']:
+            self.assertIn('2024-01-01', row[-1])
+
+    def test_qwp_udp_new_buffer_inherits_settings(self):
+        self._require_qwp_udp()
+        with self._mk_qwpudp_sender(
+                init_buf_size=2048, max_name_len=32) as sender:
+            buf = sender.new_buffer()
+            self.assertEqual(buf.init_buf_size, 2048)
+            self.assertEqual(buf.max_name_len, 32)
+            buf.row('t', columns={'a' * 32: 1}, at=qi.ServerTimestamp)
+            self.assertGreater(len(buf), 0)
+            with self.assertRaises(qi.IngressError):
+                buf.row('t', columns={'a' * 33: 1}, at=qi.ServerTimestamp)
+
     def test_f64_arr(self):
         if self.qdb_plain.version < FIRST_ARRAY_RELEASE:
             self.skipTest('old server does not support array')
