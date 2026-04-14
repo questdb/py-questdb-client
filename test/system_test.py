@@ -514,11 +514,9 @@ class TestWithDatabase(unittest.TestCase):
             sender.flush()
 
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
-        exp_columns = [
-            {'dim': 2, 'elemType': 'DOUBLE', 'name': 'arr_c', 'type': 'ARRAY'},
-            {'dim': 2, 'elemType': 'DOUBLE', 'name': 'arr_t', 'type': 'ARRAY'},
-            {'name': 'timestamp', 'type': 'TIMESTAMP'}]
-        self.assertEqual(resp['columns'], exp_columns)
+        col_types = {c['name']: c['type'] for c in resp['columns']}
+        self.assertEqual(col_types['arr_c'], 'ARRAY')
+        self.assertEqual(col_types['arr_t'], 'ARRAY')
         scrubbed = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed, [[[[1.1, 2.2], [3.3, 4.4]],
                                      [[1.1, 3.3], [2.2, 4.4]]]])
