@@ -954,6 +954,36 @@ class TestWithDatabase(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 buf.row('t', columns={'a' * 33: 1}, at=qi.ServerTimestamp)
 
+    @unittest.skipIf(not pyarrow, 'pyarrow not installed')
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_qwp_udp_decimal_pyarrow(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table_name} '
+            f'(prices DECIMAL(18,3), timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        df = pd.DataFrame({
+            'prices': pd.array(
+                [
+                    decimal.Decimal('-99999.99'),
+                    decimal.Decimal('-678'),
+                ],
+                dtype=pd.ArrowDtype(pyarrow.decimal128(18, 2))
+            )
+        })
+        with self._mk_qwpudp_sender() as sender:
+            sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        exp_columns = [
+            {'name': 'prices', 'type': 'DECIMAL(18,3)'},
+            {'name': 'timestamp', 'type': 'TIMESTAMP'}]
+        self.assertEqual(resp['columns'], exp_columns)
+        scrubbed = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(scrubbed, [['-99999.990'], ['-678.000']])
+
     def test_f64_arr(self):
         if self.qdb_plain.version < FIRST_ARRAY_RELEASE:
             self.skipTest('old server does not support array')
