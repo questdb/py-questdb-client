@@ -589,11 +589,15 @@ cdef bint _is_http_protocol(line_sender_protocol protocol):
         (protocol == line_sender_protocol_https))
 
 
+cdef bint _is_qwp_udp_protocol(line_sender_protocol protocol):
+    return protocol == line_sender_protocol_qwpudp
+
+
 cdef class SenderTransaction:
     """
     A transaction for a specific table.
 
-    Transactions are not supported with ILP/TCP, only ILP/HTTP.
+    Transactions are only supported with ILP/HTTP.
 
     The sender API can only operate on one transaction at a time.
 
@@ -610,11 +614,10 @@ cdef class SenderTransaction:
     cdef bint _complete
 
     def __cinit__(self, Sender sender, str table_name):
-        if _is_tcp_protocol(sender._c_protocol):
+        if not _is_http_protocol(sender._c_protocol):
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
-                "Transactions aren't supported for ILP/TCP, " +
-                "use ILP/HTTP instead.")
+                'Transactions are only supported for ILP/HTTP.')
         self._sender = sender
         self._table_name = table_name
         self._complete = False
@@ -749,70 +752,37 @@ cdef class SenderTransaction:
 
 cdef class Buffer:
     """
-    Construct QuestDB InfluxDB Line Protocol (ILP) messages.
-    Version 1 is compatible with the InfluxDB Line Protocol.
+    Buffer for serializing rows before flushing through a
+    :func:`Sender <questdb.ingress.Sender>`.
 
-    The :func:`Buffer.row` method is used to add a row to the buffer.
+    Use the factory class methods to create a buffer:
 
-    You can call this many times.
-
-    .. code-block:: python
-
-        from questdb.ingress import Buffer
-
-        buf = Buffer()
-        buf.row(
-            'table_name1',
-            symbols={'s1', 'v1', 's2', 'v2'},
-            columns={'c1': True, 'c2': 0.5})
-
-        buf.row(
-            'table_name2',
-            symbols={'questdb': '❤️'},
-            columns={'like': 100000})
-
-        # Append any additional rows then, once ready, call
-        sender.flush(buffer)  # a `Sender` instance.
-
-        # The sender auto-cleared the buffer, ready for reuse.
-
-        buf.row(
-            'table_name1',
-            symbols={'s1', 'v1', 's2', 'v2'},
-            columns={'c1': True, 'c2': 0.5})
-
-        # etc.
-
-
-    Buffer Constructor Arguments:
-      * protocol_version (``int``): The protocol version to use.
-      * ``init_buf_size`` (``int``): Initial capacity of the buffer in bytes.
-        Defaults to ``65536`` (64KiB).
-      * ``max_name_len`` (``int``): Maximum length of a column name.
-        Defaults to ``127`` which is the same default value as QuestDB.
-        This should match the ``cairo.max.file.name.length`` setting of the
-        QuestDB instance you're connecting to.
-
-    **Note**: Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
+    * :func:`Buffer.ilp` for ILP (InfluxDB Line Protocol) buffers.
+    * :func:`Buffer.qwp` for QWP (QuestWire Protocol) buffers.
 
     .. code-block:: python
 
-        # These two buffer constructions are equivalent.
-        buf1 = Buffer()
-        buf2 = Buffer(init_buf_size=65536, max_name_len=127)
+        from questdb.ingress import Buffer, Sender, Protocol, TimestampNanos
 
-    To avoid having to manually set these arguments every time, you can call
-    the sender's ``new_buffer()`` method instead.
+        buf = Buffer.ilp(protocol_version=2)
+        buf.row(
+            'table_name',
+            symbols={'s1': 'v1'},
+            columns={'c1': True, 'c2': 0.5},
+            at=TimestampNanos.now())
+
+        with Sender(Protocol.Http, 'localhost', 9000) as sender:
+            sender.flush(buf)
+
+    Alternatively, call :func:`Sender.new_buffer` which creates the
+    correct buffer type (ILP or QWP) matching the sender's protocol:
 
     .. code-block:: python
 
-        from questdb.ingress import Sender, Buffer
+        from questdb.ingress import Sender, Protocol
 
-        sender = Sender('http', 'localhost', 9009,
-            init_buf_size=16384, max_name_len=64)
-        buf = sender.new_buffer()
-        assert buf.init_buf_size == 16384
-        assert buf.max_name_len == 64
+        with Sender(Protocol.Http, 'localhost', 9000) as sender:
+            buf = sender.new_buffer()
 
     """
     cdef line_sender_buffer* _impl
@@ -821,20 +791,81 @@ cdef class Buffer:
     cdef size_t _max_name_len
     cdef object _row_complete_sender
 
-    def __cinit__(self, protocol_version: int, init_buf_size: int=65536, max_name_len: int=127):
+    def __cinit__(self):
+        self._impl = NULL
+        self._b = NULL
+        self._init_buf_size = 0
+        self._max_name_len = 0
+        self._row_complete_sender = None
+
+    def __init__(
+            self,
+            protocol_version: int,
+            init_buf_size: int=65536,
+            max_name_len: int=127):
         """
-        Create a new buffer with the an initial capacity and max name length.
+        .. deprecated::
+            Use :func:`Buffer.ilp` or :func:`Buffer.qwp` instead.
+        """
+        warnings.warn(
+            'Buffer() is deprecated, use Buffer.ilp() or Buffer.qwp() instead.',
+            DeprecationWarning,
+            stacklevel=2)
+        if protocol_version not in range(1, 4):
+            raise IngressError(
+                IngressErrorCode.ProtocolVersionError,
+                'Invalid protocol version. Supported versions are 1-3.')
+        self._init_ilp_impl(protocol_version, init_buf_size, max_name_len)
+
+    @staticmethod
+    def ilp(
+            protocol_version: int=2,
+            init_buf_size: int=65536,
+            max_name_len: int=127):
+        """
+        Create an ILP (InfluxDB Line Protocol) buffer.
+
+        :param int protocol_version: The protocol version to use (1-3).
+            Defaults to ``2``.
         :param int init_buf_size: Initial capacity of the buffer in bytes.
+            Defaults to ``65536`` (64KiB).
         :param int max_name_len: Maximum length of a table or column name.
+            Defaults to ``127``.
         """
         if protocol_version not in range(1, 4):
             raise IngressError(
                 IngressErrorCode.ProtocolVersionError,
                 'Invalid protocol version. Supported versions are 1-3.')
-        self._cinit_impl(protocol_version, init_buf_size, max_name_len)
+        cdef Buffer buf = Buffer.__new__(Buffer)
+        buf._init_ilp_impl(protocol_version, init_buf_size, max_name_len)
+        return buf
 
-    cdef inline _cinit_impl(self, line_sender_protocol_version version, size_t init_buf_size, size_t max_name_len):
+    @staticmethod
+    def qwp(
+            init_buf_size: int=65536,
+            max_name_len: int=127):
+        """
+        Create a QWP (QuestWire Protocol) buffer.
+
+        :param int init_buf_size: Initial capacity of the buffer in bytes.
+            Defaults to ``65536`` (64KiB).
+        :param int max_name_len: Maximum length of a table or column name.
+            Defaults to ``127``.
+        """
+        cdef Buffer buf = Buffer.__new__(Buffer)
+        buf._init_qwp_impl(init_buf_size, max_name_len)
+        return buf
+
+    cdef inline _init_ilp_impl(self, line_sender_protocol_version version, size_t init_buf_size, size_t max_name_len):
         self._impl = line_sender_buffer_with_max_name_len(version, max_name_len)
+        self._b = qdb_pystr_buf_new()
+        line_sender_buffer_reserve(self._impl, init_buf_size)
+        self._init_buf_size = init_buf_size
+        self._max_name_len = max_name_len
+        self._row_complete_sender = None
+
+    cdef inline _init_qwp_impl(self, size_t init_buf_size, size_t max_name_len):
+        self._impl = line_sender_buffer_new_qwp_with_max_name_len(max_name_len)
         self._b = qdb_pystr_buf_new()
         line_sender_buffer_reserve(self._impl, init_buf_size)
         self._init_buf_size = init_buf_size
@@ -846,6 +877,12 @@ cdef class Buffer:
         self._row_complete_sender = None
         qdb_pystr_buf_free(self._b)
         line_sender_buffer_free(self._impl)
+
+    cdef inline void_int _check_impl(self) except -1:
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Buffer is not initialized.')
 
     @property
     def init_buf_size(self) -> int:
@@ -869,10 +906,12 @@ cdef class Buffer:
         """
         if additional < 0:
             raise ValueError('additional must be non-negative.')
+        self._check_impl()
         line_sender_buffer_reserve(self._impl, additional)
 
     def capacity(self) -> int:
         """The current buffer capacity."""
+        self._check_impl()
         return line_sender_buffer_capacity(self._impl)
 
     def clear(self):
@@ -885,6 +924,7 @@ cdef class Buffer:
         This method is designed to be called only in conjunction with
         ``sender.flush(buffer, clear=False)``.
         """
+        self._check_impl()
         line_sender_buffer_clear(self._impl)
         qdb_pystr_buf_clear(self._b)
 
@@ -894,6 +934,7 @@ cdef class Buffer:
 
         Equivalent (but cheaper) to ``len(bytes(buffer))``.
         """
+        self._check_impl()
         return line_sender_buffer_size(self._impl)
 
     def __bytes__(self) -> bytes:
@@ -901,6 +942,7 @@ cdef class Buffer:
         return self._to_bytes()
 
     cdef inline object _to_bytes(self):
+        self._check_impl()
         cdef line_sender_buffer_view view = line_sender_buffer_peek(self._impl)
         return PyBytes_FromStringAndSize(<const char *> view.buf, <Py_ssize_t> view.len)
 
@@ -1110,6 +1152,7 @@ cdef class Buffer:
         Add a row to the buffer.
         """
         cdef bint wrote_fields = False
+        self._check_impl()
         self._set_marker()
         try:
             self._table(table_name)
@@ -1359,7 +1402,7 @@ cdef class Buffer:
             import pandas as pd
             import questdb.ingress as qi
 
-            buf = qi.Buffer(protocol_version=2)
+            buf = qi.Buffer.ilp(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -1533,6 +1576,7 @@ cdef class Buffer:
                 IngressErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
+        self._check_impl()
         _dataframe(
             auto_flush_blank(),
             self._impl,
@@ -1576,14 +1620,18 @@ cdef void_int _parse_auto_flush(
     object auto_flush_rows,
     object auto_flush_bytes,
     object auto_flush_interval,
-    auto_flush_mode_t* c_auto_flush
+    auto_flush_mode_t* c_auto_flush,
+    size_t max_datagram_size
 ) except -1:
     # Set defaults.
     if auto_flush_rows is None:
         auto_flush_rows = auto_flush_rows_default(protocol)
 
     if auto_flush_bytes is None:
-        auto_flush_bytes = False
+        if _is_qwp_udp_protocol(protocol):
+            auto_flush_bytes = max_datagram_size if max_datagram_size else 1400
+        else:
+            auto_flush_bytes = False
 
     if auto_flush_interval is None:
         auto_flush_interval = 1000
@@ -1749,6 +1797,7 @@ class Protocol(TaggedEnum):
     Tcps = ('tcps', 1)
     Http = ('http', 2)
     Https = ('https', 3)
+    QwpUdp = ('qwpudp', 4)
 
     @property
     def tls_enabled(self):
@@ -1824,6 +1873,8 @@ cdef object parse_conf_str(
     # are kept as strings and are parsed by Sender._set_sender_fields.
     type_mappings = {
         'bind_interface': str,
+        'max_datagram_size': int,
+        'multicast_ttl': int,
         'username': str,
         'password': str,
         'token': str,
@@ -1894,6 +1945,8 @@ cdef class Sender:
             object auto_flush_rows,
             object auto_flush_bytes,
             object auto_flush_interval,
+            object max_datagram_size,
+            object multicast_ttl,
             object protocol_version,
             object init_buf_size,
             object max_name_len) except -1:
@@ -1917,6 +1970,8 @@ cdef class Sender:
         cdef uint64_t c_retry_timeout
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
+        cdef size_t c_max_datagram_size = 0
+        cdef uint32_t c_multicast_ttl = 0
 
         self._c_protocol = protocol.c_value
 
@@ -1929,6 +1984,34 @@ cdef class Sender:
             str_to_utf8(b, <PyObject*>bind_interface, &c_bind_interface)
             if not line_sender_opts_bind_interface(
                     self._opts, c_bind_interface, &err):
+                raise c_err_to_py(err)
+
+        if max_datagram_size is not None:
+            if not isinstance(max_datagram_size, int) or isinstance(max_datagram_size, bool):
+                raise TypeError(
+                    '"max_datagram_size" must be a positive int, '
+                    f'not {_fqn(type(max_datagram_size))}')
+            if max_datagram_size <= 0 or max_datagram_size > 65507:
+                raise ValueError(
+                    '"max_datagram_size" must be an int between 1 and 65507, '
+                    f'not {max_datagram_size!r}')
+            c_max_datagram_size = max_datagram_size
+            if not line_sender_opts_max_datagram_size(
+                    self._opts, c_max_datagram_size, &err):
+                raise c_err_to_py(err)
+
+        if multicast_ttl is not None:
+            if not isinstance(multicast_ttl, int) or isinstance(multicast_ttl, bool):
+                raise TypeError(
+                    '"multicast_ttl" must be an int (0-255), '
+                    f'not {_fqn(type(multicast_ttl))}')
+            if multicast_ttl < 0 or multicast_ttl > 255:
+                raise ValueError(
+                    '"multicast_ttl" must be an int (0-255), '
+                    f'not {multicast_ttl!r}')
+            c_multicast_ttl = multicast_ttl
+            if not line_sender_opts_multicast_ttl(
+                    self._opts, c_multicast_ttl, &err):
                 raise c_err_to_py(err)
 
         if username is not None:
@@ -2067,7 +2150,8 @@ cdef class Sender:
             auto_flush_rows,
             auto_flush_bytes,
             auto_flush_interval,
-            &self._auto_flush_mode)
+            &self._auto_flush_mode,
+            c_max_datagram_size)
 
         self._init_buf_size = init_buf_size or 65536
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
@@ -2107,6 +2191,8 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object max_datagram_size=None,  # Default 1400 for QWP/UDP
+            object multicast_ttl=None,  # Default 0 for QWP/UDP
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2151,6 +2237,8 @@ cdef class Sender:
                 auto_flush_rows,
                 auto_flush_bytes,
                 auto_flush_interval,
+                max_datagram_size,
+                multicast_ttl,
                 protocol_version,
                 init_buf_size,
                 max_name_len)
@@ -2179,6 +2267,8 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object max_datagram_size=None,  # Default 1400 for QWP/UDP
+            object multicast_ttl=None,  # Default 0 for QWP/UDP
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2234,6 +2324,8 @@ cdef class Sender:
                 'auto_flush_rows': auto_flush_rows,
                 'auto_flush_bytes': auto_flush_bytes,
                 'auto_flush_interval': auto_flush_interval,
+                'max_datagram_size': max_datagram_size,
+                'multicast_ttl': multicast_ttl,
                 'protocol_version': protocol_version,
                 'init_buf_size': init_buf_size,
                 'max_name_len': max_name_len,
@@ -2275,6 +2367,8 @@ cdef class Sender:
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
+                params.get('max_datagram_size'),
+                params.get('multicast_ttl'),
                 params.get('protocol_version'),
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
@@ -2304,6 +2398,8 @@ cdef class Sender:
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
             object auto_flush_bytes=None,  # Default off
             object auto_flush_interval=None,  # Default 1000 milliseconds
+            object max_datagram_size=None,  # Default 1400 for QWP/UDP
+            object multicast_ttl=None,  # Default 0 for QWP/UDP
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2344,10 +2440,21 @@ cdef class Sender:
             auto_flush_rows=auto_flush_rows,
             auto_flush_bytes=auto_flush_bytes,
             auto_flush_interval=auto_flush_interval,
+            max_datagram_size=max_datagram_size,
+            multicast_ttl=multicast_ttl,
             protocol_version=protocol_version,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
 
+
+    cdef inline object _new_buffer_for_sender(self):
+        cdef Buffer buf = Buffer.__new__(Buffer)
+        buf._impl = line_sender_buffer_new_for_sender(self._impl)
+        buf._b = qdb_pystr_buf_new()
+        line_sender_buffer_reserve(buf._impl, self._init_buf_size)
+        buf._init_buf_size = self._init_buf_size
+        buf._max_name_len = line_sender_get_max_name_len(self._impl)
+        return buf
 
     def new_buffer(self):
         """
@@ -2356,10 +2463,15 @@ cdef class Sender:
         The buffer is set up with the configured `init_buf_size` and
         `max_name_len`.
         """
-        return Buffer(
-            protocol_version=self.protocol_version,
-            init_buf_size=self._init_buf_size,
-            max_name_len=self.max_name_len)
+        if self._impl == NULL:
+            if self._opts == NULL:
+                raise IngressError(
+                    IngressErrorCode.InvalidApiCall,
+                    'new_buffer() can\'t be called: Sender is closed.')
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'new_buffer() can\'t be called before establish().')
+        return self._new_buffer_for_sender()
 
     @property
     def init_buf_size(self) -> int:
@@ -2433,6 +2545,10 @@ cdef class Sender:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'protocol_version() can\'t be called: Sender is closed.')
+        if _is_qwp_udp_protocol(self._c_protocol):
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'protocol_version is not applicable for QWP/UDP senders.')
         return <int>line_sender_get_protocol_version(self._impl)
 
     def establish(self):
@@ -2464,10 +2580,7 @@ cdef class Sender:
             raise c_err_to_py(err)
 
         if self._buffer is None:
-            self._buffer = Buffer(
-                protocol_version=self.protocol_version,
-                init_buf_size=self._init_buf_size,
-                max_name_len=self.max_name_len)
+            self._buffer = self._new_buffer_for_sender()
 
         line_sender_opts_free(self._opts)
         self._opts = NULL
@@ -2503,6 +2616,10 @@ cdef class Sender:
 
         The ``bytes`` value returned represents the unsent data.
 
+        For QWP/UDP senders this always returns ``b''`` because encoding
+        is deferred to flush. Use :func:`Sender.__len__` instead for a
+        size estimate.
+
         Also see :func:`Sender.__len__`.
         """
         if self._buffer is None:
@@ -2515,6 +2632,9 @@ cdef class Sender:
         Number of bytes of unsent data in the internal buffer.
 
         Equivalent (but cheaper) to ``len(bytes(sender))``.
+
+        For QWP/UDP senders this returns an estimated size hint, not the
+        exact serialized byte count.
         """
         if self._buffer is None:
             return 0
@@ -2692,6 +2812,7 @@ cdef class Sender:
                 IngressErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Sender is closed.')
         if buffer is not None:
+            buffer._check_impl()
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl
@@ -2769,4 +2890,3 @@ cdef class Sender:
     def __dealloc__(self):
         self._close()
         free(self._last_flush_ms)
-

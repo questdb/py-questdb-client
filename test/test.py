@@ -772,8 +772,7 @@ class TestBases:
                 server.accept()
                 self.assertRaisesRegex(
                     qi.IngressError,
-                    ('Transactions aren\'t supported for ILP/TCP,' +
-                     ' use ILP/HTTP instead.'),
+                    'Transactions are only supported for ILP/HTTP.',
                     sender.transaction, 'table_name')
 
         def test_transaction_basic(self):
@@ -1481,6 +1480,53 @@ class TestBufferProtocolVersionV2(TestBases.TestBuffer):
 class TestBufferProtocolVersionV3(TestBases.TestBuffer):
     name = 'protocol version 3'
     version = 3
+
+
+class TestUninitializedBuffer(unittest.TestCase):
+    """Verify that Buffer.__new__(Buffer) raises instead of segfaulting."""
+
+    def _make_uninit(self):
+        return qi.Buffer.__new__(qi.Buffer)
+
+    def test_len(self):
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            len(self._make_uninit())
+
+    def test_bytes(self):
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            bytes(self._make_uninit())
+
+    def test_capacity(self):
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            self._make_uninit().capacity()
+
+    def test_clear(self):
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            self._make_uninit().clear()
+
+    def test_reserve(self):
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            self._make_uninit().reserve(1)
+
+    def test_row(self):
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            self._make_uninit().row('t', columns={'x': 1}, at=qi.ServerTimestamp)
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_dataframe(self):
+        import pandas as _pd
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            self._make_uninit().dataframe(
+                _pd.DataFrame({'x': [1]}),
+                table_name='t',
+                at=qi.ServerTimestamp)
+
+    def test_flush(self):
+        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+            with Server() as server, \
+                    qi.Sender(qi.Protocol.Tcp, '127.0.0.1', server.port) as sender:
+                server.accept()
+                sender.flush(self._make_uninit())
 
 
 if __name__ == '__main__':

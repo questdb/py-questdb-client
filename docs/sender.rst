@@ -540,11 +540,16 @@ serialisation logic from the sending logic.
 Note that the sender's auto-flushing logic will not apply to independent
 buffers.
 
+You can create a standalone buffer with :func:`Buffer.ilp` (for ILP senders)
+or :func:`Buffer.qwp` (for QWP/UDP senders). Alternatively, call
+:func:`Sender.new_buffer` which creates the correct buffer type matching the
+sender's protocol.
+
 .. code-block:: python
 
     from questdb.ingress import Buffer, Sender, TimestampNanos
 
-    buf = Buffer()
+    buf = Buffer.ilp(protocol_version=2)
     buf.row(
         'trades',
         symbols={'symbol': 'ETH-USD', 'side': 'sell'},
@@ -576,7 +581,7 @@ databases via the ``.flush(buf, clear=False)`` option.
 
     from questdb.ingress import Buffer, Sender, TimestampNanos
 
-    buf = Buffer()
+    buf = Buffer.ilp(protocol_version=2)
     buf.row(
         'trades',
         symbols={'symbol': 'ETH-USD', 'side': 'sell'},
@@ -835,13 +840,18 @@ See the :ref:`sender_conf_protocol_version` section for more details.
 
 .. _sender_which_protocol:
 
-ILP/TCP or ILP/HTTP
-===================
+Which protocol?
+===============
 
-The sender supports ``tcp``, ``tcps``, ``http``, and ``https`` protocols.
+The sender supports ``tcp``, ``tcps``, ``http``, ``https``, and ``qwpudp``
+protocols.
 
-**You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
-cases as it provides better feedback on errors and transaction control.**
+**You should prefer to use ILP/HTTP in most cases as it provides better
+feedback on errors and transaction control.**
+
+QWP/UDP (``qwpudp``) uses fire-and-forget UDP datagrams for lowest-latency
+ingestion. It does not support authentication, TLS, or transactions. The
+default port is 9007. See the :ref:`qwp_udp_example` example.
 
 ILP/HTTP is available from:
 
@@ -880,6 +890,7 @@ Either way, you can easily switch between the two protocols by changing:
 
 * The ``<protocol>`` part of the :ref:`configuration string <sender_conf>`.
 
-* The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000).
+* The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000,
+  QWP/UDP default is 9007).
 
 * Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.

@@ -11,6 +11,22 @@
     ```
     python3 -m pip install -U questdb
     ```
+- name: qwpudp
+  lang: python
+  path: examples/qwp_udp.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  addr:
+    host: localhost
+    port: 9007
 - name: ilp-auth
   lang: python
   path: examples/auth.py
@@ -61,4 +77,3 @@
     python3 -m pip install -U questdb
     ```
   conf: http::addr=localhost:9000;
-

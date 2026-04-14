@@ -250,85 +250,65 @@ class SenderTransaction:
 
 class Buffer:
     """
-    Construct QuestDB InfluxDB Line Protocol (ILP) messages.
+    Buffer for serializing rows before flushing through a
+    :func:`Sender <questdb.ingress.Sender>`.
 
-    The :func:`Buffer.row` method is used to add a row to the buffer.
+    Use the factory class methods to create a buffer:
 
-    You can call this many times.
-
-    .. code-block:: python
-
-        from questdb.ingress import Buffer
-
-        buf = Buffer(protocol_version=2)  # or better yet, `sender.new_buffer()`
-        buf.row(
-            'table_name1',
-            symbols={'s1', 'v1', 's2', 'v2'},
-            columns={'c1': True, 'c2': 0.5})
-
-        buf.row(
-            'table_name2',
-            symbols={'questdb': '❤️'},
-            columns={'like': 100000})
-
-        # Append any additional rows then, once ready, call
-        sender.flush(buffer)  # a `Sender` instance.
-
-        # The sender auto-cleared the buffer, ready for reuse.
-
-        buf.row(
-            'table_name1',
-            symbols={'s1', 'v1', 's2', 'v2'},
-            columns={'c1': True, 'c2': 0.5})
-
-        # etc.
-
-    In general, it's best to create a new buffer from a sender instance,
-    via the :func:`Sender.new_buffer` method, as this will ensure the buffer
-    is configured with the same protocol version and maximum name length
-    as the sender. 
-
-    Buffer Constructor Arguments:
-      * protocol_version (``int``): The protocol version to use.
-      * ``init_buf_size`` (``int``): Initial capacity of the buffer in bytes.
-        Defaults to ``65536`` (64KiB).
-      * ``max_name_len`` (``int``): Maximum length of a column name.
-        Defaults to ``127`` which is the same default value as QuestDB.
-        This should match the ``cairo.max.file.name.length`` setting of the
-        QuestDB instance you're connecting to.
-
-    **Note**: Protocol version ``2`` requires QuestDB server version 9.0.0 or higher.
+    * :func:`Buffer.ilp` for ILP (InfluxDB Line Protocol) buffers.
+    * :func:`Buffer.qwp` for QWP (QuestWire Protocol) buffers.
 
     .. code-block:: python
 
-        # These two buffer constructions are equivalent.
-        buf1 = Buffer(protocol_version=2)
-        buf2 = Buffer(protocol_version=2, init_buf_size=65536, max_name_len=127)
+        from questdb.ingress import Buffer, Sender, Protocol, TimestampNanos
 
-    To avoid having to manually set these arguments every time, you can call
-    the sender's ``new_buffer()`` method instead.
+        buf = Buffer.ilp(protocol_version=2)
+        buf.row(
+            'table_name',
+            symbols={'s1': 'v1'},
+            columns={'c1': True, 'c2': 0.5},
+            at=TimestampNanos.now())
 
-    .. code-block:: python
+        with Sender(Protocol.Http, 'localhost', 9000) as sender:
+            sender.flush(buf)
 
-        from questdb.ingress import Sender, Buffer
-
-        sender = Sender('http', 'localhost', 9009,
-            init_buf_size=16384)
-        buf = sender.new_buffer()
-        assert buf.init_buf_size == 16384
-        assert buf.max_name_len == 127
+    Alternatively, call :func:`Sender.new_buffer` which creates the
+    correct buffer type (ILP or QWP) matching the sender's protocol.
 
     """
 
     def __init__(
             self,
-            *,
             protocol_version: int,
             init_buf_size: int = 65536,
             max_name_len: int = 127):
         """
-        Create a new buffer with the an initial capacity and max name length.
-        :param int protocol_version: The protocol version to use.
+        .. deprecated::
+            Use :func:`Buffer.ilp` or :func:`Buffer.qwp` instead.
+        """
+        ...
+
+    @staticmethod
+    def ilp(
+            protocol_version: int = 2,
+            init_buf_size: int = 65536,
+            max_name_len: int = 127) -> Buffer:
+        """
+        Create an ILP (InfluxDB Line Protocol) buffer.
+
+        :param int protocol_version: The protocol version to use (1-3).
+        :param int init_buf_size: Initial capacity of the buffer in bytes.
+        :param int max_name_len: Maximum length of a table or column name.
+        """
+        ...
+
+    @staticmethod
+    def qwp(
+            init_buf_size: int = 65536,
+            max_name_len: int = 127) -> Buffer:
+        """
+        Create a QWP (QuestWire Protocol) buffer.
+
         :param int init_buf_size: Initial capacity of the buffer in bytes.
         :param int max_name_len: Maximum length of a table or column name.
         """
@@ -592,7 +572,7 @@ class Buffer:
             import pandas as pd
             import questdb.ingress as qi
 
-            buf = qi.Buffer(protocol_version=2)
+            buf = qi.Buffer.ilp(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -798,6 +778,7 @@ class Protocol(TaggedEnum):
     Tcps = ...
     Http = ...
     Https = ...
+    QwpUdp = ...
 
     @property
     def tls_enabled(self) -> bool: ...
@@ -849,6 +830,8 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        max_datagram_size: Optional[int] = None,
+        multicast_ttl: Optional[int] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -875,6 +858,8 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        max_datagram_size: Optional[int] = None,
+        multicast_ttl: Optional[int] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -911,6 +896,8 @@ class Sender:
         auto_flush_rows: Optional[int] = None,
         auto_flush_bytes: bool = False,
         auto_flush_interval: int = 1000,
+        max_datagram_size: Optional[int] = None,
+        multicast_ttl: Optional[int] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,

@@ -5,6 +5,19 @@ Examples
 Basics
 ======
 
+.. _qwp_udp_example:
+
+QWP over UDP
+------------
+
+The following example sends a row using QuestWire Protocol over UDP.
+
+Requires a QuestDB instance with QWP/UDP receiver support enabled. The
+default listener port is ``9007``.
+
+.. literalinclude:: ../examples/qwp_udp.py
+   :language: python
+
 HTTP with Token Auth
 --------------------
 

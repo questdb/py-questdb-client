@@ -29,6 +29,7 @@ The valid protocols are:
 * ``tcps``: ILP/TCP with TLS
 * ``http``: ILP/HTTP
 * ``https``: ILP/HTTP with TLS
+* ``qwpudp``: QWP/UDP (QuestWire Protocol over UDP)
 
 If you're unsure which protocol to use, see :ref:`sender_which_protocol`.
 
@@ -57,14 +58,24 @@ Connection
   ``host:port``.
 
   This key-value pair is mandatory, but the port can be defaulted.
-  If omitted, the port will be defaulted to 9009 for TCP(s)
-  and 9000 for HTTP(s).
+  If omitted, the port will be defaulted to 9009 for TCP(s),
+  9000 for HTTP(s), and 9007 for QWP/UDP.
 
-* ``bind_interface`` - TCP-only, ``str``: Network interface to bind from.
-  Useful if you have an accelerated network interface (e.g. Solarflare) and
-  want to use it.
-  
+* ``bind_interface`` - TCP/QWP-UDP only, ``str``: Network interface to bind
+  from. Useful if you have an accelerated network interface (e.g. Solarflare)
+  and want to use it.
+
   The default is ``0.0.0.0``.
+
+* ``max_datagram_size`` - QWP/UDP-only, ``int > 0``: Maximum UDP datagram
+  payload size in bytes.
+
+  Default: 1400.
+
+* ``multicast_ttl`` - QWP/UDP-only, ``int (0-255)``: Multicast TTL
+  (time-to-live) for UDP datagrams.
+
+  Default: 0.
 
 .. _sender_conf_auth:
 
@@ -170,13 +181,13 @@ The following parameters control the :ref:`sender_auto_flush` behavior.
 
 * ``auto_flush_rows`` - ``int > 0`` | ``'off'``: The number of rows that will
   trigger a flush. Set to ``'off'`` to disable.
-    
-  *Default: 75000 (HTTP) | 600 (TCP).*
+
+  *Default: 75000 (HTTP) | 600 (TCP, QWP/UDP).*
 
 * ``auto_flush_bytes`` - ``int > 0`` | ``'off'``: The number of bytes that will
   trigger a flush. Set to ``'off'`` to disable.
-        
-  Default: ``'off'``.
+
+  *Default: off (TCP, HTTP) | max_datagram_size (QWP/UDP, 1400 by default).*
 
 * ``auto_flush_interval`` - ``int > 0`` | ``'off'``: The time in milliseconds
   that will trigger a flush. Set to ``'off'`` to disable.

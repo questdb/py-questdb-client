@@ -49,6 +49,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_protocol_tcps,
         line_sender_protocol_http,
         line_sender_protocol_https,
+        line_sender_protocol_qwpudp,
 
     cdef enum line_sender_protocol_version:
         line_sender_protocol_version_1 = 1,
@@ -135,6 +136,13 @@ cdef extern from "questdb/ingress/line_sender.h":
 
     line_sender_buffer* line_sender_buffer_with_max_name_len(
         line_sender_protocol_version version,
+        size_t max_name_len
+        ) noexcept nogil
+
+    line_sender_buffer* line_sender_buffer_new_qwp(
+        ) noexcept nogil
+
+    line_sender_buffer* line_sender_buffer_new_qwp_with_max_name_len(
         size_t max_name_len
         ) noexcept nogil
 
@@ -337,6 +345,18 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_opts_max_datagram_size(
+        line_sender_opts* opts,
+        size_t max_datagram_size,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_opts_multicast_ttl(
+        line_sender_opts* opts,
+        uint32_t multicast_ttl,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint line_sender_opts_username(
         line_sender_opts* opts,
         line_sender_utf8 username,
@@ -450,6 +470,10 @@ cdef extern from "questdb/ingress/line_sender.h":
         ) noexcept nogil
 
     line_sender_protocol_version line_sender_get_protocol_version(
+        const line_sender * sender
+        ) noexcept nogil
+
+    line_sender_protocol line_sender_get_protocol(
         const line_sender * sender
         ) noexcept nogil
 
