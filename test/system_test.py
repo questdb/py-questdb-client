@@ -954,6 +954,119 @@ class TestWithDatabase(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 buf.row('t', columns={'a' * 33: 1}, at=qi.ServerTimestamp)
 
+    def test_qwp_udp_decimal_zero_and_negative(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table_name} '
+            f'(val DECIMAL(18,3), timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name,
+                       columns={'val': decimal.Decimal('0')},
+                       at=qi.TimestampNanos.now())
+            sender.row(table_name,
+                       columns={'val': decimal.Decimal('-0')},
+                       at=qi.TimestampNanos.now())
+            sender.row(table_name,
+                       columns={'val': decimal.Decimal('-123456789.012')},
+                       at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        vals = [row[0] for row in resp['dataset']]
+        self.assertEqual(vals[0], '0.000')
+        self.assertIn(vals[1], ('0.000', '-0.000'))
+        self.assertEqual(vals[2], '-123456789.012')
+
+    def test_qwp_udp_decimal_max_precision(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table_name} '
+            f'(val DECIMAL(18,3), timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name,
+                       columns={'val': decimal.Decimal('999999999999999.999')},
+                       at=qi.TimestampNanos.now())
+            sender.row(table_name,
+                       columns={'val': decimal.Decimal('0.001')},
+                       at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        vals = [row[0] for row in resp['dataset']]
+        self.assertEqual(vals[0], '999999999999999.999')
+        self.assertEqual(vals[1], '0.001')
+
+    def test_qwp_udp_decimal_nan_inf_rejected(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table_name} '
+            f'(val DECIMAL(18,3), timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        with self._mk_qwpudp_sender() as sender:
+            with self.assertRaises(qi.IngressError):
+                sender.row(table_name,
+                           columns={'val': decimal.Decimal('NaN')},
+                           at=qi.TimestampNanos.now())
+            with self.assertRaises(qi.IngressError):
+                sender.row(table_name,
+                           columns={'val': decimal.Decimal('Inf')},
+                           at=qi.TimestampNanos.now())
+
+    def test_qwp_udp_decimal_multiple_columns(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table_name} '
+            f'(price DECIMAL(18,2), fee DECIMAL(18,6), timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name,
+                       columns={
+                           'price': decimal.Decimal('199.99'),
+                           'fee': decimal.Decimal('0.000123')},
+                       at=qi.TimestampNanos.now())
+            sender.flush()
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        row = resp['dataset'][0]
+        self.assertEqual(row[0], '199.99')
+        self.assertEqual(row[1], '0.000123')
+
+    @unittest.skipIf(not pyarrow, 'pyarrow not installed')
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_qwp_udp_decimal_pyarrow_nulls(self):
+        self._require_qwp_udp()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table_name = uuid.uuid4().hex
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table_name} '
+            f'(val DECIMAL(18,3), seq LONG, timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        df = pd.DataFrame({
+            'val': pd.array(
+                [decimal.Decimal('1.5'), None, decimal.Decimal('3.25')],
+                dtype=pd.ArrowDtype(pyarrow.decimal128(18, 3))),
+            'seq': [1, 2, 3],
+        })
+        with self._mk_qwpudp_sender() as sender:
+            sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        vals = [row[0] for row in resp['dataset']]
+        self.assertIn('1.500', vals)
+        self.assertIn(None, vals)
+        self.assertIn('3.250', vals)
+
     @unittest.skipIf(not pyarrow, 'pyarrow not installed')
     @unittest.skipIf(not pd, 'pandas not installed')
     def test_qwp_udp_decimal_pyarrow(self):
