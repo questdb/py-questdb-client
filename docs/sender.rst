@@ -850,9 +850,43 @@ protocols.
 **You should prefer to use ILP/HTTP in most cases as it provides better
 feedback on errors and transaction control.**
 
+.. _sender_qwp_udp:
+
+QWP/UDP
+-------
+
 QWP/UDP (``qwpudp``) uses fire-and-forget UDP datagrams for lowest-latency
 ingestion. It does not support authentication, TLS, or transactions. The
 default port is 9007. See the :ref:`qwp_udp_example` example.
+
+Key differences from ILP:
+
+* **No delivery guarantee.** UDP datagrams may be dropped under load or network
+  congestion. There is no retry mechanism and the server sends no
+  acknowledgement. Use ILP/HTTP if you need reliable delivery.
+
+* **No error feedback.** If a row contains invalid data (e.g. wrong column type
+  for an existing table), the server silently drops it. With ILP/HTTP you would
+  get an error response.
+
+* **Buffer inspection.** ``bytes(sender)`` returns ``b''`` because QWP encoding
+  is deferred to flush. ``len(sender)`` returns an estimated size hint, not the
+  exact serialized byte count.
+
+* **Standalone buffers.** Use :func:`Buffer.qwp` (not :func:`Buffer.ilp`) to
+  create standalone QWP buffers. Alternatively, use :func:`Sender.new_buffer`
+  which creates the correct buffer type automatically.
+
+* **Auto-flush.** ``auto_flush_bytes`` defaults to ``max_datagram_size`` (1400
+  by default) so that rows are flushed when the buffer approaches a single
+  datagram's worth of data. Rows and interval thresholds work the same as ILP.
+
+* **Datagram size limit.** A single row that exceeds ``max_datagram_size`` will
+  raise :class:`IngressError` at flush time. Configure ``max_datagram_size`` via
+  the constructor or :ref:`configuration string <sender_conf>`.
+
+* **No protocol version.** QWP has its own versioning. The ``protocol_version``
+  parameter and property are not applicable and will raise an error.
 
 ILP/HTTP is available from:
 
@@ -872,6 +906,9 @@ auto-detection.
 |                | :ref:`configure <sender_conf_protocol_version>`              |
 |                | ``protocol_version=N`` to to match a version supported by    |
 |                | the server.                                                  |
++----------------+--------------------------------------------------------------+
+| QWP/UDP        | **N/A**: QWP uses its own wire format. The                   |
+|                | ``protocol_version`` setting is not applicable.              |
 +----------------+--------------------------------------------------------------+
 
 .. note::
