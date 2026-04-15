@@ -9,9 +9,9 @@ Overview
 
 The :class:`Sender <questdb.ingress.Sender>` class is a client that inserts
 rows into QuestDB via the
-`ILP protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_, with
-support for both ILP over TCP and the newer and recommended ILP over HTTP.
-The sender also supports TLS and authentication.
+`ILP protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_ (TCP
+and HTTP) or via QWP/UDP for fire-and-forget, lowest-latency ingestion.
+The sender also supports TLS and authentication (ILP only).
 
 .. code-block:: python
 
@@ -462,7 +462,8 @@ Prefer ILP/HTTP
 ---------------
 
 Use the ILP/HTTP protocol instead of ILP/TCP for better error reporting and
-transaction control.
+transaction control. Use QWP/UDP only when you need fire-and-forget,
+lowest-latency ingestion and can tolerate potential data loss.
 
 .. _sender_tips_connection_reuse:
 

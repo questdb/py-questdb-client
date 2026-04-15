@@ -239,6 +239,7 @@ Protocol Version
 ================
 
 Specifies the version of InfluxDB Line Protocol to use.
+Not applicable for QWP/UDP senders.
 
 Here is a configuration string with ``protocol_version=2`` for ``TCP``::
 
