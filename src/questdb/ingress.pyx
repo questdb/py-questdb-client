@@ -36,6 +36,10 @@ __all__ = [
     'IngressErrorCode',
     'Protocol',
     'Sender',
+    'QwpWsError',
+    'QwpWsErrorCategory',
+    'QwpWsErrorPolicy',
+    'QwpWsProgress',
     'ServerTimestamp',
     'ServerTimestampType',
     'TimestampMicros',
@@ -79,6 +83,7 @@ include "dataframe.pxi"
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
     Iterable
+from dataclasses import dataclass
 import pathlib
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
@@ -152,14 +157,25 @@ class IngressErrorCode(Enum):
 
 class IngressError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
-    def __init__(self, code, msg):
+    def __init__(self, code, msg, qwp_ws_error=None):
         super().__init__(msg)
         self._code = code
+        self._qwp_ws_error = qwp_ws_error
 
     @property
     def code(self) -> IngressErrorCode:
         """Return the error code."""
         return self._code
+
+    @property
+    def qwp_ws_error(self):
+        """
+        Return the structured QWP/WebSocket HALT diagnostic, if this error
+        carries one from a terminal QWP/WebSocket sender failure.
+        """
+        if self._qwp_ws_error is not None:
+            self._qwp_ws_error = _qwp_ws_error_from_raw(self._qwp_ws_error)
+        return self._qwp_ws_error
 
 
 cdef inline object c_err_code_to_py(line_sender_error_code code):
@@ -195,32 +211,53 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         raise ValueError('Internal error converting error code.')
 
 
-cdef inline object c_err_to_code_and_msg(line_sender_error* err):
+cdef inline object c_qwp_ws_error_view_to_raw(
+        line_sender_qwpws_error_view view):
+    cdef object message
+    if view.message == NULL:
+        message = ''
+    else:
+        message = PyUnicode_FromStringAndSize(
+            view.message, <Py_ssize_t>view.message_len)
+    return (
+        <int>view.category,
+        <int>view.applied_policy,
+        view.status if view.has_status else None,
+        message,
+        view.message_sequence if view.has_message_sequence else None,
+        view.from_fsn,
+        view.to_fsn)
+
+
+cdef inline object c_err_to_fields(line_sender_error* err):
     """Construct a ``SenderError`` from a C error, which will be freed."""
     cdef line_sender_error_code code = line_sender_error_get_code(err)
     cdef size_t c_len = 0
     cdef const char* c_msg = line_sender_error_msg(err, &c_len)
-    cdef object py_err
+    cdef line_sender_qwpws_error_view qwp_ws_view
     cdef object py_msg
     cdef object py_code
+    cdef object py_qwp_ws_error = None
     try:
         py_code = c_err_code_to_py(code)
         py_msg = PyUnicode_FromStringAndSize(c_msg, <Py_ssize_t>c_len)
-        return (py_code, py_msg)
+        if line_sender_error_qwpws_get_view(err, &qwp_ws_view):
+            py_qwp_ws_error = c_qwp_ws_error_view_to_raw(qwp_ws_view)
+        return (py_code, py_msg, py_qwp_ws_error)
     finally:
         line_sender_error_free(err)
 
 
 cdef inline object c_err_to_py(line_sender_error* err):
     """Construct an ``IngressError`` from a C error, which will be freed."""
-    cdef object tup = c_err_to_code_and_msg(err)
-    return IngressError(tup[0], tup[1])
+    cdef object tup = c_err_to_fields(err)
+    return IngressError(tup[0], tup[1], tup[2])
 
 
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Construct an ``IngressError`` from a C error, which will be freed."""
-    cdef object tup = c_err_to_code_and_msg(err)
-    return IngressError(tup[0], fmt.format(tup[1]))
+    cdef object tup = c_err_to_fields(err)
+    return IngressError(tup[0], fmt.format(tup[1]), tup[2])
 
 
 cdef object _utf8_decode_error(
@@ -591,6 +628,12 @@ cdef bint _is_http_protocol(line_sender_protocol protocol):
 
 cdef bint _is_qwp_udp_protocol(line_sender_protocol protocol):
     return protocol == line_sender_protocol_qwpudp
+
+
+cdef bint _is_qwp_ws_protocol(line_sender_protocol protocol):
+    return (
+        (protocol == line_sender_protocol_qwpws) or
+        (protocol == line_sender_protocol_qwpwss))
 
 
 cdef class SenderTransaction:
@@ -1798,10 +1841,94 @@ class Protocol(TaggedEnum):
     Http = ('http', 2)
     Https = ('https', 3)
     QwpUdp = ('qwpudp', 4)
+    QwpWs = ('qwpws', 5)
+    QwpWss = ('qwpwss', 6)
 
     @property
     def tls_enabled(self):
-        return self in (Protocol.Tcps, Protocol.Https)
+        return self in (Protocol.Tcps, Protocol.Https, Protocol.QwpWss)
+
+
+class QwpWsProgress(TaggedEnum):
+    """
+    Progress mode for QWP/WebSocket senders.
+    """
+    Background = ('background', LINE_SENDER_QWPWS_PROGRESS_BACKGROUND)
+    Manual = ('manual', LINE_SENDER_QWPWS_PROGRESS_MANUAL)
+
+
+class QwpWsErrorCategory(TaggedEnum):
+    """
+    Category of a structured QWP/WebSocket diagnostic.
+    """
+    SchemaMismatch = (
+        'schema_mismatch',
+        LINE_SENDER_QWPWS_ERROR_SCHEMA_MISMATCH)
+    ParseError = ('parse_error', LINE_SENDER_QWPWS_ERROR_PARSE_ERROR)
+    InternalError = ('internal_error', LINE_SENDER_QWPWS_ERROR_INTERNAL_ERROR)
+    SecurityError = ('security_error', LINE_SENDER_QWPWS_ERROR_SECURITY_ERROR)
+    WriteError = ('write_error', LINE_SENDER_QWPWS_ERROR_WRITE_ERROR)
+    ProtocolViolation = (
+        'protocol_violation',
+        LINE_SENDER_QWPWS_ERROR_PROTOCOL_VIOLATION)
+    Unknown = ('unknown', LINE_SENDER_QWPWS_ERROR_UNKNOWN)
+
+
+class QwpWsErrorPolicy(TaggedEnum):
+    """
+    Applied policy for a structured QWP/WebSocket diagnostic.
+    """
+    DropAndContinue = (
+        'drop_and_continue',
+        LINE_SENDER_QWPWS_ERROR_DROP_AND_CONTINUE)
+    Halt = ('halt', LINE_SENDER_QWPWS_ERROR_HALT)
+
+
+@dataclass(frozen=True)
+class QwpWsError:
+    category: QwpWsErrorCategory
+    applied_policy: QwpWsErrorPolicy
+    status: Optional[int]
+    message: str
+    message_sequence: Optional[int]
+    from_fsn: int
+    to_fsn: int
+
+
+def _qwp_ws_error_from_raw(raw):
+    if raw is None or isinstance(raw, QwpWsError):
+        return raw
+
+    (
+        category,
+        applied_policy,
+        status,
+        message,
+        message_sequence,
+        from_fsn,
+        to_fsn,
+    ) = raw
+
+    py_category = QwpWsErrorCategory.Unknown
+    for entry in QwpWsErrorCategory:
+        if entry.c_value == category:
+            py_category = entry
+            break
+
+    py_policy = QwpWsErrorPolicy.Halt
+    for entry in QwpWsErrorPolicy:
+        if entry.c_value == applied_policy:
+            py_policy = entry
+            break
+
+    return QwpWsError(
+        py_category,
+        py_policy,
+        status,
+        message,
+        message_sequence,
+        from_fsn,
+        to_fsn)
 
 
 class TlsCa(TaggedEnum):
@@ -1894,12 +2021,17 @@ cdef object parse_conf_str(
         'auto_flush_interval': str,
         'init_buf_size': int,
         'max_name_len': int,
+        'qwp_ws_progress': str,
     }
     params = {
         k: type_mappings.get(k, str)(v)
         for k, v in params.items()
     }
     return (Protocol.parse(service), params)
+
+
+cdef str conf_str_value(object value):
+    return str(value).replace(';', ';;')
 
 
 cdef class Sender:
@@ -1948,6 +2080,7 @@ cdef class Sender:
             object max_datagram_size,
             object multicast_ttl,
             object protocol_version,
+            object qwp_ws_progress,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -1972,6 +2105,7 @@ cdef class Sender:
         cdef uint64_t c_request_timeout
         cdef size_t c_max_datagram_size = 0
         cdef uint32_t c_multicast_ttl = 0
+        cdef line_sender_qwpws_progress c_qwp_ws_progress
 
         self._c_protocol = protocol.c_value
 
@@ -2012,6 +2146,12 @@ cdef class Sender:
             c_multicast_ttl = multicast_ttl
             if not line_sender_opts_multicast_ttl(
                     self._opts, c_multicast_ttl, &err):
+                raise c_err_to_py(err)
+
+        if qwp_ws_progress is not None:
+            c_qwp_ws_progress = QwpWsProgress.parse(qwp_ws_progress).c_value
+            if not line_sender_opts_qwpws_progress(
+                    self._opts, c_qwp_ws_progress, &err):
                 raise c_err_to_py(err)
 
         if username is not None:
@@ -2193,6 +2333,7 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 0 for QWP/UDP
+            object qwp_ws_progress=None,  # Default background for QWP/WebSocket
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2240,6 +2381,7 @@ cdef class Sender:
                 max_datagram_size,
                 multicast_ttl,
                 protocol_version,
+                qwp_ws_progress,
                 init_buf_size,
                 max_name_len)
         finally:
@@ -2269,6 +2411,7 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 0 for QWP/UDP
+            object qwp_ws_progress=None,  # Default background for QWP/WebSocket
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2326,6 +2469,7 @@ cdef class Sender:
                 'auto_flush_interval': auto_flush_interval,
                 'max_datagram_size': max_datagram_size,
                 'multicast_ttl': multicast_ttl,
+                'qwp_ws_progress': qwp_ws_progress,
                 'protocol_version': protocol_version,
                 'init_buf_size': init_buf_size,
                 'max_name_len': max_name_len,
@@ -2340,11 +2484,46 @@ cdef class Sender:
 
             sender = Sender.__new__(Sender)
 
-            # Forward only the `addr=` parameter to the C API.
-            synthetic_conf_str = f'{protocol.tag}::addr={addr};'
+            python_handled_keys = {
+                'addr',
+                'bind_interface',
+                'username',
+                'password',
+                'token',
+                'token_x',
+                'token_y',
+                'auth_timeout',
+                'tls_verify',
+                'tls_ca',
+                'tls_roots',
+                'max_buf_size',
+                'retry_timeout',
+                'request_min_throughput',
+                'request_timeout',
+                'auto_flush',
+                'auto_flush_rows',
+                'auto_flush_bytes',
+                'auto_flush_interval',
+                'max_datagram_size',
+                'multicast_ttl',
+                'qwp_ws_progress',
+                'protocol_version',
+                'init_buf_size',
+                'max_name_len',
+            }
+            synthetic_params = {'addr': addr}
+            if protocol in (Protocol.QwpWs, Protocol.QwpWss):
+                for key, value in params.items():
+                    if key not in python_handled_keys:
+                        synthetic_params[key] = value
+            synthetic_conf_str = protocol.tag + '::' + ''.join(
+                f'{key}={conf_str_value(value)};'
+                for key, value in synthetic_params.items())
             str_to_utf8(b, <PyObject*>synthetic_conf_str, &c_synthetic_conf_str)
             sender._opts = line_sender_opts_from_conf(
                 c_synthetic_conf_str, &err)
+            if sender._opts == NULL:
+                raise c_err_to_py(err)
 
             sender._set_sender_fields(
                 b,
@@ -2370,6 +2549,7 @@ cdef class Sender:
                 params.get('max_datagram_size'),
                 params.get('multicast_ttl'),
                 params.get('protocol_version'),
+                params.get('qwp_ws_progress'),
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
             
@@ -2400,6 +2580,7 @@ cdef class Sender:
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 0 for QWP/UDP
+            object qwp_ws_progress=None,  # Default background for QWP/WebSocket
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2442,6 +2623,7 @@ cdef class Sender:
             auto_flush_interval=auto_flush_interval,
             max_datagram_size=max_datagram_size,
             multicast_ttl=multicast_ttl,
+            qwp_ws_progress=qwp_ws_progress,
             protocol_version=protocol_version,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
@@ -2781,6 +2963,12 @@ cdef class Sender:
         :param buffer: The buffer to flush. If ``None``, the internal buffer
             is flushed.
 
+        With QWP/WebSocket, this publishes the buffer into the local sender
+        queue and returns before the server necessarily ACKs the frame. Later
+        terminal diagnostics fail subsequent sender calls and are available as
+        :attr:`IngressError.qwp_ws_error`. Server diagnostics are also
+        available through :func:`Sender.poll_qwp_ws_error`.
+
         :param clear: If ``True``, the flushed buffer is cleared (default).
             If ``False``, the flushed buffer is left in the internal buffer.
             Note that ``clear=False`` is only supported if ``buffer`` is also
@@ -2816,7 +3004,7 @@ cdef class Sender:
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl
-        if line_sender_buffer_size(c_buf) == 0:
+        if line_sender_buffer_size(c_buf) == 0 and not _is_qwp_ws_protocol(self._c_protocol):
             return
 
         # We might be blocking on IO, so temporarily release the GIL.
@@ -2849,6 +3037,226 @@ cdef class Sender:
             else:
                 raise c_err_to_py(err)
 
+    def flush_and_get_fsn(self, Buffer buffer=None):
+        """
+        Publish a QWP/WebSocket buffer locally, clear it on success, and return
+        the assigned frame sequence number.
+        """
+        cdef line_sender* sender = self._impl
+        cdef line_sender_error* err = NULL
+        cdef line_sender_buffer* c_buf = NULL
+        cdef line_sender_qwpws_fsn fsn
+        cdef PyThreadState* gs = NULL
+        cdef bint ok = False
+
+        if self._in_txn:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Cannot flush explicitly inside a transaction')
+        if sender == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'flush_and_get_fsn() can\'t be called: Sender is closed.')
+        if buffer is not None:
+            buffer._check_impl()
+            c_buf = buffer._impl
+        else:
+            c_buf = self._buffer._impl
+
+        _ensure_doesnt_have_gil(&gs)
+        ok = line_sender_qwpws_flush_and_get_fsn(sender, c_buf, &fsn, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise c_err_to_py(err)
+        if c_buf == self._buffer._impl:
+            self._last_flush_ms[0] = line_sender_now_micros() // 1000
+        if fsn.has_value:
+            return fsn.value
+        return None
+
+    def flush_and_keep_and_get_fsn(self, Buffer buffer=None):
+        """
+        Publish a QWP/WebSocket buffer locally without clearing it and return
+        the assigned frame sequence number.
+        """
+        cdef line_sender* sender = self._impl
+        cdef line_sender_error* err = NULL
+        cdef line_sender_buffer* c_buf = NULL
+        cdef line_sender_qwpws_fsn fsn
+        cdef PyThreadState* gs = NULL
+        cdef bint ok = False
+
+        if self._in_txn:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'Cannot flush explicitly inside a transaction')
+        if sender == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'flush_and_keep_and_get_fsn() can\'t be called: Sender is closed.')
+        if buffer is not None:
+            buffer._check_impl()
+            c_buf = buffer._impl
+        else:
+            c_buf = self._buffer._impl
+
+        _ensure_doesnt_have_gil(&gs)
+        ok = line_sender_qwpws_flush_and_keep_and_get_fsn(
+            sender, c_buf, &fsn, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise c_err_to_py(err)
+        if c_buf == self._buffer._impl:
+            self._last_flush_ms[0] = line_sender_now_micros() // 1000
+        if fsn.has_value:
+            return fsn.value
+        return None
+
+    def published_fsn(self):
+        """
+        Highest QWP/WebSocket frame sequence number published locally.
+        """
+        cdef line_sender_qwpws_fsn fsn
+        cdef line_sender_error* err = NULL
+
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'published_fsn() can\'t be called: Sender is closed.')
+        if not line_sender_qwpws_published_fsn(self._impl, &fsn, &err):
+            raise c_err_to_py(err)
+        if fsn.has_value:
+            return fsn.value
+        return None
+
+    def acked_fsn(self):
+        """
+        Highest QWP/WebSocket frame sequence number completed by ACK or
+        drop-and-continue rejection.
+        """
+        cdef line_sender_qwpws_fsn fsn
+        cdef line_sender_error* err = NULL
+
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'acked_fsn() can\'t be called: Sender is closed.')
+        if not line_sender_qwpws_acked_fsn(self._impl, &fsn, &err):
+            raise c_err_to_py(err)
+        if fsn.has_value:
+            return fsn.value
+        return None
+
+    def await_acked_fsn(self, fsn, timeout_millis):
+        """
+        Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
+        """
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef uint64_t c_fsn
+        cdef uint64_t c_timeout_millis
+        cdef cbool reached = False
+        cdef bint ok = False
+
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'await_acked_fsn() can\'t be called: Sender is closed.')
+        if not isinstance(fsn, int) or isinstance(fsn, bool):
+            raise TypeError('"fsn" must be a non-negative int.')
+        if fsn < 0:
+            raise ValueError('"fsn" must be a non-negative int.')
+        if not isinstance(timeout_millis, int) or isinstance(timeout_millis, bool):
+            raise TypeError('"timeout_millis" must be a non-negative int.')
+        if timeout_millis < 0:
+            raise ValueError('"timeout_millis" must be a non-negative int.')
+        c_fsn = fsn
+        c_timeout_millis = timeout_millis
+
+        _ensure_doesnt_have_gil(&gs)
+        ok = line_sender_qwpws_await_acked_fsn(
+            self._impl, c_fsn, c_timeout_millis, &reached, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise c_err_to_py(err)
+        return bool(reached)
+
+    def drive_once(self):
+        """
+        Drive one QWP/WebSocket progress step for manual progress senders.
+        """
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef cbool progressed = False
+        cdef bint ok = False
+
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'drive_once() can\'t be called: Sender is closed.')
+        _ensure_doesnt_have_gil(&gs)
+        ok = line_sender_qwpws_drive_once(self._impl, &progressed, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise c_err_to_py(err)
+        return bool(progressed)
+
+    def poll_qwp_ws_error(self):
+        """
+        Poll the next structured QWP/WebSocket diagnostic.
+        """
+        cdef line_sender_error* err = NULL
+        cdef line_sender_qwpws_error* qwp_err = NULL
+        cdef line_sender_qwpws_error_view view
+
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'poll_qwp_ws_error() can\'t be called: Sender is closed.')
+        if not line_sender_qwpws_poll_error(self._impl, &qwp_err, &err):
+            raise c_err_to_py(err)
+        if qwp_err == NULL:
+            return None
+        try:
+            view = line_sender_qwpws_error_get_view(qwp_err)
+            return _qwp_ws_error_from_raw(c_qwp_ws_error_view_to_raw(view))
+        finally:
+            line_sender_qwpws_error_free(qwp_err)
+
+    def qwp_ws_errors_dropped(self):
+        """
+        Number of QWP/WebSocket diagnostics dropped from the bounded ring.
+        """
+        cdef line_sender_error* err = NULL
+        cdef uint64_t dropped = 0
+
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'qwp_ws_errors_dropped() can\'t be called: Sender is closed.')
+        if not line_sender_qwpws_errors_dropped(self._impl, &dropped, &err):
+            raise c_err_to_py(err)
+        return dropped
+
+    def close_drain(self):
+        """
+        Stop accepting new QWP/WebSocket publications and wait for already
+        published frames to resolve.
+        """
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef bint ok = False
+
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'close_drain() can\'t be called: Sender is closed.')
+        _ensure_doesnt_have_gil(&gs)
+        ok = line_sender_qwpws_close_drain(self._impl, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise c_err_to_py(err)
+
     cdef _close(self):
         self._buffer = None
         line_sender_opts_free(self._opts)
@@ -2868,11 +3276,15 @@ cdef class Sender:
         Once a sender is closed, it can't be re-used.
 
         :param bool flush: If ``True``, flush the internal buffer before closing.
+            For QWP/WebSocket, this also drains already-published frames before
+            closing.
         """
         try:
             if (flush and (self._impl != NULL) and
                     (not line_sender_must_close(self._impl))):
                 self.flush(None, True)
+                if _is_qwp_ws_protocol(self._c_protocol):
+                    self.close_drain()
         finally:
             self._close()
 

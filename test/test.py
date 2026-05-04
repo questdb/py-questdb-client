@@ -66,6 +66,106 @@ class TestManifest(unittest.TestCase):
             yaml.safe_load(f)
 
 
+class TestQwpWebSocketApi(unittest.TestCase):
+    def test_protocol_enum(self):
+        self.assertEqual(qi.Protocol.parse('qwpws'), qi.Protocol.QwpWs)
+        self.assertEqual(qi.Protocol.parse('qwpwss'), qi.Protocol.QwpWss)
+        self.assertFalse(qi.Protocol.QwpWs.tls_enabled)
+        self.assertTrue(qi.Protocol.QwpWss.tls_enabled)
+
+    def test_progress_enum(self):
+        self.assertEqual(
+            qi.QwpWsProgress.parse('background'),
+            qi.QwpWsProgress.Background)
+        self.assertEqual(
+            qi.QwpWsProgress.parse('manual'),
+            qi.QwpWsProgress.Manual)
+
+    def test_ingress_error_can_carry_qwpws_diagnostic(self):
+        err = qi.IngressError(
+            qi.IngressErrorCode.SocketError,
+            'sender halted',
+            (
+                qi.QwpWsErrorCategory.ParseError.c_value,
+                qi.QwpWsErrorPolicy.Halt.c_value,
+                2,
+                'bad line',
+                44,
+                5,
+                6,
+            ))
+
+        diagnostic = err.qwp_ws_error
+
+        self.assertEqual(diagnostic.category, qi.QwpWsErrorCategory.ParseError)
+        self.assertEqual(diagnostic.applied_policy, qi.QwpWsErrorPolicy.Halt)
+        self.assertEqual(diagnostic.status, 2)
+        self.assertEqual(diagnostic.message, 'bad line')
+        self.assertEqual(diagnostic.message_sequence, 44)
+        self.assertEqual(diagnostic.from_fsn, 5)
+        self.assertEqual(diagnostic.to_fsn, 6)
+        self.assertIs(err.qwp_ws_error, diagnostic)
+
+    def test_from_conf_preserves_qwpws_progress(self):
+        sender = qi.Sender.from_conf(
+            'qwpws::addr=localhost:9000;qwp_ws_progress=manual;')
+        try:
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    r'drive_once\(\) can\'t be called: Sender is closed'):
+                sender.drive_once()
+        finally:
+            sender.close(False)
+
+    def test_from_conf_preserves_c_only_qwpws_keys(self):
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'invalid sf_max_bytes'):
+            qi.Sender.from_conf('qwpws::addr=localhost:9000;sf_max_bytes=64mi;')
+
+    def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):
+        sender = qi.Sender.from_conf(
+            'qwpws::addr=localhost:9000;sf_dir=/tmp/qdb;;sf;')
+        try:
+            self.assertIsInstance(sender, qi.Sender)
+        finally:
+            sender.close(False)
+
+    def test_qwpws_progress_rejects_non_websocket_protocol(self):
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'only supported for QWP/WebSocket'):
+            qi.Sender(
+                qi.Protocol.QwpUdp,
+                '127.0.0.1',
+                9009,
+                qwp_ws_progress=qi.QwpWsProgress.Manual)
+
+    def test_qwpws_fsn_helpers_reject_non_websocket_sender_even_when_empty(self):
+        sender = qi.Sender(
+            qi.Protocol.QwpUdp,
+            '127.0.0.1',
+            9009)
+        try:
+            sender.establish()
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'only supported for QWP/WebSocket'):
+                sender.flush_and_get_fsn()
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    'only supported for QWP/WebSocket'):
+                sender.flush_and_keep_and_get_fsn()
+        finally:
+            sender.close(False)
+
+    def test_qwpws_progress_conf_override_conflict(self):
+        with self.assertRaisesRegex(ValueError, '"qwp_ws_progress" is already present'):
+            qi.Sender.from_conf(
+                'qwpws::addr=localhost:9000;qwp_ws_progress=manual;',
+                qwp_ws_progress=qi.QwpWsProgress.Background)
+
+
 class TestBases:
     """
     Dummy class that's only used so that we can create subclasses of testcases.

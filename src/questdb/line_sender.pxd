@@ -24,6 +24,9 @@
 
 from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t, uint32_t, int32_t
 
+cdef extern from "stdbool.h":
+    ctypedef unsigned char cbool "bool"
+
 cdef extern from "questdb/ingress/line_sender.h":
     cdef struct line_sender_error:
         pass
@@ -50,6 +53,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_protocol_http,
         line_sender_protocol_https,
         line_sender_protocol_qwpudp,
+        line_sender_protocol_qwpws,
+        line_sender_protocol_qwpwss,
 
     cdef enum line_sender_protocol_version:
         line_sender_protocol_version_1 = 1,
@@ -61,6 +66,42 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_ca_os_roots,
         line_sender_ca_webpki_and_os_roots,
         line_sender_ca_pem_file,
+
+    cdef enum line_sender_qwpws_progress:
+        LINE_SENDER_QWPWS_PROGRESS_BACKGROUND,
+        LINE_SENDER_QWPWS_PROGRESS_MANUAL,
+
+    cdef struct line_sender_qwpws_fsn:
+        cbool has_value
+        uint64_t value
+
+    cdef enum line_sender_qwpws_error_category:
+        LINE_SENDER_QWPWS_ERROR_SCHEMA_MISMATCH,
+        LINE_SENDER_QWPWS_ERROR_PARSE_ERROR,
+        LINE_SENDER_QWPWS_ERROR_INTERNAL_ERROR,
+        LINE_SENDER_QWPWS_ERROR_SECURITY_ERROR,
+        LINE_SENDER_QWPWS_ERROR_WRITE_ERROR,
+        LINE_SENDER_QWPWS_ERROR_PROTOCOL_VIOLATION,
+        LINE_SENDER_QWPWS_ERROR_UNKNOWN,
+
+    cdef enum line_sender_qwpws_error_policy:
+        LINE_SENDER_QWPWS_ERROR_DROP_AND_CONTINUE,
+        LINE_SENDER_QWPWS_ERROR_HALT,
+
+    cdef struct line_sender_qwpws_error:
+        pass
+
+    cdef struct line_sender_qwpws_error_view:
+        line_sender_qwpws_error_category category
+        line_sender_qwpws_error_policy applied_policy
+        cbool has_status
+        uint8_t status
+        cbool has_message_sequence
+        uint64_t message_sequence
+        uint64_t from_fsn
+        uint64_t to_fsn
+        const char* message
+        size_t message_len
 
     line_sender_error_code line_sender_error_get_code(
         const line_sender_error* error
@@ -357,6 +398,12 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_opts_qwpws_progress(
+        line_sender_opts* opts,
+        line_sender_qwpws_progress progress,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint line_sender_opts_username(
         line_sender_opts* opts,
         line_sender_utf8 username,
@@ -491,6 +538,76 @@ cdef extern from "questdb/ingress/line_sender.h":
 
     void line_sender_close(
         line_sender* sender
+        ) noexcept nogil
+
+    bint line_sender_qwpws_flush_and_get_fsn(
+        line_sender* sender,
+        line_sender_buffer* buffer,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_qwpws_flush_and_keep_and_get_fsn(
+        line_sender* sender,
+        const line_sender_buffer* buffer,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_qwpws_drive_once(
+        line_sender* sender,
+        cbool* progressed_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_qwpws_published_fsn(
+        const line_sender* sender,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_qwpws_acked_fsn(
+        const line_sender* sender,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_qwpws_await_acked_fsn(
+        line_sender* sender,
+        uint64_t fsn,
+        uint64_t timeout_millis,
+        cbool* reached_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_qwpws_poll_error(
+        line_sender* sender,
+        line_sender_qwpws_error** error_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    line_sender_qwpws_error_view line_sender_qwpws_error_get_view(
+        const line_sender_qwpws_error* error
+        ) noexcept nogil
+
+    bint line_sender_error_qwpws_get_view(
+        const line_sender_error* error,
+        line_sender_qwpws_error_view* view_out
+        ) noexcept nogil
+
+    void line_sender_qwpws_error_free(
+        line_sender_qwpws_error* error
+        ) noexcept nogil
+
+    bint line_sender_qwpws_errors_dropped(
+        const line_sender* sender,
+        uint64_t* dropped_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_qwpws_close_drain(
+        line_sender* sender,
+        line_sender_error** err_out
         ) noexcept nogil
 
     bint line_sender_flush(

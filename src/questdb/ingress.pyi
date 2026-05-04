@@ -28,6 +28,10 @@ __all__ = [
     "IngressErrorCode",
     "Protocol",
     "Sender",
+    "QwpWsError",
+    "QwpWsErrorCategory",
+    "QwpWsErrorPolicy",
+    "QwpWsProgress",
     "ServerTimestampType",
     "TimestampMicros",
     "TimestampNanos",
@@ -36,6 +40,7 @@ __all__ = [
 
 from datetime import datetime, timedelta
 from enum import Enum
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -68,6 +73,13 @@ class IngressError(Exception):
     @property
     def code(self) -> IngressErrorCode:
         """Return the error code."""
+
+    @property
+    def qwp_ws_error(self) -> Optional["QwpWsError"]:
+        """
+        Return the structured QWP/WebSocket HALT diagnostic, if this error
+        carries one from a terminal QWP/WebSocket sender failure.
+        """
 
 
 class ServerTimestampType:
@@ -177,7 +189,6 @@ class TimestampNanos:
     @property
     def value(self) -> int:
         """Number of nanoseconds (Unix epoch timestamp, UTC)."""
-
 
 class SenderTransaction:
     """
@@ -779,9 +790,54 @@ class Protocol(TaggedEnum):
     Http = ...
     Https = ...
     QwpUdp = ...
+    QwpWs = ...
+    QwpWss = ...
 
     @property
     def tls_enabled(self) -> bool: ...
+
+class QwpWsProgress(TaggedEnum):
+    """
+    Progress mode for QWP/WebSocket senders.
+    """
+
+    Background = ...
+    Manual = ...
+
+class QwpWsErrorCategory(TaggedEnum):
+    """
+    Category of a structured QWP/WebSocket diagnostic.
+    """
+
+    SchemaMismatch = ...
+    ParseError = ...
+    InternalError = ...
+    SecurityError = ...
+    WriteError = ...
+    ProtocolViolation = ...
+    Unknown = ...
+
+class QwpWsErrorPolicy(TaggedEnum):
+    """
+    Applied policy for a structured QWP/WebSocket diagnostic.
+    """
+
+    DropAndContinue = ...
+    Halt = ...
+
+@dataclass(frozen=True)
+class QwpWsError:
+    """
+    Structured QWP/WebSocket diagnostic.
+    """
+
+    category: QwpWsErrorCategory
+    applied_policy: QwpWsErrorPolicy
+    status: Optional[int]
+    message: str
+    message_sequence: Optional[int]
+    from_fsn: int
+    to_fsn: int
 
 class TlsCa(TaggedEnum):
     """
@@ -832,6 +888,7 @@ class Sender:
         auto_flush_interval: int = 1000,
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
+        qwp_ws_progress: Optional[QwpWsProgress] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -860,6 +917,7 @@ class Sender:
         auto_flush_interval: int = 1000,
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
+        qwp_ws_progress: Optional[QwpWsProgress] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -898,6 +956,7 @@ class Sender:
         auto_flush_interval: int = 1000,
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
+        qwp_ws_progress: Optional[QwpWsProgress] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -1105,6 +1164,12 @@ class Sender:
         :param buffer: The buffer to flush. If ``None``, the internal buffer
             is flushed.
 
+        With QWP/WebSocket, this publishes the buffer into the local sender
+        queue and returns before the server necessarily ACKs the frame. Later
+        terminal diagnostics fail subsequent sender calls and are available as
+        :attr:`IngressError.qwp_ws_error`. Server diagnostics are also
+        available through :func:`Sender.poll_qwp_ws_error`.
+
         :param clear: If ``True``, the flushed buffer is cleared (default).
             If ``False``, the flushed buffer is left in the internal buffer.
             Note that ``clear=False`` is only supported if ``buffer`` is also
@@ -1118,6 +1183,57 @@ class Sender:
         The Python GIL is released during the network IO operation.
         """
 
+    def flush_and_get_fsn(self, buffer: Optional[Buffer] = None) -> Optional[int]:
+        """
+        Publish a QWP/WebSocket buffer locally, clear it on success, and return
+        the assigned frame sequence number.
+        """
+
+    def flush_and_keep_and_get_fsn(
+        self, buffer: Optional[Buffer] = None
+    ) -> Optional[int]:
+        """
+        Publish a QWP/WebSocket buffer locally without clearing it and return
+        the assigned frame sequence number.
+        """
+
+    def published_fsn(self) -> Optional[int]:
+        """
+        Highest QWP/WebSocket frame sequence number published locally.
+        """
+
+    def acked_fsn(self) -> Optional[int]:
+        """
+        Highest QWP/WebSocket frame sequence number completed by ACK or
+        drop-and-continue rejection.
+        """
+
+    def await_acked_fsn(self, fsn: int, timeout_millis: int) -> bool:
+        """
+        Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
+        """
+
+    def drive_once(self) -> bool:
+        """
+        Drive one QWP/WebSocket progress step for manual progress senders.
+        """
+
+    def poll_qwp_ws_error(self) -> Optional[QwpWsError]:
+        """
+        Poll the next structured QWP/WebSocket diagnostic.
+        """
+
+    def qwp_ws_errors_dropped(self) -> int:
+        """
+        Number of QWP/WebSocket diagnostics dropped from the bounded ring.
+        """
+
+    def close_drain(self):
+        """
+        Stop accepting new QWP/WebSocket publications and wait for already
+        published frames to resolve.
+        """
+
     def close(self, flush: bool = True):
         """
         Disconnect.
@@ -1127,6 +1243,8 @@ class Sender:
         Once a sender is closed, it can't be re-used.
 
         :param bool flush: If ``True``, flush the internal buffer before closing.
+            For QWP/WebSocket, this also drains already-published frames before
+            closing.
         """
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
