@@ -42,6 +42,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_tls_error,
         line_sender_error_http_not_supported,
         line_sender_error_server_flush_error,
+        line_sender_error_server_rejection,
         line_sender_error_config_error,
         line_sender_error_array_error,
         line_sender_error_protocol_version_error,
@@ -102,6 +103,11 @@ cdef extern from "questdb/ingress/line_sender.h":
         uint64_t to_fsn
         const char* message
         size_t message_len
+
+    ctypedef void (*line_sender_qwpws_error_cb)(
+        void* user_data,
+        const line_sender_qwpws_error_view* event
+        ) noexcept with gil
 
     line_sender_error_code line_sender_error_get_code(
         const line_sender_error* error
@@ -401,6 +407,13 @@ cdef extern from "questdb/ingress/line_sender.h":
     bint line_sender_opts_qwpws_progress(
         line_sender_opts* opts,
         line_sender_qwpws_progress progress,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_opts_qwpws_error_handler(
+        line_sender_opts* opts,
+        line_sender_qwpws_error_cb cb,
+        void* user_data,
         line_sender_error** err_out
         ) noexcept nogil
 

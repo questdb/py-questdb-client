@@ -106,6 +106,24 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(diagnostic.to_fsn, 6)
         self.assertIs(err.qwp_ws_error, diagnostic)
 
+    def test_server_rejection_error_is_specific_subclass(self):
+        err = qi.IngressServerRejectionError(
+            qi.IngressErrorCode.ServerRejection,
+            'sender halted',
+            (
+                qi.QwpWsErrorCategory.ParseError.c_value,
+                qi.QwpWsErrorPolicy.Halt.c_value,
+                2,
+                'bad line',
+                44,
+                5,
+                6,
+            ))
+
+        self.assertIsInstance(err, qi.IngressError)
+        self.assertEqual(err.code, qi.IngressErrorCode.ServerRejection)
+        self.assertEqual(err.qwp_ws_error.category, qi.QwpWsErrorCategory.ParseError)
+
     def test_from_conf_preserves_qwpws_progress(self):
         sender = qi.Sender.from_conf(
             'qwpws::addr=localhost:9000;qwp_ws_progress=manual;')
@@ -140,6 +158,27 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 '127.0.0.1',
                 9009,
                 qwp_ws_progress=qi.QwpWsProgress.Manual)
+
+    def test_qwpws_error_handler_can_be_registered(self):
+        sender = qi.Sender(
+            qi.Protocol.QwpWs,
+            '127.0.0.1',
+            9000,
+            qwp_ws_error_handler=lambda error: None)
+        try:
+            self.assertIsInstance(sender, qi.Sender)
+        finally:
+            sender.close(False)
+
+    def test_qwpws_error_handler_rejects_non_websocket_protocol(self):
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'only supported for QWP/WebSocket'):
+            qi.Sender(
+                qi.Protocol.QwpUdp,
+                '127.0.0.1',
+                9009,
+                qwp_ws_error_handler=lambda error: None)
 
     def test_qwpws_fsn_helpers_reject_non_websocket_sender_even_when_empty(self):
         sender = qi.Sender(

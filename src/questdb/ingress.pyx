@@ -34,6 +34,7 @@ __all__ = [
     'Buffer',
     'IngressError',
     'IngressErrorCode',
+    'IngressServerRejectionError',
     'Protocol',
     'Sender',
     'QwpWsError',
@@ -95,6 +96,7 @@ import collections
 import time
 import heapq
 import warnings
+import logging
 
 import numpy
 cimport numpy as cnp
@@ -144,6 +146,7 @@ class IngressErrorCode(Enum):
     TlsError = line_sender_error_tls_error
     HttpNotSupported = line_sender_error_http_not_supported
     ServerFlushError = line_sender_error_server_flush_error
+    ServerRejection = line_sender_error_server_rejection
     ConfigError = line_sender_error_config_error
     ArrayError = line_sender_error_array_error
     ProtocolVersionError = line_sender_error_protocol_version_error
@@ -178,6 +181,15 @@ class IngressError(Exception):
         return self._qwp_ws_error
 
 
+class IngressServerRejectionError(IngressError):
+    """
+    A terminal QWP/WebSocket server rejection.
+
+    The structured server payload is available through
+    :attr:`IngressError.qwp_ws_error`.
+    """
+
+
 cdef inline object c_err_code_to_py(line_sender_error_code code):
     if code == line_sender_error_could_not_resolve_addr:
         return IngressErrorCode.CouldNotResolveAddr
@@ -199,6 +211,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.HttpNotSupported
     elif code == line_sender_error_server_flush_error:
         return IngressErrorCode.ServerFlushError
+    elif code == line_sender_error_server_rejection:
+        return IngressErrorCode.ServerRejection
     elif code == line_sender_error_config_error:
         return IngressErrorCode.ConfigError
     elif code == line_sender_error_array_error:
@@ -251,12 +265,16 @@ cdef inline object c_err_to_fields(line_sender_error* err):
 cdef inline object c_err_to_py(line_sender_error* err):
     """Construct an ``IngressError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
+    if tup[0] == IngressErrorCode.ServerRejection:
+        return IngressServerRejectionError(tup[0], tup[1], tup[2])
     return IngressError(tup[0], tup[1], tup[2])
 
 
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Construct an ``IngressError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
+    if tup[0] == IngressErrorCode.ServerRejection:
+        return IngressServerRejectionError(tup[0], fmt.format(tup[1]), tup[2])
     return IngressError(tup[0], fmt.format(tup[1]), tup[2])
 
 
@@ -1931,6 +1949,35 @@ def _qwp_ws_error_from_raw(raw):
         to_fsn)
 
 
+def _default_qwp_ws_error_handler(error):
+    level = (
+        logging.ERROR
+        if error.applied_policy is QwpWsErrorPolicy.Halt
+        else logging.WARNING)
+    logging.getLogger("questdb.ingress").log(
+        level,
+        "QWP/WebSocket server rejection: "
+        "category=%s policy=%s status=%s fsn=[%s,%s] seq=%s message=%s",
+        error.category.tag,
+        error.applied_policy.tag,
+        error.status,
+        error.from_fsn,
+        error.to_fsn,
+        error.message_sequence,
+        error.message)
+
+
+cdef void _qwp_ws_error_trampoline(
+        void* user_data,
+        const line_sender_qwpws_error_view* view) noexcept with gil:
+    cdef object handler = <object>user_data
+    try:
+        handler(_qwp_ws_error_from_raw(c_qwp_ws_error_view_to_raw(view[0])))
+    except BaseException:
+        logging.getLogger("questdb.ingress").exception(
+            "QWP/WebSocket error handler failed")
+
+
 class TlsCa(TaggedEnum):
     """
     Verification mechanism for the server's certificate.
@@ -2049,6 +2096,7 @@ cdef class Sender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
+    cdef object _qwp_ws_error_handler
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
@@ -2081,6 +2129,7 @@ cdef class Sender:
             object multicast_ttl,
             object protocol_version,
             object qwp_ws_progress,
+            object qwp_ws_error_handler,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -2152,6 +2201,26 @@ cdef class Sender:
             c_qwp_ws_progress = QwpWsProgress.parse(qwp_ws_progress).c_value
             if not line_sender_opts_qwpws_progress(
                     self._opts, c_qwp_ws_progress, &err):
+                raise c_err_to_py(err)
+
+        if qwp_ws_error_handler is not None and not callable(qwp_ws_error_handler):
+            raise TypeError(
+                '"qwp_ws_error_handler" must be callable or None, '
+                f'not {_fqn(type(qwp_ws_error_handler))}')
+        if qwp_ws_error_handler is not None and not _is_qwp_ws_protocol(self._c_protocol):
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'qwp_ws_error_handler is only supported for QWP/WebSocket senders.')
+        if _is_qwp_ws_protocol(self._c_protocol):
+            if qwp_ws_error_handler is None:
+                qwp_ws_error_handler = _default_qwp_ws_error_handler
+            self._qwp_ws_error_handler = qwp_ws_error_handler
+            if not line_sender_opts_qwpws_error_handler(
+                    self._opts,
+                    _qwp_ws_error_trampoline,
+                    <void*>self._qwp_ws_error_handler,
+                    &err):
+                self._qwp_ws_error_handler = None
                 raise c_err_to_py(err)
 
         if username is not None:
@@ -2301,6 +2370,7 @@ cdef class Sender:
         self._opts = NULL
         self._impl = NULL
         self._buffer = None
+        self._qwp_ws_error_handler = None
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
@@ -2334,6 +2404,7 @@ cdef class Sender:
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 0 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
+            object qwp_ws_error_handler=None,
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2382,6 +2453,7 @@ cdef class Sender:
                 multicast_ttl,
                 protocol_version,
                 qwp_ws_progress,
+                qwp_ws_error_handler,
                 init_buf_size,
                 max_name_len)
         finally:
@@ -2412,6 +2484,7 @@ cdef class Sender:
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 0 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
+            object qwp_ws_error_handler=None,
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2550,6 +2623,7 @@ cdef class Sender:
                 params.get('multicast_ttl'),
                 params.get('protocol_version'),
                 params.get('qwp_ws_progress'),
+                qwp_ws_error_handler,
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
             
@@ -2581,6 +2655,7 @@ cdef class Sender:
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 0 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
+            object qwp_ws_error_handler=None,
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -2624,6 +2699,7 @@ cdef class Sender:
             max_datagram_size=max_datagram_size,
             multicast_ttl=multicast_ttl,
             qwp_ws_progress=qwp_ws_progress,
+            qwp_ws_error_handler=qwp_ws_error_handler,
             protocol_version=protocol_version,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
@@ -3263,6 +3339,7 @@ cdef class Sender:
         self._opts = NULL
         line_sender_close(self._impl)
         self._impl = NULL
+        self._qwp_ws_error_handler = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1

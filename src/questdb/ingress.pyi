@@ -26,6 +26,7 @@ __all__ = [
     "Buffer",
     "IngressError",
     "IngressErrorCode",
+    "IngressServerRejectionError",
     "Protocol",
     "Sender",
     "QwpWsError",
@@ -41,7 +42,7 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -60,6 +61,7 @@ class IngressErrorCode(Enum):
     TlsError = ...
     HttpNotSupported = ...
     ServerFlushError = ...
+    ServerRejection = ...
     ConfigError = ...
     ArrayError = ...
     ProtocolVersionError = ...
@@ -80,6 +82,15 @@ class IngressError(Exception):
         Return the structured QWP/WebSocket HALT diagnostic, if this error
         carries one from a terminal QWP/WebSocket sender failure.
         """
+
+
+class IngressServerRejectionError(IngressError):
+    """
+    A terminal QWP/WebSocket server rejection.
+
+    The structured server payload is available through
+    :attr:`IngressError.qwp_ws_error`.
+    """
 
 
 class ServerTimestampType:
@@ -889,6 +900,7 @@ class Sender:
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
+        qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -918,6 +930,7 @@ class Sender:
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
+        qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -957,6 +970,7 @@ class Sender:
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
+        qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
