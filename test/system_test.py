@@ -5,7 +5,10 @@ sys.dont_write_bytecode = True
 import os
 import datetime
 import importlib.util
+import random
 import shutil
+import socket
+import tempfile
 import unittest
 import uuid
 import pathlib
@@ -111,6 +114,75 @@ class TestWithDatabase(unittest.TestCase):
         for key, value in kwargs.items():
             conf += f'{key}={value};'
         return conf
+
+    def _require_qwp_ws(self):
+        if not os.environ.get('QDB_REPO_PATH'):
+            self.skipTest(
+                'QWP/WebSocket integration tests require repo-backed QWP support')
+
+    def _require_qwp_fuzz(self):
+        self._require_qwp_ws()
+
+    def _mk_qwpws_conf(self, sender_id, sf_dir, endpoints=None, **kwargs):
+        self._require_qwp_ws()
+        if endpoints is None:
+            endpoints = [
+                (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+        addr = ','.join(
+            f'{endpoint_host}:{endpoint_port}'
+            for endpoint_host, endpoint_port in endpoints)
+        conf = (
+            f'qwpws::addr={addr};'
+            f'sender_id={sender_id};'
+            f'sf_dir={sf_dir};')
+        for key, value in kwargs.items():
+            conf += f'{key}={value};'
+        return conf
+
+    @staticmethod
+    def _micros_to_qdb_date(timestamp_us):
+        secs, remaining_us = divmod(timestamp_us, 1_000_000)
+        return datetime.datetime.fromtimestamp(
+            secs, datetime.timezone.utc).replace(
+            microsecond=remaining_us).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+    @staticmethod
+    def _nanos_to_qdb_date(timestamp_ns):
+        secs, remaining_ns = divmod(timestamp_ns, 1_000_000_000)
+        base = datetime.datetime.fromtimestamp(
+            secs, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+        return f'{base}.{remaining_ns:09d}Z'
+
+    @staticmethod
+    def _sfa_file_count(sf_dir, sender_id):
+        slot_dir = pathlib.Path(sf_dir) / sender_id
+        if not slot_dir.exists():
+            return 0
+        return sum(1 for path in slot_dir.iterdir()
+                   if path.name.endswith('.sfa'))
+
+    @staticmethod
+    def _unused_tcp_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('127.0.0.1', 0))
+            return sock.getsockname()[1]
+
+    def _retry_poll_qwp_ws_error(self, sender, timeout_sec=10):
+        import time as _time
+        deadline = _time.monotonic() + timeout_sec
+        while _time.monotonic() < deadline:
+            diagnostic = sender.poll_qwp_ws_error()
+            if diagnostic is not None:
+                return diagnostic
+            _time.sleep(0.05)
+        self.fail('Timed out waiting for QWP/WebSocket diagnostic')
+
+    @staticmethod
+    def _qwp_fuzz_seed():
+        seed_text = os.environ.get('QDB_PY_QWP_FUZZ_SEED')
+        if seed_text:
+            return int(seed_text, 0)
+        return 0x5151
 
     def _test_scenario(self, qdb, protocol, **kwargs):
         protocol = qi.Protocol.parse(protocol)
@@ -259,6 +331,338 @@ class TestWithDatabase(unittest.TestCase):
             ['val_a', True, 42, 2.5, 'val_b']]
         scrubbed_dataset = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_dataset, exp_dataset)
+
+    def test_qwp_websocket_single_batch_round_trip(self):
+        self._require_qwp_ws()
+        table_name = uuid.uuid4().hex
+        sender_id = 'py-smoke-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE "{table_name}" '
+            '(id LONG, val DOUBLE, timestamp TIMESTAMP) '
+            'TIMESTAMP(timestamp) PARTITION BY DAY WAL '
+            'DEDUP UPSERT KEYS(timestamp, id)')
+        with tempfile.TemporaryDirectory(prefix='py-qwp-ws-smoke-') as sf_dir:
+            conf = self._mk_qwpws_conf(
+                sender_id,
+                sf_dir,
+                reconnect_max_duration_millis=30000,
+                close_flush_timeout_millis=30000)
+            sender = qi.Sender.from_conf(conf)
+            try:
+                sender.establish()
+                for row_id in range(3):
+                    sender.row(
+                        table_name,
+                        columns={
+                            'id': row_id,
+                            'val': row_id * 0.5},
+                        at=qi.TimestampMicros(
+                            1_700_000_000_000_000 + row_id * 1000))
+                fsn = sender.flush_and_get_fsn()
+                self.assertEqual(fsn, 0)
+                self.assertTrue(sender.await_acked_fsn(fsn, 30000))
+                sender.close_drain()
+            finally:
+                sender.close(False)
+
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        resp = self.qdb_plain.http_sql_query(
+            f"select id, val from '{table_name}' order by id")
+        self.assertEqual(resp['dataset'], [[0, 0.0], [1, 0.5], [2, 1.0]])
+
+    def test_qwp_websocket_dead_endpoint_failover_and_ack_progresses(self):
+        self._require_qwp_ws()
+        table_name = uuid.uuid4().hex
+        sender_id = 'py-failover-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE "{table_name}" '
+            '(id LONG, val DOUBLE, timestamp TIMESTAMP) '
+            'TIMESTAMP(timestamp) PARTITION BY DAY WAL '
+            'DEDUP UPSERT KEYS(timestamp, id)')
+        endpoints = [
+            (self.qdb_plain.host, self._unused_tcp_port()),
+            (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+
+        with tempfile.TemporaryDirectory(prefix='py-qwp-ws-failover-') as sf_dir:
+            sender = qi.Sender.from_conf(self._mk_qwpws_conf(
+                sender_id,
+                sf_dir,
+                endpoints=endpoints,
+                reconnect_max_duration_millis=30000,
+                close_flush_timeout_millis=30000))
+            try:
+                sender.establish()
+                sender.row(
+                    table_name,
+                    columns={'id': 0, 'val': 0.5},
+                    at=qi.TimestampMicros(1_700_000_000_000_000))
+                fsn = sender.flush_and_get_fsn()
+                self.assertEqual(fsn, 0)
+                self.assertTrue(sender.await_acked_fsn(fsn, 30000))
+                self.assertEqual(sender.acked_fsn(), fsn)
+                sender.close_drain()
+            finally:
+                sender.close(False)
+
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        resp = self.qdb_plain.http_sql_query(
+            f"select id, val from '{table_name}'")
+        self.assertEqual(resp['dataset'], [[0, 0.5]])
+
+    def test_qwp_websocket_schema_evolution_across_batches(self):
+        self._require_qwp_ws()
+        table_name = uuid.uuid4().hex
+        sender_id = 'py-schema-' + uuid.uuid4().hex[:8]
+
+        with tempfile.TemporaryDirectory(prefix='py-qwp-ws-schema-') as sf_dir:
+            sender = qi.Sender.from_conf(self._mk_qwpws_conf(
+                sender_id,
+                sf_dir,
+                reconnect_max_duration_millis=30000,
+                close_flush_timeout_millis=30000))
+            try:
+                sender.establish()
+                sender.row(
+                    table_name,
+                    symbols={'host': 'r1'},
+                    at=qi.TimestampMicros(1_700_000_000_000_000))
+                first_fsn = sender.flush_and_get_fsn()
+                self.assertEqual(first_fsn, 0)
+
+                sender.row(
+                    table_name,
+                    symbols={'host': 'r2'},
+                    columns={'qty': 2, 'note': 'two'},
+                    at=qi.TimestampMicros(1_700_000_000_001_000))
+                second_fsn = sender.flush_and_get_fsn()
+                self.assertEqual(second_fsn, 1)
+
+                sender.row(
+                    table_name,
+                    symbols={'host': 'r3'},
+                    columns={'note': 'three'},
+                    at=qi.TimestampMicros(1_700_000_000_002_000))
+                third_fsn = sender.flush_and_get_fsn()
+                self.assertEqual(third_fsn, 2)
+
+                self.assertTrue(sender.await_acked_fsn(third_fsn, 30000))
+                sender.close_drain()
+            finally:
+                sender.close(False)
+
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        resp = self.qdb_plain.http_sql_query(
+            f"select host, qty, note from '{table_name}' order by host")
+        self.assertEqual(resp['dataset'], [
+            ['r1', None, None],
+            ['r2', 2, 'two'],
+            ['r3', None, 'three']])
+
+    def test_qwp_websocket_write_rejection_drops_and_sender_continues(self):
+        self._require_qwp_ws()
+        table_name = uuid.uuid4().hex
+        sender_id = 'py-reject-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE "{table_name}" '
+            '(id LONG, px DOUBLE, bad LONG, timestamp TIMESTAMP) '
+            'TIMESTAMP(timestamp) PARTITION BY DAY WAL')
+
+        with tempfile.TemporaryDirectory(prefix='py-qwp-ws-reject-') as sf_dir:
+            sender = qi.Sender.from_conf(self._mk_qwpws_conf(
+                sender_id,
+                sf_dir,
+                reconnect_max_duration_millis=30000,
+                close_flush_timeout_millis=30000))
+            try:
+                sender.establish()
+                sender.row(
+                    table_name,
+                    columns={'id': 0, 'px': 10.5},
+                    at=qi.TimestampMicros(1_700_000_000_000_000))
+                first_fsn = sender.flush_and_get_fsn()
+
+                sender.row(
+                    table_name,
+                    columns={'id': 1, 'bad': 'not-a-long'},
+                    at=qi.TimestampMicros(1_700_000_000_001_000))
+                rejected_fsn = sender.flush_and_get_fsn()
+
+                sender.row(
+                    table_name,
+                    columns={'id': 2, 'px': 20.5},
+                    at=qi.TimestampMicros(1_700_000_000_002_000))
+                final_fsn = sender.flush_and_get_fsn()
+
+                self.assertEqual(
+                    (first_fsn, rejected_fsn, final_fsn),
+                    (0, 1, 2))
+                self.assertTrue(sender.await_acked_fsn(final_fsn, 30000))
+                diagnostic = self._retry_poll_qwp_ws_error(sender)
+                self.assertEqual(
+                    diagnostic.category,
+                    qi.QwpWsErrorCategory.SchemaMismatch)
+                self.assertEqual(
+                    diagnostic.applied_policy,
+                    qi.QwpWsErrorPolicy.DropAndContinue)
+                self.assertEqual(diagnostic.status, 0x03)
+                self.assertEqual(diagnostic.from_fsn, rejected_fsn)
+                self.assertEqual(diagnostic.to_fsn, rejected_fsn)
+                self.assertIsNone(sender.poll_qwp_ws_error())
+                self.assertEqual(sender.qwp_ws_errors_dropped(), 0)
+                sender.close_drain()
+            finally:
+                sender.close(False)
+
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        resp = self.qdb_plain.http_sql_query(
+            f"select id, px from '{table_name}' order by id")
+        self.assertEqual(resp['dataset'], [[0, 10.5], [2, 20.5]])
+
+    def test_qwp_websocket_schema_fuzz(self):
+        self._require_qwp_fuzz()
+        seed = self._qwp_fuzz_seed()
+        rng = random.Random(seed)
+        sys.stderr.write(f'[qwp-python-fuzz seed] {seed:#x}\n')
+        sys.stderr.flush()
+
+        rows = int(os.environ.get('QDB_PY_QWP_FUZZ_ROWS', '64'))
+        rows = max(8, rows)
+        table_count = int(os.environ.get('QDB_PY_QWP_FUZZ_TABLES', '2'))
+        table_count = max(1, table_count)
+        tables = [
+            'py_qwp_fuzz_' + uuid.uuid4().hex[:8]
+            for _ in range(table_count)]
+        expected = {table: [] for table in tables}
+        sender_id = 'py-fuzz-' + uuid.uuid4().hex[:8]
+        base_ts = 1_700_000_100_000_000
+        host_values = ['alpha', 'beta value', 'Zürich', '東京']
+        region_values = ['eu', 'us west', 'apac', 'münchen']
+        note_values = ['plain', 'two words', '你好世界', 'emoji-🚀']
+
+        def append_row(sender, table, row_id, include_all=False):
+            row_ts = base_ts + row_id
+            row = {
+                'id': row_id,
+                'host': None,
+                'region': None,
+                'qty': None,
+                'px': None,
+                'note': None,
+                'event_ts': None,
+                'timestamp': self._micros_to_qdb_date(row_ts)}
+            symbols = {}
+            columns = {'id': row_id}
+
+            if include_all or rng.randrange(4) != 0:
+                value = rng.choice(host_values)
+                symbols['host'] = value
+                row['host'] = value
+            if include_all or rng.randrange(2) == 0:
+                value = rng.choice(region_values)
+                symbols['region'] = value
+                row['region'] = value
+
+            candidates = [
+                ('qty', lambda: rng.randrange(-1000, 1000)),
+                ('px', lambda: round(rng.uniform(-1000.0, 1000.0), 6)),
+                ('note', lambda: rng.choice(note_values) + f'-{row_id}'),
+                ('event_ts', lambda: qi.TimestampMicros(row_ts + 123))]
+            rng.shuffle(candidates)
+            for name, value_factory in candidates:
+                if include_all or rng.randrange(3) != 0:
+                    value = value_factory()
+                    columns[name] = value
+                    row[name] = (
+                        self._micros_to_qdb_date(value.value)
+                        if isinstance(value, qi.TimestampMicros)
+                        else value)
+
+            sender.row(
+                table,
+                symbols=symbols,
+                columns=columns,
+                at=qi.TimestampMicros(row_ts))
+            expected[table].append(row)
+
+        with tempfile.TemporaryDirectory(prefix='py-qwp-ws-fuzz-') as sf_dir:
+            sender = qi.Sender.from_conf(self._mk_qwpws_conf(
+                sender_id,
+                sf_dir,
+                reconnect_max_duration_millis=30000,
+                close_flush_timeout_millis=30000))
+            last_fsn = None
+            pending = 0
+            try:
+                sender.establish()
+                next_flush_at = rng.randrange(3, 11)
+                for row_id in range(rows):
+                    table = (
+                        tables[row_id % table_count]
+                        if row_id < table_count
+                        else rng.choice(tables))
+                    append_row(sender, table, row_id)
+                    pending += 1
+                    if pending >= next_flush_at:
+                        fsn = sender.flush_and_get_fsn()
+                        self.assertIsNotNone(fsn)
+                        if last_fsn is not None:
+                            self.assertEqual(fsn, last_fsn + 1)
+                        last_fsn = fsn
+                        pending = 0
+                        next_flush_at = rng.randrange(3, 11)
+
+                for table in tables:
+                    append_row(
+                        sender,
+                        table,
+                        rows + tables.index(table),
+                        include_all=True)
+                    pending += 1
+
+                if pending:
+                    fsn = sender.flush_and_get_fsn()
+                    self.assertIsNotNone(fsn)
+                    if last_fsn is not None:
+                        self.assertEqual(fsn, last_fsn + 1)
+                    last_fsn = fsn
+
+                self.assertIsNotNone(last_fsn)
+                self.assertTrue(sender.await_acked_fsn(last_fsn, 30000))
+                self.assertIsNone(sender.poll_qwp_ws_error())
+                self.assertEqual(sender.qwp_ws_errors_dropped(), 0)
+                sender.close_drain()
+            finally:
+                sender.close(False)
+
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        for table in tables:
+            self.qdb_plain.retry_check_table(
+                table,
+                min_rows=len(expected[table]))
+            resp = self.qdb_plain.http_sql_query(
+                f"select id, host, region, qty, px, note, event_ts, timestamp "
+                f"from '{table}' order by id")
+            expected_rows = [
+                [
+                    row['id'],
+                    row['host'],
+                    row['region'],
+                    row['qty'],
+                    row['px'],
+                    row['note'],
+                    row['event_ts'],
+                    row['timestamp']]
+                for row in sorted(expected[table], key=lambda item: item['id'])]
+            self.assertEqual(resp['dataset'], expected_rows)
 
     def test_qwp_udp_protocol_enum(self):
         self.assertEqual(qi.Protocol.parse('qwpudp'), qi.Protocol.QwpUdp)
@@ -497,6 +901,80 @@ class TestWithDatabase(unittest.TestCase):
         # ts_dt: 2024-06-15T12:00:00Z
         self.assertEqual(row[2], '2024-06-15T12:00:00.000000Z')
 
+    def test_qwp_udp_timestamp_columns_convert_into_existing_table_types(self):
+        self._require_qwp_udp()
+        micros_table = uuid.uuid4().hex
+        nanos_table = uuid.uuid4().hex
+        event_ts_us = 123_456
+        event_ts_ns = 123_456_789
+        row_ts_us = 1_700_000_000_000_123
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {micros_table} '
+            f'(host SYMBOL, event_ts TIMESTAMP_NS, timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {nanos_table} '
+            f'(host SYMBOL, event_ts TIMESTAMP, timestamp TIMESTAMP) '
+            f'TIMESTAMP(timestamp) PARTITION BY DAY;')
+
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(
+                micros_table,
+                symbols={'host': 'micro'},
+                columns={'event_ts': qi.TimestampMicros(event_ts_us)},
+                at=qi.TimestampMicros(row_ts_us))
+            sender.row(
+                nanos_table,
+                symbols={'host': 'nano'},
+                columns={'event_ts': qi.TimestampNanos(event_ts_ns)},
+                at=qi.TimestampMicros(row_ts_us))
+            sender.flush()
+
+        self.qdb_plain.retry_check_table(micros_table, min_rows=1)
+        self.qdb_plain.retry_check_table(nanos_table, min_rows=1)
+        micros_resp = self.qdb_plain.http_sql_query(
+            f"select host, event_ts, timestamp from '{micros_table}'")
+        nanos_resp = self.qdb_plain.http_sql_query(
+            f"select host, event_ts, timestamp from '{nanos_table}'")
+        self.assertEqual(micros_resp['dataset'], [[
+            'micro',
+            self._nanos_to_qdb_date(event_ts_us * 1000),
+            self._micros_to_qdb_date(row_ts_us)]])
+        self.assertEqual(nanos_resp['dataset'], [[
+            'nano',
+            self._micros_to_qdb_date(event_ts_ns // 1000),
+            self._micros_to_qdb_date(row_ts_us)]])
+
+    def test_qwp_udp_mixed_timestamp_precisions_rejected(self):
+        self._require_qwp_udp()
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'designated timestamp changes type within a batched table'):
+            with self._mk_qwpudp_sender() as sender:
+                sender.row(
+                    'mixed_ts_designated',
+                    columns={'qty': 1},
+                    at=qi.TimestampMicros(123_456))
+                sender.row(
+                    'mixed_ts_designated',
+                    columns={'qty': 2},
+                    at=qi.TimestampNanos(789_000))
+                sender.flush()
+
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'column "event_ts" changes type within a batched table'):
+            with self._mk_qwpudp_sender() as sender:
+                sender.row(
+                    'mixed_ts_column',
+                    columns={'event_ts': qi.TimestampMicros(123_456)},
+                    at=qi.ServerTimestamp)
+                sender.row(
+                    'mixed_ts_column',
+                    columns={'event_ts': qi.TimestampNanos(789_000)},
+                    at=qi.ServerTimestamp)
+                sender.flush()
+
     def test_qwp_udp_f64_array(self):
         self._require_qwp_udp()
         if self.qdb_plain.version < FIRST_ARRAY_RELEASE:
@@ -663,15 +1141,18 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_flush_clear_false(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
+        row_ts = qi.TimestampMicros(1_700_000_000_200_000)
         with self._mk_qwpudp_sender() as sender:
             buf = sender.new_buffer()
-            buf.row(table_name, columns={'val': 99}, at=qi.TimestampNanos.now())
+            buf.row(table_name, columns={'val': 99}, at=row_ts)
             sender.flush(buf, clear=False)
             self.assertGreater(len(buf), 0)
-            buf.clear()
+            sender.flush(buf)
             self.assertEqual(len(buf), 0)
-        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
-        self.assertEqual([row[:-1] for row in resp['dataset']], [[99]])
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        self.assertEqual(resp['dataset'], [
+            [99, self._micros_to_qdb_date(row_ts.value)],
+            [99, self._micros_to_qdb_date(row_ts.value)]])
 
     def test_qwp_udp_unicode(self):
         self._require_qwp_udp()
@@ -704,6 +1185,82 @@ class TestWithDatabase(unittest.TestCase):
         self.assertIn('present', col_names)
         self.assertNotIn('absent', col_names)
         self.assertNotIn('skip_sym', col_names)
+
+    def test_qwp_udp_schema_expansion_backfills_rows(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name, symbols={'host': 'r1'}, at=qi.ServerTimestamp)
+            sender.row(
+                table_name,
+                symbols={'host': 'r2'},
+                columns={'qty': 2, 'note': 'two'},
+                at=qi.ServerTimestamp)
+            sender.row(
+                table_name,
+                symbols={'host': 'r3'},
+                columns={'note': 'three'},
+                at=qi.ServerTimestamp)
+            sender.flush()
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        resp = self.qdb_plain.http_sql_query(
+            f"select host, qty, note from '{table_name}' order by host")
+        self.assertEqual(resp['dataset'], [
+            ['r1', None, None],
+            ['r2', 2, 'two'],
+            ['r3', None, 'three']])
+
+    def test_qwp_udp_sparse_boolean_columns_fill_false(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name, symbols={'host': 'r1'}, at=qi.ServerTimestamp)
+            sender.row(
+                table_name,
+                symbols={'host': 'r2'},
+                columns={'active': True},
+                at=qi.ServerTimestamp)
+            sender.row(
+                table_name,
+                symbols={'host': 'r3'},
+                columns={'active': False},
+                at=qi.ServerTimestamp)
+            sender.flush()
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        resp = self.qdb_plain.http_sql_query(
+            f"select host, active from '{table_name}' order by host")
+        self.assertEqual(resp['dataset'], [
+            ['r1', False],
+            ['r2', True],
+            ['r3', False]])
+
+    def test_qwp_udp_sparse_numeric_and_timestamp_columns_fill_null(self):
+        self._require_qwp_udp()
+        table_name = uuid.uuid4().hex
+        event_ts = qi.TimestampMicros(123_456)
+        with self._mk_qwpudp_sender() as sender:
+            sender.row(table_name, symbols={'host': 'r1'}, at=qi.ServerTimestamp)
+            sender.row(
+                table_name,
+                symbols={'host': 'r2'},
+                columns={'qty': 2, 'event_ts': event_ts},
+                at=qi.ServerTimestamp)
+            sender.row(
+                table_name,
+                symbols={'host': 'r3'},
+                columns={'temp': 33.5},
+                at=qi.ServerTimestamp)
+            sender.flush()
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=3)
+        resp = self.qdb_plain.http_sql_query(
+            f"select host, qty, temp, event_ts from '{table_name}' order by host")
+        self.assertEqual(resp['dataset'], [
+            ['r1', None, None, None],
+            ['r2', 2, None, self._micros_to_qdb_date(event_ts.value)],
+            ['r3', None, 33.5, None]])
 
     def test_qwp_udp_empty_flush(self):
         self._require_qwp_udp()
