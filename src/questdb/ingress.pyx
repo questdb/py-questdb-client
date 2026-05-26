@@ -1676,6 +1676,10 @@ cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     return millis
 
 
+cdef bint _is_int_not_bool(object value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 cdef int64_t auto_flush_rows_default(line_sender_protocol protocol):
     if _is_http_protocol(protocol):
         return 75000
@@ -2284,7 +2288,7 @@ cdef class Sender:
                     f' not {protocol_version!r}')
 
         if auth_timeout is not None:
-            if isinstance(auth_timeout, int):
+            if _is_int_not_bool(auth_timeout):
                 c_auth_timeout = auth_timeout
             elif isinstance(auth_timeout, cp_timedelta):
                 c_auth_timeout = _timedelta_to_millis(auth_timeout)
@@ -2336,7 +2340,7 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if retry_timeout is not None:
-            if isinstance(retry_timeout, int):
+            if _is_int_not_bool(retry_timeout):
                 c_retry_timeout = retry_timeout
                 if not line_sender_opts_retry_timeout(self._opts, c_retry_timeout, &err):
                     raise c_err_to_py(err)
@@ -2350,7 +2354,7 @@ cdef class Sender:
                     f'not {_fqn(type(retry_timeout))}')
 
         if retry_max_backoff is not None:
-            if isinstance(retry_max_backoff, int):
+            if _is_int_not_bool(retry_max_backoff):
                 c_retry_max_backoff = retry_max_backoff
                 if not line_sender_opts_retry_max_backoff(
                         self._opts, c_retry_max_backoff, &err):
@@ -2376,7 +2380,7 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if request_timeout is not None:
-            if isinstance(request_timeout, int):
+            if _is_int_not_bool(request_timeout):
                 c_request_timeout = request_timeout
                 if not line_sender_opts_request_timeout(self._opts, c_request_timeout, &err):
                     raise c_err_to_py(err)

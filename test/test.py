@@ -185,6 +185,25 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 9009,
                 retry_max_backoff=250)
 
+    def test_duration_options_reject_bool(self):
+        cases = {
+            'auth_timeout': '"auth_timeout" must be an int or a timedelta',
+            'retry_timeout': '"retry_timeout" must be an int or a timedelta',
+            'retry_max_backoff': (
+                '"retry_max_backoff" must be an int or a timedelta'),
+            'request_timeout': (
+                '"request_timeout" must be an int or a timedelta'),
+        }
+        for option, message in cases.items():
+            for value in (False, True):
+                with self.subTest(option=option, value=value):
+                    with self.assertRaisesRegex(TypeError, message):
+                        qi.Sender(
+                            qi.Protocol.Http,
+                            '127.0.0.1',
+                            9000,
+                            **{option: value})
+
     def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):
         sender = qi.Sender.from_conf(
             'qwpws::addr=localhost:9000;sf_dir=/tmp/qdb;;sf;')
