@@ -1897,7 +1897,7 @@ class TestPandasBase:
                 self.assertTrue(exp_df.equals(deser_df))
 
             # fastparquet doesn't roundtrip with pyarrow parquet properly.
-            # It decays categories to object and UInt8 to float64.
+            # It decays categories to object/string and UInt8 to float64.
             # We need to set up special case expected results for that.
             fallback_exp_dtypes = [
                 np.dtype('O'),
@@ -1906,13 +1906,23 @@ class TestPandasBase:
                 np.dtype('float64')]
             fallback_df = df.astype({'s': 'object', 'b': 'float64'})
 
+            def fastparquet_pyarrow_expected(deser_df):
+                actual_dtypes = list(deser_df.dtypes)
+                if not isinstance(actual_dtypes[0], pd.StringDtype):
+                    return fallback_df, fallback_exp_dtypes
+
+                exp_dtypes = list(fallback_exp_dtypes)
+                exp_dtypes[0] = actual_dtypes[0]
+                return fallback_df.astype({'s': actual_dtypes[0]}), exp_dtypes
+
             df_eq(df, pa2pa_df, exp_dtypes)
             if fp_wrote:
                 pa2fp_df = pd.read_parquet(pa_parquet_path, engine='fastparquet')
                 fp2pa_df = pd.read_parquet(fp_parquet_path, engine='pyarrow')
                 fp2fp_df = pd.read_parquet(fp_parquet_path, engine='fastparquet')
                 df_eq(df, pa2fp_df, exp_dtypes)
-                df_eq(fallback_df, fp2pa_df, fallback_exp_dtypes)
+                fp2pa_exp_df, fp2pa_exp_dtypes = fastparquet_pyarrow_expected(fp2pa_df)
+                df_eq(fp2pa_exp_df, fp2pa_df, fp2pa_exp_dtypes)
                 df_eq(df, fp2fp_df, exp_dtypes)
 
             exp = (
