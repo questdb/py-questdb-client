@@ -25,6 +25,8 @@
 from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t, uint32_t, \
     int32_t, int8_t, int16_t
 
+from .arrow_c_data_interface cimport ArrowArray, ArrowSchema
+
 cdef extern from "stdbool.h":
     ctypedef unsigned char cbool "bool"
 
@@ -891,6 +893,15 @@ cdef extern from "questdb/ingress/column_sender.h":
         column_sender_chunk* chunk,
         const int64_t* data,
         size_t row_count,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_append_arrow_column(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const ArrowArray* array,
+        const ArrowSchema* schema,
         line_sender_error** err_out
         ) noexcept nogil
 
