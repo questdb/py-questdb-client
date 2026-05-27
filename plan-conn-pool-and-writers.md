@@ -441,55 +441,99 @@ and `sync_calls == 1`.
   (the row-path serializer doesn't know `col_source_str_lrg_utf8_arrow`).
   Either Step 4 or a separate row-path patch must handle this.
 
-### Step 3 — Rust + Python: NumPy appender (reframed per Q1)
+### Step 3 — Rust + Python: NumPy widening + bool packing ✅ done
 
-**Reframing**: Q1 confirmed the per-type appends are already
-direct-write to wire (one `extend_from_slice` per column). Step 3
-no longer "saves an extra memcpy". Its value is now:
-- avoiding a Python-side widen+alloc for narrower numeric dtypes
-  (`int8/16/32`, `uint*`, `float32`);
-- handling `strides[0] != itemsize` in Rust without a contiguous
-  copy;
-- handling non-native-endian arrays with a byte-swap-on-read in the
-  encoder.
+Submodule `ba0cf92`, parent `d420d79`.
 
-For native-LE contiguous NumPy primitives (the common case) there's
-no measurable benefit over the existing per-type calls.
+Reframed per Q1: not a perf win for native NumPy (which is already
+direct-write to wire), but covers the wide-set of NumPy dtypes the
+v1 columnar path was rejecting:
 
-**Open decisions before implementing**:
-- Widening policy: `int8` -> i64? `uint8` -> i64 (sign-check)?
-  `float32` -> f64?  `uint64` -> i64 with overflow check or reject?
-- Bool packing: pack one-byte-per-row NumPy bool into the Arrow
-  LSB-first bitmap that `column_bool` expects?
-- Which decisions match the row-path's existing widening behaviour
-  (so users see consistent QuestDB target types regardless of which
-  API they use)?
+- `i8/i16/i32` → `i64` (sign-extend), wire = LONG.
+- `u8/u16/u32` → `i64` (zero-extend), wire = LONG.
+- `i64` pass-through, wire = LONG.
+- `u64` bit-reinterpret to `i64` (values > `i64::MAX` wrap to
+  negative on the wire — **matches the row-path's C cast**).
+- `f32` → `f64`, wire = DOUBLE.
+- `f64` pass-through.
+- NumPy native `bool` (byte-per-row) → Arrow LSB-first packed bitmap,
+  wire = BOOLEAN.
 
-**Implementation tasks** (post-decision):
-- Add `column_sender_chunk_append_numpy_column` (or extend the
-  existing per-type calls in Cython with Python-side widening).
-- Drop v1 rejection for the chosen-supported NumPy dtypes.
-- Fuzz: move the chosen-supported generators from
-  `UNSUPPORTED_FIELD_GENS` to `SUPPORTED_FIELD_GENS_WEIGHTED`.
+Implementation:
+- `Chunk::column_numpy(name, dtype, ptr, row_count, validity)` in
+  the Rust crate. Widens / packs into a chunk-owned `NumpyScratch`
+  arena keyed by destination type so the `ColumnDescriptor`'s raw
+  pointer alignment matches the encoder's reads.
+- FFI: `column_sender_chunk_append_numpy_column` with a
+  `column_sender_numpy_dtype` enum.
+- Cython: `_is_numpy_widening_source` + `_source_to_numpy_dtype` +
+  `_numpy_dtype_element_size` route narrower NumPy sources through
+  the new FFI. NumPy `int64` / `float64` continue using the per-type
+  FFI directly.
+- Validator accepts the new sources; fuzz moves the corresponding
+  generators into `SUPPORTED_FIELD_GENS_WEIGHTED`.
 
-**Success criterion**: the fuzz test's selected generators
-(int32 / float32 / uint8 / bool / …) stop landing in
-`UNSUPPORTED_FIELD_GENS` and exercise round-trip through the
-appender.
+Strided arrays and non-native-endian arrays are not supported in v1
+— the Python wrapper consolidates upstream.
 
-### Step 4 — Python: PyObject sniff + build
+**Success criterion** (met): UNSUPPORTED_FIELD_GENS is empty (every
+narrower numeric generator + native bool round-trips); 941 Python
+tests, 836 Rust unit tests, 4 fuzz seeds × 200 iters all green.
 
-- Port the existing row-path `_dataframe_series_sniff_pyobj` logic to
-  the columnar dispatch.
-- Build into Cython growable buffers (one per column), then call the
-  matching per-type `column_sender_chunk_column_*`.
-- Drop the v1 rejection for `object` / `string[python]`.
-- Add fuzz coverage that mixes object-dtype columns with the existing
-  supported set.
+### Step 4 — Python: PyObject sniff + build ✅ done
 
-**Success criterion**: `_gen_object_str` and `_gen_string_python` move
-to `SUPPORTED_FIELD_GENS_WEIGHTED`; the fuzz exercises end-to-end with
-mixed object + Arrow + NumPy columns.
+Submodule unaffected; parent `0d3b1d5` (str_pyobj), `e43783e`
+(int/float/bool pyobj), `10dba21` (post-review null-alignment fix).
+
+- `dataframe_plan_t` grew a `pyobj_built: pyobj_built_t**` field —
+  one per column, NULL for non-pyobj sources, populated by the new
+  prebuild phase that runs after `validate_plan` and before the
+  chunk emission loop in `Client.dataframe()`.
+- Four builders in `ingress.pyx`:
+  - `_dataframe_columnar_build_str_pyobj`: Arrow Utf8-shaped int32
+    offsets + uint8 bytes (encoded via Python's `str.encode('utf-8')`)
+    + LSB validity. Rejects > 2 GiB up front.
+  - `_dataframe_columnar_build_int_pyobj`: i64 + LSB validity.
+    PyBool checked before PyLong (subclass).
+  - `_dataframe_columnar_build_float_pyobj`: f64 + LSB validity.
+    NaN cells treated as null (pandas convention).
+  - `_dataframe_columnar_build_bool_pyobj`: LSB-packed bitmap of
+    values. Nulls rejected (BOOLEAN has no row-level null).
+- New `col_target_column_bool` emitter branch (was missing in the
+  columnar path).
+- Validator accepts pyobj sources for the corresponding wire
+  targets.
+- Fuzz: `object_str`, `string_python`, `object_int`, `object_float`,
+  `object_bool` all in `SUPPORTED_FIELD_GENS_WEIGHTED`.
+
+**Success criterion** (met): 941 Python tests pass; multi-seed fuzz
+green.
+
+### Round-3 must_close fix ✅ done
+
+Submodule `45ce070`, parent `64cb920`.
+
+Closes the round-3 review #1 concern that Step 1 had explicitly
+not resolved. A mid-call flush failure left a conn with in-flight
+uncommitted frames in the pool; the next borrower's first flush
+("immediate commit") would commit those alongside their own.
+
+Fix:
+- Rust: `ColumnConn::mark_must_close(&mut self)` (pub(crate)) +
+  `ColumnSender::mark_must_close(&mut self)` (pub) flip the
+  existing terminal flag.
+- FFI: new `questdb_db_drop_conn(db, conn)` marks must_close, then
+  drops the box (the existing return-to-pool path drops conns
+  marked terminal instead of recycling).
+- Cython: `Client.dataframe()` gained a `force_drop_conn` cdef
+  bint. Any exception escaping the chunk loop sets it; the
+  defensive sync resets it to False on success. The finally
+  branches: `questdb_db_drop_conn` vs. `questdb_db_return_conn`.
+
+Limitation: no targeted regression test. The `QwpAckServer` doesn't
+support mid-stream error injection. Validating end-to-end requires
+either extending the ACK harness or running against a real QuestDB
+that returns HALT mid-frame.
 
 ### Step 5 — Rust: egress readers (separate doc)
 

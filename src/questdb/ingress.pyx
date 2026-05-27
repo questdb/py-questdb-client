@@ -2661,6 +2661,13 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
     Walk a PyObject int column once and produce a contiguous int64
     buffer + LSB-packed validity bitmap. Null cells leave the int64
     slot at 0 with the validity bit cleared.
+
+    Null detection: ``None``, ``pd.NA``, and ``float('nan')`` all count
+    as null — the NaN-as-null rule matches the row-path behaviour
+    (`_dataframe_is_null_pyobj` in dataframe.pxi). A non-NaN float in
+    an int-sniffed column raises ``IngressError`` with the row index;
+    we accept the asymmetry because column-wide sniff has already
+    locked the source type from the first non-null cell.
     """
     cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
     if b == NULL:
