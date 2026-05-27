@@ -2641,7 +2641,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
     _dataframe_columnar_append_at(chunk, at_col, row_offset, row_count)
 
 
-cdef void_int _dataframe_columnar_sync(column_sender* sender) except -1:
+cdef void_int _dataframe_columnar_sync(qwpws_conn* conn) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
@@ -2652,7 +2652,7 @@ cdef void_int _dataframe_columnar_sync(column_sender* sender) except -1:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
     ok = column_sender_sync(
-        sender,
+        conn,
         column_sender_ack_level.column_sender_ack_level_ok,
         &err)
     _ensure_has_gil(&gs)
@@ -2676,7 +2676,7 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
 
 
 cdef void_int _dataframe_columnar_flush(
-        column_sender* sender,
+        qwpws_conn* conn,
         column_sender_chunk* chunk,
         bint retry_after_sync) except -1:
     cdef line_sender_error* err = NULL
@@ -2691,7 +2691,7 @@ cdef void_int _dataframe_columnar_flush(
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = column_sender_flush(sender, chunk, &err)
+    ok = column_sender_flush(conn, chunk, &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
@@ -2706,11 +2706,11 @@ cdef void_int _dataframe_columnar_flush(
             _dataframe_columnar_flush_retry_syncs += 1
         line_sender_error_free(err)
         err = NULL
-        _dataframe_columnar_sync(sender)
+        _dataframe_columnar_sync(conn)
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
-        ok = column_sender_flush(sender, chunk, &err)
+        ok = column_sender_flush(conn, chunk, &err)
         _ensure_has_gil(&gs)
         if _dataframe_columnar_count_io_stats:
             _dataframe_columnar_flush_calls += 1
@@ -2899,7 +2899,7 @@ cdef class Client:
     Pooled QWP/WebSocket client.
 
     This is the ownership surface for the #148 `questdb_db` pool. DataFrame
-    ingestion will borrow `column_sender` handles from this pool.
+    ingestion will borrow `qwpws_conn` handles from this pool.
     """
     cdef questdb_db* _db
     cdef object _conf_str
@@ -3004,7 +3004,7 @@ cdef class Client:
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
         cdef column_sender_chunk* chunk = NULL
-        cdef column_sender* sender = NULL
+        cdef qwpws_conn* conn = NULL
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
         cdef questdb_db* db = NULL
@@ -3032,9 +3032,9 @@ cdef class Client:
             rows_per_chunk = _dataframe_columnar_rows_per_chunk(&plan, 0)
 
             _ensure_doesnt_have_gil(&gs)
-            sender = questdb_db_borrow_sender(db, &err)
+            conn = questdb_db_borrow_conn(db, &err)
             _ensure_has_gil(&gs)
-            if sender == NULL:
+            if conn == NULL:
                 raise c_err_to_py(err)
 
             try:
@@ -3057,7 +3057,7 @@ cdef class Client:
                         chunk_rows)
                     if column_sender_chunk_row_count(chunk) != 0:
                         _dataframe_columnar_flush(
-                            sender,
+                            conn,
                             chunk,
                             row_offset != 0)
                         flushed = True
@@ -3066,12 +3066,12 @@ cdef class Client:
                     row_offset += chunk_rows
 
                 sync_attempted = True
-                _dataframe_columnar_sync(sender)
+                _dataframe_columnar_sync(conn)
             except:
-                if (sender != NULL and flushed and not sync_attempted and
-                        not column_sender_must_close(sender)):
+                if (conn != NULL and flushed and not sync_attempted and
+                        not qwpws_conn_must_close(conn)):
                     try:
-                        _dataframe_columnar_sync(sender)
+                        _dataframe_columnar_sync(conn)
                     except Exception:
                         pass
                 raise
@@ -3079,8 +3079,8 @@ cdef class Client:
             return self
         finally:
             _ensure_has_gil(&gs)
-            if sender != NULL:
-                questdb_db_return_sender(db, sender)
+            if conn != NULL:
+                questdb_db_return_conn(db, conn)
             if chunk != NULL:
                 column_sender_chunk_free(chunk)
             dataframe_plan_release(&plan)

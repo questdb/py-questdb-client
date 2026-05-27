@@ -676,7 +676,7 @@ cdef extern from "questdb/ingress/column_sender.h":
     cdef struct questdb_db:
         pass
 
-    cdef struct column_sender:
+    cdef struct qwpws_conn:
         pass
 
     cdef struct column_sender_chunk:
@@ -700,22 +700,22 @@ cdef extern from "questdb/ingress/column_sender.h":
         questdb_db* db
         ) noexcept nogil
 
-    column_sender* questdb_db_borrow_sender(
+    qwpws_conn* questdb_db_borrow_conn(
         questdb_db* db,
         line_sender_error** err_out
         ) noexcept nogil
 
-    void questdb_db_return_sender(
+    void questdb_db_return_conn(
         questdb_db* db,
-        column_sender* sender
+        qwpws_conn* conn
         ) noexcept nogil
 
     size_t questdb_db_reap_idle(
         questdb_db* db
         ) noexcept nogil
 
-    bint column_sender_must_close(
-        const column_sender* sender
+    bint qwpws_conn_must_close(
+        const qwpws_conn* conn
         ) noexcept nogil
 
     column_sender_chunk* column_sender_chunk_new(
@@ -895,13 +895,13 @@ cdef extern from "questdb/ingress/column_sender.h":
         ) noexcept nogil
 
     bint column_sender_flush(
-        column_sender* sender,
+        qwpws_conn* conn,
         column_sender_chunk* chunk,
         line_sender_error** err_out
         ) noexcept nogil
 
     bint column_sender_sync(
-        column_sender* sender,
+        qwpws_conn* conn,
         column_sender_ack_level ack_level,
         line_sender_error** err_out
         ) noexcept nogil
