@@ -347,11 +347,32 @@ UNSUPPORTED_FIELD_GENS = [
 ]
 
 
-# Step 4 added PyObject str support via the sniff+build path. Both
+# Object-dtype int / float / bool generators.
+
+def _gen_object_int(rng, n):
+    items = [int(rng.uniform(-(1 << 30), 1 << 30)) for _ in range(n)]
+    return pd.Series(items, dtype='object')
+
+
+def _gen_object_float(rng, n):
+    items = [rng.uniform(-1e6, 1e6) for _ in range(n)]
+    return pd.Series(items, dtype='object')
+
+
+def _gen_object_bool(rng, n):
+    items = [bool(rng.next_bool()) for _ in range(n)]
+    return pd.Series(items, dtype='object')
+
+
+# Step 4 added PyObject support via the sniff+build path. Both
 # object-dtype str and pd.StringDtype(storage='python') resolve to
-# col_source_str_pyobj and now flow through the columnar emitter.
+# col_source_str_pyobj; int / float / bool flow through their own
+# pyobj sources.
 SUPPORTED_FIELD_GENS_WEIGHTED.append(('object_str', _gen_object_str, 10))
-SUPPORTED_FIELD_GENS_WEIGHTED.append(('string_python', _gen_string_python, 8))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('string_python', _gen_string_python, 6))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('object_int', _gen_object_int, 8))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('object_float', _gen_object_float, 8))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('object_bool', _gen_object_bool, 6))
 
 
 # ---------------------------------------------------------------------------

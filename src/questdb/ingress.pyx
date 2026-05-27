@@ -2336,20 +2336,32 @@ cdef object _dataframe_columnar_plan_failures(
                 'nulls are present.'))
             continue
 
-        if col.setup.target == col_target_t.col_target_column_i64:
-            if col.setup.source != col_source_t.col_source_i64_numpy:
+        if col.setup.target == col_target_t.col_target_column_bool:
+            if col.setup.source != col_source_t.col_source_bool_pyobj:
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy int64 integer columns; narrower '
-                    'integer dtypes would change the QWP target type.'))
+                    'v1 only supports object-dtype bool columns; native '
+                    'bool / Arrow bool require a packing decision.'))
+        elif col.setup.target == col_target_t.col_target_column_i64:
+            if col.setup.source not in (
+                    col_source_t.col_source_i64_numpy,
+                    col_source_t.col_source_int_pyobj):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports NumPy int64 or object-dtype int '
+                    'columns; narrower NumPy ints would change the QWP '
+                    'target type.'))
         elif col.setup.target == col_target_t.col_target_column_f64:
-            if col.setup.source != col_source_t.col_source_f64_numpy:
+            if col.setup.source not in (
+                    col_source_t.col_source_f64_numpy,
+                    col_source_t.col_source_float_pyobj):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy float64 columns; float32 would '
-                    'change the QWP target type.'))
+                    'v1 only supports NumPy float64 or object-dtype float '
+                    'columns; float32 would change the QWP target type.'))
         elif col.setup.target == col_target_t.col_target_column_ts:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
@@ -2555,6 +2567,184 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
     return b
 
 
+cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    """
+    Walk a PyObject int column once and produce a contiguous int64
+    buffer + LSB-packed validity bitmap. Null cells leave the int64
+    slot at 0 with the validity bit cleared.
+    """
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef int64_t* values = NULL
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t i
+    cdef int64_t value
+
+    try:
+        values = <int64_t*>calloc(row_count if row_count > 0 else 1,
+                                  sizeof(int64_t))
+        if values == NULL:
+            raise MemoryError()
+        b.data = <void*>values
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        for i in range(row_count):
+            cell = access[i]
+            # PyBool_Check goes BEFORE PyLong_CheckExact because Python
+            # bools are subclasses of int and PyLong_CheckExact returns
+            # false for them; treat them as int (matches row-path).
+            if PyBool_Check(cell):
+                values[i] = 1 if cell == <PyObject*>True else 0
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif PyLong_CheckExact(cell):
+                value = PyLong_AsLongLong(cell)
+                values[i] = value
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.has_nulls = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected int, '
+                    f'got {_fqn(type(<object>cell))}.')
+
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
+cdef pyobj_built_t* _dataframe_columnar_build_float_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    """
+    Walk a PyObject float column once and produce a contiguous double
+    buffer + LSB-packed validity bitmap.
+    """
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef double* values = NULL
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t i
+    cdef double value
+
+    try:
+        values = <double*>calloc(row_count if row_count > 0 else 1,
+                                 sizeof(double))
+        if values == NULL:
+            raise MemoryError()
+        b.data = <void*>values
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        for i in range(row_count):
+            cell = access[i]
+            if PyFloat_CheckExact(cell):
+                value = PyFloat_AS_DOUBLE(cell)
+                if isnan(value):
+                    # pandas NaN-as-null convention matches the row-path.
+                    b.has_nulls = True
+                else:
+                    values[i] = value
+                    if b.validity != NULL:
+                        _pyobj_set_validity_bit(b.validity, i)
+            elif PyLong_CheckExact(cell) or PyBool_Check(cell):
+                # Accept widening of int / bool to float, matching how
+                # Python implicitly converts when you do float(x).
+                values[i] = <double>PyLong_AsLongLong(cell)
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.has_nulls = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected float, '
+                    f'got {_fqn(type(<object>cell))}.')
+
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
+cdef pyobj_built_t* _dataframe_columnar_build_bool_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    """
+    Walk a PyObject bool column once and pack the values into an
+    Arrow LSB-first bitmap (one bit per row). Null cells are rejected —
+    matches the row-path behaviour (QuestDB BOOLEAN has no null
+    representation at the row level).
+    """
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef uint8_t* bits = NULL
+    cdef size_t bytes = (row_count + 7) // 8
+    cdef size_t i
+
+    try:
+        if bytes == 0:
+            bytes = 1
+        bits = <uint8_t*>calloc(bytes, sizeof(uint8_t))
+        if bits == NULL:
+            raise MemoryError()
+        b.data = <void*>bits
+        for i in range(row_count):
+            cell = access[i]
+            if PyBool_Check(cell):
+                if cell == <PyObject*>True:
+                    bits[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif _dataframe_is_null_pyobj(cell):
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: cannot insert '
+                    'null into a boolean column.')
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected bool, '
+                    f'got {_fqn(type(<object>cell))}.')
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
 cdef void_int _dataframe_columnar_prebuild_pyobj(
         object df,
         dataframe_plan_t* plan) except -1:
@@ -2584,6 +2774,15 @@ cdef void_int _dataframe_columnar_prebuild_pyobj(
         col = &plan.cols.d[i]
         if col.setup.source == col_source_t.col_source_str_pyobj:
             plan.pyobj_built[i] = _dataframe_columnar_build_str_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+        elif col.setup.source == col_source_t.col_source_int_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_int_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+        elif col.setup.source == col_source_t.col_source_float_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_float_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+        elif col.setup.source == col_source_t.col_source_bool_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_bool_pyobj(
                 col, plan.row_count, df.columns[col.setup.orig_index])
 
 
@@ -2649,7 +2848,41 @@ cdef void_int _dataframe_columnar_append_field(
         _dataframe_columnar_validity(arr, row_offset, row_count, &validity))
     cdef bint ok = False
 
-    if col.setup.target == col_target_t.col_target_column_i64:
+    if col.setup.target == col_target_t.col_target_column_bool:
+        if prebuilt == NULL:
+            raise RuntimeError(
+                'PyObject bool column missing pre-built bitmap.')
+        # Bool source is currently only bool_pyobj; the row-path's
+        # native and Arrow bool sources are not yet enabled in the
+        # columnar planner (separate decision).
+        if row_offset % 8 != 0:
+            raise RuntimeError(
+                'PyObject bool column requires byte-aligned chunk boundaries.')
+        with nogil:
+            ok = column_sender_chunk_column_bool(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const uint8_t*>prebuilt.data) + (row_offset // 8),
+                row_count,
+                NULL,
+                &err)
+    elif col.setup.target == col_target_t.col_target_column_i64:
+        # Numeric int columns come from one of two sources today:
+        # NumPy int64 (data lives in arr.buffers[1]) or PyObject int
+        # (data lives in prebuilt.data after the prebuild phase).
+        if col.setup.source == col_source_t.col_source_int_pyobj:
+            data = prebuilt.data
+            if prebuilt.has_nulls and row_offset % 8 != 0:
+                raise RuntimeError(
+                    'PyObject int column with nulls requires byte-aligned '
+                    'chunk boundaries.')
+            if prebuilt.has_nulls:
+                validity.bits = prebuilt.validity + (row_offset // 8)
+                validity.bit_len = row_count
+                validity_ptr = &validity
+            else:
+                validity_ptr = NULL
         with nogil:
             ok = column_sender_chunk_column_i64(
                 chunk,
@@ -2660,6 +2893,18 @@ cdef void_int _dataframe_columnar_append_field(
                 validity_ptr,
                 &err)
     elif col.setup.target == col_target_t.col_target_column_f64:
+        if col.setup.source == col_source_t.col_source_float_pyobj:
+            data = prebuilt.data
+            if prebuilt.has_nulls and row_offset % 8 != 0:
+                raise RuntimeError(
+                    'PyObject float column with nulls requires byte-aligned '
+                    'chunk boundaries.')
+            if prebuilt.has_nulls:
+                validity.bits = prebuilt.validity + (row_offset // 8)
+                validity.bit_len = row_count
+                validity_ptr = &validity
+            else:
+                validity_ptr = NULL
         with nogil:
             ok = column_sender_chunk_column_f64(
                 chunk,
@@ -2779,6 +3024,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
         if col.setup.target == col_target_t.col_target_at:
             at_col = col
         elif col.setup.target in (
+                col_target_t.col_target_column_bool,
                 col_target_t.col_target_column_i64,
                 col_target_t.col_target_column_f64,
                 col_target_t.col_target_column_ts,
