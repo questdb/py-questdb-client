@@ -55,7 +55,7 @@ __all__ = [
 from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
     INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
-from libc.string cimport strncmp, memset
+from libc.string cimport strncmp, memset, memcpy
 from libc.math cimport isnan
 from libc.errno cimport errno
 # from libc.stdio cimport stderr, fprintf
@@ -88,7 +88,8 @@ from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
     Iterable
 from dataclasses import dataclass
 import pathlib
-from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.bytes cimport (PyBytes_FromStringAndSize,
+                            PyBytes_GET_SIZE, PyBytes_AsString)
 
 import sys
 import datetime
@@ -2373,14 +2374,19 @@ cdef object _dataframe_columnar_plan_failures(
                         'v1 timestamp field columns cannot contain '
                         'timestamps before the Unix epoch.'))
         elif col.setup.target == col_target_t.col_target_column_str:
-            if col.setup.source not in (
+            if col.setup.source == col_source_t.col_source_str_pyobj:
+                # PyObject sources are validated by the pre-build phase
+                # at row level (one walk catches all rows). The planner
+                # has nothing more to check here.
+                pass
+            elif col.setup.source not in (
                     col_source_t.col_source_str_utf8_arrow,
                     col_source_t.col_source_str_lrg_utf8_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
                     'v1 only supports string[pyarrow] columns backed by '
-                    'Arrow UTF-8 or LargeUtf8.'))
+                    'Arrow UTF-8 or LargeUtf8 (or object-dtype str).'))
             elif not _dataframe_columnar_has_utf8_values(
                     &col.setup.chunks.chunks[0]):
                 failures.append(_dataframe_columnar_col_failure(
@@ -2451,9 +2457,182 @@ cdef void_int _dataframe_columnar_validate_plan(
             failures)
 
 
+cdef bint _is_pyobj_source(col_source_t source) noexcept nogil:
+    return (
+        source == col_source_t.col_source_str_pyobj or
+        source == col_source_t.col_source_int_pyobj or
+        source == col_source_t.col_source_float_pyobj or
+        source == col_source_t.col_source_bool_pyobj)
+
+
+cdef inline void _pyobj_set_validity_bit(uint8_t* bitmap, size_t row) noexcept nogil:
+    bitmap[row >> 3] |= <uint8_t>(1 << (row & 7))
+
+
+cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    """
+    Walk a PyObject column once and produce Arrow-Utf8-shaped buffers
+    (int32 offsets + uint8 bytes + LSB-packed validity). Encoding uses
+    Python's str.encode('utf-8') so any valid Python str produces valid
+    UTF-8.
+    """
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef size_t i
+    cdef Py_ssize_t utf8_len
+    cdef const char* utf8_buf
+    cdef object py_bytes
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t bytes_cap = 16
+    cdef uint8_t* new_bytes
+    cdef size_t bytes_used = 0
+
+    try:
+        b.str_offsets = <int32_t*>calloc(row_count + 1, sizeof(int32_t))
+        if b.str_offsets == NULL:
+            raise MemoryError()
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        b.str_bytes = <uint8_t*>malloc(bytes_cap)
+        if b.str_bytes == NULL:
+            raise MemoryError()
+
+        for i in range(row_count):
+            cell = access[i]
+            if PyUnicode_CheckExact(cell):
+                py_bytes = (<object>cell).encode('utf-8')
+                utf8_len = PyBytes_GET_SIZE(py_bytes)
+                utf8_buf = PyBytes_AsString(py_bytes)
+                # Grow bytes buffer to fit.
+                while bytes_used + <size_t>utf8_len > bytes_cap:
+                    bytes_cap *= 2
+                    if bytes_cap > (<size_t>(2_147_483_647)):
+                        raise IngressError(
+                            IngressErrorCode.BadDataFrame,
+                            f'Bad column {df_col_name!r}: column total UTF-8 '
+                            'bytes exceeds the QWP wire varchar offset table '
+                            'limit (2 GiB).')
+                    new_bytes = <uint8_t*>realloc(b.str_bytes, bytes_cap)
+                    if new_bytes == NULL:
+                        raise MemoryError()
+                    b.str_bytes = new_bytes
+                if utf8_len > 0:
+                    memcpy(b.str_bytes + bytes_used, utf8_buf, <size_t>utf8_len)
+                bytes_used += <size_t>utf8_len
+                b.str_offsets[i + 1] = <int32_t>bytes_used
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.str_offsets[i + 1] = <int32_t>bytes_used
+                b.has_nulls = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected str, '
+                    f'got {_fqn(type(<object>cell))}.')
+
+        b.str_bytes_len = bytes_used
+
+        # If the column turned out to be all-valid, drop the bitmap so
+        # the FFI takes the no-validity hot path.
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
+cdef void_int _dataframe_columnar_prebuild_pyobj(
+        object df,
+        dataframe_plan_t* plan) except -1:
+    """
+    Walk every PyObject-sourced column once and stash typed buffers on
+    `plan.pyobj_built`. Runs after `validate_plan` and before the chunk
+    emission loop in `Client.dataframe()`.
+    """
+    cdef size_t i
+    cdef col_t* col
+    cdef bint any_pyobj = False
+
+    for i in range(plan.col_count):
+        col = &plan.cols.d[i]
+        if _is_pyobj_source(col.setup.source):
+            any_pyobj = True
+            break
+    if not any_pyobj:
+        return 0
+
+    plan.pyobj_built = <pyobj_built_t**>calloc(
+        plan.col_count, sizeof(pyobj_built_t*))
+    if plan.pyobj_built == NULL:
+        raise MemoryError()
+
+    for i in range(plan.col_count):
+        col = &plan.cols.d[i]
+        if col.setup.source == col_source_t.col_source_str_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_str_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+
+
+cdef void_int _dataframe_columnar_append_pyobj_str(
+        column_sender_chunk* chunk,
+        col_t* col,
+        pyobj_built_t* prebuilt,
+        size_t row_offset,
+        size_t row_count) except -1:
+    cdef line_sender_error* err = NULL
+    cdef column_sender_validity validity
+    cdef const column_sender_validity* validity_ptr = NULL
+    cdef bint ok = False
+    cdef int32_t* offsets
+    cdef size_t bytes_len
+
+    if prebuilt == NULL:
+        raise RuntimeError(
+            'PyObject str column missing pre-built buffer; '
+            'prebuild phase did not run.')
+    if prebuilt.has_nulls:
+        if row_offset % 8 != 0:
+            raise RuntimeError(
+                'PyObject str column with nulls requires byte-aligned '
+                'chunk boundaries.')
+        validity.bits = prebuilt.validity + (row_offset // 8)
+        validity.bit_len = row_count
+        validity_ptr = &validity
+    offsets = prebuilt.str_offsets + row_offset
+    bytes_len = prebuilt.str_bytes_len
+    with nogil:
+        ok = column_sender_chunk_column_varchar(
+            chunk,
+            col.name.buf,
+            col.name.len,
+            offsets,
+            prebuilt.str_bytes,
+            bytes_len,
+            row_count,
+            validity_ptr,
+            &err)
+    if not ok:
+        raise c_err_to_py(err)
+
+
 cdef void_int _dataframe_columnar_append_field(
         column_sender_chunk* chunk,
         col_t* col,
+        pyobj_built_t* prebuilt,
         size_t row_offset,
         size_t row_count) except -1:
     cdef line_sender_error* err = NULL
@@ -2514,6 +2693,10 @@ cdef void_int _dataframe_columnar_append_field(
         else:
             raise RuntimeError('Unsupported columnar timestamp field source.')
     elif col.setup.target == col_target_t.col_target_column_str:
+        if col.setup.source == col_source_t.col_source_str_pyobj:
+            _dataframe_columnar_append_pyobj_str(
+                chunk, col, prebuilt, row_offset, row_count)
+            return 0  # err already raised inside on failure
         # Route through the generic Arrow appender. Rust dispatches on
         # the schema's format string, so utf8 ("u") and large_utf8 ("U")
         # are handled uniformly without a Python-side cast.
@@ -2589,6 +2772,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
     cdef col_t* col
     cdef col_t* at_col = NULL
     cdef size_t field_count = 0
+    cdef pyobj_built_t* prebuilt = NULL
 
     for col_index in range(plan.col_count):
         col = &plan.cols.d[col_index]
@@ -2600,8 +2784,12 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_ts,
                 col_target_t.col_target_column_str,
                 col_target_t.col_target_symbol):
+            if plan.pyobj_built != NULL:
+                prebuilt = plan.pyobj_built[col_index]
+            else:
+                prebuilt = NULL
             _dataframe_columnar_append_field(
-                chunk, col, row_offset, row_count)
+                chunk, col, prebuilt, row_offset, row_count)
             field_count += 1
 
     if field_count == 0:
@@ -2812,6 +3000,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                     continue
 
                 _dataframe_columnar_validate_plan(df, &plan)
+                _dataframe_columnar_prebuild_pyobj(df, &plan)
                 rows_per_chunk = _dataframe_columnar_rows_per_chunk(
                     &plan,
                     max_rows_per_chunk)
@@ -3000,6 +3189,7 @@ cdef class Client:
                 return self
 
             _dataframe_columnar_validate_plan(df, &plan)
+            _dataframe_columnar_prebuild_pyobj(df, &plan)
             rows_per_chunk = _dataframe_columnar_rows_per_chunk(&plan, 0)
 
             _ensure_doesnt_have_gil(&gs)

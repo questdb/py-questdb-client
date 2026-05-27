@@ -289,6 +289,7 @@ SUPPORTED_FIELD_GENS_WEIGHTED = [
     ('categorical', _gen_categorical, 18),
     ('string_pyarrow', _gen_string_pyarrow, 18),
     ('large_string', _gen_large_string, 12),
+    # object-dtype str is appended below, once `_gen_object_str` is defined.
 ]
 
 
@@ -343,9 +344,14 @@ UNSUPPORTED_FIELD_GENS = [
     ('bool', _gen_bool),
     ('uint8', _gen_uint8),
     ('uint64', _gen_uint64),
-    ('object_str', _gen_object_str),
-    ('string_python', _gen_string_python),
 ]
+
+
+# Step 4 added PyObject str support via the sniff+build path. Both
+# object-dtype str and pd.StringDtype(storage='python') resolve to
+# col_source_str_pyobj and now flow through the columnar emitter.
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('object_str', _gen_object_str, 10))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('string_python', _gen_string_python, 8))
 
 
 # ---------------------------------------------------------------------------

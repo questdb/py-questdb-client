@@ -486,6 +486,30 @@ cdef struct col_t_arr:
     col_t* d
 
 
+# Storage for one column's PyObject-sniffed, pre-built typed buffers.
+#
+# Lifetime is bound to the dataframe_plan_t that owns it. Buffers are
+# heap-allocated and freed in `pyobj_built_free`. The columnar emitter
+# accesses them via raw pointers (offsets / bytes / data / validity)
+# until the chunk flush completes.
+cdef struct pyobj_built_t:
+    # Per-source typed payload. Only one of these is set:
+    #   - str_pyobj    : str_offsets + str_bytes
+    #   - int_pyobj    : data (int64*)
+    #   - float_pyobj  : data (double*)
+    #   - bool_pyobj   : data (uint8* — LSB-packed Arrow bitmap, value bits)
+    void* data
+    int32_t* str_offsets       # NULL except for str_pyobj
+    uint8_t* str_bytes         # NULL except for str_pyobj
+    size_t str_bytes_len       # bytes used (not capacity)
+
+    # Validity bitmap (Arrow LSB-first). NULL when no nulls were seen.
+    uint8_t* validity
+    bint has_nulls
+
+    size_t row_count
+
+
 cdef struct dataframe_plan_t:
     size_t row_count
     size_t col_count
@@ -494,6 +518,10 @@ cdef struct dataframe_plan_t:
     col_t_arr cols
     bint any_cols_need_gil
     qdb_pystr_pos str_buf_marker
+    # Per-column pre-built PyObject buffers, indexed by col_index;
+    # NULL slot for non-PyObject columns. The outer array is NULL until
+    # `_dataframe_columnar_prebuild_pyobj` runs.
+    pyobj_built_t** pyobj_built
 
 
 cdef col_t_arr col_t_arr_blank() noexcept nogil:
@@ -534,10 +562,31 @@ cdef dataframe_plan_t dataframe_plan_blank() noexcept nogil:
     plan.any_cols_need_gil = False
     plan.str_buf_marker.chain = 0
     plan.str_buf_marker.string = 0
+    plan.pyobj_built = NULL
     return plan
 
 
+cdef void pyobj_built_free(pyobj_built_t* b) noexcept nogil:
+    if b == NULL:
+        return
+    if b.data != NULL:
+        free(b.data)
+    if b.str_offsets != NULL:
+        free(b.str_offsets)
+    if b.str_bytes != NULL:
+        free(b.str_bytes)
+    if b.validity != NULL:
+        free(b.validity)
+    free(b)
+
+
 cdef void dataframe_plan_release(dataframe_plan_t* plan) noexcept:
+    cdef size_t i
+    if plan.pyobj_built != NULL:
+        for i in range(plan.col_count):
+            pyobj_built_free(plan.pyobj_built[i])
+        free(plan.pyobj_built)
+        plan.pyobj_built = NULL
     col_t_arr_release(&plan.cols)
     plan.row_count = 0
     plan.col_count = 0
