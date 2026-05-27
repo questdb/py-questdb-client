@@ -3571,6 +3571,7 @@ cdef class Client:
         cdef bint db_use = False
         cdef bint flushed = False
         cdef bint sync_attempted = False
+        cdef bint force_drop_conn = False
         cdef size_t rows_per_chunk
         cdef size_t row_offset
         cdef size_t chunk_rows
@@ -3629,10 +3630,22 @@ cdef class Client:
                 sync_attempted = True
                 _dataframe_columnar_sync(conn)
             except:
+                # Any exception during the chunk loop or the closing
+                # sync leaves the conn in a state we can't trust for
+                # recycling: it may hold in-flight uncommitted frames
+                # that the next borrower's first flush would commit
+                # alongside their own (round-3 #1 — "dirty sender
+                # pollutes next borrow"). Try one defensive sync to
+                # recover; if that succeeds, the conn is clean and we
+                # can recycle it. Otherwise force-drop in the finally.
+                force_drop_conn = True
                 if (conn != NULL and flushed and not sync_attempted and
                         not qwpws_conn_must_close(conn)):
                     try:
                         _dataframe_columnar_sync(conn)
+                        # Defensive sync committed all previously-
+                        # flushed chunks; conn is recyclable.
+                        force_drop_conn = False
                     except Exception:
                         pass
                 raise
@@ -3641,7 +3654,10 @@ cdef class Client:
         finally:
             _ensure_has_gil(&gs)
             if conn != NULL:
-                questdb_db_return_conn(db, conn)
+                if force_drop_conn:
+                    questdb_db_drop_conn(db, conn)
+                else:
+                    questdb_db_return_conn(db, conn)
             if chunk != NULL:
                 column_sender_chunk_free(chunk)
             dataframe_plan_release(&plan)

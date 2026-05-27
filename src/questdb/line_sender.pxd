@@ -712,6 +712,11 @@ cdef extern from "questdb/ingress/column_sender.h":
         qwpws_conn* conn
         ) noexcept nogil
 
+    void questdb_db_drop_conn(
+        questdb_db* db,
+        qwpws_conn* conn
+        ) noexcept nogil
+
     size_t questdb_db_reap_idle(
         questdb_db* db
         ) noexcept nogil
