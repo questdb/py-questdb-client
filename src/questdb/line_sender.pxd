@@ -902,6 +902,8 @@ cdef extern from "questdb/ingress/column_sender.h":
         size_t name_len,
         const ArrowArray* array,
         const ArrowSchema* schema,
+        size_t row_offset,
+        size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 

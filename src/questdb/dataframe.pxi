@@ -1041,6 +1041,11 @@ cdef const char* _ARROW_FMT_LRG_UTF8_STRING = 'U'
 cdef list _dataframe_cast_large_string_chunks_to_utf8(
         list chunks,
         col_t* col):
+    # Down-cast large_string ("U") to utf8 ("u") so the legacy
+    # row-path serializer's cell dispatch works. The columnar path's
+    # generic Arrow appender supports `U` natively (narrows offsets at
+    # encode time), so this cast is row-path-only — but the planner is
+    # shared, so we do it here.
     if (len(chunks) > 0 and chunks[0].type == _PYARROW.large_string()):
         col.setup.large_string_cast_to_utf8 = True
         return [chunk.cast(_PYARROW.string()) for chunk in chunks]

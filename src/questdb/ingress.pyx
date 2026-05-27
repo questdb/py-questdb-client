@@ -2278,6 +2278,11 @@ cdef object _dataframe_columnar_plan_normalizations(
     for col_index in range(plan.col_count):
         col = &plan.cols.d[col_index]
         if col.setup.large_string_cast_to_utf8:
+            # Cast is performed for the row-path planner-shared with
+            # this columnar path; the columnar emitter would handle
+            # `U` natively, but the planner produced `u` by the time
+            # it reaches us. Reported for symmetry with the support
+            # report's existing schema.
             normalizations.append({
                 'column': df.columns[col.setup.orig_index],
                 'target': _TARGET_NAMES[col.setup.target],
@@ -2368,18 +2373,20 @@ cdef object _dataframe_columnar_plan_failures(
                         'v1 timestamp field columns cannot contain '
                         'timestamps before the Unix epoch.'))
         elif col.setup.target == col_target_t.col_target_column_str:
-            if col.setup.source != col_source_t.col_source_str_utf8_arrow:
+            if col.setup.source not in (
+                    col_source_t.col_source_str_utf8_arrow,
+                    col_source_t.col_source_str_lrg_utf8_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
                     'v1 only supports string[pyarrow] columns backed by '
-                    'Arrow UTF-8 with int32 offsets.'))
+                    'Arrow UTF-8 or LargeUtf8.'))
             elif not _dataframe_columnar_has_utf8_values(
                     &col.setup.chunks.chunks[0]):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 requires Arrow UTF-8 offsets and byte buffers.'))
+                    'v1 requires Arrow UTF-8 or LargeUtf8 offsets and byte buffers.'))
         elif col.setup.target == col_target_t.col_target_symbol:
             if col.setup.source not in (
                     col_source_t.col_source_str_i8_cat,
@@ -2507,70 +2514,34 @@ cdef void_int _dataframe_columnar_append_field(
         else:
             raise RuntimeError('Unsupported columnar timestamp field source.')
     elif col.setup.target == col_target_t.col_target_column_str:
-        offsets = (<int32_t*>arr.buffers[1]) + row_offset
-        # Arrow offsets are monotonic, so the slice high-water offset satisfies
-        # the FFI bytes_len contract without exposing unrelated trailing bytes.
-        bytes_len = <size_t>offsets[row_count]
+        # Route through the generic Arrow appender. Rust dispatches on
+        # the schema's format string, so utf8 ("u") and large_utf8 ("U")
+        # are handled uniformly without a Python-side cast.
         with nogil:
-            ok = column_sender_chunk_column_varchar(
+            ok = column_sender_chunk_append_arrow_column(
                 chunk,
                 col.name.buf,
                 col.name.len,
-                offsets,
-                <const uint8_t*>arr.buffers[2],
-                bytes_len,
+                &col.setup.chunks.chunks[0],
+                &col.setup.arrow_schema,
+                row_offset,
                 row_count,
-                validity_ptr,
                 &err)
     elif col.setup.target == col_target_t.col_target_symbol:
-        dictionary = arr.dictionary
-        dict_offsets = <int32_t*>dictionary.buffers[1]
-        dict_offsets_len = <size_t>dictionary.length + 1
-        dict_bytes_len = <size_t>dict_offsets[dictionary.length]
-        if col.setup.source == col_source_t.col_source_str_i8_cat:
-            with nogil:
-                ok = column_sender_chunk_symbol_dict_i8(
-                    chunk,
-                    col.name.buf,
-                    col.name.len,
-                    (<const int8_t*>data) + row_offset,
-                    row_count,
-                    dict_offsets,
-                    dict_offsets_len,
-                    <const uint8_t*>dictionary.buffers[2],
-                    dict_bytes_len,
-                    validity_ptr,
-                    &err)
-        elif col.setup.source == col_source_t.col_source_str_i16_cat:
-            with nogil:
-                ok = column_sender_chunk_symbol_dict_i16(
-                    chunk,
-                    col.name.buf,
-                    col.name.len,
-                    (<const int16_t*>data) + row_offset,
-                    row_count,
-                    dict_offsets,
-                    dict_offsets_len,
-                    <const uint8_t*>dictionary.buffers[2],
-                    dict_bytes_len,
-                    validity_ptr,
-                    &err)
-        elif col.setup.source == col_source_t.col_source_str_i32_cat:
-            with nogil:
-                ok = column_sender_chunk_symbol_dict_i32(
-                    chunk,
-                    col.name.buf,
-                    col.name.len,
-                    (<const int32_t*>data) + row_offset,
-                    row_count,
-                    dict_offsets,
-                    dict_offsets_len,
-                    <const uint8_t*>dictionary.buffers[2],
-                    dict_bytes_len,
-                    validity_ptr,
-                    &err)
-        else:
-            raise RuntimeError('Unsupported columnar symbol source.')
+        # Route through the generic Arrow appender. The Rust side reads
+        # the dictionary from arr.dictionary and dispatches on the
+        # outer schema's index format (c / s / i) to the matching
+        # symbol_dict_i* call.
+        with nogil:
+            ok = column_sender_chunk_append_arrow_column(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                &col.setup.chunks.chunks[0],
+                &col.setup.arrow_schema,
+                row_offset,
+                row_count,
+                &err)
     else:
         raise RuntimeError('Unsupported columnar field target.')
 
