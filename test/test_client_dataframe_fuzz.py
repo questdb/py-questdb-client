@@ -161,15 +161,21 @@ _TEST_ALPHABET = _build_test_alphabet()
 _ASCII_LETTERS = [chr(c) for c in range(ord('A'), ord('Z') + 1)]
 
 
-def _random_strings(rng, n, max_len, null_prob, *, ascii_only=False):
-    """Generate n strings, possibly with nulls. ``ascii_only`` forces the
-    ASCII-letter subset (useful where the planner / FFI layer reserves a
-    code point or path)."""
+def _random_strings(rng, n, max_len, null_prob, *,
+                    ascii_only=False, empty_prob=0.05):
+    """Generate n strings, possibly with nulls and zero-length values.
+
+    ``ascii_only`` forces the ASCII-letter subset. ``empty_prob`` is the
+    chance of emitting ``''`` for a non-null slot — empty strings
+    exercise the zero-length offset slice in the varchar wire path."""
     pool = _ASCII_LETTERS if ascii_only else _TEST_ALPHABET
     out = []
     for _ in range(n):
         if null_prob > 0 and rng.chance(null_prob):
             out.append(None)
+            continue
+        if empty_prob > 0 and rng.chance(empty_prob):
+            out.append('')
             continue
         length = max(1, rng.next_int(max_len))
         out.append(''.join(rng.choice(pool) for _ in range(length)))
@@ -188,15 +194,43 @@ def _datetime_array(n, unit='ns'):
 # ---------------------------------------------------------------------------
 
 
+_INT64_MIN = -(1 << 63)
+_INT64_MAX = (1 << 63) - 1
+_INT64_SPECIALS = (
+    0, 1, -1,
+    _INT64_MIN, _INT64_MIN + 1,
+    _INT64_MAX, _INT64_MAX - 1)
+
+_FLOAT64_SPECIALS = (
+    0.0, -0.0, 1.0, -1.0,
+    float('nan'), float('inf'), float('-inf'),
+    1e-300, 1e300)
+
+
 def _gen_int64(rng, n):
-    return pd.Series(np.array(
-        [int(rng.uniform(-(1 << 50), 1 << 50)) for _ in range(n)],
-        dtype=np.int64))
+    # 5% special values to exercise wire-edge cases: INT64_MIN
+    # (QuestDB's NULL sentinel for LONG — should still flow through
+    # the wire), INT64_MAX, zero, etc.
+    out = np.empty(n, dtype=np.int64)
+    for i in range(n):
+        if rng.chance(0.05):
+            out[i] = rng.choice(_INT64_SPECIALS)
+        else:
+            out[i] = int(rng.uniform(-(1 << 50), 1 << 50))
+    return pd.Series(out)
 
 
 def _gen_float64(rng, n):
-    return pd.Series(np.array(
-        [rng.uniform(-1e6, 1e6) for _ in range(n)], dtype=np.float64))
+    # 5% IEEE-754 special values: NaN, ±Inf, ±0.0, subnormals. None of
+    # these should crash the wire encoder; the server may reject them
+    # semantically but the QwpAckServer doesn't validate value content.
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        if rng.chance(0.05):
+            out[i] = rng.choice(_FLOAT64_SPECIALS)
+        else:
+            out[i] = rng.uniform(-1e6, 1e6)
+    return pd.Series(out)
 
 
 def _gen_dt64ns_field(rng, n):
@@ -743,6 +777,136 @@ class TestClientDataframeFuzz(unittest.TestCase):
         stats = self.server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['binary_frames'], 2)
+
+    def test_multi_chunk_with_nulls(self):
+        """Force multi-chunk emission with a nullable categorical so the
+        validity bitmap must be sliced across chunk boundaries.
+
+        The categorical-symbols planner cap is 100 000 and the planner
+        rounds chunk size to a multiple of 8 when validity is present.
+        Using > 100 000 rows guarantees at least two chunks; randomly
+        sprinkled nulls verify ``(<uint8_t*>arr.buffers[0]) + (row_offset
+        // 8)`` lands on the correct byte for the second chunk."""
+        n_rows = 100_003  # > 100k cap + force a 3-row tail chunk
+        rng = Rng(0xa17e_4c91_55_42_99_03)
+        sym_pool = [f'S{i:04d}' for i in range(64)]
+        choices = [
+            None if rng.chance(0.15) else sym_pool[rng.next_int(64)]
+            for _ in range(n_rows)]
+        df = pd.DataFrame({
+            'ts': pd.Series(_datetime_array(n_rows, 'ns')),
+            'sym': pd.Series(pd.Categorical(
+                choices, dtype=pd.CategoricalDtype(categories=sym_pool))),
+            'seq': pd.Series(np.arange(n_rows, dtype=np.int64)),
+        })
+        client = qi.Client.from_conf(self.conf)
+        try:
+            qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
+            try:
+                client.dataframe(df, table_name='mc_nulls', at='ts')
+            finally:
+                io_stats = qi._debug_dataframe_columnar_io_stats(
+                    enabled=False)
+        finally:
+            client.close()
+        self.assertGreaterEqual(
+            io_stats['flush_calls'], 2,
+            f'expected >=2 flushes; io_stats={io_stats}')
+        self.assertEqual(io_stats['sync_calls'], 1)
+        stats = self.server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 2)
+
+    def test_high_cardinality_symbol_i16(self):
+        """A categorical with > 128 categories forces the i16-codes
+        path. The default rng-driven fuzz almost never produces enough
+        cardinality to reach this branch."""
+        n_rows = 1_000
+        cardinality = 200  # > 128 -> i16
+        rng = Rng(0xc1d_7e_4f_55_42_de_ad)
+        pool = [f'C{i:04d}_{chr(0x0391 + (i % 24))}' for i in range(cardinality)]
+        choices = [pool[rng.next_int(cardinality)] for _ in range(n_rows)]
+        df = pd.DataFrame({
+            'ts': pd.Series(_datetime_array(n_rows, 'ns')),
+            'sym': pd.Series(pd.Categorical(
+                choices, dtype=pd.CategoricalDtype(categories=pool))),
+            'seq': pd.Series(np.arange(n_rows, dtype=np.int64)),
+        })
+        # Sanity: pandas should have picked an int16 code width.
+        self.assertEqual(
+            df['sym'].cat.codes.dtype, np.int16,
+            'expected i16 code width for cardinality > 128')
+        client = qi.Client.from_conf(self.conf)
+        try:
+            client.dataframe(df, table_name='hi_card_sym', at='ts')
+        finally:
+            client.close()
+        stats = self.server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+
+    def test_wide_frame_multi_chunk(self):
+        """A frame with > 8 field columns hits the planner's
+        ``rows_per_chunk = 64_000`` branch. Using 64 001 rows guarantees
+        chunk-split through the wide-frame path (distinct from the
+        Arrow-string and categorical-symbols caps exercised elsewhere)."""
+        n_rows = 64_001
+        n_int_cols = 12
+        df_cols = {'ts': pd.Series(_datetime_array(n_rows, 'ns'))}
+        seq = np.arange(n_rows, dtype=np.int64)
+        for i in range(n_int_cols):
+            df_cols[f'i{i:02d}'] = pd.Series(seq + i * 1_000_000)
+        df = pd.DataFrame(df_cols)
+        client = qi.Client.from_conf(self.conf)
+        try:
+            qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
+            try:
+                client.dataframe(df, table_name='wide', at='ts',
+                                 symbols=False)
+            finally:
+                io_stats = qi._debug_dataframe_columnar_io_stats(
+                    enabled=False)
+        finally:
+            client.close()
+        self.assertGreaterEqual(
+            io_stats['flush_calls'], 2,
+            f'expected >=2 flushes for wide-frame multi-chunk; '
+            f'io_stats={io_stats}')
+        self.assertEqual(io_stats['sync_calls'], 1)
+        stats = self.server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 2)
+
+    def test_sequential_client_lifecycle(self):
+        """Open, use, and close a fresh Client many times in succession.
+        Each cycle opens a new TCP connection (because the prior Client
+        was closed); we verify that lifecycle is clean across repeated
+        open/close cycles, no leaks, no server-side protocol errors."""
+        n_cycles = 30
+        rng = Rng(0x115ec_2_f0a_55_42)
+        df = pd.DataFrame({
+            'ts': pd.Series(_datetime_array(8, 'ns')),
+            'seq': pd.Series(np.arange(8, dtype=np.int64)),
+            's': pd.Series(_random_strings(rng, 8, 8, 0.0),
+                           dtype='string[pyarrow]'),
+        })
+        for _ in range(n_cycles):
+            client = qi.Client.from_conf(self.conf)
+            try:
+                client.dataframe(df, table_name='seq_lifecycle', at='ts',
+                                 symbols=False)
+            finally:
+                client.close()
+        stats = self.server.snapshot()
+        self.assertEqual(
+            stats['errors'], [],
+            f'server saw protocol errors across {n_cycles} cycles: '
+            f'{stats["errors"]}')
+        self.assertEqual(
+            stats['accepted_connections'], n_cycles,
+            f'expected {n_cycles} accepts, saw '
+            f'{stats["accepted_connections"]}')
+        self.assertGreaterEqual(stats['binary_frames'], n_cycles)
 
     def test_empty_dataframe_is_noop(self):
         df = pd.DataFrame({
