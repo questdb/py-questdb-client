@@ -24,6 +24,7 @@
 
 __all__ = [
     "Buffer",
+    "Client",
     "IngressError",
     "IngressErrorCode",
     "IngressServerRejectionError",
@@ -37,6 +38,7 @@ __all__ = [
     "TimestampMicros",
     "TimestampNanos",
     "TlsCa",
+    "UnsupportedDataFrameShapeError",
 ]
 
 from datetime import datetime, timedelta
@@ -91,6 +93,15 @@ class IngressServerRejectionError(IngressError):
     The structured server payload is available through
     :attr:`IngressError.qwp_ws_error`.
     """
+
+
+class UnsupportedDataFrameShapeError(IngressError):
+    """
+    A DataFrame shape is not supported by the optimized columnar client path.
+    """
+
+    @property
+    def column_failures(self) -> tuple: ...
 
 
 class ServerTimestampType:
@@ -865,6 +876,44 @@ class TlsCa(TaggedEnum):
     OsRoots = ...
     WebpkiAndOsRoots = ...
     PemFile = ...
+
+class Client:
+    """
+    Pooled QWP/WebSocket client.
+    """
+
+    @staticmethod
+    def from_conf(conf_str: str) -> Client:
+        """
+        Construct a pooled client from a QWP/WebSocket configuration string.
+        """
+
+    def __enter__(self) -> Client: ...
+
+    def dataframe(
+        self,
+        df: pd.DataFrame,
+        *,
+        table_name: Optional[str] = None,
+        table_name_col: Union[None, int, str] = None,
+        symbols: Union[str, bool, List[int], List[str]] = "auto",
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
+    ) -> Client:
+        """
+        Ingest a pandas DataFrame through the pooled columnar QWP path.
+        """
+
+    def reap_idle(self) -> int:
+        """
+        Manually reap idle above-pool-size connections.
+        """
+
+    def close(self):
+        """
+        Close the client and its connection pool.
+        """
+
+    def __exit__(self, exc_type, _exc_val, _exc_tb): ...
 
 class Sender:
     """

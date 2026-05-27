@@ -394,6 +394,360 @@ class TestPandasBase:
                     qi.IngressError, 'Bad dataframe row.*1: All values are nulls.'):
                 _dataframe(self.version, df, table_name='tbl1', symbols=['a'], at=qi.ServerTimestamp)
 
+        def test_planning_error_keeps_existing_buffer(self):
+            buf = qi.Buffer(protocol_version=self.version)
+            buf.dataframe(
+                pd.DataFrame({'a': [1]}),
+                table_name='tbl1',
+                at=qi.ServerTimestamp)
+            before = bytes(buf)
+
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    "`symbols`: Bad dtype `int64`.*'a'.*Must be a strings column."):
+                buf.dataframe(
+                    pd.DataFrame({'a': [1]}),
+                    table_name='tbl2',
+                    symbols=['a'],
+                    at=qi.ServerTimestamp)
+
+            self.assertEqual(bytes(buf), before)
+
+        def test_debug_dataframe_plan_fixed_table_and_timestamp_column(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2], dtype='int64'),
+                'price': pd.Series([10.5, 11.5], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts', symbols=False)
+            cols = {col['orig_name']: col for col in plan['cols']}
+
+            self.assertEqual(plan['row_count'], 2)
+            self.assertEqual(plan['col_count'], 3)
+            self.assertEqual(plan['fixed_table_name'], 'trades')
+            self.assertEqual(plan['at_value'], 'column')
+            self.assertEqual(cols['seq']['target'], 'integer')
+            self.assertEqual(cols['seq']['target_name'], 'seq')
+            self.assertEqual(cols['price']['target'], 'float')
+            self.assertEqual(cols['price']['target_name'], 'price')
+            self.assertEqual(cols['ts']['target'], 'designated timestamp')
+            self.assertIsNone(cols['ts']['target_name'])
+            self.assertEqual(
+                _dataframe(1, df, table_name='trades', at='ts', symbols=False),
+                b'trades seq=1i,price=10.5 1704067200000000000\n'
+                b'trades seq=2i,price=11.5 1704067201000000000\n')
+
+        def test_debug_dataframe_plan_handles_zero_row_dataframe(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([], dtype='datetime64[ns]'),
+                'seq': pd.Series([], dtype='int64'),
+            })
+
+            row_plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts')
+            columnar_plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertEqual(row_plan['row_count'], 0)
+            self.assertEqual(row_plan['col_count'], 0)
+            self.assertEqual(row_plan['cols'], [])
+            self.assertTrue(columnar_plan['supported'])
+            self.assertEqual(columnar_plan['failures'], [])
+            self.assertEqual(columnar_plan['normalizations'], [])
+
+        def test_debug_dataframe_plan_table_column_and_auto_symbol(self):
+            df = pd.DataFrame({
+                'tbl': ['t1', 't2'],
+                'sym': pd.Categorical(['a', 'b']),
+                'value': pd.Series([1, 2], dtype='int64'),
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_plan(df, table_name_col='tbl', at='ts')
+            cols = {col['orig_name']: col for col in plan['cols']}
+
+            self.assertIsNone(plan['fixed_table_name'])
+            self.assertEqual(plan['at_value'], 'column')
+            self.assertEqual(cols['tbl']['target'], 'table name')
+            self.assertIsNone(cols['tbl']['target_name'])
+            self.assertEqual(cols['sym']['target'], 'symbol')
+            self.assertEqual(cols['sym']['target_name'], 'sym')
+            self.assertEqual(cols['value']['target'], 'integer')
+            self.assertEqual(cols['value']['target_name'], 'value')
+            self.assertEqual(cols['ts']['target'], 'designated timestamp')
+            self.assertEqual(
+                _dataframe(1, df, table_name_col='tbl', at='ts'),
+                b't1,sym=a value=1i 1704067200000000000\n'
+                b't2,sym=b value=2i 1704067201000000000\n')
+
+        def test_debug_dataframe_plan_reuses_row_path_validation(self):
+            df = pd.DataFrame({'a': [1]})
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    "`symbols`: Bad dtype `int64`.*'a'.*Must be a strings column."):
+                qi._debug_dataframe_plan(
+                    df,
+                    table_name='tbl1',
+                    symbols=['a'],
+                    at=qi.ServerTimestamp)
+
+        def test_debug_dataframe_columnar_plan_accepts_v1_numeric_core(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2], dtype='int64'),
+                'price': pd.Series([10.5, 11.5], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+
+        def test_debug_dataframe_columnar_plan_rejects_type_drift(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00')], dtype='datetime64[ns]'),
+                'narrow_int': pd.Series([1], dtype='int32'),
+                'narrow_float': pd.Series([1.5], dtype='float32'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+            reasons = {failure['column']: failure['reason']
+                       for failure in plan['failures']}
+
+            self.assertFalse(plan['supported'])
+            self.assertIn('NumPy int64', reasons['narrow_int'])
+            self.assertIn('NumPy float64', reasons['narrow_float'])
+
+        def test_debug_dataframe_columnar_plan_rejects_unsupported_shape(self):
+            df = pd.DataFrame({
+                'tbl': ['t1'],
+                'sym': pd.Series(['a'], dtype='string[pyarrow]'),
+                'value': pd.Series([1], dtype='int64'),
+                'ts': pd.Series([pd.NaT], dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name_col='tbl', symbols=['sym'], at='ts')
+            reasons = [failure['reason'] for failure in plan['failures']]
+
+            self.assertFalse(plan['supported'])
+            self.assertTrue(any('fixed table_name' in reason
+                                for reason in reasons))
+            self.assertTrue(any('Categorical symbol' in reason
+                                for reason in reasons))
+            self.assertTrue(any('cannot contain NaT' in reason
+                                for reason in reasons))
+
+        def test_debug_dataframe_columnar_plan_accepts_v1_mixed_fast_paths(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'event_ts': pd.Series([
+                    pd.Timestamp('2024-01-02 00:00:00'),
+                    pd.Timestamp('2024-01-02 00:00:01'),
+                    pd.Timestamp('2024-01-02 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(['a', None, 'b']),
+                'label': pd.Series(
+                    pa.array(['alpha', None, 'gamma'], type=pa.string()),
+                    dtype='string[pyarrow]'),
+                'seq': pd.Series([1, 2, 3], dtype='int64'),
+                'price': pd.Series([10.5, 11.5, 12.5], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+
+        def test_debug_dataframe_columnar_plan_rejects_timestamp_only_frame(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertFalse(plan['supported'])
+            self.assertEqual(
+                [failure['reason'] for failure in plan['failures']],
+                ['v1 requires at least one non-timestamp data column.'])
+            with self.assertRaises(qi.UnsupportedDataFrameShapeError) as cm:
+                qi._bench_dataframe_plan_and_populate_column_chunks(
+                    df,
+                    table_name='trades',
+                    at='ts')
+            self.assertEqual(
+                cm.exception.column_failures,
+                ({'column': None,
+                  'target': None,
+                  'source_code': None,
+                  'reason': 'v1 requires at least one non-timestamp data column.'},))
+
+        def test_debug_dataframe_columnar_plan_reports_large_string_cast(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+                'label': pd.Series(
+                    pa.array(['alpha', 'beta'], type=pa.large_string()),
+                    dtype=pd.ArrowDtype(pa.large_string())),
+                'seq': pd.Series([1, 2], dtype='int64'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+            self.assertEqual(
+                plan['normalizations'],
+                [{
+                    'column': 'label',
+                    'target': 'string',
+                    'source_code': 402000,
+                    'action': 'arrow_large_string_cast_to_utf8',
+                    'copy_expected': True,
+                }])
+
+        def test_bench_dataframe_plan_and_populate_column_chunks(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2], dtype='int64'),
+                'price': pd.Series([10.5, 11.5], dtype='float64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                symbols=False,
+                iterations=3)
+
+            self.assertEqual(result['iterations'], 3)
+            self.assertEqual(result['row_count'], 2)
+            self.assertEqual(result['col_count'], 3)
+            self.assertEqual(result['logical_cells'], 6)
+            self.assertEqual(result['populated_chunks'], 3)
+            self.assertEqual(result['last_populated_rows'], 2)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_splits_chunks(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2, 3], dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                symbols=False,
+                iterations=2,
+                max_rows_per_chunk=2)
+
+            self.assertEqual(result['rows_per_chunk'], 2)
+            self.assertEqual(result['populated_chunks'], 4)
+            self.assertEqual(result['populated_rows_total'], 6)
+            self.assertEqual(result['last_populated_rows'], 1)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_aligns_nullable_chunks(self):
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=10, freq='s'),
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(
+                    ['a', None, 'b', 'c', None, 'a', 'b', 'c', 'a', None]),
+                'seq': pd.Series(range(10), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=3)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['populated_rows_total'], 10)
+            self.assertEqual(result['last_populated_rows'], 2)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_rejects_unsupported_shape(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00')], dtype='datetime64[ns]'),
+                'active': pd.Series([True], dtype='bool'),
+            })
+
+            with self.assertRaisesRegex(
+                    qi.UnsupportedDataFrameShapeError,
+                    'DataFrame is not supported'):
+                qi._bench_dataframe_plan_and_populate_column_chunks(
+                    df,
+                    table_name='trades',
+                    at='ts',
+                    symbols=False)
+
+        def test_bench_dataframe_plan_and_populate_mixed_fast_paths(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'event_ts': pd.Series([
+                    pd.Timestamp('2024-01-02 00:00:00'),
+                    pd.Timestamp('2024-01-02 00:00:01'),
+                    pd.Timestamp('2024-01-02 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(['a', None, 'b']),
+                'label': pd.Series(
+                    pa.array(['alpha', None, 'gamma'], type=pa.string()),
+                    dtype='string[pyarrow]'),
+                'seq': pd.Series([1, 2, 3], dtype='int64'),
+                'price': pd.Series([10.5, 11.5, 12.5], dtype='float64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=2)
+
+            self.assertEqual(result['iterations'], 2)
+            self.assertEqual(result['row_count'], 3)
+            self.assertEqual(result['col_count'], 6)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['last_populated_rows'], 3)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_u8_numpy_col(self):
             df = pd.DataFrame({'a': pd.Series([
                     1, 2, 3,

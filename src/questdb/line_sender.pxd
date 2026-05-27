@@ -22,7 +22,8 @@
 ##
 ################################################################################
 
-from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t, uint32_t, int32_t
+from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t, uint32_t, \
+    int32_t, int8_t, int16_t
 
 cdef extern from "stdbool.h":
     ctypedef unsigned char cbool "bool"
@@ -667,5 +668,240 @@ cdef extern from "questdb/ingress/line_sender.h":
     bint line_sender_opts_user_agent(
         line_sender_opts* opts,
         line_sender_utf8 user_agent,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+
+cdef extern from "questdb/ingress/column_sender.h":
+    cdef struct questdb_db:
+        pass
+
+    cdef struct column_sender:
+        pass
+
+    cdef struct column_sender_chunk:
+        pass
+
+    cdef struct column_sender_validity:
+        const uint8_t* bits
+        size_t bit_len
+
+    cdef enum column_sender_ack_level:
+        column_sender_ack_level_ok
+        column_sender_ack_level_durable
+
+    questdb_db* questdb_db_connect(
+        const char* conf,
+        size_t conf_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    void questdb_db_close(
+        questdb_db* db
+        ) noexcept nogil
+
+    column_sender* questdb_db_borrow_sender(
+        questdb_db* db,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    void questdb_db_return_sender(
+        questdb_db* db,
+        column_sender* sender
+        ) noexcept nogil
+
+    size_t questdb_db_reap_idle(
+        questdb_db* db
+        ) noexcept nogil
+
+    bint column_sender_must_close(
+        const column_sender* sender
+        ) noexcept nogil
+
+    column_sender_chunk* column_sender_chunk_new(
+        const char* table_name,
+        size_t table_name_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    void column_sender_chunk_free(
+        column_sender_chunk* chunk
+        ) noexcept nogil
+
+    void column_sender_chunk_clear(
+        column_sender_chunk* chunk
+        ) noexcept nogil
+
+    size_t column_sender_chunk_row_count(
+        const column_sender_chunk* chunk
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_i8(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int8_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_i16(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int16_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_i32(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int32_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_i64(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int64_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_f32(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const float* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_f64(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const double* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_bool(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const uint8_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_ts_nanos(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int64_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_ts_micros(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int64_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_varchar(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int32_t* offsets,
+        const uint8_t* bytes,
+        size_t bytes_len,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_symbol_dict_i8(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int8_t* codes,
+        size_t row_count,
+        const int32_t* dict_offsets,
+        size_t dict_offsets_len,
+        const uint8_t* dict_bytes,
+        size_t dict_bytes_len,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_symbol_dict_i16(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int16_t* codes,
+        size_t row_count,
+        const int32_t* dict_offsets,
+        size_t dict_offsets_len,
+        const uint8_t* dict_bytes,
+        size_t dict_bytes_len,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_symbol_dict_i32(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const int32_t* codes,
+        size_t row_count,
+        const int32_t* dict_offsets,
+        size_t dict_offsets_len,
+        const uint8_t* dict_bytes,
+        size_t dict_bytes_len,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_designated_timestamp_micros(
+        column_sender_chunk* chunk,
+        const int64_t* data,
+        size_t row_count,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_designated_timestamp_nanos(
+        column_sender_chunk* chunk,
+        const int64_t* data,
+        size_t row_count,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_flush(
+        column_sender* sender,
+        column_sender_chunk* chunk,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_sync(
+        column_sender* sender,
+        column_sender_ack_level ack_level,
         line_sender_error** err_out
         ) noexcept nogil

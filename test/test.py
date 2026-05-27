@@ -7,6 +7,7 @@ import unittest
 import datetime
 import timeit
 import time
+import threading
 from enum import Enum
 import random
 import pathlib
@@ -26,6 +27,7 @@ sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
+from qwp_ws_ack_server import QwpAckServer
 
 import questdb.ingress as qi
 
@@ -129,6 +131,281 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertNotEqual(
             qi.IngressErrorCode.BadDataFrame,
             qi.IngressErrorCode.ServerRejection)
+
+    def test_unsupported_dataframe_shape_error_carries_failures(self):
+        err = qi.UnsupportedDataFrameShapeError(
+            'unsupported frame',
+            [{'column': 'active', 'reason': 'bool_requires_packing'}])
+
+        self.assertIsInstance(err, qi.IngressError)
+        self.assertEqual(err.code, qi.IngressErrorCode.BadDataFrame)
+        self.assertEqual(
+            err.column_failures,
+            ({'column': 'active', 'reason': 'bool_requires_packing'},))
+
+    def test_client_from_conf_rejects_non_qwp_websocket(self):
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'requires a QWP/WebSocket configuration string'):
+            qi.Client.from_conf('tcp::addr=localhost:9009;')
+
+    def test_client_from_conf_requires_addr(self):
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                'Missing "addr" parameter'):
+            qi.Client.from_conf('qwpws::pool_size=1;')
+
+    def test_client_close_is_idempotent(self):
+        client = qi.Client.__new__(qi.Client)
+        client.close()
+        client.close()
+
+    def test_closed_client_methods_reject(self):
+        client = qi.Client.__new__(qi.Client)
+
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                "__enter__\\(\\) can't be called: Client is closed"):
+            with client:
+                pass
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                "reap_idle\\(\\) can't be called: Client is closed"):
+            client.reap_idle()
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                "dataframe\\(\\) can't be called: Client is closed"):
+            client.dataframe([], table_name='tbl', at=qi.ServerTimestamp)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_client_dataframe_uses_pooled_qwp_websocket_connection(self):
+        df = pd.DataFrame({
+            'ts': pd.Series([
+                pd.Timestamp('2024-01-01 00:00:00'),
+                pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+            'seq': pd.Series([1, 2], dtype='int64'),
+            'price': pd.Series([10.5, 11.5], dtype='float64'),
+        })
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.Client.from_conf(conf)
+            try:
+                for _ in range(3):
+                    client.dataframe(df, table_name='trades', at='ts')
+            finally:
+                client.close()
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['qwp1_frames'], 3)
+        self.assertEqual(stats['binary_frames'], stats['qwp1_frames'])
+        self.assertGreater(stats['binary_bytes'], 0)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_client_dataframe_rejects_timestamp_only_before_publication(self):
+        df = pd.DataFrame({
+            'ts': pd.Series([
+                pd.Timestamp('2024-01-01 00:00:00'),
+                pd.Timestamp('2024-01-01 00:00:01')],
+                dtype='datetime64[ns]'),
+        })
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.Client.from_conf(conf)
+            try:
+                with self.assertRaises(qi.UnsupportedDataFrameShapeError) as cm:
+                    client.dataframe(df, table_name='trades', at='ts')
+            finally:
+                client.close()
+
+            stats = server.snapshot()
+
+        self.assertEqual(
+            cm.exception.column_failures,
+            ({'column': None,
+              'target': None,
+              'source_code': None,
+              'reason': 'v1 requires at least one non-timestamp data column.'},))
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+        self.assertEqual(stats['qwp1_frames'], 0)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_client_close_waits_for_active_dataframe(self):
+        df = pd.DataFrame({
+            'ts': pd.Series([
+                pd.Timestamp('2024-01-01 00:00:00'),
+                pd.Timestamp('2024-01-01 00:00:01')],
+                dtype='datetime64[ns]'),
+            'seq': pd.Series([1, 2], dtype='int64'),
+        })
+
+        with QwpAckServer(ack_delay_s=0.2) as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.Client.from_conf(conf)
+            errors = []
+
+            def ingest():
+                try:
+                    client.dataframe(df, table_name='trades', at='ts')
+                except Exception as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=ingest)
+            thread.start()
+            deadline = time.monotonic() + 2
+            while (server.snapshot()['binary_frames'] == 0 and
+                   time.monotonic() < deadline):
+                time.sleep(0.01)
+            self.assertGreater(server.snapshot()['binary_frames'], 0)
+            self.assertTrue(thread.is_alive())
+
+            close_started = time.monotonic()
+            client.close()
+            close_elapsed = time.monotonic() - close_started
+            thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertGreater(close_elapsed, 0.05)
+        with self.assertRaisesRegex(
+                qi.IngressError,
+                "reap_idle\\(\\) can't be called: Client is closed"):
+            client.reap_idle()
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_client_dataframe_syncs_before_returning_after_late_flush_error(self):
+        labels = ['a'] * 64000
+        labels.append('x' * 1_200_000)
+        df = pd.DataFrame({
+            'ts': pd.date_range(
+                '2024-01-01 00:00:00',
+                periods=len(labels),
+                freq='ns'),
+            'label': pd.Series(
+                pyarrow.array(labels, type=pyarrow.string()),
+                dtype='string[pyarrow]'),
+        })
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;'
+                'max_buf_size=1000000;')
+            client = qi.Client.from_conf(conf)
+            try:
+                with self.assertRaisesRegex(
+                        qi.IngressError,
+                        'exceeds max_buf_size'):
+                    client.dataframe(df, table_name='trades', at='ts')
+            finally:
+                client.close()
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['qwp1_frames'], 3)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_real_benchmark_paths_use_qwp_websocket_ack_flow(self):
+        from benchmark_pandas_columnar import (
+            make_numeric_core,
+            run_real_client_path,
+            run_real_row_path)
+
+        df = make_numeric_core(2)
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            _samples, _cpu_samples, last = run_real_client_path(
+                df,
+                2,
+                1,
+                1,
+                conf=conf,
+                table_name='trades')
+            client_stats = server.snapshot()
+
+        self.assertEqual(last['path'], 'real-client')
+        self.assertEqual(last['chunk_plan']['row_path_cell_emissions'], 0)
+        self.assertEqual(last['rows_ingested'], 2)
+        self.assertFalse(last['columnar_io_stats']['enabled'])
+        self.assertEqual(
+            last['columnar_io_stats']['flush_calls'],
+            last['flushes'])
+        self.assertEqual(last['columnar_io_stats']['sync_calls'], 1)
+        self.assertGreaterEqual(last['columnar_io_stats']['flush_s'], 0.0)
+        self.assertGreaterEqual(last['columnar_io_stats']['sync_s'], 0.0)
+        self.assertEqual(client_stats['errors'], [])
+        self.assertEqual(client_stats['accepted_connections'], 1)
+        self.assertGreaterEqual(client_stats['qwp1_frames'], 2)
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            _samples, _cpu_samples, last = run_real_row_path(
+                df,
+                2,
+                1,
+                1,
+                conf=conf,
+                table_name='trades',
+                await_ack_ms=5000)
+            row_stats = server.snapshot()
+
+        self.assertEqual(last['path'], 'real-row')
+        self.assertTrue(last['acked'])
+        self.assertEqual(last['rows_ingested'], 2)
+        self.assertNotIn('pool_size', last['conf'])
+        self.assertNotIn('pool_max', last['conf'])
+        self.assertNotIn('pool_reap', last['conf'])
+        self.assertEqual(row_stats['errors'], [])
+        self.assertEqual(row_stats['accepted_connections'], 1)
+        self.assertGreaterEqual(row_stats['qwp1_frames'], 1)
+
+    def test_benchmark_schema_sql_report_uses_schema_table(self):
+        from benchmark_pandas_columnar import schema_sql_report
+
+        report = schema_sql_report('numeric-core')
+
+        self.assertEqual(report['schema'], 'numeric-core')
+        self.assertEqual(report['table_name'], 'bench_numeric_core')
+        self.assertEqual(
+            report['drop_sql'],
+            'DROP TABLE IF EXISTS bench_numeric_core')
+        self.assertIn(
+            'CREATE TABLE bench_numeric_core',
+            report['create_sql'])
+        self.assertIn('seq LONG', report['create_sql'])
+        self.assertIn('ts TIMESTAMP', report['create_sql'])
+        self.assertEqual(
+            report['truncate_sql'],
+            'TRUNCATE TABLE bench_numeric_core')
 
     def test_from_conf_preserves_qwpws_progress(self):
         sender = qi.Sender.from_conf(

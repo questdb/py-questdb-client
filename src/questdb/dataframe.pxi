@@ -439,6 +439,7 @@ cdef struct col_setup_t:
     col_source_t source
     meta_target_t meta_target
     col_target_t target
+    bint large_string_cast_to_utf8
 
 
 cdef struct col_t:
@@ -485,6 +486,16 @@ cdef struct col_t_arr:
     col_t* d
 
 
+cdef struct dataframe_plan_t:
+    size_t row_count
+    size_t col_count
+    line_sender_table_name c_table_name
+    int64_t at_value
+    col_t_arr cols
+    bint any_cols_need_gil
+    qdb_pystr_pos str_buf_marker
+
+
 cdef col_t_arr col_t_arr_blank() noexcept nogil:
     cdef col_t_arr arr
     arr.size = 0
@@ -512,6 +523,32 @@ cdef void col_t_arr_release(col_t_arr* arr) noexcept:
         arr.d = NULL
 
 
+cdef dataframe_plan_t dataframe_plan_blank() noexcept nogil:
+    cdef dataframe_plan_t plan
+    plan.row_count = 0
+    plan.col_count = 0
+    plan.c_table_name.buf = NULL
+    plan.c_table_name.len = 0
+    plan.at_value = 0
+    plan.cols = col_t_arr_blank()
+    plan.any_cols_need_gil = False
+    plan.str_buf_marker.chain = 0
+    plan.str_buf_marker.string = 0
+    return plan
+
+
+cdef void dataframe_plan_release(dataframe_plan_t* plan) noexcept:
+    col_t_arr_release(&plan.cols)
+    plan.row_count = 0
+    plan.col_count = 0
+    plan.c_table_name.buf = NULL
+    plan.c_table_name.len = 0
+    plan.at_value = 0
+    plan.any_cols_need_gil = False
+    plan.str_buf_marker.chain = 0
+    plan.str_buf_marker.string = 0
+
+
 cdef object _NUMPY = None  # module object
 cdef object _NUMPY_BOOL = None
 cdef object _NUMPY_UINT8 = None
@@ -531,6 +568,9 @@ cdef object _PANDAS_NA = None  # pandas.NA
 cdef object _PYARROW = None  # module object, if available or None
 
 cdef int64_t _NAT = INT64_MIN  # pandas NaT
+
+cdef bint _dataframe_count_row_path_emissions = False
+cdef uint64_t _dataframe_row_path_emissions = 0
 
 
 cdef object _dataframe_may_import_deps():
@@ -998,6 +1038,24 @@ cdef const char* _ARROW_FMT_UTF8_STRING = 'u'
 cdef const char* _ARROW_FMT_LRG_UTF8_STRING = 'U'
 
 
+cdef list _dataframe_cast_large_string_chunks_to_utf8(
+        list chunks,
+        col_t* col):
+    if (len(chunks) > 0 and chunks[0].type == _PYARROW.large_string()):
+        col.setup.large_string_cast_to_utf8 = True
+        return [chunk.cast(_PYARROW.string()) for chunk in chunks]
+    return chunks
+
+
+cdef void_int _dataframe_string_series_as_arrow(
+        PandasCol pandas_col, col_t* col) except -1:
+    _dataframe_export_arrow_chunks(
+        _dataframe_cast_large_string_chunks_to_utf8(
+            _dataframe_series_to_arrow_chunks(pandas_col),
+            col),
+        col)
+
+
 cdef void_int _dataframe_category_series_as_arrow(
         PandasCol pandas_col, col_t* col) except -1:
     cdef const char* format
@@ -1039,6 +1097,14 @@ cdef void_int _dataframe_category_series_as_arrow(
 
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
     cdef bint is_decimal_col = False
+    if arrowtype.id in (
+            _PYARROW.lib.Type_STRING,
+            _PYARROW.lib.Type_LARGE_STRING):
+        _dataframe_string_series_as_arrow(pandas_col, col)
+        col.setup.source = col_source_t.col_source_str_utf8_arrow
+        col.scale = 0
+        return 0
+
     _dataframe_series_as_arrow(pandas_col, col)
     if arrowtype.id == _PYARROW.lib.Type_DECIMAL32:
         col.setup.source = col_source_t.col_source_decimal32_arrow
@@ -1250,7 +1316,7 @@ cdef void_int _dataframe_resolve_source_and_buffers(
         _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.StringDtype):
         if dtype.storage == 'pyarrow':
-            _dataframe_series_as_arrow(pandas_col, col)
+            _dataframe_string_series_as_arrow(pandas_col, col)
             if strncmp(col.setup.arrow_schema.format, _ARROW_FMT_UTF8_STRING, 1) == 0:
                 col.setup.source = col_source_t.col_source_str_utf8_arrow
             elif strncmp(col.setup.arrow_schema.format, _ARROW_FMT_LRG_UTF8_STRING, 1) == 0:
@@ -1408,6 +1474,105 @@ cdef void_int _dataframe_resolve_args(
     _dataframe_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
     _dataframe_resolve_cols_target_name_and_dc(b, pandas_cols, cols)
     qsort(cols.d, col_count, sizeof(col_t), _dataframe_compare_cols)
+
+
+cdef void_int _dataframe_plan_build(
+        qdb_pystr_buf* b,
+        object df,
+        object table_name,
+        object table_name_col,
+        object symbols,
+        object at,
+        dataframe_plan_t* plan) except -1:
+    _dataframe_may_import_deps()
+    _dataframe_check_is_dataframe(df)
+    plan.row_count = len(df)
+    if (len(df.columns) == 0) or (plan.row_count == 0):
+        plan.col_count = 0
+        return 0
+
+    plan.col_count = len(df.columns)
+    qdb_pystr_buf_clear(b)
+    plan.cols = col_t_arr_new(plan.col_count)
+    _dataframe_resolve_args(
+        df,
+        table_name,
+        table_name_col,
+        symbols,
+        at if not isinstance(at, ServerTimestampType) else None,
+        b,
+        plan.col_count,
+        &plan.c_table_name,
+        &plan.at_value,
+        &plan.cols,
+        &plan.any_cols_need_gil)
+
+    # Headers and table names stored in `b` are borrowed by the plan.
+    # Serialization rewinds to this point for every row without dropping
+    # those borrowed strings.
+    plan.str_buf_marker = qdb_pystr_buf_tell(b)
+
+
+cdef object _dataframe_plan_debug_str(const char* buf, size_t length):
+    if buf == NULL:
+        return None
+    return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>length)
+
+
+def _debug_dataframe_plan(
+        object df,
+        *,
+        object table_name=None,
+        object table_name_col=None,
+        object symbols='auto',
+        object at=None):
+    cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+    cdef dataframe_plan_t plan = dataframe_plan_blank()
+    cdef size_t col_index
+    cdef col_t* col
+    cdef list cols = []
+    try:
+        _dataframe_plan_build(
+            b,
+            df,
+            table_name,
+            table_name_col,
+            symbols,
+            at,
+            &plan)
+        for col_index in range(plan.col_count):
+            col = &plan.cols.d[col_index]
+            cols.append({
+                'orig_index': col.setup.orig_index,
+                'orig_name': df.columns[col.setup.orig_index],
+                'target': _TARGET_NAMES[col.setup.target],
+                'target_name': _dataframe_plan_debug_str(
+                    col.name.buf,
+                    col.name.len),
+                'source_code': <int>col.setup.source,
+                'dispatch_code': <int>col.dispatch_code,
+                'large_string_cast_to_utf8': bool(
+                    col.setup.large_string_cast_to_utf8),
+            })
+        if plan.at_value == _AT_IS_SERVER_NOW:
+            at_value = 'server_now'
+        elif plan.at_value == _AT_IS_SET_BY_COLUMN:
+            at_value = 'column'
+        else:
+            at_value = plan.at_value
+        return {
+            'row_count': plan.row_count,
+            'col_count': plan.col_count,
+            'fixed_table_name': _dataframe_plan_debug_str(
+                plan.c_table_name.buf,
+                plan.c_table_name.len),
+            'at_value': at_value,
+            'any_cols_need_gil': bool(plan.any_cols_need_gil),
+            'cols': cols,
+        }
+    finally:
+        dataframe_plan_release(&plan)
+        qdb_pystr_buf_free(b)
 
 
 cdef inline bint _dataframe_arrow_get_bool(col_cursor_t* cursor) noexcept nogil:
@@ -2516,6 +2681,9 @@ cdef void_int _dataframe_serialize_cell(
         col_t* col,
         PyThreadState** gs) except -1:
     cdef col_dispatch_code_t dc = col.dispatch_code
+    global _dataframe_row_path_emissions
+    if _dataframe_count_row_path_emissions:
+        _dataframe_row_path_emissions += 1
     # Note!: Code below will generate a `switch` statement.
     # Ensure this happens! Don't break the `dc == ...` pattern.
     if dc == col_dispatch_code_t.col_dispatch_code_skip_nulls:
@@ -2722,13 +2890,7 @@ cdef void_int _dataframe(
         object table_name_col,
         object symbols,
         object at) except -1:
-    cdef size_t col_count
-    cdef line_sender_table_name c_table_name
-    cdef int64_t at_value = _AT_IS_SET_BY_COLUMN
-    cdef col_t_arr cols = col_t_arr_blank()
-    cdef bint any_cols_need_gil = False
-    cdef qdb_pystr_pos str_buf_marker
-    cdef size_t row_count
+    cdef dataframe_plan_t plan = dataframe_plan_blank()
     cdef line_sender_error* err = NULL
     cdef size_t row_index
     cdef size_t col_index
@@ -2737,51 +2899,36 @@ cdef void_int _dataframe(
     cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
     cdef bint had_gil
     cdef bint was_serializing_cell = False
-
-    _dataframe_may_import_deps()
-    _dataframe_check_is_dataframe(df)
-    row_count = len(df)
-    col_count = len(df.columns)
-    if (col_count == 0) or (row_count == 0):
-        return 0  # Nothing to do.
+    cdef bint plan_has_content
 
     try:
-        qdb_pystr_buf_clear(b)
-        cols = col_t_arr_new(col_count)
-        _dataframe_resolve_args(
+        _dataframe_plan_build(
+            b,
             df,
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, ServerTimestampType) else None,
-            b,
-            col_count,
-            &c_table_name,
-            &at_value,
-            &cols,
-            &any_cols_need_gil)
-
-        # We've used the str buffer up to a point for the headers.
-        # Instead of clearing it (which would clear the headers' memory)
-        # we will truncate (rewind) back to this position.
-        str_buf_marker = qdb_pystr_buf_tell(b)
+            at,
+            &plan)
+        if (plan.col_count == 0) or (plan.row_count == 0):
+            return 0  # Nothing to do.
         line_sender_buffer_clear_marker(ls_buf)
 
         # On error, undo all added lines.
         if not line_sender_buffer_set_marker(ls_buf, &err):
             raise c_err_to_py(err)
 
-        row_gil_blip_interval = _CELL_GIL_BLIP_INTERVAL // col_count
+        row_gil_blip_interval = _CELL_GIL_BLIP_INTERVAL // plan.col_count
         if row_gil_blip_interval < 400:  # ceiling reached at 100 columns
             row_gil_blip_interval = 400
         try:
             # Don't move this logic up! We need the GIL to execute a `try`.
             # Also we can't have any other `try` blocks between here and the
             # `finally` block.
-            if not any_cols_need_gil:
+            if not plan.any_cols_need_gil:
                 _ensure_doesnt_have_gil(&gs)
 
-            for row_index in range(row_count):
+            for row_index in range(plan.row_count):
                 if (gs == NULL) and (row_index % row_gil_blip_interval == 0):
                     # Release and re-acquire the GIL every so often.
                     # This is to allow other python threads to run.
@@ -2790,30 +2937,30 @@ cdef void_int _dataframe(
                     _ensure_doesnt_have_gil(&gs)
                     _ensure_has_gil(&gs)
 
-                qdb_pystr_buf_truncate(b, str_buf_marker)
+                qdb_pystr_buf_truncate(b, plan.str_buf_marker)
 
                 # Table-name from `table_name` arg in Python.
-                if c_table_name.buf != NULL:
-                    if not line_sender_buffer_table(ls_buf, c_table_name, &err):
+                if plan.c_table_name.buf != NULL:
+                    if not line_sender_buffer_table(ls_buf, plan.c_table_name, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 
                 # Serialize columns cells.
                 # Note: Columns are sorted: table name, symbols, fields, at.
                 was_serializing_cell = True
-                for col_index in range(col_count):
-                    col = &cols.d[col_index]
+                for col_index in range(plan.col_count):
+                    col = &plan.cols.d[col_index]
                     _dataframe_serialize_cell(ls_buf, b, col, &gs)  # may raise
                     _dataframe_col_advance(col)
                 was_serializing_cell = False
 
                 # Fixed "at" value (not from a column).
-                if at_value == _AT_IS_SERVER_NOW:
+                if plan.at_value == _AT_IS_SERVER_NOW:
                     if not line_sender_buffer_at_now(ls_buf, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
-                elif at_value >= 0:
-                    if not line_sender_buffer_at_nanos(ls_buf, at_value, &err):
+                elif plan.at_value >= 0:
+                    if not line_sender_buffer_at_nanos(ls_buf, plan.at_value, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 
@@ -2853,6 +3000,9 @@ cdef void_int _dataframe(
             raise
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
-        line_sender_buffer_clear_marker(ls_buf)
-        col_t_arr_release(&cols)
-        qdb_pystr_buf_clear(b)
+        plan_has_content = (plan.col_count != 0) and (plan.row_count != 0)
+        if plan_has_content:
+            line_sender_buffer_clear_marker(ls_buf)
+        dataframe_plan_release(&plan)
+        if plan_has_content:
+            qdb_pystr_buf_clear(b)

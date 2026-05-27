@@ -32,6 +32,7 @@ API for fast data ingestion into QuestDB.
 
 __all__ = [
     'Buffer',
+    'Client',
     'IngressError',
     'IngressErrorCode',
     'IngressServerRejectionError',
@@ -46,6 +47,7 @@ __all__ = [
     'TimestampMicros',
     'TimestampNanos',
     'TlsCa',
+    'UnsupportedDataFrameShapeError',
     'WARN_HIGH_RECONNECTS'
 ]
 
@@ -106,6 +108,13 @@ from numpy cimport NPY_DOUBLE, PyArrayObject
 from .extra_numpy cimport *
 
 cnp.import_array()
+
+cdef bint _dataframe_columnar_count_io_stats = False
+cdef uint64_t _dataframe_columnar_flush_calls = 0
+cdef uint64_t _dataframe_columnar_flush_ns = 0
+cdef uint64_t _dataframe_columnar_sync_calls = 0
+cdef uint64_t _dataframe_columnar_sync_ns = 0
+cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
 
 
 # This value is automatically updated by the `bump2version` tool.
@@ -188,6 +197,19 @@ class IngressServerRejectionError(IngressError):
     The structured server payload is available through
     :attr:`IngressError.qwp_ws_error`.
     """
+
+
+class UnsupportedDataFrameShapeError(IngressError):
+    """
+    A DataFrame shape is not supported by the optimized columnar client path.
+
+    The existing ``Sender.dataframe(...)`` row path may still support the
+    frame. ``column_failures`` carries structured per-column rejection details
+    where available.
+    """
+    def __init__(self, msg, column_failures=None):
+        super().__init__(IngressErrorCode.BadDataFrame, msg)
+        self.column_failures = tuple(column_failures or ())
 
 
 cdef inline object c_err_code_to_py(line_sender_error_code code):
@@ -628,6 +650,7 @@ cdef class TimestampNanos:
         return f'TimestampNanos({self.value})'
 
 
+cdef class Client
 cdef class Sender
 cdef class Buffer
 
@@ -2093,6 +2116,1028 @@ cdef object parse_conf_str(
 
 cdef str conf_str_value(object value):
     return str(value).replace(';', ';;')
+
+
+cdef bint _dataframe_columnar_has_single_contiguous_chunk(
+        col_t* col,
+        size_t row_count) noexcept nogil:
+    cdef ArrowArray* arr
+    if col.setup.chunks.n_chunks != 1:
+        return False
+    if col.setup.chunks.chunks == NULL:
+        return False
+    arr = &col.setup.chunks.chunks[0]
+    return (
+        arr.offset == 0 and
+        arr.length == <int64_t>row_count and
+        arr.buffers != NULL and
+        arr.buffers[1] != NULL)
+
+
+cdef bint _dataframe_columnar_i64_has_nat(
+        const int64_t* data,
+        size_t row_count) noexcept nogil:
+    cdef size_t row_index
+    for row_index in range(row_count):
+        if data[row_index] == _NAT:
+            return True
+    return False
+
+
+cdef bint _dataframe_columnar_i64_has_negative(
+        const int64_t* data,
+        size_t row_count) noexcept nogil:
+    cdef size_t row_index
+    for row_index in range(row_count):
+        if data[row_index] < 0:
+            return True
+    return False
+
+
+cdef const column_sender_validity* _dataframe_columnar_validity(
+        ArrowArray* arr,
+        size_t row_offset,
+        size_t row_count,
+        column_sender_validity* validity) except? NULL:
+    if arr.null_count == 0:
+        return NULL
+    if row_offset % 8 != 0:
+        raise RuntimeError(
+            'Columnar validity slices must start at byte-aligned row offsets.')
+    validity.bits = (<const uint8_t*>arr.buffers[0]) + (row_offset // 8)
+    validity.bit_len = row_count
+    return validity
+
+
+cdef bint _dataframe_columnar_has_validity(
+        ArrowArray* arr) noexcept nogil:
+    return arr.null_count == 0 or arr.buffers[0] != NULL
+
+
+cdef bint _dataframe_columnar_has_utf8_values(
+        ArrowArray* arr) noexcept nogil:
+    return (
+        arr.n_buffers >= 3 and
+        arr.buffers != NULL and
+        arr.buffers[1] != NULL and
+        (arr.length == 0 or arr.buffers[2] != NULL))
+
+
+cdef bint _dataframe_columnar_has_utf8_dictionary(
+        ArrowArray* arr) noexcept nogil:
+    cdef ArrowArray* dictionary = arr.dictionary
+    if dictionary == NULL:
+        return False
+    return (
+        dictionary.offset == 0 and
+        dictionary.n_buffers >= 3 and
+        dictionary.buffers != NULL and
+        dictionary.buffers[1] != NULL and
+        (dictionary.length == 0 or dictionary.buffers[2] != NULL))
+
+
+cdef bint _dataframe_columnar_plan_has_validity(
+        dataframe_plan_t* plan) noexcept nogil:
+    cdef size_t col_index
+    cdef ArrowArray* arr
+    for col_index in range(plan.col_count):
+        arr = &plan.cols.d[col_index].setup.chunks.chunks[0]
+        if arr.null_count != 0:
+            return True
+    return False
+
+
+cdef size_t _dataframe_columnar_rows_per_chunk(
+        dataframe_plan_t* plan,
+        size_t max_rows_per_chunk) noexcept nogil:
+    cdef size_t col_index
+    cdef col_t* col
+    cdef size_t rows_per_chunk
+    cdef bint has_symbol = False
+    cdef bint has_string = False
+
+    if max_rows_per_chunk != 0:
+        rows_per_chunk = max_rows_per_chunk
+    else:
+        rows_per_chunk = 250000
+        for col_index in range(plan.col_count):
+            col = &plan.cols.d[col_index]
+            if col.setup.target == col_target_t.col_target_column_str:
+                has_string = True
+            elif col.setup.target == col_target_t.col_target_symbol:
+                has_symbol = True
+        if has_string:
+            rows_per_chunk = 32000
+        elif plan.col_count > 8:
+            rows_per_chunk = 64000
+        elif has_symbol:
+            rows_per_chunk = 100000
+
+    if rows_per_chunk > 1000000:
+        rows_per_chunk = 1000000
+    if rows_per_chunk == 0:
+        rows_per_chunk = 1
+    if _dataframe_columnar_plan_has_validity(plan):
+        if rows_per_chunk < 8 and rows_per_chunk < plan.row_count:
+            rows_per_chunk = 8
+        elif rows_per_chunk > 8:
+            rows_per_chunk -= rows_per_chunk % 8
+            if rows_per_chunk == 0:
+                rows_per_chunk = 8
+    return rows_per_chunk
+
+
+cdef object _dataframe_columnar_global_failure(str reason):
+    return {
+        'column': None,
+        'target': None,
+        'source_code': None,
+        'reason': reason,
+    }
+
+
+cdef object _dataframe_columnar_col_failure(
+        object df,
+        col_t* col,
+        str reason):
+    return {
+        'column': df.columns[col.setup.orig_index],
+        'target': _TARGET_NAMES[col.setup.target],
+        'source_code': <int>col.setup.source,
+        'reason': reason,
+    }
+
+
+cdef object _dataframe_columnar_plan_normalizations(
+        object df,
+        dataframe_plan_t* plan):
+    cdef list normalizations = []
+    cdef size_t col_index
+    cdef col_t* col
+
+    for col_index in range(plan.col_count):
+        col = &plan.cols.d[col_index]
+        if col.setup.large_string_cast_to_utf8:
+            normalizations.append({
+                'column': df.columns[col.setup.orig_index],
+                'target': _TARGET_NAMES[col.setup.target],
+                'source_code': <int>col.setup.source,
+                'action': 'arrow_large_string_cast_to_utf8',
+                'copy_expected': True,
+            })
+    return normalizations
+
+
+cdef object _dataframe_columnar_plan_failures(
+        object df,
+        dataframe_plan_t* plan):
+    cdef list failures = []
+    cdef size_t col_index
+    cdef size_t field_count = 0
+    cdef col_t* col
+    cdef const int64_t* ts_data
+
+    if (plan.col_count == 0) or (plan.row_count == 0):
+        return failures
+
+    if plan.c_table_name.buf == NULL:
+        failures.append(_dataframe_columnar_global_failure(
+            'v1 requires a fixed table_name; table_name_col is not supported.'))
+
+    if plan.at_value != _AT_IS_SET_BY_COLUMN:
+        failures.append(_dataframe_columnar_global_failure(
+            'v1 requires at to be a non-null DataFrame timestamp column.'))
+
+    for col_index in range(plan.col_count):
+        col = &plan.cols.d[col_index]
+        if col.setup.target == col_target_t.col_target_skip:
+            continue
+        if col.setup.target == col_target_t.col_target_table:
+            failures.append(_dataframe_columnar_col_failure(
+                df, col, 'table-name columns are not supported in v1.'))
+            continue
+        if col.setup.target != col_target_t.col_target_at:
+            field_count += 1
+        if not _dataframe_columnar_has_single_contiguous_chunk(
+                col, plan.row_count):
+            failures.append(_dataframe_columnar_col_failure(
+                df, col, 'v1 requires one contiguous zero-offset buffer.'))
+            continue
+        if not _dataframe_columnar_has_validity(
+                &col.setup.chunks.chunks[0]):
+            failures.append(_dataframe_columnar_col_failure(
+                df, col, 'v1 requires a zero-offset validity bitmap when '
+                'nulls are present.'))
+            continue
+
+        if col.setup.target == col_target_t.col_target_column_i64:
+            if col.setup.source != col_source_t.col_source_i64_numpy:
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports NumPy int64 integer columns; narrower '
+                    'integer dtypes would change the QWP target type.'))
+        elif col.setup.target == col_target_t.col_target_column_f64:
+            if col.setup.source != col_source_t.col_source_f64_numpy:
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports NumPy float64 columns; float32 would '
+                    'change the QWP target type.'))
+        elif col.setup.target == col_target_t.col_target_column_ts:
+            if col.setup.source not in (
+                    col_source_t.col_source_dt64ns_numpy,
+                    col_source_t.col_source_dt64us_numpy):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports NumPy datetime64[ns/us] timestamp '
+                    'field columns.'))
+            else:
+                ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
+                if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
+                    failures.append(_dataframe_columnar_col_failure(
+                        df,
+                        col,
+                        'v1 timestamp field columns cannot contain NaT.'))
+                elif _dataframe_columnar_i64_has_negative(
+                        ts_data, plan.row_count):
+                    failures.append(_dataframe_columnar_col_failure(
+                        df,
+                        col,
+                        'v1 timestamp field columns cannot contain '
+                        'timestamps before the Unix epoch.'))
+        elif col.setup.target == col_target_t.col_target_column_str:
+            if col.setup.source != col_source_t.col_source_str_utf8_arrow:
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports string[pyarrow] columns backed by '
+                    'Arrow UTF-8 with int32 offsets.'))
+            elif not _dataframe_columnar_has_utf8_values(
+                    &col.setup.chunks.chunks[0]):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 requires Arrow UTF-8 offsets and byte buffers.'))
+        elif col.setup.target == col_target_t.col_target_symbol:
+            if col.setup.source not in (
+                    col_source_t.col_source_str_i8_cat,
+                    col_source_t.col_source_str_i16_cat,
+                    col_source_t.col_source_str_i32_cat):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports pandas string Categorical symbol '
+                    'columns.'))
+            elif not _dataframe_columnar_has_utf8_dictionary(
+                    &col.setup.chunks.chunks[0]):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 requires Arrow UTF-8 dictionary offsets and byte '
+                    'buffers for categorical symbols.'))
+        elif col.setup.target == col_target_t.col_target_at:
+            if col.setup.source not in (
+                    col_source_t.col_source_dt64ns_numpy,
+                    col_source_t.col_source_dt64us_numpy):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports NumPy datetime64[ns/us] designated '
+                    'timestamp columns.'))
+            else:
+                ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
+                if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
+                    failures.append(_dataframe_columnar_col_failure(
+                        df,
+                        col,
+                        'v1 designated timestamp columns cannot contain NaT.'))
+                elif _dataframe_columnar_i64_has_negative(
+                        ts_data, plan.row_count):
+                    failures.append(_dataframe_columnar_col_failure(
+                        df,
+                        col,
+                        'v1 designated timestamp columns cannot contain '
+                        'timestamps before the Unix epoch.'))
+        else:
+            failures.append(_dataframe_columnar_col_failure(
+                df,
+                col,
+                f'v1 does not support {_TARGET_NAMES[col.setup.target]} '
+                'columns.'))
+
+    if field_count == 0:
+        failures.append(_dataframe_columnar_global_failure(
+            'v1 requires at least one non-timestamp data column.'))
+
+    return failures
+
+
+cdef void_int _dataframe_columnar_validate_plan(
+        object df,
+        dataframe_plan_t* plan) except -1:
+    cdef object failures = _dataframe_columnar_plan_failures(df, plan)
+    if failures:
+        raise UnsupportedDataFrameShapeError(
+            'DataFrame is not supported by Client.dataframe() columnar v1.',
+            failures)
+
+
+cdef void_int _dataframe_columnar_append_field(
+        column_sender_chunk* chunk,
+        col_t* col,
+        size_t row_offset,
+        size_t row_count) except -1:
+    cdef line_sender_error* err = NULL
+    cdef ArrowArray* arr = &col.setup.chunks.chunks[0]
+    cdef ArrowArray* dictionary
+    cdef const void* data = arr.buffers[1]
+    cdef int32_t* offsets
+    cdef int32_t* dict_offsets
+    cdef size_t bytes_len
+    cdef size_t dict_offsets_len
+    cdef size_t dict_bytes_len
+    cdef column_sender_validity validity
+    cdef const column_sender_validity* validity_ptr = (
+        _dataframe_columnar_validity(arr, row_offset, row_count, &validity))
+    cdef bint ok = False
+
+    if col.setup.target == col_target_t.col_target_column_i64:
+        with nogil:
+            ok = column_sender_chunk_column_i64(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const int64_t*>data) + row_offset,
+                row_count,
+                validity_ptr,
+                &err)
+    elif col.setup.target == col_target_t.col_target_column_f64:
+        with nogil:
+            ok = column_sender_chunk_column_f64(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const double*>data) + row_offset,
+                row_count,
+                validity_ptr,
+                &err)
+    elif col.setup.target == col_target_t.col_target_column_ts:
+        if col.setup.source == col_source_t.col_source_dt64ns_numpy:
+            with nogil:
+                ok = column_sender_chunk_column_ts_nanos(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const int64_t*>data) + row_offset,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_dt64us_numpy:
+            with nogil:
+                ok = column_sender_chunk_column_ts_micros(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const int64_t*>data) + row_offset,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        else:
+            raise RuntimeError('Unsupported columnar timestamp field source.')
+    elif col.setup.target == col_target_t.col_target_column_str:
+        offsets = (<int32_t*>arr.buffers[1]) + row_offset
+        # Arrow offsets are monotonic, so the slice high-water offset satisfies
+        # the FFI bytes_len contract without exposing unrelated trailing bytes.
+        bytes_len = <size_t>offsets[row_count]
+        with nogil:
+            ok = column_sender_chunk_column_varchar(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                offsets,
+                <const uint8_t*>arr.buffers[2],
+                bytes_len,
+                row_count,
+                validity_ptr,
+                &err)
+    elif col.setup.target == col_target_t.col_target_symbol:
+        dictionary = arr.dictionary
+        dict_offsets = <int32_t*>dictionary.buffers[1]
+        dict_offsets_len = <size_t>dictionary.length + 1
+        dict_bytes_len = <size_t>dict_offsets[dictionary.length]
+        if col.setup.source == col_source_t.col_source_str_i8_cat:
+            with nogil:
+                ok = column_sender_chunk_symbol_dict_i8(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const int8_t*>data) + row_offset,
+                    row_count,
+                    dict_offsets,
+                    dict_offsets_len,
+                    <const uint8_t*>dictionary.buffers[2],
+                    dict_bytes_len,
+                    validity_ptr,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_str_i16_cat:
+            with nogil:
+                ok = column_sender_chunk_symbol_dict_i16(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const int16_t*>data) + row_offset,
+                    row_count,
+                    dict_offsets,
+                    dict_offsets_len,
+                    <const uint8_t*>dictionary.buffers[2],
+                    dict_bytes_len,
+                    validity_ptr,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_str_i32_cat:
+            with nogil:
+                ok = column_sender_chunk_symbol_dict_i32(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const int32_t*>data) + row_offset,
+                    row_count,
+                    dict_offsets,
+                    dict_offsets_len,
+                    <const uint8_t*>dictionary.buffers[2],
+                    dict_bytes_len,
+                    validity_ptr,
+                    &err)
+        else:
+            raise RuntimeError('Unsupported columnar symbol source.')
+    else:
+        raise RuntimeError('Unsupported columnar field target.')
+
+    if not ok:
+        raise c_err_to_py(err)
+
+
+cdef void_int _dataframe_columnar_append_at(
+        column_sender_chunk* chunk,
+        col_t* col,
+        size_t row_offset,
+        size_t row_count) except -1:
+    cdef line_sender_error* err = NULL
+    cdef const int64_t* data = <const int64_t*>(
+        col.setup.chunks.chunks[0].buffers[1])
+    cdef bint ok = False
+
+    if col.setup.source == col_source_t.col_source_dt64ns_numpy:
+        with nogil:
+            ok = column_sender_chunk_designated_timestamp_nanos(
+                chunk,
+                data + row_offset,
+                row_count,
+                &err)
+    elif col.setup.source == col_source_t.col_source_dt64us_numpy:
+        with nogil:
+            ok = column_sender_chunk_designated_timestamp_micros(
+                chunk,
+                data + row_offset,
+                row_count,
+                &err)
+    else:
+        raise RuntimeError('Unsupported columnar designated timestamp source.')
+
+    if not ok:
+        raise c_err_to_py(err)
+
+
+cdef void_int _dataframe_columnar_populate_chunk(
+        dataframe_plan_t* plan,
+        column_sender_chunk* chunk,
+        size_t row_offset,
+        size_t row_count) except -1:
+    cdef size_t col_index
+    cdef col_t* col
+    cdef col_t* at_col = NULL
+    cdef size_t field_count = 0
+
+    for col_index in range(plan.col_count):
+        col = &plan.cols.d[col_index]
+        if col.setup.target == col_target_t.col_target_at:
+            at_col = col
+        elif col.setup.target in (
+                col_target_t.col_target_column_i64,
+                col_target_t.col_target_column_f64,
+                col_target_t.col_target_column_ts,
+                col_target_t.col_target_column_str,
+                col_target_t.col_target_symbol):
+            _dataframe_columnar_append_field(
+                chunk, col, row_offset, row_count)
+            field_count += 1
+
+    if field_count == 0:
+        raise RuntimeError(
+            'Validated columnar plan has no non-timestamp data columns.')
+    if at_col == NULL:
+        raise RuntimeError('Validated columnar plan has no timestamp column.')
+    _dataframe_columnar_append_at(chunk, at_col, row_offset, row_count)
+
+
+cdef void_int _dataframe_columnar_sync(column_sender* sender) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint ok = False
+    cdef PyThreadState* gs = NULL
+    cdef uint64_t start_ns = 0
+    global _dataframe_columnar_sync_calls
+    global _dataframe_columnar_sync_ns
+    if _dataframe_columnar_count_io_stats:
+        start_ns = time.perf_counter_ns()
+    _ensure_doesnt_have_gil(&gs)
+    ok = column_sender_sync(
+        sender,
+        column_sender_ack_level.column_sender_ack_level_ok,
+        &err)
+    _ensure_has_gil(&gs)
+    if _dataframe_columnar_count_io_stats:
+        _dataframe_columnar_sync_calls += 1
+        _dataframe_columnar_sync_ns += time.perf_counter_ns() - start_ns
+    if not ok:
+        raise c_err_to_py(err)
+
+
+cdef bint _dataframe_columnar_is_deferred_capacity_error(
+        line_sender_error* err) noexcept:
+    cdef size_t msg_len = 0
+    cdef const char* msg = line_sender_error_msg(err, &msg_len)
+    if msg_len < 47:
+        return False
+    return strncmp(
+        msg,
+        "column sender deferred flush capacity exhausted",
+        47) == 0
+
+
+cdef void_int _dataframe_columnar_flush(
+        column_sender* sender,
+        column_sender_chunk* chunk,
+        bint retry_after_sync) except -1:
+    cdef line_sender_error* err = NULL
+    cdef line_sender_error_code err_code
+    cdef bint ok = False
+    cdef PyThreadState* gs = NULL
+    cdef uint64_t start_ns = 0
+    global _dataframe_columnar_flush_calls
+    global _dataframe_columnar_flush_ns
+    global _dataframe_columnar_flush_retry_syncs
+
+    if _dataframe_columnar_count_io_stats:
+        start_ns = time.perf_counter_ns()
+    _ensure_doesnt_have_gil(&gs)
+    ok = column_sender_flush(sender, chunk, &err)
+    _ensure_has_gil(&gs)
+    if _dataframe_columnar_count_io_stats:
+        _dataframe_columnar_flush_calls += 1
+        _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
+    if ok:
+        return 0
+
+    err_code = line_sender_error_get_code(err)
+    if (retry_after_sync and err_code == line_sender_error_invalid_api_call and
+            _dataframe_columnar_is_deferred_capacity_error(err)):
+        if _dataframe_columnar_count_io_stats:
+            _dataframe_columnar_flush_retry_syncs += 1
+        line_sender_error_free(err)
+        err = NULL
+        _dataframe_columnar_sync(sender)
+        if _dataframe_columnar_count_io_stats:
+            start_ns = time.perf_counter_ns()
+        _ensure_doesnt_have_gil(&gs)
+        ok = column_sender_flush(sender, chunk, &err)
+        _ensure_has_gil(&gs)
+        if _dataframe_columnar_count_io_stats:
+            _dataframe_columnar_flush_calls += 1
+            _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
+        if ok:
+            return 0
+
+    raise c_err_to_py(err)
+
+
+def _debug_dataframe_columnar_io_stats(
+        object enabled=None,
+        bint reset=False):
+    """
+    Internal benchmark hook for columnar flush/sync timing.
+    """
+    global _dataframe_columnar_count_io_stats
+    global _dataframe_columnar_flush_calls
+    global _dataframe_columnar_flush_ns
+    global _dataframe_columnar_sync_calls
+    global _dataframe_columnar_sync_ns
+    global _dataframe_columnar_flush_retry_syncs
+
+    if reset:
+        _dataframe_columnar_flush_calls = 0
+        _dataframe_columnar_flush_ns = 0
+        _dataframe_columnar_sync_calls = 0
+        _dataframe_columnar_sync_ns = 0
+        _dataframe_columnar_flush_retry_syncs = 0
+    if enabled is not None:
+        _dataframe_columnar_count_io_stats = bool(enabled)
+    return {
+        'enabled': _dataframe_columnar_count_io_stats,
+        'flush_calls': _dataframe_columnar_flush_calls,
+        'flush_s': _dataframe_columnar_flush_ns / 1_000_000_000.0,
+        'sync_calls': _dataframe_columnar_sync_calls,
+        'sync_s': _dataframe_columnar_sync_ns / 1_000_000_000.0,
+        'flush_retry_syncs': _dataframe_columnar_flush_retry_syncs,
+    }
+
+
+def _debug_dataframe_columnar_plan(
+        object df,
+        *,
+        object table_name=None,
+        object table_name_col=None,
+        object symbols='auto',
+        object at=None):
+    cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+    cdef dataframe_plan_t plan = dataframe_plan_blank()
+    cdef object failures
+    try:
+        _dataframe_plan_build(
+            b,
+            df,
+            table_name,
+            table_name_col,
+            symbols,
+            at,
+            &plan)
+        failures = _dataframe_columnar_plan_failures(df, &plan)
+        return {
+            'supported': not bool(failures),
+            'failures': failures,
+            'normalizations': _dataframe_columnar_plan_normalizations(
+                df,
+                &plan),
+        }
+    finally:
+        dataframe_plan_release(&plan)
+        qdb_pystr_buf_free(b)
+
+
+def _bench_dataframe_plan_and_populate_column_chunks(
+        object df,
+        *,
+        object table_name=None,
+        object table_name_col=None,
+        object symbols='auto',
+        object at=None,
+        size_t iterations=1,
+        size_t max_rows_per_chunk=0):
+    """
+    Internal benchmark hook for Layer 1 pandas columnar work.
+
+    This builds the shared dataframe plan and populates #148 chunks, but it
+    never flushes to a sender. It is intentionally kept out of ``__all__``.
+    """
+    cdef size_t iteration
+    cdef qdb_pystr_buf* b = NULL
+    cdef dataframe_plan_t plan
+    cdef column_sender_chunk* chunk = NULL
+    cdef line_sender_error* err = NULL
+    cdef uint64_t start_row_path_emissions
+    cdef uint64_t end_row_path_emissions
+    cdef size_t row_count = 0
+    cdef size_t col_count = 0
+    cdef size_t populated_rows = 0
+    cdef size_t populated_rows_total = 0
+    cdef size_t populated_chunks = 0
+    cdef size_t rows_per_chunk = 0
+    cdef size_t row_offset
+    cdef size_t chunk_rows
+    global _dataframe_count_row_path_emissions
+    global _dataframe_row_path_emissions
+
+    if iterations == 0:
+        raise ValueError('iterations must be greater than zero')
+
+    start_row_path_emissions = _dataframe_row_path_emissions
+    _dataframe_count_row_path_emissions = True
+    try:
+        for iteration in range(iterations):
+            b = qdb_pystr_buf_new()
+            plan = dataframe_plan_blank()
+            try:
+                _dataframe_plan_build(
+                    b,
+                    df,
+                    table_name,
+                    table_name_col,
+                    symbols,
+                    at,
+                    &plan)
+                row_count = plan.row_count
+                col_count = plan.col_count
+                if (plan.col_count == 0) or (plan.row_count == 0):
+                    continue
+
+                _dataframe_columnar_validate_plan(df, &plan)
+                rows_per_chunk = _dataframe_columnar_rows_per_chunk(
+                    &plan,
+                    max_rows_per_chunk)
+                row_offset = 0
+                while row_offset < plan.row_count:
+                    chunk_rows = rows_per_chunk
+                    if chunk_rows > plan.row_count - row_offset:
+                        chunk_rows = plan.row_count - row_offset
+                    chunk = column_sender_chunk_new(
+                        plan.c_table_name.buf,
+                        plan.c_table_name.len,
+                        &err)
+                    if chunk == NULL:
+                        raise c_err_to_py(err)
+
+                    _dataframe_columnar_populate_chunk(
+                        &plan,
+                        chunk,
+                        row_offset,
+                        chunk_rows)
+                    populated_rows = column_sender_chunk_row_count(chunk)
+                    if populated_rows != 0:
+                        populated_chunks += 1
+                        populated_rows_total += populated_rows
+                    column_sender_chunk_free(chunk)
+                    chunk = NULL
+                    row_offset += chunk_rows
+            finally:
+                if chunk != NULL:
+                    column_sender_chunk_free(chunk)
+                    chunk = NULL
+                dataframe_plan_release(&plan)
+                if b != NULL:
+                    qdb_pystr_buf_free(b)
+                    b = NULL
+    finally:
+        _dataframe_count_row_path_emissions = False
+
+    end_row_path_emissions = _dataframe_row_path_emissions
+    return {
+        'iterations': iterations,
+        'row_count': row_count,
+        'col_count': col_count,
+        'logical_cells': row_count * col_count,
+        'rows_per_chunk': rows_per_chunk,
+        'populated_chunks': populated_chunks,
+        'populated_rows_total': populated_rows_total,
+        'last_populated_rows': populated_rows,
+        'row_path_cell_emissions': (
+            end_row_path_emissions - start_row_path_emissions),
+    }
+
+
+cdef class Client:
+    """
+    Pooled QWP/WebSocket client.
+
+    This is the ownership surface for the #148 `questdb_db` pool. DataFrame
+    ingestion will borrow `column_sender` handles from this pool.
+    """
+    cdef questdb_db* _db
+    cdef object _conf_str
+    cdef object _state_cond
+    cdef size_t _active_uses
+
+    def __cinit__(self):
+        self._db = NULL
+        self._conf_str = None
+        self._state_cond = threading.Condition(threading.RLock())
+        self._active_uses = 0
+
+    cdef questdb_db* _begin_db_use(self, str method) except? NULL:
+        cdef questdb_db* db = NULL
+        self._state_cond.acquire()
+        try:
+            db = self._db
+            if db == NULL:
+                raise IngressError(
+                    IngressErrorCode.InvalidApiCall,
+                    f"{method}() can't be called: Client is closed.")
+            self._active_uses += 1
+            return db
+        finally:
+            self._state_cond.release()
+
+    cdef void _end_db_use(self) except *:
+        self._state_cond.acquire()
+        try:
+            if self._active_uses == 0:
+                raise RuntimeError('Client use counter underflow.')
+            self._active_uses -= 1
+            if self._active_uses == 0:
+                self._state_cond.notify_all()
+        finally:
+            self._state_cond.release()
+
+    @staticmethod
+    def from_conf(str conf_str):
+        """
+        Construct a pooled client from a QWP/WebSocket configuration string.
+
+        The underlying #148 pool is opened eagerly by `questdb_db_connect`.
+        """
+        cdef line_sender_error* err = NULL
+        cdef line_sender_utf8 c_conf
+        cdef object protocol
+        cdef dict params
+        cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        cdef Client client = Client.__new__(Client)
+        cdef PyThreadState* gs = NULL
+        try:
+            protocol, params = parse_conf_str(b, conf_str)
+            if protocol not in (Protocol.QwpWs, Protocol.QwpWss):
+                raise IngressError(
+                    IngressErrorCode.ConfigError,
+                    'Client.from_conf() requires a QWP/WebSocket '
+                    'configuration string: qwpws:: or qwpwss::.')
+            if params.get('addr') is None:
+                raise IngressError(
+                    IngressErrorCode.ConfigError,
+                    'Missing "addr" parameter in config string')
+
+            str_to_utf8(b, <PyObject*>conf_str, &c_conf)
+            _ensure_doesnt_have_gil(&gs)
+            client._db = questdb_db_connect(c_conf.buf, c_conf.len, &err)
+            _ensure_has_gil(&gs)
+            if client._db == NULL:
+                raise c_err_to_py(err)
+            client._conf_str = conf_str
+            return client
+        finally:
+            _ensure_has_gil(&gs)
+            qdb_pystr_buf_free(b)
+
+    def __enter__(self):
+        self._state_cond.acquire()
+        try:
+            if self._db == NULL:
+                raise IngressError(
+                    IngressErrorCode.InvalidApiCall,
+                    '__enter__() can\'t be called: Client is closed.')
+        finally:
+            self._state_cond.release()
+        return self
+
+    def dataframe(
+            self,
+            df,
+            *,
+            table_name: Optional[str] = None,
+            table_name_col: Union[None, int, str] = None,
+            symbols: Union[str, bool, List[int], List[str]] = 'auto',
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
+        """
+        Ingest a pandas DataFrame through the pooled columnar QWP path.
+
+        The initial implementation supports a conservative v1 subset:
+        fixed table name, NumPy int64/float64 fields, and a non-null NumPy
+        datetime64[ns/us] designated timestamp column.
+        """
+        cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        cdef dataframe_plan_t plan = dataframe_plan_blank()
+        cdef column_sender_chunk* chunk = NULL
+        cdef column_sender* sender = NULL
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef questdb_db* db = NULL
+        cdef bint db_use = False
+        cdef bint flushed = False
+        cdef bint sync_attempted = False
+        cdef size_t rows_per_chunk
+        cdef size_t row_offset
+        cdef size_t chunk_rows
+        db = self._begin_db_use('dataframe')
+        db_use = True
+        try:
+            _dataframe_plan_build(
+                b,
+                df,
+                table_name,
+                table_name_col,
+                symbols,
+                at,
+                &plan)
+            if (plan.col_count == 0) or (plan.row_count == 0):
+                return self
+
+            _dataframe_columnar_validate_plan(df, &plan)
+            rows_per_chunk = _dataframe_columnar_rows_per_chunk(&plan, 0)
+
+            _ensure_doesnt_have_gil(&gs)
+            sender = questdb_db_borrow_sender(db, &err)
+            _ensure_has_gil(&gs)
+            if sender == NULL:
+                raise c_err_to_py(err)
+
+            try:
+                row_offset = 0
+                while row_offset < plan.row_count:
+                    chunk_rows = rows_per_chunk
+                    if chunk_rows > plan.row_count - row_offset:
+                        chunk_rows = plan.row_count - row_offset
+                    chunk = column_sender_chunk_new(
+                        plan.c_table_name.buf,
+                        plan.c_table_name.len,
+                        &err)
+                    if chunk == NULL:
+                        raise c_err_to_py(err)
+
+                    _dataframe_columnar_populate_chunk(
+                        &plan,
+                        chunk,
+                        row_offset,
+                        chunk_rows)
+                    if column_sender_chunk_row_count(chunk) != 0:
+                        _dataframe_columnar_flush(
+                            sender,
+                            chunk,
+                            row_offset != 0)
+                        flushed = True
+                    column_sender_chunk_free(chunk)
+                    chunk = NULL
+                    row_offset += chunk_rows
+
+                sync_attempted = True
+                _dataframe_columnar_sync(sender)
+            except:
+                if (sender != NULL and flushed and not sync_attempted and
+                        not column_sender_must_close(sender)):
+                    try:
+                        _dataframe_columnar_sync(sender)
+                    except Exception:
+                        pass
+                raise
+
+            return self
+        finally:
+            _ensure_has_gil(&gs)
+            if sender != NULL:
+                questdb_db_return_sender(db, sender)
+            if chunk != NULL:
+                column_sender_chunk_free(chunk)
+            dataframe_plan_release(&plan)
+            qdb_pystr_buf_free(b)
+            if db_use:
+                self._end_db_use()
+
+    def reap_idle(self):
+        """
+        Manually reap idle above-pool-size connections.
+        """
+        cdef size_t closed
+        cdef PyThreadState* gs = NULL
+        cdef questdb_db* db = NULL
+        cdef bint db_use = False
+        db = self._begin_db_use('reap_idle')
+        db_use = True
+        try:
+            _ensure_doesnt_have_gil(&gs)
+            closed = questdb_db_reap_idle(db)
+            _ensure_has_gil(&gs)
+            return closed
+        finally:
+            _ensure_has_gil(&gs)
+            if db_use:
+                self._end_db_use()
+
+    cpdef close(self):
+        """
+        Close the client and its connection pool.
+
+        This method is idempotent.
+        """
+        cdef questdb_db* db = NULL
+        cdef PyThreadState* gs = NULL
+        self._state_cond.acquire()
+        try:
+            db = self._db
+            if db == NULL:
+                return
+            self._db = NULL
+            self._conf_str = None
+            while self._active_uses != 0:
+                self._state_cond.wait()
+        finally:
+            self._state_cond.release()
+        _ensure_doesnt_have_gil(&gs)
+        questdb_db_close(db)
+        _ensure_has_gil(&gs)
+
+    def __exit__(self, exc_type, _exc_val, _exc_tb):
+        self.close()
+
+    def __dealloc__(self):
+        if self._db != NULL:
+            questdb_db_close(self._db)
+            self._db = NULL
 
 
 cdef class Sender:
