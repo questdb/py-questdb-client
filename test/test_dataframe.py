@@ -512,22 +512,26 @@ class TestPandasBase:
             self.assertTrue(plan['supported'])
             self.assertEqual(plan['failures'], [])
 
-        def test_debug_dataframe_columnar_plan_rejects_type_drift(self):
+        def test_debug_dataframe_columnar_plan_accepts_narrow_numpy_dtypes(self):
+            # Step 3 broadened the columnar planner to accept every
+            # narrower NumPy numeric dtype + native bool. The shapes
+            # that were rejected pre-Step-3 (int8/16/32, uint*, float32,
+            # bool) all flow through the Rust widening / packing
+            # appender now.
             df = pd.DataFrame({
                 'ts': pd.Series([
                     pd.Timestamp('2024-01-01 00:00:00')], dtype='datetime64[ns]'),
                 'narrow_int': pd.Series([1], dtype='int32'),
                 'narrow_float': pd.Series([1.5], dtype='float32'),
+                'native_bool': pd.Series([True], dtype='bool'),
+                'u8': pd.Series([200], dtype='uint8'),
             })
 
             plan = qi._debug_dataframe_columnar_plan(
                 df, table_name='trades', at='ts', symbols=False)
-            reasons = {failure['column']: failure['reason']
-                       for failure in plan['failures']}
 
-            self.assertFalse(plan['supported'])
-            self.assertIn('NumPy int64', reasons['narrow_int'])
-            self.assertIn('NumPy float64', reasons['narrow_float'])
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
 
         def test_debug_dataframe_columnar_plan_rejects_unsupported_shape(self):
             df = pd.DataFrame({
@@ -757,10 +761,11 @@ class TestPandasBase:
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
         def test_bench_dataframe_plan_and_populate_rejects_unsupported_shape(self):
+            # Step 3 made bool/int32/etc. supported. Pick a shape that
+            # remains rejected: NaT in the designated timestamp.
             df = pd.DataFrame({
-                'ts': pd.Series([
-                    pd.Timestamp('2024-01-01 00:00:00')], dtype='datetime64[ns]'),
-                'active': pd.Series([True], dtype='bool'),
+                'ts': pd.Series([pd.NaT], dtype='datetime64[ns]'),
+                'seq': pd.Series([1], dtype='int64'),
             })
 
             with self.assertRaisesRegex(

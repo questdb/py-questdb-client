@@ -907,6 +907,30 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    cdef enum column_sender_numpy_dtype:
+        column_sender_numpy_i8 = 0
+        column_sender_numpy_i16 = 1
+        column_sender_numpy_i32 = 2
+        column_sender_numpy_i64 = 3
+        column_sender_numpy_u8 = 4
+        column_sender_numpy_u16 = 5
+        column_sender_numpy_u32 = 6
+        column_sender_numpy_u64 = 7
+        column_sender_numpy_f32 = 8
+        column_sender_numpy_f64 = 9
+        column_sender_numpy_bool = 10
+
+    bint column_sender_chunk_append_numpy_column(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        column_sender_numpy_dtype dtype,
+        const uint8_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint column_sender_flush(
         qwpws_conn* conn,
         column_sender_chunk* chunk,

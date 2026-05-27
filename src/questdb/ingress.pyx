@@ -2353,31 +2353,40 @@ cdef object _dataframe_columnar_plan_failures(
             continue
 
         if col.setup.target == col_target_t.col_target_column_bool:
-            if col.setup.source != col_source_t.col_source_bool_pyobj:
+            if col.setup.source not in (
+                    col_source_t.col_source_bool_pyobj,
+                    col_source_t.col_source_bool_numpy):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports object-dtype bool columns; native '
-                    'bool / Arrow bool require a packing decision.'))
+                    'v1 only supports object-dtype bool or NumPy bool '
+                    'columns; Arrow nullable bool not yet supported.'))
         elif col.setup.target == col_target_t.col_target_column_i64:
             if col.setup.source not in (
                     col_source_t.col_source_i64_numpy,
+                    col_source_t.col_source_i8_numpy,
+                    col_source_t.col_source_i16_numpy,
+                    col_source_t.col_source_i32_numpy,
+                    col_source_t.col_source_u8_numpy,
+                    col_source_t.col_source_u16_numpy,
+                    col_source_t.col_source_u32_numpy,
+                    col_source_t.col_source_u64_numpy,
                     col_source_t.col_source_int_pyobj):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy int64 or object-dtype int '
-                    'columns; narrower NumPy ints would change the QWP '
-                    'target type.'))
+                    'v1 only supports NumPy signed/unsigned int columns '
+                    'or object-dtype int columns.'))
         elif col.setup.target == col_target_t.col_target_column_f64:
             if col.setup.source not in (
                     col_source_t.col_source_f64_numpy,
+                    col_source_t.col_source_f32_numpy,
                     col_source_t.col_source_float_pyobj):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy float64 or object-dtype float '
-                    'columns; float32 would change the QWP target type.'))
+                    'v1 only supports NumPy float32/float64 or object-'
+                    'dtype float columns.'))
         elif col.setup.target == col_target_t.col_target_column_ts:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
@@ -2491,6 +2500,67 @@ cdef bint _is_pyobj_source(col_source_t source) noexcept nogil:
         source == col_source_t.col_source_int_pyobj or
         source == col_source_t.col_source_float_pyobj or
         source == col_source_t.col_source_bool_pyobj)
+
+
+cdef bint _is_numpy_widening_source(col_source_t source) noexcept nogil:
+    """True if the source goes through column_sender_chunk_append_numpy_column.
+    Excludes int64/float64 (which already match the wire type and use
+    the per-type FFI directly) and excludes pyobj sources."""
+    return (
+        source == col_source_t.col_source_bool_numpy or
+        source == col_source_t.col_source_i8_numpy or
+        source == col_source_t.col_source_i16_numpy or
+        source == col_source_t.col_source_i32_numpy or
+        source == col_source_t.col_source_u8_numpy or
+        source == col_source_t.col_source_u16_numpy or
+        source == col_source_t.col_source_u32_numpy or
+        source == col_source_t.col_source_u64_numpy or
+        source == col_source_t.col_source_f32_numpy)
+
+
+cdef size_t _numpy_dtype_element_size(
+        column_sender_numpy_dtype dtype) noexcept nogil:
+    """Byte size of one source element for `data + row_offset * element_size`."""
+    if dtype == column_sender_numpy_dtype.column_sender_numpy_bool:
+        return 1
+    elif (dtype == column_sender_numpy_dtype.column_sender_numpy_i8 or
+          dtype == column_sender_numpy_dtype.column_sender_numpy_u8):
+        return 1
+    elif (dtype == column_sender_numpy_dtype.column_sender_numpy_i16 or
+          dtype == column_sender_numpy_dtype.column_sender_numpy_u16):
+        return 2
+    elif (dtype == column_sender_numpy_dtype.column_sender_numpy_i32 or
+          dtype == column_sender_numpy_dtype.column_sender_numpy_u32 or
+          dtype == column_sender_numpy_dtype.column_sender_numpy_f32):
+        return 4
+    else:
+        return 8
+
+
+cdef column_sender_numpy_dtype _source_to_numpy_dtype(
+        col_source_t source) noexcept nogil:
+    # Caller guards via _is_numpy_widening_source first.
+    if source == col_source_t.col_source_bool_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_bool
+    elif source == col_source_t.col_source_i8_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_i8
+    elif source == col_source_t.col_source_i16_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_i16
+    elif source == col_source_t.col_source_i32_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_i32
+    elif source == col_source_t.col_source_u8_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_u8
+    elif source == col_source_t.col_source_u16_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_u16
+    elif source == col_source_t.col_source_u32_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_u32
+    elif source == col_source_t.col_source_u64_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_u64
+    elif source == col_source_t.col_source_f32_numpy:
+        return column_sender_numpy_dtype.column_sender_numpy_f32
+    else:
+        # Unreachable per _is_numpy_widening_source.
+        return column_sender_numpy_dtype.column_sender_numpy_bool
 
 
 cdef inline void _pyobj_set_validity_bit(uint8_t* bitmap, size_t row) noexcept nogil:
@@ -2864,34 +2934,72 @@ cdef void_int _dataframe_columnar_append_field(
         _dataframe_columnar_validity(arr, row_offset, row_count, &validity))
     cdef bint ok = False
 
+    cdef column_sender_numpy_dtype np_dtype
+    cdef size_t element_size
+
     if col.setup.target == col_target_t.col_target_column_bool:
-        if prebuilt == NULL:
-            raise RuntimeError(
-                'PyObject bool column missing pre-built bitmap.')
-        # Bool source is currently only bool_pyobj; the row-path's
-        # native and Arrow bool sources are not yet enabled in the
-        # columnar planner (separate decision).
-        if row_offset % 8 != 0:
-            raise RuntimeError(
-                'PyObject bool column requires byte-aligned chunk boundaries.')
-        with nogil:
-            ok = column_sender_chunk_column_bool(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const uint8_t*>prebuilt.data) + (row_offset // 8),
-                row_count,
-                NULL,
-                &err)
+        if col.setup.source == col_source_t.col_source_bool_pyobj:
+            if prebuilt == NULL:
+                raise RuntimeError(
+                    'PyObject bool column missing pre-built bitmap.')
+            if row_offset % 8 != 0:
+                raise RuntimeError(
+                    'PyObject bool column requires byte-aligned chunk boundaries.')
+            with nogil:
+                ok = column_sender_chunk_column_bool(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const uint8_t*>prebuilt.data) + (row_offset // 8),
+                    row_count,
+                    NULL,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_bool_numpy:
+            # NumPy bool is byte-per-row; Rust packs to LSB-bitmap
+            # inside column_sender_chunk_append_numpy_column.
+            with nogil:
+                ok = column_sender_chunk_append_numpy_column(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    column_sender_numpy_dtype.column_sender_numpy_bool,
+                    (<const uint8_t*>data) + row_offset,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        else:
+            raise RuntimeError('Unsupported columnar bool source.')
     elif col.setup.target == col_target_t.col_target_column_i64:
-        # Numeric int columns come from one of two sources today:
-        # NumPy int64 (data lives in arr.buffers[1]) or PyObject int
-        # (data lives in prebuilt.data after the prebuild phase).
-        if col.setup.source == col_source_t.col_source_int_pyobj:
+        # NumPy int64 (matches wire type) uses the per-type FFI;
+        # narrower NumPy ints widen via the NumPy appender; pyobj int
+        # uses the prebuild buffer.
+        if col.setup.source == col_source_t.col_source_i64_numpy:
+            with nogil:
+                ok = column_sender_chunk_column_i64(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const int64_t*>data) + row_offset,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        elif _is_numpy_widening_source(col.setup.source):
+            np_dtype = _source_to_numpy_dtype(col.setup.source)
+            element_size = _numpy_dtype_element_size(np_dtype)
+            with nogil:
+                ok = column_sender_chunk_append_numpy_column(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    np_dtype,
+                    (<const uint8_t*>data) + row_offset * element_size,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_int_pyobj:
             if prebuilt == NULL:
                 raise RuntimeError(
                     'PyObject int column missing pre-built buffer.')
-            data = prebuilt.data
             if prebuilt.has_nulls and row_offset % 8 != 0:
                 raise RuntimeError(
                     'PyObject int column with nulls requires byte-aligned '
@@ -2902,21 +3010,43 @@ cdef void_int _dataframe_columnar_append_field(
                 validity_ptr = &validity
             else:
                 validity_ptr = NULL
-        with nogil:
-            ok = column_sender_chunk_column_i64(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const int64_t*>data) + row_offset,
-                row_count,
-                validity_ptr,
-                &err)
+            with nogil:
+                ok = column_sender_chunk_column_i64(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const int64_t*>prebuilt.data) + row_offset,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        else:
+            raise RuntimeError('Unsupported columnar int source.')
     elif col.setup.target == col_target_t.col_target_column_f64:
-        if col.setup.source == col_source_t.col_source_float_pyobj:
+        if col.setup.source == col_source_t.col_source_f64_numpy:
+            with nogil:
+                ok = column_sender_chunk_column_f64(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const double*>data) + row_offset,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_f32_numpy:
+            with nogil:
+                ok = column_sender_chunk_append_numpy_column(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    column_sender_numpy_dtype.column_sender_numpy_f32,
+                    (<const uint8_t*>data) + row_offset * 4,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_float_pyobj:
             if prebuilt == NULL:
                 raise RuntimeError(
                     'PyObject float column missing pre-built buffer.')
-            data = prebuilt.data
             if prebuilt.has_nulls and row_offset % 8 != 0:
                 raise RuntimeError(
                     'PyObject float column with nulls requires byte-aligned '
@@ -2927,15 +3057,17 @@ cdef void_int _dataframe_columnar_append_field(
                 validity_ptr = &validity
             else:
                 validity_ptr = NULL
-        with nogil:
-            ok = column_sender_chunk_column_f64(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const double*>data) + row_offset,
-                row_count,
-                validity_ptr,
-                &err)
+            with nogil:
+                ok = column_sender_chunk_column_f64(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    (<const double*>prebuilt.data) + row_offset,
+                    row_count,
+                    validity_ptr,
+                    &err)
+        else:
+            raise RuntimeError('Unsupported columnar float source.')
     elif col.setup.target == col_target_t.col_target_column_ts:
         if col.setup.source == col_source_t.col_source_dt64ns_numpy:
             with nogil:

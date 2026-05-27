@@ -339,12 +339,21 @@ def _gen_string_python(rng, n):
 
 
 UNSUPPORTED_FIELD_GENS = [
-    ('int32', _gen_int32),
-    ('float32', _gen_float32),
-    ('bool', _gen_bool),
-    ('uint8', _gen_uint8),
-    ('uint64', _gen_uint64),
+    # Step 3 moved every narrower-dtype generator into the supported
+    # list below. The only remaining intentional rejection cases live
+    # in dedicated focused tests (e.g. table_name_col, NaT designated
+    # ts, non-column at), not in the fuzz frame builder.
 ]
+
+
+# Step 3 added a Rust-side widening / packing appender. Every narrower
+# NumPy numeric dtype + native bool is now supported via
+# column_sender_chunk_append_numpy_column.
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('int32', _gen_int32, 8))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('float32', _gen_float32, 8))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('bool_numpy', _gen_bool, 6))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('uint8', _gen_uint8, 6))
+SUPPORTED_FIELD_GENS_WEIGHTED.append(('uint64', _gen_uint64, 6))
 
 
 # Object-dtype int / float / bool generators.
@@ -497,10 +506,12 @@ def _build_frame(rng):
 
     cols = {'ts': ts}
 
-    # ~25% of frames include an explicitly unsupported field column.
-    # An empty df short-circuits validation entirely, so a 0-row frame
-    # with an unsupported column is still a no-op accept.
-    if rng.chance(0.25):
+    # Step 3 emptied UNSUPPORTED_FIELD_GENS — every previously-rejected
+    # narrow NumPy dtype is now accepted via the widening appender, and
+    # PyObject sources via the sniff+build path. The unsupported-column
+    # injection is preserved here for forward use if a new
+    # never-accepted dtype shows up in the future.
+    if UNSUPPORTED_FIELD_GENS and rng.chance(0.25):
         kind, gen = _weighted_pick_kv(
             rng, [(k, g, 1) for k, g in UNSUPPORTED_FIELD_GENS])
         cols[f'bad_{kind}'] = gen(rng, n_rows)
