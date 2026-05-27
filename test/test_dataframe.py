@@ -699,6 +699,63 @@ class TestPandasBase:
             self.assertEqual(result['last_populated_rows'], 2)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
+        def test_bench_dataframe_plan_and_populate_aligns_pyobj_chunks(self):
+            # Regression: PyObject-sourced columns can carry nulls (or
+            # always be bitmaps in the bool_pyobj case). The chunk-size
+            # planner must align to 8 even though the wrapping ArrowArray
+            # has null_count=0 (the pyobj wrapper hardcodes this).
+            #
+            # Without the fix, max_rows_per_chunk=3 would survive as 3
+            # and the second chunk's row_offset=3 would trip the
+            # byte-aligned-offset check in the emit branch.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=10, freq='s'),
+                    dtype='datetime64[ns]'),
+                'obj_str': pd.Series(
+                    ['a', None, 'b', 'c', None, 'a', 'b', 'c', 'a', None],
+                    dtype='object'),
+                'seq': pd.Series(range(10), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=3)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['populated_rows_total'], 10)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_aligns_bool_pyobj_chunks(self):
+            # bool_pyobj always builds a bitmap of values; the emit
+            # offsets by row_offset // 8 regardless of nulls, so the
+            # planner must require 8-row alignment for this source too.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=10, freq='s'),
+                    dtype='datetime64[ns]'),
+                'flag': pd.Series(
+                    [True, False, True, True, False] * 2,
+                    dtype='object'),
+                'seq': pd.Series(range(10), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=5)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['populated_rows_total'], 10)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_bench_dataframe_plan_and_populate_rejects_unsupported_shape(self):
             df = pd.DataFrame({
                 'ts': pd.Series([

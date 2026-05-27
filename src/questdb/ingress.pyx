@@ -2199,10 +2199,26 @@ cdef bint _dataframe_columnar_has_utf8_dictionary(
 
 cdef bint _dataframe_columnar_plan_has_validity(
         dataframe_plan_t* plan) noexcept nogil:
+    """
+    True when chunk row boundaries must be byte-aligned (multiples of 8).
+    Triggers for:
+    - Any Arrow column whose `null_count != 0` (the encoder reads a
+      validity bitmap and our slicing requires byte-alignment).
+    - Any PyObject source. The planner can't see the nulls until the
+      build phase walks the column; we conservatively assume they
+      might be present and require alignment.
+    - col_source_bool_pyobj specifically packs its VALUES into an
+      LSB-first bitmap; the emit shift `row_offset // 8` requires
+      alignment whether or not nulls are present.
+    """
     cdef size_t col_index
     cdef ArrowArray* arr
+    cdef col_t* col
     for col_index in range(plan.col_count):
-        arr = &plan.cols.d[col_index].setup.chunks.chunks[0]
+        col = &plan.cols.d[col_index]
+        if _is_pyobj_source(col.setup.source):
+            return True
+        arr = &col.setup.chunks.chunks[0]
         if arr.null_count != 0:
             return True
     return False
@@ -2872,6 +2888,9 @@ cdef void_int _dataframe_columnar_append_field(
         # NumPy int64 (data lives in arr.buffers[1]) or PyObject int
         # (data lives in prebuilt.data after the prebuild phase).
         if col.setup.source == col_source_t.col_source_int_pyobj:
+            if prebuilt == NULL:
+                raise RuntimeError(
+                    'PyObject int column missing pre-built buffer.')
             data = prebuilt.data
             if prebuilt.has_nulls and row_offset % 8 != 0:
                 raise RuntimeError(
@@ -2894,6 +2913,9 @@ cdef void_int _dataframe_columnar_append_field(
                 &err)
     elif col.setup.target == col_target_t.col_target_column_f64:
         if col.setup.source == col_source_t.col_source_float_pyobj:
+            if prebuilt == NULL:
+                raise RuntimeError(
+                    'PyObject float column missing pre-built buffer.')
             data = prebuilt.data
             if prebuilt.has_nulls and row_offset % 8 != 0:
                 raise RuntimeError(
