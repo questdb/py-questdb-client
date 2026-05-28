@@ -971,5 +971,216 @@ class TestClientDataframeFuzz(unittest.TestCase):
         self.assertEqual(cm.exception.code, qi.IngressErrorCode.ConfigError)
 
 
+# ---------------------------------------------------------------------------
+# Round-trip fuzz against a real QuestDB. Gated on QDB_REPO_PATH, matching
+# system_test.py's convention.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_for_compare(df):
+    """Project a DataFrame onto a representation that compares cleanly
+    across the QuestDB round-trip.
+
+    Drops the QuestDB-renamed designated-timestamp column (caller is
+    expected to compare it separately if needed). Coerces categorical
+    and any string-flavoured dtype to plain `object` strings. Sorts
+    columns alphabetically.
+    """
+    df = df.copy()
+    df = df.reindex(sorted(df.columns), axis=1)
+    out = {}
+    for col in df.columns:
+        s = df[col]
+        if isinstance(s.dtype, pd.CategoricalDtype):
+            out[col] = s.astype('object')
+        elif pd.api.types.is_string_dtype(s.dtype):
+            out[col] = s.astype('object')
+        elif pd.api.types.is_datetime64_any_dtype(s.dtype):
+            # Strip timezone (QuestDB always returns UTC; source may be
+            # tz-naive) and normalise to microsecond resolution to match
+            # QuestDB's TIMESTAMP precision on round-trip.
+            v = s.dt.tz_convert(None) if s.dt.tz is not None else s
+            out[col] = v.astype('datetime64[us]')
+        else:
+            out[col] = s
+    return pd.DataFrame(out)
+
+
+@unittest.skipUnless(
+    os.environ.get('QDB_REPO_PATH') and pd is not None and pa is not None,
+    'Round-trip fuzz needs a real QuestDB. Set QDB_REPO_PATH=<questdb checkout> '
+    'to enable. Matches the gating convention in system_test.py.')
+class TestClientDataframeRoundTrip(unittest.TestCase):
+    """Ingest via Client.dataframe → real QuestDB → read back via
+    Client.query → assert frame equivalence.
+
+    Set ``QDB_REPO_PATH=/path/to/questdb`` to enable. Uses a class-scoped
+    QuestDB fixture (one process; tables are dropped between iterations).
+    """
+
+    DEFAULT_ITERS = 8
+
+    @classmethod
+    def setUpClass(cls):
+        # Import the heavy fixture infra only when this test class runs.
+        import importlib
+        cls._fixture_mod = importlib.import_module('fixture')
+        repo = os.environ.get('QDB_REPO_PATH')
+        if not repo:
+            raise unittest.SkipTest(
+                'QDB_REPO_PATH required for Layer-3 fuzz')
+        install_path = cls._fixture_mod.install_questdb_from_repo(
+            __import__('pathlib').Path(repo))
+        import shutil
+        plain_dir = PROJ_ROOT / 'build' / 'questdb' / 'layer3'
+        plain_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(install_path, plain_dir, dirs_exist_ok=True)
+        cls.qdb = cls._fixture_mod.QuestDbFixture(
+            plain_dir, auth=False, http=True)
+        cls.qdb.start()
+
+        cls.iter_seed_override = _parse_int_env(ITER_SEED_ENV)
+        if cls.iter_seed_override is not None:
+            cls.master_seed = None
+            cls.iters = 1
+        else:
+            cls.master_seed = _derive_master_seed()
+            cls.iters = _parse_int_env(ITERS_ENV) or cls.DEFAULT_ITERS
+        sys.stderr.write(
+            f'>>>> Round-trip fuzz vs real QuestDB: '
+            f'master={_format_seed(cls.master_seed) if cls.master_seed else "n/a"}, '
+            f'iter_override='
+            f'{_format_seed(cls.iter_seed_override) if cls.iter_seed_override else "n/a"}, '
+            f'iters={cls.iters}\n')
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, 'qdb', None) is not None:
+            cls.qdb.stop()
+
+    @property
+    def conf(self):
+        return (f'qwpws::addr={self.qdb.host}:'
+                f'{self.qdb.http_server_port};')
+
+    def _wait_for_rows(self, table_name, expected, timeout_s=30):
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                res = self.qdb.http_sql_query(
+                    f'SELECT count() FROM {table_name}')
+            except Exception:
+                time.sleep(0.1)
+                continue
+            rows = res.get('dataset') or []
+            if rows and rows[0][0] >= expected:
+                return
+            time.sleep(0.1)
+        raise RuntimeError(
+            f'WAL apply timed out: {expected} rows expected on {table_name}')
+
+    # Round-trip generators avoid QuestDB's sentinel-value collisions:
+    # INT64_MIN aliases LONG null, NaN aliases DOUBLE null. The fuzz
+    # generators in this module deliberately sprinkle those values to
+    # exercise the wire encoder; for the Layer-3 round-trip oracle
+    # we need lossless inputs.
+    @staticmethod
+    def _gen_int64_safe(rng, n):
+        out = np.empty(n, dtype=np.int64)
+        for i in range(n):
+            out[i] = int(rng.uniform(-(1 << 50), 1 << 50))
+        return pd.Series(out)
+
+    @staticmethod
+    def _gen_float64_safe(rng, n):
+        out = np.empty(n, dtype=np.float64)
+        for i in range(n):
+            out[i] = rng.uniform(-1e6, 1e6)
+        return pd.Series(out)
+
+    def _build_simple_frame(self, rng):
+        """Hand-picked frame shapes for round-trip. Each is a
+        type-coverage probe rather than a max-entropy fuzz; this
+        keeps normalisation tractable for first-cut Layer-3."""
+        n_rows = max(rng.choice(ROW_COUNT_CHOICES), 1)
+        cols = {
+            'ts': pd.Series(_datetime_array(n_rows, 'ns')),
+            'id': pd.Series(np.arange(1, n_rows + 1, dtype=np.int64)),
+        }
+        shape = rng.choice(['numeric', 'string', 'categorical', 'mixed'])
+        if shape in ('numeric', 'mixed'):
+            cols['price'] = self._gen_float64_safe(rng, n_rows)
+            cols['count'] = self._gen_int64_safe(rng, n_rows)
+        if shape in ('string', 'mixed'):
+            cols['note'] = pd.Series(
+                _random_strings(rng, n_rows, 8, 0.0, ascii_only=True),
+                dtype='string[pyarrow]')
+        if shape in ('categorical', 'mixed'):
+            cols['sym'] = _gen_categorical(rng, n_rows)
+        return pd.DataFrame(cols), shape, n_rows
+
+    def _iter_seeds(self):
+        if self.iter_seed_override is not None:
+            return [self.iter_seed_override]
+        master = Rng(self.master_seed)
+        return [master.next_long() for _ in range(self.iters)]
+
+    def test_round_trip(self):
+        seeds = self._iter_seeds()
+        failures = []
+        for iter_idx, iter_seed in enumerate(seeds):
+            rng = Rng(iter_seed)
+            table_name = f'rt_{iter_idx}_{iter_seed:016x}'
+            try:
+                df, shape, n_rows = self._build_simple_frame(rng)
+                try:
+                    self.qdb.http_sql_query(
+                        f'DROP TABLE IF EXISTS {table_name}')
+                except Exception:
+                    pass
+                with qi.Client.from_conf(self.conf) as client:
+                    client.dataframe(df, table_name=table_name, at='ts')
+                self._wait_for_rows(table_name, n_rows)
+
+                # Read back. Project out 'ts' (renamed to 'timestamp')
+                # so the comparison stays tractable.
+                cols = [c for c in df.columns if c != 'ts']
+                sql = (f"SELECT {','.join(cols)} FROM {table_name} "
+                       f"ORDER BY id")
+                with qi.Client.from_conf(self.conf) as client:
+                    result = client.query(sql)
+                    df_out = result.to_pandas()
+
+                df_in_norm = _normalize_for_compare(
+                    df[cols].sort_values('id').reset_index(drop=True))
+                df_out_norm = _normalize_for_compare(
+                    df_out.sort_values('id').reset_index(drop=True))
+                pd.testing.assert_frame_equal(
+                    df_in_norm, df_out_norm,
+                    check_dtype=False, check_like=True)
+            except Exception as exc:
+                failures.append(
+                    (iter_seed, shape if 'shape' in locals() else '?',
+                     type(exc).__name__, repr(exc)))
+                # Try to drop the table to keep iterations independent.
+                try:
+                    self.qdb.http_sql_query(
+                        f'DROP TABLE IF EXISTS {table_name}')
+                except Exception:
+                    pass
+
+        if failures:
+            preview = '\n'.join(
+                f'  iter={_format_seed(s)} shape={sh} [{cls}]: {m}'
+                for s, sh, cls, m in failures[:5])
+            self.fail(
+                f'{len(failures)}/{len(seeds)} iterations failed.\n'
+                f'(showing first 5)\n{preview}')
+
+
+# Late imports for the round-trip class.
+import time  # noqa: E402
+
+
 if __name__ == '__main__':
     unittest.main()

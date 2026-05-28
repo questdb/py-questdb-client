@@ -37,6 +37,7 @@ __all__ = [
     'IngressErrorCode',
     'IngressServerRejectionError',
     'Protocol',
+    'QueryResult',
     'Sender',
     'QwpWsError',
     'QwpWsErrorCategory',
@@ -82,6 +83,7 @@ ctypedef int void_int
 
 import cython
 include "dataframe.pxi"
+include "egress.pxi"
 
 from enum import Enum
 from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
@@ -3669,6 +3671,54 @@ cdef class Client:
                 column_sender_chunk_free(chunk)
             dataframe_plan_release(&plan)
             qdb_pystr_buf_free(b)
+            if db_use:
+                self._end_db_use()
+
+    def query(self, str sql) -> QueryResult:
+        """
+        Execute a SQL query and return a :class:`QueryResult`.
+
+        Egress goes through the QuestDB Wire Protocol (QWP/WebSocket)
+        ``/read/v1`` endpoint. The reader connection is opened per-call,
+        independent of the ingress pool; it is closed when the returned
+        :class:`QueryResult` is consumed.
+
+        The reader conf-string is derived from the client's ingress
+        conf-string by swapping the service prefix
+        (``qwpws::`` → ``ws::``, ``qwpwss::`` → ``wss::``). Auth / TLS
+        knobs apply to both directions.
+
+        :param sql: SQL text to execute. Forwarded verbatim to QuestDB.
+
+        :return: A :class:`QueryResult`. Materialise it via
+            ``to_pandas()``, ``to_arrow()``, ``iter_arrow()``,
+            ``iter_pandas()``, or the ``__arrow_c_stream__`` PyCapsule
+            protocol.
+
+        Sentinel-value collisions in the result frame round-trip QuestDB's
+        contract: ``INT64_MIN`` in a LONG column, NaN in DOUBLE / FLOAT,
+        and the sentinel values for INT / DATE / TIMESTAMP /
+        TIMESTAMP_NS / CHAR / UUID / LONG256 / IPV4 / GEOHASH are all
+        interpreted as NULL by QuestDB and cannot be distinguished from
+        legitimate occurrences of those values.
+        """
+        # Validate Client is open. We don't borrow from the pool — egress
+        # opens its own connection — but we want the closed-client guard.
+        cdef PyThreadState* gs = NULL
+        cdef questdb_db* db = NULL
+        cdef bint db_use = False
+        cdef object reader_handle
+        cdef object cursor_handle
+        cdef str reader_conf
+        db = self._begin_db_use('query')
+        db_use = True
+        try:
+            reader_conf = _derive_reader_conf(self._conf_str)
+            _ensure_pyarrow()
+            reader_handle = _open_reader_from_conf(reader_conf)
+            cursor_handle = _execute_query(reader_handle, sql)
+            return QueryResult(cursor_handle)
+        finally:
             if db_use:
                 self._end_db_use()
 

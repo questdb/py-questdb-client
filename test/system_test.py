@@ -1898,5 +1898,220 @@ class TestWithDatabase(unittest.TestCase):
         scrubbed_data = [row[:-1] for row in resp['dataset']]
         self.assertEqual(scrubbed_data, expected_data)
 
+
+class TestEgressWithDatabase(unittest.TestCase):
+    """Live-server coverage for ``Client.query(...)``.
+
+    Reuses ``TestWithDatabase`` fixture setup. The egress reader path
+    is HTTP/QWP-only; we don't replicate the TLS+auth ingress matrix
+    since the auth fixture's QWP/HTTP endpoint is unauthenticated
+    (``http_auth=False``). Conf-string + TLS plumbing for egress is
+    derived from the ingress side; if it breaks there the existing
+    ingress matrix catches it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # Reuse the fixture lifecycle from TestWithDatabase.
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    def _conf(self):
+        return (f'qwpws::addr={self.qdb_plain.host}:'
+                f'{self.qdb_plain.http_server_port};')
+
+    def _exec(self, sql):
+        return self.qdb_plain.http_sql_query(sql)
+
+    def test_type_coverage_round_trip(self):
+        """One row, every QuestDB type we can express in SQL, read back
+        via ``Client.query``. Single WAL apply, one query, per-column
+        assertions on Arrow dtype and value.
+
+        Decimal / Array are deferred: their SQL literal syntax varies
+        across QuestDB versions and they're better verified once
+        ingress writes them too.
+        """
+        import pyarrow as pa
+        table_name = 't_egress_types_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} ('
+                'ts TIMESTAMP, '
+                'b BOOLEAN, by BYTE, sh SHORT, i INT, lg LONG, '
+                'fl FLOAT, db DOUBLE, '
+                'ts_ns TIMESTAMP_NS, dt DATE, '
+                'sym SYMBOL, vc VARCHAR, st STRING, ch CHAR, '
+                'uu UUID, l256 LONG256, ip IPV4, gh GEOHASH(8c)'
+                ') TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {table_name} VALUES ("
+                "'2024-01-01T00:00:00.000000Z', "
+                "true, 7, 700, 70000, 7000000000, "
+                "3.5, 6.5, "
+                "'2024-01-01T00:00:00.123456789Z', "
+                "'2024-01-02', "
+                "'AAA', 'varchar-value', 'string-value', 'C', "
+                "'11111111-2222-3333-4444-555555555555', "
+                "'0x0001020304050607080910111213141516171819202122232425262728293031', "
+                "'192.168.1.10', "
+                "'s00twy01'"
+                ")")
+            self.qdb_plain.retry_check_table(table_name, min_rows=1)
+
+            with qi.Client.from_conf(self._conf()) as client:
+                table = client.query(
+                    f'SELECT * FROM {table_name}').to_arrow()
+
+            self.assertEqual(table.num_rows, 1)
+            sch = table.schema
+            # Numeric / boolean primitives.
+            self.assertEqual(sch.field('b').type, pa.bool_())
+            self.assertEqual(sch.field('by').type, pa.int8())
+            self.assertEqual(sch.field('sh').type, pa.int16())
+            self.assertEqual(sch.field('i').type, pa.int32())
+            self.assertEqual(sch.field('lg').type, pa.int64())
+            self.assertEqual(sch.field('fl').type, pa.float32())
+            self.assertEqual(sch.field('db').type, pa.float64())
+            # Temporal.
+            self.assertEqual(
+                sch.field('ts').type,
+                pa.timestamp('us', tz='UTC'))
+            self.assertEqual(
+                sch.field('ts_ns').type,
+                pa.timestamp('ns', tz='UTC'))
+            self.assertEqual(
+                sch.field('dt').type,
+                pa.timestamp('ms', tz='UTC'))
+            # Strings.
+            self.assertEqual(
+                sch.field('sym').type,
+                pa.dictionary(pa.uint32(), pa.utf8()))
+            self.assertEqual(sch.field('vc').type, pa.utf8())
+            self.assertEqual(sch.field('st').type, pa.utf8())
+            self.assertEqual(sch.field('ch').type, pa.uint16())
+            # Fixed-size / extension. UUID is surfaced as pyarrow's
+            # registered Arrow `arrow.uuid` extension type (storage =
+            # FixedSizeBinary(16)).
+            uu_type = sch.field('uu').type
+            if isinstance(uu_type, pa.BaseExtensionType):
+                self.assertEqual(uu_type.extension_name, 'arrow.uuid')
+                self.assertEqual(uu_type.storage_type, pa.binary(16))
+            else:
+                self.assertEqual(uu_type, pa.binary(16))
+            self.assertEqual(
+                sch.field('l256').type, pa.binary(32))
+            self.assertEqual(sch.field('ip').type, pa.uint32())
+            # Geohash precision_bits=40 (8 chars × 5 bits) → int64.
+            self.assertEqual(sch.field('gh').type, pa.int64())
+
+            # Spot-check a few values.
+            row = table.to_pylist()[0]
+            self.assertIs(row['b'], True)
+            self.assertEqual(row['by'], 7)
+            self.assertEqual(row['sh'], 700)
+            self.assertEqual(row['i'], 70000)
+            self.assertEqual(row['lg'], 7000000000)
+            self.assertAlmostEqual(row['fl'], 3.5)
+            self.assertAlmostEqual(row['db'], 6.5)
+            self.assertEqual(row['sym'], 'AAA')
+            self.assertEqual(row['vc'], 'varchar-value')
+            self.assertEqual(row['st'], 'string-value')
+            self.assertEqual(row['ch'], ord('C'))
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_empty_result(self):
+        """A query that returns zero rows. The server still sends a
+        terminal frame; ``Client.query`` must not hang or crash.
+        Current behaviour: returns a DataFrame with zero columns (the
+        ``pa.table({})`` fallback). Pins that contract."""
+        import pandas as pd
+        table_name = 't_egress_empty_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, x LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            with qi.Client.from_conf(self._conf()) as client:
+                pdf = client.query(
+                    f'SELECT * FROM {table_name} WHERE x = 1'
+                ).to_pandas()
+            self.assertIsInstance(pdf, pd.DataFrame)
+            self.assertEqual(len(pdf), 0)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_bad_sql_raises_ingress_error(self):
+        """Server-side parse error surfaces as an ``IngressError`` from
+        ``client.query`` with a usable message."""
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError) as cm:
+                client.query(
+                    'SELECT * FROM nonexistent_table_xyz_abc_123'
+                ).to_arrow()
+        msg = str(cm.exception)
+        # Don't pin the exact message — just check the user gets
+        # something informative about the missing table.
+        self.assertTrue(
+            'nonexistent_table_xyz' in msg.lower()
+            or 'does not exist' in msg.lower()
+            or 'not found' in msg.lower()
+            or 'invalid' in msg.lower(),
+            f'expected error message to mention the missing table; '
+            f'got {msg!r}')
+
+    def test_sequential_queries_on_one_client(self):
+        """Open one Client, run several queries in sequence. Catches
+        regressions in any per-call reader/cursor lifecycle assumption.
+        Currently each call opens its own line_reader; this guards the
+        contract if pooling lands later."""
+        table_name = 't_egress_seq_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, x LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {table_name} VALUES "
+                f"('2024-01-01T00:00:00Z', 1), "
+                f"('2024-01-01T00:00:01Z', 2), "
+                f"('2024-01-01T00:00:02Z', 3)")
+            self.qdb_plain.retry_check_table(table_name, min_rows=3)
+
+            with qi.Client.from_conf(self._conf()) as client:
+                first = client.query(
+                    f'SELECT count() FROM {table_name}').to_arrow()
+                self.assertEqual(first.num_rows, 1)
+                self.assertEqual(first.column(0).to_pylist(), [3])
+
+                second = client.query(
+                    f'SELECT x FROM {table_name} ORDER BY x').to_arrow()
+                self.assertEqual(second.num_rows, 3)
+                self.assertEqual(
+                    second.column('x').to_pylist(), [1, 2, 3])
+
+                third = client.query(
+                    f'SELECT x FROM {table_name} WHERE x > 1 '
+                    f'ORDER BY x').to_arrow()
+                self.assertEqual(third.num_rows, 2)
+                self.assertEqual(
+                    third.column('x').to_pylist(), [2, 3])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+
 if __name__ == '__main__':
     unittest.main()

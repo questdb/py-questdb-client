@@ -94,7 +94,8 @@ def ingress_extension():
         extra_objects=extra_objects,
         depends=depends,
         define_macros = [
-            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')
+            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
+            ('QUESTDB_CLIENT_HAS_ARROW', '1'),
         ]
     )
 
@@ -146,7 +147,8 @@ def cargo_build():
         else:
             del env['CXX']
     subprocess.check_call(
-        cargo_args + ['--features', 'confstr-ffi,insecure-skip-verify'],
+        cargo_args + ['--features',
+            'confstr-ffi,insecure-skip-verify,sync-reader-ws,arrow'],
         cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'),
         env=env)
 

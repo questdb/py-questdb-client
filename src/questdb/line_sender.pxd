@@ -25,7 +25,7 @@
 from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t, uint32_t, \
     int32_t, int8_t, int16_t
 
-from .arrow_c_data_interface cimport ArrowArray, ArrowSchema
+from .arrow_c_data_interface cimport ArrowArray, ArrowArrayStream, ArrowSchema
 
 cdef extern from "stdbool.h":
     ctypedef unsigned char cbool "bool"
@@ -946,4 +946,107 @@ cdef extern from "questdb/ingress/column_sender.h":
         qwpws_conn* conn,
         column_sender_ack_level ack_level,
         line_sender_error** err_out
+        ) noexcept nogil
+
+
+cdef extern from "questdb/egress/line_reader.h":
+    cdef struct line_reader:
+        pass
+
+    cdef struct line_reader_query:
+        pass
+
+    cdef struct line_reader_cursor:
+        pass
+
+    cdef struct line_reader_error:
+        pass
+
+    cdef enum line_reader_error_code:
+        line_reader_error_could_not_resolve_addr = 0
+        line_reader_error_config_error = 1
+        line_reader_error_invalid_api_call = 2
+        line_reader_error_socket_error = 3
+        line_reader_error_tls_error = 4
+        line_reader_error_handshake_error = 5
+        line_reader_error_auth_error = 6
+        line_reader_error_unsupported_server = 7
+        line_reader_error_role_mismatch = 8
+        line_reader_error_protocol_error = 9
+        line_reader_error_invalid_utf8 = 10
+        line_reader_error_invalid_bind = 11
+        line_reader_error_server_schema_mismatch = 14
+        line_reader_error_server_parse_error = 15
+        line_reader_error_server_internal_error = 16
+        line_reader_error_server_security_error = 17
+        line_reader_error_limit_exceeded = 18
+        line_reader_error_server_limit_exceeded = 19
+        line_reader_error_cancelled = 20
+        line_reader_error_failover_would_duplicate = 21
+        line_reader_error_schema_drift = 22
+        line_reader_error_no_schema = 23
+        line_reader_error_arrow_export = 24
+
+    cdef enum line_reader_arrow_batch_result:
+        line_reader_arrow_batch_ok = 0
+        line_reader_arrow_batch_end = 1
+        line_reader_arrow_batch_error = 2
+
+    line_reader_error_code line_reader_error_get_code(
+        const line_reader_error* error
+        ) noexcept nogil
+
+    const char* line_reader_error_msg(
+        const line_reader_error* error,
+        size_t* len_out
+        ) noexcept nogil
+
+    void line_reader_error_free(
+        line_reader_error* error
+        ) noexcept nogil
+
+    line_reader* line_reader_from_conf(
+        line_sender_utf8 config,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    void line_reader_close(
+        line_reader* reader
+        ) noexcept nogil
+
+    line_reader_query* line_reader_prepare(
+        line_reader* reader,
+        line_sender_utf8 sql,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    void line_reader_query_free(
+        line_reader_query* query
+        ) noexcept nogil
+
+    line_reader_cursor* line_reader_query_execute(
+        line_reader_query** query_inout,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    line_reader_cursor* line_reader_execute(
+        line_reader* reader,
+        line_sender_utf8 sql,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    void line_reader_cursor_free(
+        line_reader_cursor* cursor
+        ) noexcept nogil
+
+    bint line_reader_cursor_cancel(
+        line_reader_cursor* cursor,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    line_reader_arrow_batch_result line_reader_cursor_next_arrow_batch(
+        line_reader_cursor* cursor,
+        ArrowArray* out_array,
+        ArrowSchema* out_schema,
+        line_reader_error** err_out
         ) noexcept nogil
