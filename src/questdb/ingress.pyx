@@ -164,6 +164,7 @@ class IngressErrorCode(Enum):
     ProtocolVersionError = line_sender_error_protocol_version_error
     DecimalError = line_sender_error_invalid_decimal
     BadDataFrame = <int>line_sender_error_server_rejection + 1
+    Cancelled = <int>line_sender_error_server_rejection + 2
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -3702,25 +3703,21 @@ cdef class Client:
         interpreted as NULL by QuestDB and cannot be distinguished from
         legitimate occurrences of those values.
         """
-        # Validate Client is open. We don't borrow from the pool — egress
-        # opens its own connection — but we want the closed-client guard.
-        cdef PyThreadState* gs = NULL
-        cdef questdb_db* db = NULL
-        cdef bint db_use = False
-        cdef object reader_handle
-        cdef object cursor_handle
-        cdef str reader_conf
-        db = self._begin_db_use('query')
-        db_use = True
+        # Pin the Client open across the conf-string read + reader
+        # construction. We don't borrow from the pool — egress opens
+        # its own connection — but _begin_db_use guards against a
+        # concurrent close() reading a freed _conf_str.
+        cdef _ReaderHandle reader_handle
+        cdef _CursorHandle cursor_handle
+        self._begin_db_use('query')
         try:
-            reader_conf = _derive_reader_conf(self._conf_str)
             _ensure_pyarrow()
-            reader_handle = _open_reader_from_conf(reader_conf)
+            reader_handle = _open_reader_from_conf(
+                _derive_reader_conf(self._conf_str))
             cursor_handle = _execute_query(reader_handle, sql)
-            return QueryResult(cursor_handle)
         finally:
-            if db_use:
-                self._end_db_use()
+            self._end_db_use()
+        return QueryResult(cursor_handle)
 
     def reap_idle(self):
         """

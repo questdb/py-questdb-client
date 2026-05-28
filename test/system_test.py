@@ -2070,6 +2070,71 @@ class TestEgressWithDatabase(unittest.TestCase):
             f'expected error message to mention the missing table; '
             f'got {msg!r}')
 
+    def test_dtype_backend_variants(self):
+        """Validate the three `to_pandas` mappings: default (numpy
+        primitives + new ``str`` dtype), ``pyarrow`` (ArrowDtype-backed),
+        and ``numpy_nullable`` (pandas extension types).
+
+        QuestDB BYTE column → int8/Int8Dtype/ArrowDtype(int8); LONG →
+        int64/Int64Dtype/ArrowDtype(int64); VARCHAR → str/StringDtype/
+        ArrowDtype(string). One iteration, three reads against the same
+        table.
+        """
+        import pandas as pd
+        import pyarrow as pa
+        table_name = 't_egress_dtype_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG, vc VARCHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {table_name} VALUES "
+                f"('2024-01-01T00:00:00Z', 42, 'hello')")
+            self.qdb_plain.retry_check_table(table_name, min_rows=1)
+
+            sql = f'SELECT lg, vc FROM {table_name}'
+            with qi.Client.from_conf(self._conf()) as client:
+                default = client.query(sql).to_pandas()
+                arrow_backed = client.query(sql).to_pandas(
+                    dtype_backend='pyarrow')
+                nullable = client.query(sql).to_pandas(
+                    dtype_backend='numpy_nullable')
+
+            # Default: numpy int64, new pandas 3.0 str dtype.
+            self.assertEqual(default['lg'].dtype, np.int64)
+            self.assertTrue(
+                pd.api.types.is_string_dtype(default['vc'].dtype),
+                f'expected str dtype, got {default["vc"].dtype!r}')
+
+            # pyarrow: ArrowDtype-wrapped.
+            self.assertIsInstance(
+                arrow_backed['lg'].dtype, pd.ArrowDtype)
+            self.assertEqual(
+                arrow_backed['lg'].dtype.pyarrow_dtype, pa.int64())
+            self.assertIsInstance(
+                arrow_backed['vc'].dtype, pd.ArrowDtype)
+            self.assertEqual(
+                arrow_backed['vc'].dtype.pyarrow_dtype, pa.string())
+
+            # numpy_nullable: pandas extension dtypes for primitives.
+            self.assertIsInstance(nullable['lg'].dtype, pd.Int64Dtype)
+            self.assertIsInstance(nullable['vc'].dtype, pd.StringDtype)
+
+            # Mutual-exclusion + invalid-value rejection.
+            with qi.Client.from_conf(self._conf()) as client:
+                with self.assertRaises(ValueError):
+                    client.query(sql).to_pandas(
+                        dtype_backend='pyarrow', types_mapper=lambda t: None)
+                with self.assertRaises(ValueError):
+                    client.query(sql).to_pandas(
+                        dtype_backend='not_a_thing')
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_sequential_queries_on_one_client(self):
         """Open one Client, run several queries in sequence. Catches
         regressions in any per-call reader/cursor lifecycle assumption.

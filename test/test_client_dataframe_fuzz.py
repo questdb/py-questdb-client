@@ -991,9 +991,8 @@ def _normalize_for_compare(df):
     out = {}
     for col in df.columns:
         s = df[col]
-        if isinstance(s.dtype, pd.CategoricalDtype):
-            out[col] = s.astype('object')
-        elif pd.api.types.is_string_dtype(s.dtype):
+        if (isinstance(s.dtype, pd.CategoricalDtype)
+                or pd.api.types.is_string_dtype(s.dtype)):
             out[col] = s.astype('object')
         elif pd.api.types.is_datetime64_any_dtype(s.dtype):
             # Strip timezone (QuestDB always returns UTC; source may be

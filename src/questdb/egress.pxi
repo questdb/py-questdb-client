@@ -21,8 +21,12 @@ cdef inline object _reader_err_code_to_py(line_reader_error_code code):
         return IngressErrorCode.AuthError
     if code == line_reader_error_invalid_utf8:
         return IngressErrorCode.InvalidUtf8
-    # Map every other reader-specific code to ServerFlushError as a
-    # broad bucket. Refine later if users need finer-grained handling.
+    if code == line_reader_error_cancelled:
+        return IngressErrorCode.Cancelled
+    # Map every other reader-specific code (handshake, role mismatch,
+    # protocol, invalid bind, schema drift, no schema, server-side
+    # errors, etc.) to ServerFlushError as a broad bucket. Refine
+    # later as users surface concrete distinctions.
     return IngressErrorCode.ServerFlushError
 
 
@@ -124,7 +128,7 @@ cdef object _fetch_one_batch(_CursorHandle handle, object pa_module):
     raise _reader_err_to_py(err)
 
 
-def _build_record_batch_reader(_CursorHandle cursor_handle):
+cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
     """Construct a pyarrow.RecordBatchReader over the cursor.
 
     Peeks the first batch to capture the stream schema, then yields
@@ -158,7 +162,7 @@ def _build_record_batch_reader(_CursorHandle cursor_handle):
     return pa.RecordBatchReader.from_batches(schema, _gen())
 
 
-cdef object _open_reader_from_conf(str conf_str):
+cdef _ReaderHandle _open_reader_from_conf(str conf_str):
     """Open a line_reader from a `ws::`-prefixed conf-string."""
     cdef bytes conf_bytes = conf_str.encode('utf-8')
     cdef line_sender_error* utf8_err = NULL
@@ -188,18 +192,13 @@ cdef object _open_reader_from_conf(str conf_str):
     return handle
 
 
-cdef object _execute_query(_ReaderHandle reader_handle, str sql):
+cdef _CursorHandle _execute_query(_ReaderHandle reader_handle, str sql):
     """Execute a SQL query and return a _CursorHandle."""
     cdef bytes sql_bytes = sql.encode('utf-8')
     cdef line_sender_error* utf8_err = NULL
     cdef line_sender_utf8 sql_utf8
     cdef line_reader_error* err = NULL
     cdef line_reader_cursor* cursor
-
-    if reader_handle._reader == NULL:
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
-            'reader is closed')
 
     if not line_sender_utf8_init(
             &sql_utf8,
@@ -223,7 +222,7 @@ cdef object _execute_query(_ReaderHandle reader_handle, str sql):
     return handle
 
 
-def _derive_reader_conf(str ingress_conf):
+cdef object _derive_reader_conf(str ingress_conf):
     """Convert an ingress conf-string (`qwpws::...` / `qwpwss::...`) into
     an egress reader conf-string (`ws::...` / `wss::...`).
 
@@ -237,34 +236,78 @@ def _derive_reader_conf(str ingress_conf):
         return 'wss::' + ingress_conf[len('qwpwss::'):]
     raise IngressError(
         IngressErrorCode.ConfigError,
-        'Client.query requires a qwpws:: or qwpwss:: client conf-string; '
-        f'got {ingress_conf!r}')
+        'Client was constructed from a non-QWP/WebSocket conf-string; '
+        'Client.query() requires qwpws:: or qwpwss::. '
+        f'Got {ingress_conf!r}')
 
 
 cdef object _ensure_pyarrow():
     try:
         import pyarrow
-    except ImportError as e:
+    except ImportError:
         raise IngressError(
             IngressErrorCode.InvalidApiCall,
             'pyarrow is required for Client.query(); install pyarrow >= 14')
     return pyarrow
 
 
-class QueryResult:
-    """Result of ``Client.query(sql)``. Produces pandas / pyarrow / any
-    `__arrow_c_stream__` consumer.
+_NUMPY_NULLABLE_CACHE = None
 
-    Single-use: each materialisation method (``to_pandas``, ``to_arrow``,
-    ``iter_arrow``, ``iter_pandas``, ``__arrow_c_stream__``) consumes
-    the underlying cursor. Calling more than one of them, or any of
-    them twice, raises ``IngressError``.
+
+cdef object _numpy_nullable_mapping():
+    """Return a ``types_mapper`` callable that maps Arrow primitives to
+    pandas nullable-extension dtypes (Int64Dtype, Float64Dtype, etc.).
+
+    Mirrors ``pandas.io._util._arrow_dtype_mapping``'s coverage so that
+    ``to_pandas(dtype_backend="numpy_nullable")`` here matches what
+    ``pd.read_parquet(..., dtype_backend="numpy_nullable")`` produces.
+    Non-primitive Arrow types fall through (mapper returns None) and
+    pyarrow.Table.to_pandas applies its default conversion.
+    """
+    global _NUMPY_NULLABLE_CACHE
+    if _NUMPY_NULLABLE_CACHE is None:
+        import pyarrow as pa
+        import pandas as pd
+        _NUMPY_NULLABLE_CACHE = {
+            pa.int8(): pd.Int8Dtype(),
+            pa.int16(): pd.Int16Dtype(),
+            pa.int32(): pd.Int32Dtype(),
+            pa.int64(): pd.Int64Dtype(),
+            pa.uint8(): pd.UInt8Dtype(),
+            pa.uint16(): pd.UInt16Dtype(),
+            pa.uint32(): pd.UInt32Dtype(),
+            pa.uint64(): pd.UInt64Dtype(),
+            pa.float32(): pd.Float32Dtype(),
+            pa.float64(): pd.Float64Dtype(),
+            pa.bool_(): pd.BooleanDtype(),
+            pa.string(): pd.StringDtype(),
+            pa.large_string(): pd.StringDtype(),
+        }.get
+    return _NUMPY_NULLABLE_CACHE
+
+
+class QueryResult:
+    """Result of ``Client.query(sql)``.
+
+    Streams query rows as Arrow RecordBatches. The result is **single-use**:
+    each materialisation method (``to_pandas``, ``to_arrow``, ``iter_arrow``,
+    ``iter_pandas``, or the ``__arrow_c_stream__`` PyCapsule protocol)
+    consumes the underlying cursor. Calling any of them twice — or calling
+    one after another — raises ``IngressError``.
+
+    Example::
+
+        with client.query('SELECT * FROM trades WHERE ts > $1') as result:
+            df = result.to_pandas()
+
+    The class is also a valid PyCapsule producer
+    (``pd.DataFrame.from_arrow(result)`` / ``pa.Table.from_arrow(result)``
+    / ``pl.DataFrame(result)`` / ``duckdb.from_arrow(result)``).
     """
 
     def __init__(self, _CursorHandle cursor_handle):
         self._cursor_handle = cursor_handle
         self._consumed = False
-        self._reader = None  # lazy-built pa.RecordBatchReader
 
     def _take_reader(self):
         if self._consumed:
@@ -272,9 +315,7 @@ class QueryResult:
                 IngressErrorCode.InvalidApiCall,
                 'QueryResult already consumed')
         self._consumed = True
-        if self._reader is None:
-            self._reader = _build_record_batch_reader(self._cursor_handle)
-        return self._reader
+        return _build_record_batch_reader(self._cursor_handle)
 
     def __arrow_c_stream__(self, requested_schema=None):
         reader = self._take_reader()
@@ -282,8 +323,7 @@ class QueryResult:
 
     def to_arrow(self):
         """Read the full result into a ``pyarrow.Table``."""
-        reader = self._take_reader()
-        return reader.read_all()
+        return self._take_reader().read_all()
 
     def to_pandas(self, *, dtype_backend=None, types_mapper=None):
         """Read the full result into a ``pandas.DataFrame``.
@@ -291,6 +331,12 @@ class QueryResult:
         ``dtype_backend`` / ``types_mapper`` follow the pandas core
         convention (matching ``pd.read_sql`` / ``pd.read_parquet``).
         Mutually exclusive; passing both raises ``ValueError``.
+
+        ``dtype_backend="pyarrow"`` wraps every column in
+        ``pd.ArrowDtype``. ``dtype_backend="numpy_nullable"`` maps
+        primitives to pandas nullable extension dtypes
+        (``Int64Dtype`` / ``Float64Dtype`` / ``BooleanDtype`` /
+        ``StringDtype``); other types fall back to pyarrow's defaults.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
@@ -304,31 +350,41 @@ class QueryResult:
                 import pandas as pd
                 kwargs['types_mapper'] = pd.ArrowDtype
             elif dtype_backend == 'numpy_nullable':
-                # pandas .to_pandas() doesn't accept dtype_backend; the
-                # closest knob is types_mapper to the masked variants.
-                # Punt: surface the limitation as a clear error.
-                raise NotImplementedError(
-                    'dtype_backend="numpy_nullable" is not yet '
-                    'implemented for Client.query.to_pandas()')
+                kwargs['types_mapper'] = _numpy_nullable_mapping()
             else:
                 raise ValueError(
-                    f'dtype_backend must be "pyarrow" or '
-                    f'"numpy_nullable", got {dtype_backend!r}')
+                    f'dtype_backend={dtype_backend!r} is invalid, '
+                    'only "numpy_nullable" and "pyarrow" are allowed')
         return table.to_pandas(**kwargs)
 
     def iter_arrow(self):
-        """Iterate over result batches as ``pyarrow.RecordBatch``."""
+        """Iterate result batches as ``pyarrow.RecordBatch``.
+
+        If the iterator is abandoned partway, cleanup runs at the next
+        garbage-collection cycle; call :meth:`close` (or use the context-
+        manager) for deterministic release.
+        """
         reader = self._take_reader()
         for batch in reader:
             yield batch
 
     def iter_pandas(self, **to_pandas_kwargs):
-        """Iterate over result batches as ``pandas.DataFrame``."""
+        """Iterate result batches as ``pandas.DataFrame``.
+
+        Keyword arguments are forwarded to ``pa.RecordBatch.to_pandas``.
+        """
         for batch in self.iter_arrow():
             yield batch.to_pandas(**to_pandas_kwargs)
 
     def cancel(self):
-        """Cancel the underlying cursor. Idempotent."""
+        """Ask the server to stop streaming. Idempotent.
+
+        Distinct from :meth:`close`: ``cancel`` sends a cancellation
+        frame to QuestDB so the server can drop in-flight work;
+        ``close`` only releases local resources. A subsequent batch
+        pull after ``cancel`` typically surfaces
+        ``IngressErrorCode.Cancelled``.
+        """
         cdef _CursorHandle handle = self._cursor_handle
         cdef line_reader_error* err = NULL
         cdef bint ok
@@ -336,15 +392,26 @@ class QueryResult:
             return
         with nogil:
             ok = line_reader_cursor_cancel(handle._cursor, &err)
-        if not ok and err != NULL:
-            raise _reader_err_to_py(err)
+        if not ok:
+            if err != NULL:
+                raise _reader_err_to_py(err)
+            raise IngressError(
+                IngressErrorCode.ServerFlushError,
+                'line_reader_cursor_cancel returned false '
+                'without setting err_out')
 
     def close(self):
-        """Release the cursor + reader. Idempotent."""
+        """Release the cursor + reader. Idempotent.
+
+        Does not send a cancellation frame; use :meth:`cancel` first if
+        you need the server to stop work. After ``close``, any
+        previously-returned iterator that hasn't been exhausted will
+        fail on its next pump with
+        ``IngressErrorCode.InvalidApiCall``.
+        """
         if self._cursor_handle is not None:
             self._cursor_handle._free()
         self._cursor_handle = None
-        self._reader = None
         self._consumed = True
 
     def __enter__(self):
