@@ -2279,8 +2279,9 @@ class TestEgressWithDatabase(unittest.TestCase):
     def test_sequential_queries_on_one_client(self):
         """Open one Client, run several queries in sequence. Catches
         regressions in any per-call reader/cursor lifecycle assumption.
-        Currently each call opens its own line_reader; this guards the
-        contract if pooling lands later."""
+        Pool-reuse assertions live in ``TestEgressPool`` so this test
+        stays focused on the per-query result shape.
+        """
         table_name = 't_egress_seq_' + uuid.uuid4().hex[:8]
         try:
             self._exec(
@@ -2317,6 +2318,338 @@ class TestEgressWithDatabase(unittest.TestCase):
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
             except Exception:
                 pass
+
+
+class TestEgressPool(unittest.TestCase):
+    """Structural tests for the ``questdb_db`` egress reader pool.
+
+    Asserts behaviours the per-feature tests in
+    ``TestEgressWithDatabase`` exercise the code path of but don't
+    individually pin. Concurrency tests use ``threading.Barrier`` +
+    fixed iteration counts so they're deterministic — no ``sleep``
+    or wall-clock dependencies. All tests run whenever the system-
+    test fixture is available (``QDB_REPO_PATH`` set); no separate
+    stress-mode gate.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    def _conf(self, **extra):
+        conf = (f'qwpws::addr={self.qdb_plain.host}:'
+                f'{self.qdb_plain.http_server_port};')
+        for k, v in extra.items():
+            conf += f'{k}={v};'
+        return conf
+
+    def _seed_table(self, n_rows=3):
+        """Create a small table and return its name. The pool tests
+        below all just need *something* queryable; one shared shape
+        keeps them simple."""
+        table = 't_egress_pool_' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, x LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        # Use one-second steps but stay within a single minute by
+        # rolling over via minutes — keeps SQL literals trivially
+        # valid for n_rows up to 60*60.
+        values = ','.join(
+            f"('2024-01-01T00:{i // 60:02d}:{i % 60:02d}Z', {i})"
+            for i in range(n_rows))
+        self.qdb_plain.http_sql_query(
+            f'INSERT INTO {table} VALUES {values}')
+        self.qdb_plain.retry_check_table(table, min_rows=n_rows)
+        self.addCleanup(
+            lambda: self._drop_quietly(table))
+        return table
+
+    def _drop_quietly(self, table):
+        try:
+            self.qdb_plain.http_sql_query(f'DROP TABLE IF EXISTS {table}')
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Pool reuse — the architecture's primary promise
+    # ------------------------------------------------------------------
+
+    def test_idle_grows_on_sequential_use(self):
+        """After N sequential queries on one Client the pool holds
+        exactly one idle reader. (The lifted-out pool-reuse assertion
+        previously in test_sequential_queries_on_one_client.)
+        """
+        table = self._seed_table(n_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            for _ in range(5):
+                client.query(f'SELECT count() FROM {table}').to_arrow()
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(in_use, 0)
+            self.assertEqual(
+                idle, 1,
+                f'expected 1 idle reader cached across 5 queries; '
+                f'got in_use={in_use}, idle={idle}')
+
+    # ------------------------------------------------------------------
+    # Arc<DbInner> lifeline — silent UAF if it regresses
+    # ------------------------------------------------------------------
+
+    def test_query_after_client_close_via_held_iterator(self):
+        """The architecture promises that ``Client.close()`` can free
+        the user-facing handle while a still-streaming cursor exists.
+        The ``Arc<DbInner>`` inside ``line_reader.ownership.Pooled``
+        is what keeps the pool's transport alive across that window.
+
+        We exercise it directly: open a client, start consuming a
+        query lazily, close the client mid-stream, then drain the
+        rest. A regression that replaced the Arc with a raw pointer
+        would surface as a use-after-free here.
+        """
+        table = self._seed_table(n_rows=64)
+        client = qi.Client.from_conf(self._conf())
+        try:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            it = result.iter_arrow()
+            first = next(it)
+            client.close()
+            rest = list(it)
+            total_rows = first.num_rows + sum(b.num_rows for b in rest)
+            self.assertEqual(total_rows, 64)
+        finally:
+            client.close()
+
+    # ------------------------------------------------------------------
+    # must_close — silent corruption if a broken reader gets recycled
+    # ------------------------------------------------------------------
+
+    def test_must_close_drops_broken_reader_from_pool(self):
+        """Abandoning a cursor mid-stream causes the Rust
+        ``Cursor::Drop`` to close the transport (because
+        ``cursor_active`` is still true at drop time). The Python
+        ``_ReaderHandle`` defaults to ``_must_close=True``, so on
+        dealloc the reader is dropped — not recycled — and the next
+        borrower gets a fresh handshake instead of a broken pipe.
+        """
+        import gc
+        table = self._seed_table(n_rows=64)
+        with qi.Client.from_conf(self._conf()) as client:
+            # Seed the pool with a fully-drained reader so idle==1.
+            client.query(f'SELECT count() FROM {table}').to_arrow()
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual((in_use, idle), (0, 1))
+
+            # Abandon a cursor mid-stream. The generator's `finally`
+            # frees the cursor, but `cursor_active` was still true at
+            # the time of free — so the Rust transport was torn down.
+            # The reader handle must NOT be returned to the idle list.
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            it = result.iter_arrow()
+            next(it)
+            del it
+            del result
+            gc.collect()
+
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                in_use, 0,
+                f'leaked in-use after abandon; got '
+                f'in_use={in_use}, idle={idle}')
+            self.assertEqual(
+                idle, 0,
+                f'broken reader was recycled instead of dropped; got '
+                f'in_use={in_use}, idle={idle}. A subsequent query '
+                f'would have hit a broken pipe.')
+
+            # Next query must succeed against a fresh reader.
+            result = client.query(
+                f'SELECT count() FROM {table}').to_arrow()
+            self.assertEqual(result.column(0).to_pylist(), [64])
+            # Pool re-grew by one for the fresh borrow.
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual((in_use, idle), (0, 1))
+
+    # ------------------------------------------------------------------
+    # pool_max — the InvalidApiCall("pool exhausted") error path
+    # ------------------------------------------------------------------
+
+    def test_pool_max_exhausted_raises_not_hangs(self):
+        """When the pool is at ``pool_max`` and a second borrow is
+        attempted, the Rust side returns
+        ``InvalidApiCall("Reader pool exhausted")``. Verify it
+        surfaces as an ``IngressError``, not a hang or generic
+        socket error."""
+        table = self._seed_table(n_rows=64)
+        conf = self._conf(pool_size='1', pool_max='1')
+        with qi.Client.from_conf(conf) as client:
+            # Hold one reader by starting an iterator and not
+            # exhausting it.
+            held_result = client.query(
+                f'SELECT x FROM {table} ORDER BY x')
+            held_it = held_result.iter_arrow()
+            next(held_it)
+            try:
+                in_use, _ = qi._debug_egress_pool_stats(client)
+                self.assertEqual(
+                    in_use, 1,
+                    f'expected 1 in-use reader for the held cursor; '
+                    f'got in_use={in_use}')
+
+                # Second borrow must error, not block.
+                with self.assertRaises(qi.IngressError) as cm:
+                    client.query(
+                        f'SELECT count() FROM {table}').to_arrow()
+                msg = str(cm.exception).lower()
+                self.assertTrue(
+                    'exhausted' in msg or 'pool' in msg,
+                    f'expected pool-exhaustion message; got '
+                    f'{cm.exception!r}')
+            finally:
+                # Drain the held iterator so the pool is releaseable.
+                list(held_it)
+
+    # ------------------------------------------------------------------
+    # Conf-string acceptance — BLOCKER 1 of the thermo-nuclear review
+    # ------------------------------------------------------------------
+
+    def test_pool_conf_keys_accepted_by_reader(self):
+        """The reader's conf parser was extended to accept ``qwpws::``
+        / ``qwpwss::`` schemes and ignore ``pool_*`` keys. Verify
+        that a pool-configured Client produces a working egress
+        reader (a regression in the accept list would surface as a
+        ConfigError on the first ``query()``).
+        """
+        table = self._seed_table(n_rows=3)
+        conf = self._conf(
+            pool_size='2',
+            pool_max='4',
+            pool_idle_timeout_ms='30000',
+            pool_reap='manual')
+        with qi.Client.from_conf(conf) as client:
+            r = client.query(f'SELECT count() FROM {table}').to_arrow()
+            self.assertEqual(r.column(0).to_pylist(), [3])
+
+    # ------------------------------------------------------------------
+    # Concurrency — Barrier-synced, no sleep, deterministic
+    # ------------------------------------------------------------------
+
+    def test_concurrent_queries_share_pool(self):
+        """N threads × M queries on one Client with ``pool_size=K``.
+        Asserts: no exceptions; pool grew at most to ``K``; all
+        readers returned (``in_use==0`` at end); pool stays under
+        ``pool_max``.
+        """
+        import threading
+        table = self._seed_table(n_rows=3)
+        conf = self._conf(pool_size='4', pool_max='8')
+        n_threads = 8
+        per_thread = 25
+        sql = f'SELECT count() FROM {table}'
+
+        errors = []
+        ready = threading.Barrier(n_threads)
+
+        def worker(client):
+            try:
+                ready.wait(timeout=30)
+                for _ in range(per_thread):
+                    client.query(sql).to_arrow()
+            except BaseException as e:
+                errors.append(repr(e))
+
+        with qi.Client.from_conf(conf) as client:
+            threads = [
+                threading.Thread(target=worker, args=(client,))
+                for _ in range(n_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+
+            self.assertEqual(
+                errors, [],
+                f'{len(errors)}/{n_threads} workers errored: '
+                f'{errors[:3]}')
+            for t in threads:
+                self.assertFalse(t.is_alive(), 'worker thread hung')
+
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                in_use, 0,
+                f'workers returned but in_use={in_use}, '
+                f'idle={idle}')
+            self.assertGreaterEqual(idle, 1)
+            self.assertLessEqual(
+                idle, 8,
+                f'idle={idle} exceeds pool_max=8 — auto-grow '
+                f'overshot or returns leaked readers')
+
+    def test_long_running_stream_does_not_starve_other_queries(self):
+        """Thread A holds a streaming cursor across a Barrier (one
+        batch pulled, one pending). Thread B runs M short queries on
+        the same Client. The pool must auto-grow to a second reader
+        for B; B must not wait for A. Pure correctness assertion;
+        no timing comparison.
+        """
+        import threading
+        table = self._seed_table(n_rows=64)
+        conf = self._conf(pool_size='2', pool_max='4')
+
+        a_progress = threading.Event()
+        b_done = threading.Event()
+        errors = []
+        b_query_count = 16
+
+        with qi.Client.from_conf(conf) as client:
+            def slow_a():
+                try:
+                    result = client.query(
+                        f'SELECT x FROM {table} ORDER BY x')
+                    it = result.iter_arrow()
+                    next(it)
+                    a_progress.set()
+                    # Wait for B to finish before draining the rest.
+                    self.assertTrue(b_done.wait(timeout=60))
+                    list(it)  # drain
+                except BaseException as e:
+                    errors.append(('A', repr(e)))
+
+            def fast_b():
+                try:
+                    self.assertTrue(a_progress.wait(timeout=30))
+                    for _ in range(b_query_count):
+                        client.query(
+                            f'SELECT count() FROM {table}').to_arrow()
+                    b_done.set()
+                except BaseException as e:
+                    errors.append(('B', repr(e)))
+                    b_done.set()
+
+            ta = threading.Thread(target=slow_a)
+            tb = threading.Thread(target=fast_b)
+            ta.start()
+            tb.start()
+            ta.join(timeout=60)
+            tb.join(timeout=60)
+
+            self.assertEqual(
+                errors, [],
+                f'thread errored: {errors[:3]}')
+            self.assertFalse(ta.is_alive(), 'thread A hung')
+            self.assertFalse(tb.is_alive(), 'thread B hung')
+
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(in_use, 0)
+            # Pool must have grown to at least 2 (A held one, B
+            # borrowed at least one more).
+            self.assertGreaterEqual(
+                idle, 1,
+                f'pool did not retain any idle reader; '
+                f'in_use={in_use}, idle={idle}')
 
 
 if __name__ == '__main__':

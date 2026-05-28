@@ -1050,3 +1050,30 @@ cdef extern from "questdb/egress/line_reader.h":
         ArrowSchema* out_schema,
         line_reader_error** err_out
         ) noexcept nogil
+
+    void line_reader_mark_must_close(
+        line_reader* reader
+        ) noexcept nogil
+
+    # Reader-pool entry points. Same FFI surface as questdb_db_*_conn
+    # but for line_reader handles. Live here (alongside line_reader)
+    # because they wrap/unwrap line_reader instances; the questdb_db
+    # opaque is forward-declared from the column_sender extern block
+    # above.
+    line_reader* questdb_db_borrow_reader(
+        questdb_db* db,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    void questdb_db_return_reader(
+        questdb_db* db,
+        line_reader* reader
+        ) noexcept nogil
+
+    size_t questdb_db_reader_free_count(
+        questdb_db* db
+        ) noexcept nogil
+
+    size_t questdb_db_reader_in_use_count(
+        questdb_db* db
+        ) noexcept nogil

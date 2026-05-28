@@ -46,19 +46,50 @@ cdef inline object _reader_err_to_py(line_reader_error* err):
 
 
 cdef class _ReaderHandle:
-    """Owns a ``line_reader*``. Closed on dealloc."""
+    """Owns a ``line_reader*``.
+
+    On dealloc the reader either returns to its pool or is dropped,
+    depending on the ``line_reader``'s own ownership tag (set when it
+    was constructed — see ``ReaderOwnership`` in the Rust FFI):
+
+    - Pool-borrowed readers go back to the pool unless
+      ``_must_close`` was set, in which case the pool drops them.
+    - Standalone readers (from ``line_reader_from_conf``) are always
+      dropped.
+
+    The Python side carries only one extra bit of state —
+    ``_must_close`` — which it forwards to the FFI via
+    ``line_reader_mark_must_close`` before calling close. We never
+    hold a raw ``questdb_db*`` pointer here: the line_reader struct
+    holds an ``Arc<DbInner>`` internally, so the pool stays alive
+    even if the user's ``Client.close()`` ran after ``query()``
+    returned but before the reader dealloced.
+
+    ``_must_close`` defaults to ``True``: only the generator's
+    clean-drain path (or code that explicitly knows the cursor
+    reached terminal) clears it. Any error path or abandon-without-
+    consume path forces the reader to drop, since the Rust
+    Cursor::Drop closes the transport whenever ``cursor_active`` is
+    still set at drop time — recycling such a reader would hand the
+    next borrower a broken pipe.
+    """
     cdef line_reader* _reader
+    cdef bint _must_close
 
     def __cinit__(self):
         self._reader = NULL
+        self._must_close = True
 
     cdef _attach(self, line_reader* reader):
         self._reader = reader
 
     cdef void _close(self) noexcept:
-        if self._reader != NULL:
-            line_reader_close(self._reader)
-            self._reader = NULL
+        if self._reader == NULL:
+            return
+        if self._must_close:
+            line_reader_mark_must_close(self._reader)
+        line_reader_close(self._reader)
+        self._reader = NULL
 
     def __dealloc__(self):
         self._close()
@@ -141,7 +172,9 @@ cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
 
     first = _fetch_one_batch(cursor_handle, pa)
     if first is None:
-        # Empty result: no schema to anchor a RecordBatchReader.
+        # Empty result: cursor already reached terminal cleanly.
+        # Safe to return the reader to its pool.
+        _mark_reader_drained(cursor_handle)
         cursor_handle._free()
         empty = pa.table({})
         return empty.to_reader()
@@ -154,6 +187,8 @@ cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
             while True:
                 nxt = _fetch_one_batch(cursor_handle, pa)
                 if nxt is None:
+                    # Reached terminal cleanly; reader is reusable.
+                    _mark_reader_drained(cursor_handle)
                     return
                 yield nxt
         finally:
@@ -162,31 +197,38 @@ cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
     return pa.RecordBatchReader.from_batches(schema, _gen())
 
 
-cdef _ReaderHandle _open_reader_from_conf(str conf_str):
-    """Open a line_reader from a `ws::`-prefixed conf-string."""
-    cdef bytes conf_bytes = conf_str.encode('utf-8')
-    cdef line_sender_error* utf8_err = NULL
-    cdef line_sender_utf8 conf_utf8
+cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
+    """Tell the reader handle it's safe to return to its pool on dealloc.
+
+    The Rust Cursor::Drop closes the underlying transport whenever
+    ``cursor_active`` is still set. Only call this once the cursor has
+    reached its terminal frame (``_end``) — otherwise the next pool
+    borrower would see a broken pipe.
+    """
+    if cursor_handle is None:
+        return
+    cdef _ReaderHandle reader = cursor_handle._reader_ref
+    if reader is not None:
+        reader._must_close = False
+
+
+cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
+    """Borrow a reader from the Rust-side ``questdb_db`` pool.
+
+    Wraps ``questdb_db_borrow_reader`` and packs the result into a
+    :class:`_ReaderHandle` that knows it came from this pool, so
+    its dealloc returns/drops via the matching FFI.
+    """
     cdef line_reader_error* err = NULL
-    cdef line_reader* reader
-
-    if not line_sender_utf8_init(
-            &conf_utf8,
-            <size_t>len(conf_bytes),
-            <const char*><char*>conf_bytes,
-            &utf8_err):
-        raise c_err_to_py(utf8_err)
-
+    cdef line_reader* reader = NULL
     with nogil:
-        reader = line_reader_from_conf(conf_utf8, &err)
-
+        reader = questdb_db_borrow_reader(db, &err)
     if reader == NULL:
         if err == NULL:
             raise IngressError(
-                IngressErrorCode.ConfigError,
-                'line_reader_from_conf returned NULL without setting err')
+                IngressErrorCode.ServerFlushError,
+                'questdb_db_borrow_reader returned NULL without setting err')
         raise _reader_err_to_py(err)
-
     cdef _ReaderHandle handle = _ReaderHandle()
     handle._attach(reader)
     return handle
@@ -220,25 +262,6 @@ cdef _CursorHandle _execute_query(_ReaderHandle reader_handle, str sql):
     cdef _CursorHandle handle = _CursorHandle()
     handle._attach(cursor, reader_handle)
     return handle
-
-
-cdef object _derive_reader_conf(str ingress_conf):
-    """Convert an ingress conf-string (`qwpws::...` / `qwpwss::...`) into
-    an egress reader conf-string (`ws::...` / `wss::...`).
-
-    Only the service prefix changes; all key=value parameters are
-    forwarded verbatim. Users with mixed endpoints can pass an
-    explicit reader conf to ``Client.from_conf`` instead.
-    """
-    if ingress_conf.startswith('qwpws::'):
-        return 'ws::' + ingress_conf[len('qwpws::'):]
-    if ingress_conf.startswith('qwpwss::'):
-        return 'wss::' + ingress_conf[len('qwpwss::'):]
-    raise IngressError(
-        IngressErrorCode.ConfigError,
-        'Client was constructed from a non-QWP/WebSocket conf-string; '
-        'Client.query() requires qwpws:: or qwpwss::. '
-        f'Got {ingress_conf!r}')
 
 
 cdef object _ensure_pyarrow():
@@ -284,6 +307,29 @@ cdef object _numpy_nullable_mapping():
             pa.large_string(): pd.StringDtype(),
         }.get
     return _NUMPY_NULLABLE_CACHE
+
+
+def _debug_egress_pool_stats(client):
+    """Return ``(in_use, idle)`` from the client's reader pool.
+
+    The Rust pool doesn't track "opened" / "reused" as counters — they
+    fall out of ``in_use + idle`` plus the lazy-init pattern (first
+    borrow opens a connection; the idle list grows on returns; reuse
+    is implicit). Tests assert reuse by checking that ``idle == 1``
+    after sequential queries that each borrowed and returned. Returns
+    ``None`` if the Client is closed.
+
+    Not part of the public API.
+    """
+    cdef Client c = client
+    cdef questdb_db* db = c._db
+    if db == NULL:
+        return None
+    # FFI exposes the counts via the Rust QuestDb methods; we surface
+    # them through the column_sender_chunk debug accessors below.
+    return (
+        questdb_db_reader_in_use_count(db),
+        questdb_db_reader_free_count(db))
 
 
 class QueryResult:

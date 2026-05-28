@@ -3725,17 +3725,19 @@ cdef class Client:
         interpreted as NULL by QuestDB and cannot be distinguished from
         legitimate occurrences of those values.
         """
-        # Pin the Client open across the conf-string read + reader
-        # construction. We don't borrow from the pool — egress opens
-        # its own connection — but _begin_db_use guards against a
-        # concurrent close() reading a freed _conf_str.
+        # Borrow a reader from the same `questdb_db` pool that hosts
+        # the ingress writers. The pool amortises TCP+TLS handshake
+        # cost across many `Client.query()` calls: the first call
+        # opens a connection, subsequent calls hit the idle-list
+        # cache. See `c-questdb-client/questdb-rs/src/ingress/
+        # column_sender/db.rs` for the pool's structure.
         cdef _ReaderHandle reader_handle
         cdef _CursorHandle cursor_handle
-        self._begin_db_use('query')
+        cdef questdb_db* db
+        db = self._begin_db_use('query')
         try:
             _ensure_pyarrow()
-            reader_handle = _open_reader_from_conf(
-                _derive_reader_conf(self._conf_str))
+            reader_handle = _borrow_reader_from_pool(db)
             cursor_handle = _execute_query(reader_handle, sql)
         finally:
             self._end_db_use()
@@ -3781,6 +3783,8 @@ cdef class Client:
         finally:
             self._state_cond.release()
         _ensure_doesnt_have_gil(&gs)
+        # `questdb_db_close` drains both the writer and reader free
+        # lists in one shot (see `db.rs::DbInner::Drop`).
         questdb_db_close(db)
         _ensure_has_gil(&gs)
 
