@@ -2243,10 +2243,13 @@ class TestEgressWithDatabase(unittest.TestCase):
             # Ingest via Client.dataframe — the python int range
             # accepts INT64_MIN cleanly, sidestepping the SQL
             # parser ambiguity around the literal.
+            # Also exercise tz-aware ingest (was rejected by columnar v1
+            # until commit 9db3325 follow-up). Use the trailing 'Z' form
+            # that pd.to_datetime infers as DatetimeTZDtype.
             df = pd.DataFrame({
                 'ts': pd.to_datetime([
-                    '2024-01-01T00:00:00',
-                    '2024-01-01T00:00:01']),
+                    '2024-01-01T00:00:00Z',
+                    '2024-01-01T00:00:01Z']),
                 'lg': np.array(
                     [42, np.iinfo(np.int64).min], dtype=np.int64),
             })

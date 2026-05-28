@@ -700,17 +700,31 @@ Before Step 4, confirm this is intentional and document it. If
 intentional: add to "Unavoidable lossy scenarios". If unintentional:
 file a separate fix; egress shouldn't paper over an ingress bug.
 
-### Columnar v1 ingress rejects tz-aware timestamps — confirm intentional
+### ~~Columnar v1 ingress rejects tz-aware timestamps~~ ✅ fixed
 
-Empirical finding from writing the egress null tests: `Client.dataframe()`
-columnar v1 raises `UnsupportedDataFrameShapeError` for a `ts` column
-built via `pd.to_datetime([...'Z'])` (tz-aware), but accepts the same
-data tz-naive. Workaround for tests: strip the tz. **Open question**:
-is this a deliberate columnar v1 acceptance-matrix decision, or a gap
-in `_dataframe_columnar_plan_failures` that should accept tz-aware
-columns by stripping/honoring the offset? Compare against the
-existing row-path which (likely) accepts both. File as a follow-up
-on the ingress side, not blocking egress.
+Found during egress null-test development: `Client.dataframe()`
+columnar v1 rejected tz-aware datetime columns (e.g.
+`pd.to_datetime([...'Z'])` → `DatetimeTZDtype`) with
+`UnsupportedDataFrameShapeError`. The row-path serializer has handled
+tz-aware all along; the columnar planner accept-list was tightened
+by accident in commit `735aa96` ("Add Client.dataframe() pooled
+columnar ingest path"). A user migrating from `Buffer.dataframe(df)`
+to `Client.dataframe(df)` would have hit a silent regression.
+
+Resolved by extending the accept-list in
+`_dataframe_columnar_plan_failures` (for both `col_target_at` and
+`col_target_column_ts`) plus the dispatch in
+`_dataframe_columnar_append_field` and `_dataframe_columnar_append_at`
+to treat `col_source_dt64ns_tz_arrow` / `col_source_dt64us_tz_arrow`
+identically to their numpy counterparts. The Arrow chunk's
+`buffers[1]` already holds the int64 UTC moments in the same layout
+the numpy path expects, so the FFI calls are identical — no separate
+emit code needed. Test:
+`test_debug_dataframe_columnar_plan_accepts_tz_aware_timestamps` in
+`test_dataframe.py` covers DatetimeTZDtype + ArrowDtype timestamp +
+tz-aware-as-field-column shapes. The egress system test
+`test_sentinel_collision_is_documented_lossy` was updated to use the
+original `'...Z'` form that originally triggered the regression.
 
 ### PR #150 still OPEN upstream
 

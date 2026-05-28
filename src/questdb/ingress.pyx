@@ -2393,12 +2393,15 @@ cdef object _dataframe_columnar_plan_failures(
         elif col.setup.target == col_target_t.col_target_column_ts:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
-                    col_source_t.col_source_dt64us_numpy):
+                    col_source_t.col_source_dt64us_numpy,
+                    col_source_t.col_source_dt64ns_tz_arrow,
+                    col_source_t.col_source_dt64us_tz_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy datetime64[ns/us] timestamp '
-                    'field columns.'))
+                    'v1 only supports NumPy datetime64[ns/us] or '
+                    'tz-aware datetime64/timestamp[pyarrow] '
+                    'timestamp field columns.'))
             else:
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
                 if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
@@ -2453,12 +2456,15 @@ cdef object _dataframe_columnar_plan_failures(
         elif col.setup.target == col_target_t.col_target_at:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
-                    col_source_t.col_source_dt64us_numpy):
+                    col_source_t.col_source_dt64us_numpy,
+                    col_source_t.col_source_dt64ns_tz_arrow,
+                    col_source_t.col_source_dt64us_tz_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy datetime64[ns/us] designated '
-                    'timestamp columns.'))
+                    'v1 only supports NumPy datetime64[ns/us] or '
+                    'tz-aware datetime64/timestamp[pyarrow] '
+                    'designated timestamp columns.'))
             else:
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
                 if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
@@ -3079,7 +3085,15 @@ cdef void_int _dataframe_columnar_append_field(
         else:
             raise RuntimeError('Unsupported columnar float source.')
     elif col.setup.target == col_target_t.col_target_column_ts:
-        if col.setup.source == col_source_t.col_source_dt64ns_numpy:
+        # tz_arrow Arrow chunks store UTC int64 at buffers[1] just like
+        # numpy datetime64[ns,UTC] does; QuestDB TIMESTAMP is UTC-naive
+        # internally, so we forward the same buffer to the same FFI as
+        # the bare-numpy path. Wall-time-in-tz columns (e.g.
+        # datetime64[ns, "America/New_York"]) are pandas-stored as UTC
+        # moments + tz metadata, so this is also lossless.
+        if col.setup.source in (
+                col_source_t.col_source_dt64ns_numpy,
+                col_source_t.col_source_dt64ns_tz_arrow):
             with nogil:
                 ok = column_sender_chunk_column_ts_nanos(
                     chunk,
@@ -3089,7 +3103,9 @@ cdef void_int _dataframe_columnar_append_field(
                     row_count,
                     validity_ptr,
                     &err)
-        elif col.setup.source == col_source_t.col_source_dt64us_numpy:
+        elif col.setup.source in (
+                col_source_t.col_source_dt64us_numpy,
+                col_source_t.col_source_dt64us_tz_arrow):
             with nogil:
                 ok = column_sender_chunk_column_ts_micros(
                     chunk,
@@ -3151,14 +3167,20 @@ cdef void_int _dataframe_columnar_append_at(
         col.setup.chunks.chunks[0].buffers[1])
     cdef bint ok = False
 
-    if col.setup.source == col_source_t.col_source_dt64ns_numpy:
+    # See _dataframe_columnar_append_field's column_ts comment:
+    # tz_arrow chunks store the same UTC int64 layout at buffers[1].
+    if col.setup.source in (
+            col_source_t.col_source_dt64ns_numpy,
+            col_source_t.col_source_dt64ns_tz_arrow):
         with nogil:
             ok = column_sender_chunk_designated_timestamp_nanos(
                 chunk,
                 data + row_offset,
                 row_count,
                 &err)
-    elif col.setup.source == col_source_t.col_source_dt64us_numpy:
+    elif col.setup.source in (
+            col_source_t.col_source_dt64us_numpy,
+            col_source_t.col_source_dt64us_tz_arrow):
         with nogil:
             ok = column_sender_chunk_designated_timestamp_micros(
                 chunk,

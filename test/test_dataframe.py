@@ -533,6 +533,59 @@ class TestPandasBase:
             self.assertTrue(plan['supported'])
             self.assertEqual(plan['failures'], [])
 
+        def test_debug_dataframe_columnar_plan_accepts_tz_aware_timestamps(self):
+            # The columnar v1 planner was originally restricted to bare
+            # numpy datetime64[ns/us] for both the designated `at` column
+            # and `ts` field columns. The row path (Buffer.dataframe /
+            # Sender.dataframe) accepted tz-aware DatetimeTZDtype and
+            # pyarrow timestamp(unit, tz=...) all along; columnar v1
+            # was tightened by accident. This test pins the symmetric
+            # contract: every datetime variant the row path accepts
+            # also passes the columnar planner.
+            cases = [
+                # 1. pd.to_datetime(['...Z']) infers DatetimeTZDtype.
+                pd.to_datetime(
+                    ['2024-01-01T00:00:00Z', '2024-01-01T00:00:01Z']),
+                # 2. Explicit DatetimeTZDtype with a non-UTC zone.
+                pd.Series(
+                    [pd.Timestamp('2024-01-01 00:00:00',
+                                  tz='America/New_York'),
+                     pd.Timestamp('2024-01-01 00:00:01',
+                                  tz='America/New_York')]),
+                # 3. ArrowDtype timestamp[us, tz=...].
+                pd.Series(
+                    [1700000000000000, 1700000001000000],
+                    dtype=pd.ArrowDtype(
+                        pa.timestamp('us', tz='UTC'))),
+            ]
+            for idx, ts_series in enumerate(cases):
+                with self.subTest(case=idx, dtype=str(ts_series.dtype)):
+                    df = pd.DataFrame({
+                        'ts': ts_series,
+                        'lg': pd.Series([1, 2], dtype='int64'),
+                    })
+                    plan = qi._debug_dataframe_columnar_plan(
+                        df, table_name='t', at='ts')
+                    self.assertTrue(
+                        plan['supported'],
+                        f'case={idx} dtype={ts_series.dtype!r} '
+                        f'failures={plan["failures"]!r}')
+
+            # 4. tz-aware as a field column (non-`at`), with tz-naive at=.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    [pd.Timestamp('2024-01-01'),
+                     pd.Timestamp('2024-01-02')], dtype='datetime64[ns]'),
+                'event_ts': pd.to_datetime(
+                    ['2024-01-01T00:00:00Z', '2024-01-01T00:00:01Z']),
+                'lg': pd.Series([1, 2], dtype='int64'),
+            })
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='t', at='ts')
+            self.assertTrue(
+                plan['supported'],
+                f'tz-aware field column failures={plan["failures"]!r}')
+
         def test_debug_dataframe_columnar_plan_rejects_unsupported_shape(self):
             df = pd.DataFrame({
                 'tbl': ['t1'],
