@@ -2135,6 +2135,144 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_null_round_trip_per_dtype_backend(self):
+        """Pin the null contract across the three dtype_backend variants.
+
+        The QuestDB QWP egress wire carries an explicit validity bitmap
+        (questdb-rs/src/egress/decoder.rs::ColumnBuffer.validity), so
+        Arrow consumers see real nulls — not sentinel masquerade. This
+        test inserts SQL NULL values and verifies what each mapper
+        surfaces:
+
+          - default (numpy primitives): integer nulls are lossy
+            (widened to float64 NaN); float NaN stays NaN; varchar
+            comes back as the new pandas ``str`` dtype with NaN.
+          - dtype_backend="pyarrow": ArrowDtype preserves null as pd.NA.
+          - dtype_backend="numpy_nullable": Int64Dtype/Float64Dtype/
+            StringDtype preserve null as pd.NA.
+
+        Also verifies that QuestDB's storage sentinel-collision
+        contract holds in the other direction: a real INT64_MIN
+        ingested as a value comes back as null.
+        """
+        import pandas as pd
+        import pyarrow as pa
+        import numpy as np
+        table_name = 't_egress_nulls_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG, db DOUBLE, vc VARCHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            # Row 0: all values populated.
+            # Row 1: all nullable columns NULL.
+            self._exec(
+                f"INSERT INTO {table_name} VALUES "
+                f"('2024-01-01T00:00:00Z', 42, 3.5, 'hello'), "
+                f"('2024-01-01T00:00:01Z', NULL, NULL, NULL)")
+            self.qdb_plain.retry_check_table(table_name, min_rows=2)
+
+            sql = f'SELECT lg, db, vc FROM {table_name} ORDER BY ts'
+
+            # 1. Arrow level: verify the validity bitmap arrived.
+            with qi.Client.from_conf(self._conf()) as client:
+                table = client.query(sql).to_arrow()
+            lg_col = table.column('lg')
+            self.assertEqual(lg_col.null_count, 1,
+                f'expected 1 null on row 1; got {lg_col.null_count}')
+            self.assertFalse(lg_col.is_null()[0].as_py())
+            self.assertTrue(lg_col.is_null()[1].as_py())
+            self.assertEqual(table.column('db').null_count, 1)
+            self.assertEqual(table.column('vc').null_count, 1)
+
+            # 2. default to_pandas — integer nulls widen to float64.
+            with qi.Client.from_conf(self._conf()) as client:
+                default = client.query(sql).to_pandas()
+            # numpy int64 cannot represent null; pandas widens to float64.
+            self.assertTrue(
+                pd.api.types.is_float_dtype(default['lg'].dtype)
+                or pd.api.types.is_object_dtype(default['lg'].dtype),
+                f'expected float or object for lossy int+null; '
+                f'got {default["lg"].dtype!r}')
+            self.assertEqual(default['lg'].iloc[0], 42)
+            self.assertTrue(pd.isna(default['lg'].iloc[1]))
+
+            # 3. pyarrow-backed to_pandas — pd.NA preserved.
+            with qi.Client.from_conf(self._conf()) as client:
+                arrow_backed = client.query(sql).to_pandas(
+                    dtype_backend='pyarrow')
+            self.assertIsInstance(arrow_backed['lg'].dtype, pd.ArrowDtype)
+            self.assertEqual(arrow_backed['lg'].iloc[0], 42)
+            self.assertTrue(arrow_backed['lg'].iloc[1] is pd.NA)
+            self.assertTrue(arrow_backed['db'].iloc[1] is pd.NA)
+            self.assertTrue(arrow_backed['vc'].iloc[1] is pd.NA)
+
+            # 4. numpy_nullable to_pandas — pd.NA preserved via
+            #    Int64Dtype / Float64Dtype / StringDtype.
+            with qi.Client.from_conf(self._conf()) as client:
+                nullable = client.query(sql).to_pandas(
+                    dtype_backend='numpy_nullable')
+            self.assertIsInstance(nullable['lg'].dtype, pd.Int64Dtype)
+            self.assertEqual(nullable['lg'].iloc[0], 42)
+            self.assertTrue(nullable['lg'].iloc[1] is pd.NA)
+            self.assertIsInstance(nullable['db'].dtype, pd.Float64Dtype)
+            self.assertTrue(nullable['db'].iloc[1] is pd.NA)
+            self.assertIsInstance(nullable['vc'].dtype, pd.StringDtype)
+            self.assertTrue(nullable['vc'].iloc[1] is pd.NA)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_sentinel_collision_is_documented_lossy(self):
+        """Verify QuestDB's storage-level sentinel-collision contract:
+        a user-supplied INT64_MIN value ingested as a LONG is folded
+        into NULL by the server. This is QuestDB's docs (see
+        plan-egress-to-pandas.md "Unavoidable lossy scenarios"); we
+        pin it here so a future server-side fix would be flagged.
+        """
+        import pandas as pd
+        import numpy as np
+        table_name = 't_egress_sentinel_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            # Ingest via Client.dataframe — the python int range
+            # accepts INT64_MIN cleanly, sidestepping the SQL
+            # parser ambiguity around the literal.
+            df = pd.DataFrame({
+                'ts': pd.to_datetime([
+                    '2024-01-01T00:00:00',
+                    '2024-01-01T00:00:01']),
+                'lg': np.array(
+                    [42, np.iinfo(np.int64).min], dtype=np.int64),
+            })
+            with qi.Client.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=table_name, at='ts')
+            self.qdb_plain.retry_check_table(table_name, min_rows=2)
+
+            sql = f'SELECT lg FROM {table_name} ORDER BY ts'
+            with qi.Client.from_conf(self._conf()) as client:
+                table = client.query(sql).to_arrow()
+
+            # The INT64_MIN row collapses to NULL server-side.
+            self.assertEqual(
+                table.column('lg').null_count, 1,
+                'expected the INT64_MIN row to be folded into NULL '
+                'by QuestDB storage; a non-zero null_count of 1 '
+                'pins that contract')
+            self.assertFalse(table.column('lg').is_null()[0].as_py())
+            self.assertTrue(table.column('lg').is_null()[1].as_py())
+            self.assertEqual(table.column('lg')[0].as_py(), 42)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_sequential_queries_on_one_client(self):
         """Open one Client, run several queries in sequence. Catches
         regressions in any per-call reader/cursor lifecycle assumption.

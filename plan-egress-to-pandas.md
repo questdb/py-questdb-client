@@ -222,16 +222,30 @@ Three reasons converge on the same answer:
    numerics, booleans, and timestamps numpy-backed. We adopt the same
    policy — matching what users already see everywhere else.
 
-2. **Arrow-backed null bitmaps don't actually buy fidelity through
-   QuestDB.** The intuitive case for `pd.ArrowDtype` is that a
-   validity bitmap distinguishes null from value `INT64_MIN`. That's
-   true on the wire. It's *not* true after storage: QuestDB folds the
-   bitmap into a sentinel value in the column file. So an Arrow-backed
-   ingress that carefully preserves the bit gets silently flattened
-   server-side. Egress reading back two `INT64_MIN` values cannot tell
-   which was a null and which was a real value, regardless of what
-   dtype it surfaces them in. Switching the mapper to Arrow-backed
-   would mislead users into thinking the bit was preserved.
+2. **Arrow-backed null bitmaps DO buy fidelity for almost all data —
+   except sentinel-equal values.** This is more nuanced than initial
+   discussions captured.
+   - For any value that is *not* one of QuestDB's sentinel values
+     (the typical case): the QWP egress wire faithfully carries an
+     explicit validity bitmap (`questdb-rs/src/egress/decoder.rs`
+     `ColumnBuffer.validity`, inverted from QuestDB's "1=null" to
+     Arrow's "1=valid" convention by `convert.rs::bytes_null_buffer`).
+     `dtype_backend="pyarrow"` / `="numpy_nullable"` recover real
+     `pd.NA` distinct from any concrete value.
+   - For sentinel-equal user values (`INT64_MIN` LONG, NaN DOUBLE,
+     the specific sentinel UUID, etc.): the wire transmits validity
+     faithfully, but the bitmap and the value were derived from the
+     same sentinel bytes upstream — they're always co-null. No dtype
+     choice recovers them. The loss happens at the **wire/ingest
+     layer**, not (only) at storage: `Client.dataframe()` already
+     treats `INT64_MIN` as a wire-level null marker, so the user's
+     real-data sentinel never reaches the server as a value.
+   - Net: making `dtype_backend="pyarrow"` the **default** would
+     mislead users into thinking sentinel collisions are recoverable
+     when they aren't. Making it numpy-default with `pyarrow` /
+     `numpy_nullable` as opt-in knobs lets typical users get
+     idiomatic numpy and lets null-conscious users get real
+     `pd.NA` for nullable columns.
 
 3. **Ecosystem compatibility costs are real.** sklearn, scipy, numba,
    matplotlib, statsmodels all assume numpy buffers; ArrowDtype inputs
@@ -252,10 +266,18 @@ Consequences for the default mapper:
 
 ### Unavoidable lossy scenarios
 
-QuestDB's storage format folds nulls into sentinel values for most
-primitives. These collisions are baked into the database, not into our
-client, and **no choice of pandas dtype can recover the lost
-distinction**. Document each of these in the egress user docs.
+QuestDB's wire + storage layers fold nulls into sentinel values for
+most primitives. These collisions happen at the client→server
+boundary — `Client.dataframe()` treats `INT64_MIN`, NaN, etc. as
+wire-level null markers, so a user's real-data sentinel never makes
+it through as a value. **No choice of pandas dtype can recover the
+lost distinction**. Document each of these in the egress user docs.
+
+The egress wire format DOES carry an explicit validity bitmap, so
+all *other* nulls (genuinely missing rows, not sentinel-collisions)
+round-trip cleanly as `pd.NA` under `dtype_backend="pyarrow"` /
+`"numpy_nullable"`. The list below applies only to user values that
+*equal* the sentinel.
 
 | QuestDB type | Sentinel | What's lost |
 |---|---|---|
@@ -651,17 +673,19 @@ version for egress (the ingress side still supports older pandas).
 
 ### Sentinel collisions visible to user
 
-QuestDB's storage format folds nulls into sentinel values for almost
-every primitive type. The full list lives under "Unavoidable lossy
-scenarios" in the mapper section above. The summary for the egress
-docstring: a user value that happens to equal QuestDB's null sentinel
-for that column type (e.g. `INT64_MIN` for LONG, NaN for DOUBLE, the
-zero IPv4 address) round-trips through the database as a null.
+QuestDB folds nulls into sentinel values for almost every primitive
+type, **at the wire/ingest layer**: `Client.dataframe()` already
+treats `INT64_MIN`, NaN, the sentinel UUID, etc. as null on the way
+in. The full list lives under "Unavoidable lossy scenarios" in the
+mapper section above. The summary for the egress docstring: a user
+value that happens to equal QuestDB's null sentinel round-trips
+through the database as a null.
 
-This is QuestDB's contract, not ours. No dtype-backend choice can
-recover the lost distinction — switching to `pd.ArrowDtype` would
-preserve a validity bitmap on the wire but QuestDB flattens it
-server-side anyway. Document loudly; ship as-is.
+This is QuestDB's contract, not ours. Choosing
+`dtype_backend="pyarrow"` or `="numpy_nullable"` still gives `pd.NA`
+for *non-sentinel* nulls (the typical case) — the wire validity
+bitmap is honest. The loss is specifically about user-data values
+that happen to *equal* the sentinel. Document loudly; ship as-is.
 
 ### Ingress already collapses TIMESTAMP at `INT64_MIN` to null — verify
 
@@ -675,6 +699,18 @@ sentinel server-side), but it means an explicit `pd.Timestamp` at the
 Before Step 4, confirm this is intentional and document it. If
 intentional: add to "Unavoidable lossy scenarios". If unintentional:
 file a separate fix; egress shouldn't paper over an ingress bug.
+
+### Columnar v1 ingress rejects tz-aware timestamps — confirm intentional
+
+Empirical finding from writing the egress null tests: `Client.dataframe()`
+columnar v1 raises `UnsupportedDataFrameShapeError` for a `ts` column
+built via `pd.to_datetime([...'Z'])` (tz-aware), but accepts the same
+data tz-naive. Workaround for tests: strip the tz. **Open question**:
+is this a deliberate columnar v1 acceptance-matrix decision, or a gap
+in `_dataframe_columnar_plan_failures` that should accept tz-aware
+columns by stripping/honoring the offset? Compare against the
+existing row-path which (likely) accepts both. File as a follow-up
+on the ingress side, not blocking egress.
 
 ### PR #150 still OPEN upstream
 
