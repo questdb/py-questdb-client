@@ -105,6 +105,7 @@ cdef enum col_target_t:
     col_target_column_i16 = 12
     col_target_column_i32 = 13
     col_target_column_f32 = 14
+    col_target_column_uuid = 15
 
 
 cdef dict _TARGET_NAMES = {
@@ -123,6 +124,7 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_i16: "short",
     col_target_t.col_target_column_i32: "int",
     col_target_t.col_target_column_f32: "float32",
+    col_target_t.col_target_column_uuid: "uuid",
 }
 
 
@@ -170,6 +172,11 @@ cdef enum col_source_t:
     col_source_decimal64_arrow =        803000
     col_source_decimal128_arrow =       804000
     col_source_decimal256_arrow =       805000
+    # FixedSizeBinary(16) — the canonical Arrow shape egress emits
+    # for UUID columns (with or without the `arrow.uuid` extension
+    # wrapper, which we strip on input). Column-QWP only; row-ILP
+    # has no serializer for this source.
+    col_source_fsb16_arrow =            901000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -259,6 +266,9 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_column_f32: {
         col_source_t.col_source_f32_arrow,
     },
+    col_target_t.col_target_column_uuid: {
+        col_source_t.col_source_fsb16_arrow,
+    },
     col_target_t.col_target_column_str: {
         col_source_t.col_source_str_pyobj,
         col_source_t.col_source_str_utf8_arrow,
@@ -332,7 +342,11 @@ cdef tuple _FIELD_TARGETS_QWP = (
     col_target_t.col_target_column_str,
     col_target_t.col_target_column_ts,
     col_target_t.col_target_column_arr_f64,
-    col_target_t.col_target_column_decimal)
+    col_target_t.col_target_column_decimal,
+    # QuestDB-extension types: routed by their canonical Arrow
+    # shape (FSB(16) for UUID; future PRs add IPV4 / LONG256 /
+    # GEOHASH here).
+    col_target_t.col_target_column_uuid)
 
 
 # Targets that map directly from a meta target.
@@ -487,6 +501,8 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_i32 + col_source_t.col_source_i32_arrow
     col_dispatch_code_column_f32__f32_arrow = \
         col_target_t.col_target_column_f32 + col_source_t.col_source_f32_arrow
+    col_dispatch_code_column_uuid__fsb16_arrow = \
+        col_target_t.col_target_column_uuid + col_source_t.col_source_fsb16_arrow
 
 
 # Int values in order for sorting (as needed for API's sequential coupling).
@@ -1225,6 +1241,16 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         col.scale = 0
         return 0
 
+    # Unwrap pyarrow extension types (e.g. `arrow.uuid` wrapping
+    # `FixedSizeBinary(16)`) to their storage type so dispatch picks
+    # the storage-shape source. The wire format is identical for both
+    # forms; pyarrow may or may not have the extension registered at
+    # runtime, so we accept either input and produce the same source.
+    # pyarrow exposes no `Type_EXTENSION` constant in all versions we
+    # support; check via `BaseExtensionType` instead.
+    if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
+        arrowtype = arrowtype.storage_type
+
     _dataframe_series_as_arrow(pandas_col, col)
     if arrowtype.id == _PYARROW.lib.Type_DECIMAL32:
         col.setup.source = col_source_t.col_source_decimal32_arrow
@@ -1254,6 +1280,9 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         col.setup.source = col_source_t.col_source_i32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_INT64:
         col.setup.source = col_source_t.col_source_i64_arrow
+    elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 16):
+        col.setup.source = col_source_t.col_source_fsb16_arrow
     else:
         raise IngressError(
             IngressErrorCode.BadDataFrame,

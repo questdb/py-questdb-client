@@ -2920,6 +2920,184 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
 
     # ---------- unhappy paths ----------
 
+    # ---------- UUID (Category C — canonical mirror + extension type) ----------
+
+    @staticmethod
+    def _uuid_to_wire(u):
+        """Convert a Python ``uuid.UUID`` to QuestDB's UUID wire
+        layout (the C header: "bytes 0..8 lo half LE,
+        bytes 8..16 hi half LE"). ``uuid.UUID.bytes`` is big-endian
+        per RFC 4122; the wire layout is two 64-bit LE halves with
+        ``lo`` first."""
+        b = u.bytes
+        return bytes(reversed(b[8:16])) + bytes(reversed(b[0:8]))
+
+    @staticmethod
+    def _extract_uuid_storage(col):
+        """Return the FSB(16) storage bytes from an egress UUID
+        column, whether or not pyarrow has the `arrow.uuid`
+        extension type registered."""
+        import pyarrow as pa
+        if isinstance(col.type, pa.BaseExtensionType):
+            return col.combine_chunks().storage.to_pylist()
+        return col.to_pylist()
+
+    def test_uuid_round_trip_via_fsb16(self):
+        """``pa.fixed_size_binary(16)`` → UUID wire → server stores
+        as UUID → egress emits the same FSB(16) storage bytes.
+        Canonical mirror path: no extension type wrapping. Round-trip
+        is byte-identity at the Arrow wire level (the
+        `_uuid_to_wire` helper converts the user-facing UUID to that
+        layout up front)."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        uuids = [uuid_mod.uuid4() for _ in range(5)]
+        wire_bytes = [self._uuid_to_wire(u) for u in uuids]
+        values = pa.array(wire_bytes, type=pa.binary(16))
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(self._extract_uuid_storage(got.column('v')),
+                         wire_bytes)
+
+    def test_uuid_round_trip_via_arrow_uuid_extension(self):
+        """If pyarrow has registered the `arrow.uuid` extension
+        type, ingress accepts it directly: we unwrap to the FSB(16)
+        storage type and dispatch identically to the canonical
+        mirror path."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        try:
+            uuid_type = pa.uuid()
+        except (AttributeError, TypeError):
+            self.skipTest(
+                'pyarrow.uuid() not available in this pyarrow build')
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        uuids = [uuid_mod.uuid4() for _ in range(3)]
+        wire_bytes = [self._uuid_to_wire(u) for u in uuids]
+        values = pa.ExtensionArray.from_storage(
+            uuid_type,
+            pa.array(wire_bytes, type=pa.binary(16)))
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(self._extract_uuid_storage(got.column('v')),
+                         wire_bytes)
+
+    def test_uuid_with_nulls_round_trip(self):
+        """UUID validity bitmap round-trips: nulls stay null."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        w0 = self._uuid_to_wire(uuid_mod.uuid4())
+        w2 = self._uuid_to_wire(uuid_mod.uuid4())
+        w4 = self._uuid_to_wire(uuid_mod.uuid4())
+        values = pa.array(
+            [w0, None, w2, None, w4], type=pa.binary(16))
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        col = got.column('v')
+        self.assertEqual(self._extract_uuid_storage(col),
+                         [w0, None, w2, None, w4])
+        self.assertEqual(col.null_count, 2)
+
+    def test_uuid_string_into_uuid_column_via_server_coercion(self):
+        """Strict-mirror policy: `pa.string()` always maps to
+        VARCHAR on the wire. When the target column is UUID,
+        QuestDB's server-side INSERT coercion narrows the VARCHAR
+        string into a UUID — the canonical "policy-2" contract
+        from the design doc."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        uuids = [uuid_mod.uuid4() for _ in range(3)]
+        values = pa.array([str(u) for u in uuids], type=pa.string())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        # Server-side coercion lands the value as a UUID; egress
+        # emits the FSB(16) storage in the same wire layout as
+        # the canonical mirror path.
+        expected = [self._uuid_to_wire(u) for u in uuids]
+        self.assertEqual(self._extract_uuid_storage(got.column('v')),
+                         expected)
+
+    def test_invalid_uuid_string_is_rejected_by_server(self):
+        """Bad UUID strings written into a UUID target surface as
+        an IngressError (server rejection), not a silent corruption
+        or a connection poisoning. Verification item #4 from the
+        design doc."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        values = pa.array(
+            ['not-a-uuid', 'also-not'], type=pa.string())
+        df = self._make_df_with_ts('v', values, 2)
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError):
+                client.dataframe(df, table_name=table, at='ts')
+
+    def test_fsb16_rejected_by_row_ilp(self):
+        """Row-ILP (`Sender.dataframe`) genuinely does not support
+        UUID. `_FIELD_TARGETS_ROW` doesn't include
+        `col_target_column_uuid`, so the resolver fails to map
+        `fsb16_arrow` to any target. This pins that
+        protocol-asymmetry contract."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        values = pa.array(
+            [uuid_mod.uuid4().bytes for _ in range(2)],
+            type=pa.binary(16))
+        df = self._make_df_with_ts('v', values, 2)
+        conf = (
+            f'tcp::addr={self.qdb_plain.host}:'
+            f'{self.qdb_plain.line_tcp_port};')
+        with qi.Sender.from_conf(conf) as sender:
+            with self.assertRaises(qi.IngressError):
+                sender.dataframe(df, table_name='dummy', at='ts')
+
+    def test_fsb_other_size_rejected(self):
+        """``FixedSizeBinary(k)`` for k != 16 is not UUID and has no
+        QuestDB analogue — should be rejected cleanly rather than
+        silently routed somewhere wrong."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        values = pa.array(
+            [b'\x00' * 8, b'\xff' * 8], type=pa.binary(8))
+        df = self._make_df_with_ts('v', values, 2)
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError):
+                client.dataframe(df, table_name=table, at='ts')
+
     def test_pa_uint8_currently_unsupported(self):
         """``pa.uint8()`` is not currently routed by column-ingress
         Arrow detection (``_dataframe_series_resolve_arrow`` only

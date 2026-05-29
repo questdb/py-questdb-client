@@ -2483,13 +2483,13 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_i8,
                 col_target_t.col_target_column_i16,
                 col_target_t.col_target_column_i32,
-                col_target_t.col_target_column_f32):
-            # Narrow Arrow targets — `_FIELD_TARGETS_QWP` only routes
-            # the one Arrow source per narrow target
-            # (see `_TARGET_TO_SOURCES`), so the source is already
-            # constrained. The contiguous-buffer + validity checks
-            # above cover layout; the per-type FFI handles the wire
-            # encoding.
+                col_target_t.col_target_column_f32,
+                col_target_t.col_target_column_uuid):
+            # Column-QWP-only targets reached via `_FIELD_TARGETS_QWP`.
+            # Each target's source-set in `_TARGET_TO_SOURCES` is a
+            # singleton, so the source is already constrained by
+            # routing. The contiguous-buffer + validity checks above
+            # cover layout; the per-type FFI handles the wire encoding.
             pass
         else:
             failures.append(_dataframe_columnar_col_failure(
@@ -3169,6 +3169,20 @@ cdef void_int _dataframe_columnar_append_field(
                 row_count,
                 validity_ptr,
                 &err)
+    elif col.setup.target == col_target_t.col_target_column_uuid:
+        # `FixedSizeBinary(16)` Arrow buffer is 16 bytes per row;
+        # forward the offset-adjusted byte pointer directly. The Rust
+        # FFI reads it as the QuestDB UUID wire shape (two 64-bit
+        # little-endian halves).
+        with nogil:
+            ok = column_sender_chunk_column_uuid(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const uint8_t*>data) + row_offset * 16,
+                row_count,
+                validity_ptr,
+                &err)
     elif col.setup.target == col_target_t.col_target_column_str:
         if col.setup.source == col_source_t.col_source_str_pyobj:
             _dataframe_columnar_append_pyobj_str(
@@ -3271,7 +3285,8 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_i8,
                 col_target_t.col_target_column_i16,
                 col_target_t.col_target_column_i32,
-                col_target_t.col_target_column_f32):
+                col_target_t.col_target_column_f32,
+                col_target_t.col_target_column_uuid):
             if plan.pyobj_built != NULL:
                 prebuilt = plan.pyobj_built[col_index]
             else:
@@ -3647,9 +3662,34 @@ cdef class Client:
         """
         Ingest a pandas DataFrame through the pooled columnar QWP path.
 
-        The initial implementation supports a conservative v1 subset:
-        fixed table name, NumPy int64/float64 fields, and a non-null NumPy
-        datetime64[ns/us] designated timestamp column.
+        Supports a column-QWP v1 subset: fixed ``table_name``, non-null
+        designated timestamp column, and the following per-column dtypes:
+
+        - **Numeric**: NumPy ``bool/int{8,16,32,64}/uint{8..64}/float{32,64}``
+          (narrow types widen to LONG/DOUBLE on the wire). Arrow
+          ``pa.int{8,16,32,64}`` and ``pa.float{32,64}`` map to the
+          corresponding narrow wire types (BYTE/SHORT/INT/FLOAT/LONG/
+          DOUBLE) without widening; ``pa.uint*`` is rejected until a
+          policy is settled.
+        - **String / Symbol**: object-dtype ``str``, ``pa.string()``,
+          ``pa.large_string()``, ``pd.CategoricalDtype`` of strings.
+        - **Timestamp**: NumPy ``datetime64[ns/us]`` and ``pa.timestamp``
+          with unit ``ns`` or ``us`` (tz-aware accepted).
+        - **Decimal**: ``decimal.Decimal`` objects, ``pa.decimal{32,64,
+          128,256}``.
+        - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
+          extension type. Bytes are forwarded verbatim as **QuestDB's
+          UUID wire layout** ("bytes 0..8 lo half LE, bytes 8..16 hi
+          half LE"), matching the convention shared across the
+          c-questdb-client family (Rust direct, Polars). Round-trip is
+          byte-identity at this layout; users who want
+          ``uuid.UUID.bytes`` (RFC 4122 big-endian) round-trip must
+          convert at their boundary.
+
+        Server-side coercion handles cross-type writes (e.g. ``pa.string()``
+        UUIDs landing in a UUID column are parsed server-side; narrow ints
+        landing in a wider column are widened). Failures surface as
+        ``IngressError`` from the ``flush()``.
         """
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
