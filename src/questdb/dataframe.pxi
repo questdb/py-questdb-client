@@ -95,6 +95,17 @@ cdef enum col_target_t:
     col_target_column_arr_f64 = 8
     col_target_column_decimal = 9
     col_target_at = 10
+    # Narrow numeric targets for column-QWP. Each maps to a dedicated
+    # wire type (BYTE / SHORT / INT / FLOAT) rather than widening to
+    # LONG / DOUBLE. Selected by a column-QWP-only post-resolution
+    # retarget step (`_dataframe_columnar_rewrite_to_narrow_arrow_targets`
+    # in ingress.pyx) — the shared resolver and `_FIELD_TARGETS` keep
+    # routing all int / float sources through col_target_column_i64 /
+    # col_target_column_f64 so the row-ILP serializer is unaffected.
+    col_target_column_i8 = 11
+    col_target_column_i16 = 12
+    col_target_column_i32 = 13
+    col_target_column_f32 = 14
 
 
 cdef dict _TARGET_NAMES = {
@@ -109,6 +120,10 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_arr_f64: "array",
     col_target_t.col_target_column_decimal: "decimal",
     col_target_t.col_target_at: "designated timestamp",
+    col_target_t.col_target_column_i8: "byte",
+    col_target_t.col_target_column_i16: "short",
+    col_target_t.col_target_column_i32: "int",
+    col_target_t.col_target_column_f32: "float32",
 }
 
 
@@ -233,6 +248,18 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_f32_arrow,
         col_source_t.col_source_f64_arrow,
     },
+    col_target_t.col_target_column_i8: {
+        col_source_t.col_source_i8_arrow,
+    },
+    col_target_t.col_target_column_i16: {
+        col_source_t.col_source_i16_arrow,
+    },
+    col_target_t.col_target_column_i32: {
+        col_source_t.col_source_i32_arrow,
+    },
+    col_target_t.col_target_column_f32: {
+        col_source_t.col_source_f32_arrow,
+    },
     col_target_t.col_target_column_str: {
         col_source_t.col_source_str_pyobj,
         col_source_t.col_source_str_utf8_arrow,
@@ -267,6 +294,16 @@ cdef dict _TARGET_TO_SOURCES = {
 
 
 # Targets associated with col_meta_target.field.
+#
+# The shared resolver iterates this tuple to pick the first target whose
+# source-set accepts the column's Arrow / NumPy source. Narrow targets
+# (column_i8/i16/i32/f32/date) are intentionally **not** listed here —
+# the shared resolver always picks the wide target (column_i64 /
+# column_f64 / column_ts) so the row-ILP serializer's existing dispatch
+# stays correct. The column-QWP path adds a post-resolution rewrite
+# (`_dataframe_columnar_rewrite_to_narrow_arrow_targets`) that retargets
+# Arrow narrow sources to their narrow QWP targets after this resolver
+# has run.
 cdef tuple _FIELD_TARGETS = (
     col_target_t.col_target_skip,
     col_target_t.col_target_column_bool,
@@ -421,6 +458,15 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_decimal + col_source_t.col_source_decimal128_arrow
     col_dispatch_code_column_decimal__decimal256_arrow = \
         col_target_t.col_target_column_decimal + col_source_t.col_source_decimal256_arrow
+
+    col_dispatch_code_column_i8__i8_arrow = \
+        col_target_t.col_target_column_i8 + col_source_t.col_source_i8_arrow
+    col_dispatch_code_column_i16__i16_arrow = \
+        col_target_t.col_target_column_i16 + col_source_t.col_source_i16_arrow
+    col_dispatch_code_column_i32__i32_arrow = \
+        col_target_t.col_target_column_i32 + col_source_t.col_source_i32_arrow
+    col_dispatch_code_column_f32__f32_arrow = \
+        col_target_t.col_target_column_f32 + col_source_t.col_source_f32_arrow
 
 
 # Int values in order for sorting (as needed for API's sequential coupling).

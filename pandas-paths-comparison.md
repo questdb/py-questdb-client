@@ -156,18 +156,122 @@ on the row-ILP path:
   stated side benefit of shipping egress in the first place but has
   not been wired up.
 
+## Closing the type-support gap
+
+Strategic frame: the goal is reliable ETL round-trip (read from
+QuestDB, transform, write back). A fuzz oracle (`write X →
+query X → assert equal`) is the prerequisite for "reliable" — and
+the oracle is what forces the type-support work. Two related
+policy decisions follow.
+
+### Policy 1 — client-side dispatch is a pure function of Arrow input type
+
+No content sniffing, no column-name conventions, no server-schema
+lookup, no per-call type hints. `pa.string()` → VARCHAR.
+`pa.fixed_size_binary(16)` → UUID. `pa.uint32()` → INT.
+`pa.decimal128(p,s)` → DECIMAL. Closed-form, deterministic,
+fuzz-friendly. The exhaustive consideration that landed this
+decision: there are only four candidate sources of truth for "is
+this `pa.string()` a UUID or a STRING?" — content sniffing
+(Heisenbug-grade), column-name convention (no escape hatch),
+server-schema lookup (circular for create-on-first-write), or an
+explicit user hint. The first three are non-starters; the fourth
+costs the user about as much code as just handing us the canonical
+Arrow shape, but is more permanent in the user's code. Strict mirror
+wins on every axis except one — and that one is covered by:
+
+### Policy 2 — target-column coercion is server-side
+
+When the client sends VARCHAR and the target column is UUID,
+QuestDB's existing INSERT type-coercion narrows the value. The
+Python client does not know or care. This already works for SQL
+`INSERT INTO ... SELECT`; the column-sender INSERT path goes
+through the same engine. We do not block it; we do not implement
+it. Users who have UUIDs as strings just write them; the server
+narrows. Users who want max throughput on large batches convert to
+FSB(16) client-side and avoid the per-row server-side parse.
+
+This factoring keeps the fuzz oracle simple. The oracle generates
+inputs in canonical Arrow shapes (FSB(16) for UUID, decimal for
+DECIMAL, etc.) and `to_arrow() → dataframe() → query() → to_arrow()`
+is an identity function at the Arrow level. Server-side coercion is
+exercised by *separate* tests (the SQL coercion test suite already
+covers it), not by the oracle. Two distinct contracts, two distinct
+test surfaces.
+
+### What's left to build, by category
+
+**A — Narrow primitives.** BYTE / SHORT / INT, narrow uints, float32,
+CHAR (uint16), DATE (timestamp[ms]). Egress emits these natively.
+The recent step-3 commit (`d420d79`) routed narrow NumPy dtypes
+through `column_numpy`; the Arrow analogs (`pa.int8()`, `pa.int16()`,
+`pa.int32()`, `pa.float32()`, `pa.timestamp('ms')`) still need
+dispatch entries. Days of work; no new wire support.
+
+**B — Types row-ILP already handles.** DECIMAL{32,64,128,256}
+(`decimal32/64/128/256_arrow` exists in `col_source_t`), float64
+ARRAY (`arr_f64_numpyobj`). Wire support is there in QuestDB.
+Column-sender protocol needs new FFI shims
+(`column_sender_chunk_append_decimal`, `_append_list`), but the
+type-handling logic can crib from the row-ILP planner. Weeks per
+family.
+
+**C — QuestDB-extension types (split under the policy).**
+- *Canonical-mirror dispatch*: FSB(16) → UUID column, uint32 → IPV4
+  column, FSB(32) → LONG256 column, sized int → GEOHASH column. Plus
+  the `arrow.uuid` extension type (storage = FSB(16)): strip the
+  extension wrapper on the Cython side and dispatch on the storage
+  type. Client-side work, mechanical once each wire-type code is
+  confirmed.
+- *String → extension column*: **no client-side work needed.**
+  Server narrows. Document the perf trade-off so users with large
+  batches know to convert client-side.
+
+**D — Multi-dim arrays.** Nested ListArray dispatch. Genuinely new
+machinery; defer until there is a real user.
+
+### What to verify before locking
+
+1. **STRING vs VARCHAR on the wire.** Confirm column-ingress already
+   emits VARCHAR (not legacy STRING) for `pa.string()` /
+   `pa.large_string()`. If still STRING, one-line wire-type change.
+2. **Server coercion actually fires on column-sender INSERTs.** SQL
+   coercion is known to work; the column-sender path *should* go
+   through the same engine but is worth a system test — write a
+   `pa.string()` column to a UUID target and read it back, asserting
+   the UUID round-trip.
+3. **`arrow.uuid` extension type on input.** Confirm that when a user
+   hands us the extension type (the same shape egress emits) we can
+   strip the wrapper on the Cython side and dispatch on the storage
+   type. The egress test already round-trips this in the
+   read-only direction (`system_test.py:1996-2002`); ingress needs
+   the symmetric path.
+4. **Negative path: bad string-to-UUID.** Write `'not-a-uuid'` to a
+   UUID column. Server rejects. Confirm the rejection surfaces as
+   `IngressError` (probably `ServerRejection`) and does not poison
+   the pooled connection. This is the new failure mode for users who
+   lean on server-side coercion.
+
+### Suggested order of work
+
+DECIMAL first (B-family beachhead with the strongest row-path
+precedent), then category A in one PR (narrow Arrow dispatch +
+ms-timestamp; the smallest unit of meaningful progress), then UUID
+(C-family beachhead; sets the canonical-mirror + extension-type
+pattern that IPV4 / LONG256 / GEOHASH will follow), then float64
+ARRAY. After UUID the fuzz oracle can start expanding its
+generated-type set incrementally — each new category-C type added
+to column-ingress widens the oracle's coverage in the next CI run.
+
 ## Headline gaps worth addressing
 
 In rough priority order — these are the asymmetries with concrete
 follow-on work, not just architectural notes.
 
-1. **Type-support gap on column-ingress.** Egress can emit decimal /
-   array / IPV4 / UUID / GEOHASH / LONG256; column ingress cannot
-   accept them. If we want round-trip parity (the prerequisite for a
-   meaningful fuzz oracle) this is the work. Decimals are the
-   closest — Arrow-decimal handling already exists on the row path
-   (`decimal32/64/128/256_arrow` in `col_source_t`); column-ingress
-   needs to import that dispatch.
+1. **Type-support gap on column-ingress.** See "Closing the
+   type-support gap" above for the policy decision (strict Arrow
+   mirror client-side, server-side coercion for everything else)
+   and the categorised work. The fuzz oracle is the forcing function.
 
 2. **No streaming ingress.** A user with a 10M-row DataFrame has to
    chunk by hand; egress streams natively. `Client.iter_dataframe`

@@ -2652,5 +2652,291 @@ class TestEgressPool(unittest.TestCase):
                 f'in_use={in_use}, idle={idle}')
 
 
+class TestColumnIngressNarrowTypes(unittest.TestCase):
+    """End-to-end tests for the narrow Arrow primitive types added to
+    ``Client.dataframe`` column ingress: ``pa.int8/16/32`` →
+    BYTE/SHORT/INT, ``pa.float32`` → FLOAT. DATE
+    (``pa.timestamp('ms')``) is deferred to a follow-up PR — it
+    touches the shared row-ILP classifier and needs row-ILP
+    serializer support to ship safely.
+
+    The contract: client-side dispatch is a pure function of the
+    Arrow input dtype (no content sniffing, no schema hints), and
+    target-column coercion (e.g. BYTE landing in a LONG column) is
+    handled server-side. Each happy-path test asserts the
+    round-trip identity through a fresh table; the coercion tests
+    pre-create the target column with a wider type and verify the
+    server narrows / widens correctly.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    def _require_qwp_ws(self):
+        if not os.environ.get('QDB_REPO_PATH'):
+            self.skipTest(
+                'Narrow-type column ingress tests need a QWP-enabled '
+                'QuestDB build (QDB_REPO_PATH).')
+
+    def _conf(self):
+        return (f'qwpws::addr={self.qdb_plain.host}:'
+                f'{self.qdb_plain.http_server_port};')
+
+    def _table(self, prefix='t_narrow_'):
+        name = prefix + uuid.uuid4().hex[:8]
+        self.addCleanup(lambda: self._drop_quietly(name))
+        return name
+
+    def _drop_quietly(self, table):
+        try:
+            self.qdb_plain.http_sql_query(
+                f'DROP TABLE IF EXISTS {table}')
+        except Exception:
+            pass
+
+    def _create_table(self, table, value_col_sql):
+        """Pre-create the table with an explicit ``ts TIMESTAMP``
+        designated column plus one value column. Pre-create rather
+        than rely on auto-infer so the timestamp column is
+        guaranteed to be named ``ts`` (auto-create renames to
+        ``timestamp``) and so the server pins the value column type
+        for the coercion / round-trip tests."""
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            f'(ts TIMESTAMP, {value_col_sql}) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+
+    def _make_df_with_ts(self, value_col_name, value_arr, n):
+        """Build a DataFrame with a designated-timestamp column and
+        a single value column. Keeps the per-test setup terse."""
+        import pyarrow as pa
+        ts = pa.array(
+            [1700000000_000000 + i * 1_000_000 for i in range(n)],
+            type=pa.timestamp('us', tz='UTC'))
+        return pd.DataFrame({
+            'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
+            value_col_name: pd.array(
+                value_arr, dtype=pd.ArrowDtype(value_arr.type)),
+        })
+
+    # ---------- happy-path round-trips ----------
+
+    def test_int8_round_trip(self):
+        """pa.int8 → BYTE wire → server stores as BYTE → egress
+        emits pa.int8. QuestDB BYTE is non-nullable; we stay inside
+        the value range [-127, 127] to avoid any sentinel ambiguity.
+        """
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v BYTE')
+        values = pa.array([-127, -1, 0, 1, 127], type=pa.int8())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int8())
+        self.assertEqual(
+            got.column('v').to_pylist(), [-127, -1, 0, 1, 127])
+
+    def test_int16_round_trip(self):
+        """pa.int16 → SHORT wire. SHORT is non-nullable; stay
+        inside [-32767, 32767] to avoid sentinel ambiguity."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v SHORT')
+        values = pa.array(
+            [-32767, -1, 0, 1, 32767], type=pa.int16())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int16())
+        self.assertEqual(
+            got.column('v').to_pylist(),
+            [-32767, -1, 0, 1, 32767])
+
+    def test_int32_round_trip(self):
+        """pa.int32 → INT wire. QuestDB INT uses INT32_MIN as the
+        null sentinel; we avoid it here and pin the sentinel
+        collision contract separately in
+        ``test_int32_min_collapses_to_null``.
+        """
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v INT')
+        values = pa.array(
+            [-2147483647, -1, 0, 1, 2147483647], type=pa.int32())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int32())
+        self.assertEqual(
+            got.column('v').to_pylist(),
+            [-2147483647, -1, 0, 1, 2147483647])
+
+    def test_float32_round_trip(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v FLOAT')
+        values = pa.array(
+            [-1.5, 0.0, 0.5, 1.0, 3.14], type=pa.float32())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.float32())
+        self.assertEqual(
+            got.column('v').to_pylist(),
+            [-1.5, 0.0, 0.5, 1.0, 3.140000104904175])
+
+    # ---------- null handling ----------
+
+    def test_short_is_non_nullable_nulls_become_zero(self):
+        """QuestDB SHORT is non-nullable: Arrow nulls written to a
+        SHORT column come back as 0, not preserved. This is a
+        QuestDB storage contract (no sentinel value for SHORT in
+        the existing schema), not a client-side bug. Pinned so a
+        future server-side fix (e.g., adding a SHORT null
+        sentinel) is flagged."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v SHORT')
+        values = pa.array(
+            [-100, None, 0, None, 200], type=pa.int16())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int16())
+        # Nulls flatten to 0; non-null values round-trip cleanly.
+        self.assertEqual(
+            got.column('v').to_pylist(),
+            [-100, 0, 0, 0, 200])
+        self.assertEqual(
+            got.column('v').null_count, 0,
+            'SHORT is non-nullable; nulls should be erased server-side')
+
+    def test_int32_min_collapses_to_null(self):
+        """QuestDB INT uses INT32_MIN as the null sentinel — a
+        legitimate user value of INT32_MIN gets folded into NULL
+        on read. Same lossy contract as INT64_MIN → LONG NULL
+        pinned in ``test_sentinel_collision_is_documented_lossy``;
+        repeated here for INT so a regression on either type is
+        caught."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v INT')
+        # INT32_MIN at index 0, ordinary value at index 1.
+        values = pa.array(
+            [-2147483648, 42], type=pa.int32())
+        df = self._make_df_with_ts('v', values, 2)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int32())
+        self.assertEqual(
+            got.column('v').null_count, 1,
+            'expected the INT32_MIN row to be folded into NULL '
+            'by QuestDB INT storage')
+        self.assertTrue(got.column('v').is_null()[0].as_py())
+        self.assertFalse(got.column('v').is_null()[1].as_py())
+        self.assertEqual(got.column('v')[1].as_py(), 42)
+
+    # ---------- server-side coercion ----------
+
+    def test_int8_into_existing_long_column_widens_server_side(self):
+        """Pre-create a LONG column and write ``pa.int8`` into it.
+        The server widens to LONG on insert (the policy-2 contract:
+        target-column coercion is the server's job)."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        # Pre-create the table with v as LONG, not BYTE.
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        values = pa.array([1, 2, 3, 4, 5], type=pa.int8())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int64())
+        self.assertEqual(
+            got.column('v').to_pylist(), [1, 2, 3, 4, 5])
+
+    def test_float32_into_existing_double_column_widens(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, v DOUBLE) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        values = pa.array([0.5, 1.5, 2.5], type=pa.float32())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.float64())
+        self.assertEqual(
+            got.column('v').to_pylist(), [0.5, 1.5, 2.5])
+
+    # ---------- unhappy paths ----------
+
+    def test_pa_uint8_currently_unsupported(self):
+        """``pa.uint8()`` is not currently routed by column-ingress
+        Arrow detection (``_dataframe_series_resolve_arrow`` only
+        handles signed int8/16/32/64). It has no direct QuestDB
+        unsigned-type analogue and we haven't decided whether to
+        widen to SHORT or reject. Pinned here so any future support
+        is a deliberate change, not a silent regression."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG')
+        values = pa.array([0, 1, 255], type=pa.uint8())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError):
+                client.dataframe(df, table_name=table, at='ts')
+
+
 if __name__ == '__main__':
     unittest.main()

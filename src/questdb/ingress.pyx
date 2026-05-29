@@ -2365,6 +2365,13 @@ cdef object _dataframe_columnar_plan_failures(
                     'v1 only supports object-dtype bool or NumPy bool '
                     'columns; Arrow nullable bool not yet supported.'))
         elif col.setup.target == col_target_t.col_target_column_i64:
+            # Arrow narrow ints (i8/i16/i32) are accepted here against
+            # the shared col_target_column_i64; the column-QWP retarget
+            # step (`_dataframe_columnar_rewrite_to_narrow_arrow_targets`)
+            # then narrows them to BYTE / SHORT / INT before
+            # serialization. They're listed in the allowlist so the
+            # validator doesn't reject them between shared resolution
+            # and column-QWP retarget.
             if col.setup.source not in (
                     col_source_t.col_source_i64_numpy,
                     col_source_t.col_source_i8_numpy,
@@ -2374,22 +2381,28 @@ cdef object _dataframe_columnar_plan_failures(
                     col_source_t.col_source_u16_numpy,
                     col_source_t.col_source_u32_numpy,
                     col_source_t.col_source_u64_numpy,
-                    col_source_t.col_source_int_pyobj):
+                    col_source_t.col_source_int_pyobj,
+                    col_source_t.col_source_i8_arrow,
+                    col_source_t.col_source_i16_arrow,
+                    col_source_t.col_source_i32_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy signed/unsigned int columns '
-                    'or object-dtype int columns.'))
+                    'v1 only supports NumPy signed/unsigned int columns, '
+                    'Arrow int8/16/32 columns, or object-dtype int columns.'))
         elif col.setup.target == col_target_t.col_target_column_f64:
+            # Arrow float32 likewise: accepted here, retargeted to
+            # FLOAT (`col_target_column_f32`) by the retarget step.
             if col.setup.source not in (
                     col_source_t.col_source_f64_numpy,
                     col_source_t.col_source_f32_numpy,
-                    col_source_t.col_source_float_pyobj):
+                    col_source_t.col_source_float_pyobj,
+                    col_source_t.col_source_f32_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy float32/float64 or object-'
-                    'dtype float columns.'))
+                    'v1 only supports NumPy float32/float64, Arrow '
+                    'float32, or object-dtype float columns.'))
         elif col.setup.target == col_target_t.col_target_column_ts:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
@@ -2491,6 +2504,66 @@ cdef object _dataframe_columnar_plan_failures(
             'v1 requires at least one non-timestamp data column.'))
 
     return failures
+
+
+cdef void_int _dataframe_columnar_finalize_plan(
+        object df,
+        dataframe_plan_t* plan) except -1:
+    """Validate the plan against column-QWP v1 constraints, then
+    apply the column-QWP-specific narrow-Arrow target rewrites.
+
+    Order matters: validation runs first, against the *shared*
+    targets (`col_target_column_i64` / `col_f64` etc.) produced by
+    `_dataframe_plan_build`. The retarget step runs after, as a
+    pure transformation that cannot introduce invalid columns by
+    construction. Production column-QWP entry points should call
+    this single helper rather than orchestrating the two steps
+    themselves; the debug helper deliberately uses the lower-level
+    `_dataframe_columnar_plan_failures` + retarget pair so it can
+    *return* failures rather than raise.
+    """
+    _dataframe_columnar_validate_plan(df, plan)
+    _dataframe_columnar_rewrite_to_narrow_arrow_targets(plan)
+
+
+cdef void _dataframe_columnar_rewrite_to_narrow_arrow_targets(
+        dataframe_plan_t* plan) noexcept nogil:
+    """Column-QWP-only retarget step.
+
+    The shared resolver (`_dataframe_resolve_target`) maps every
+    integer source to `col_target_column_i64` and every float source
+    to `col_target_column_f64`, so the row-ILP serializer's existing
+    text-encoding dispatch keeps working unchanged. The column-QWP
+    wire protocol, however, has dedicated narrow types (BYTE / SHORT
+    / INT / FLOAT) and we want Arrow-narrow inputs (`pa.int8/16/32`,
+    `pa.float32`) to land on those wire types rather than widening to
+    LONG / DOUBLE. This pass walks the plan post-validation and
+    rewrites the (target, dispatch_code) pair for those four sources;
+    everything else is left untouched.
+    """
+    cdef size_t i
+    cdef col_t* col
+    cdef col_target_t new_target
+    for i in range(plan.col_count):
+        col = &plan.cols.d[i]
+        if col.setup.source == col_source_t.col_source_i8_arrow:
+            new_target = col_target_t.col_target_column_i8
+        elif col.setup.source == col_source_t.col_source_i16_arrow:
+            new_target = col_target_t.col_target_column_i16
+        elif col.setup.source == col_source_t.col_source_i32_arrow:
+            new_target = col_target_t.col_target_column_i32
+        elif col.setup.source == col_source_t.col_source_f32_arrow:
+            new_target = col_target_t.col_target_column_f32
+        else:
+            continue
+        # Only retarget field columns. If a source ever ends up as a
+        # designated-timestamp meta target (it can't today), leave it
+        # alone — narrow Arrow ints can't be a timestamp anyway.
+        if col.setup.meta_target != meta_target_t.meta_target_field:
+            continue
+        col.setup.target = new_target
+        col.dispatch_code = <col_dispatch_code_t>(
+            <int>col.setup.source + <int>new_target)
 
 
 cdef void_int _dataframe_columnar_validate_plan(
@@ -3117,6 +3190,46 @@ cdef void_int _dataframe_columnar_append_field(
                     &err)
         else:
             raise RuntimeError('Unsupported columnar timestamp field source.')
+    elif col.setup.target == col_target_t.col_target_column_i8:
+        with nogil:
+            ok = column_sender_chunk_column_i8(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const int8_t*>data) + row_offset,
+                row_count,
+                validity_ptr,
+                &err)
+    elif col.setup.target == col_target_t.col_target_column_i16:
+        with nogil:
+            ok = column_sender_chunk_column_i16(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const int16_t*>data) + row_offset,
+                row_count,
+                validity_ptr,
+                &err)
+    elif col.setup.target == col_target_t.col_target_column_i32:
+        with nogil:
+            ok = column_sender_chunk_column_i32(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const int32_t*>data) + row_offset,
+                row_count,
+                validity_ptr,
+                &err)
+    elif col.setup.target == col_target_t.col_target_column_f32:
+        with nogil:
+            ok = column_sender_chunk_column_f32(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const float*>data) + row_offset,
+                row_count,
+                validity_ptr,
+                &err)
     elif col.setup.target == col_target_t.col_target_column_str:
         if col.setup.source == col_source_t.col_source_str_pyobj:
             _dataframe_columnar_append_pyobj_str(
@@ -3215,7 +3328,11 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_f64,
                 col_target_t.col_target_column_ts,
                 col_target_t.col_target_column_str,
-                col_target_t.col_target_symbol):
+                col_target_t.col_target_symbol,
+                col_target_t.col_target_column_i8,
+                col_target_t.col_target_column_i16,
+                col_target_t.col_target_column_i32,
+                col_target_t.col_target_column_f32):
             if plan.pyobj_built != NULL:
                 prebuilt = plan.pyobj_built[col_index]
             else:
@@ -3362,7 +3479,14 @@ def _debug_dataframe_columnar_plan(
             symbols,
             at,
             &plan)
+        # Mirror the production order: collect failures against the
+        # shared targets first, then apply the column-QWP retarget
+        # only when the plan is acceptable. Skipping the retarget on
+        # failure keeps the returned dispatch view consistent with
+        # what `_dataframe_columnar_finalize_plan` would have done.
         failures = _dataframe_columnar_plan_failures(df, &plan)
+        if not failures:
+            _dataframe_columnar_rewrite_to_narrow_arrow_targets(&plan)
         return {
             'supported': not bool(failures),
             'failures': failures,
@@ -3431,7 +3555,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                 if (plan.col_count == 0) or (plan.row_count == 0):
                     continue
 
-                _dataframe_columnar_validate_plan(df, &plan)
+                _dataframe_columnar_finalize_plan(df, &plan)
                 _dataframe_columnar_prebuild_pyobj(df, &plan)
                 rows_per_chunk = _dataframe_columnar_rows_per_chunk(
                     &plan,
@@ -3621,7 +3745,7 @@ cdef class Client:
             if (plan.col_count == 0) or (plan.row_count == 0):
                 return self
 
-            _dataframe_columnar_validate_plan(df, &plan)
+            _dataframe_columnar_finalize_plan(df, &plan)
             _dataframe_columnar_prebuild_pyobj(df, &plan)
             rows_per_chunk = _dataframe_columnar_rows_per_chunk(&plan, 0)
 
