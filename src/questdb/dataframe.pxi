@@ -95,13 +95,12 @@ cdef enum col_target_t:
     col_target_column_arr_f64 = 8
     col_target_column_decimal = 9
     col_target_at = 10
-    # Narrow numeric targets for column-QWP. Each maps to a dedicated
-    # wire type (BYTE / SHORT / INT / FLOAT) rather than widening to
-    # LONG / DOUBLE. Selected by a column-QWP-only post-resolution
-    # retarget step (`_dataframe_columnar_rewrite_to_narrow_arrow_targets`
-    # in ingress.pyx) — the shared resolver and `_FIELD_TARGETS` keep
-    # routing all int / float sources through col_target_column_i64 /
-    # col_target_column_f64 so the row-ILP serializer is unaffected.
+    # Narrow numeric targets used by the column-QWP path only. Each
+    # maps to a dedicated wire type (BYTE / SHORT / INT / FLOAT)
+    # instead of widening to LONG / DOUBLE. Selected by
+    # `_FIELD_TARGETS_QWP`, which puts these ahead of the wide
+    # targets so the resolver picks them for Arrow narrow sources;
+    # row-ILP uses `_FIELD_TARGETS_ROW`, which does not list them.
     col_target_column_i8 = 11
     col_target_column_i16 = 12
     col_target_column_i32 = 13
@@ -293,21 +292,42 @@ cdef dict _TARGET_TO_SOURCES = {
 }
 
 
-# Targets associated with col_meta_target.field.
+# Field-target orderings used by `_dataframe_resolve_target` — each
+# protocol passes its own ordering so the resolver picks the right
+# target on the first hit.
 #
-# The shared resolver iterates this tuple to pick the first target whose
-# source-set accepts the column's Arrow / NumPy source. Narrow targets
-# (column_i8/i16/i32/f32/date) are intentionally **not** listed here —
-# the shared resolver always picks the wide target (column_i64 /
-# column_f64 / column_ts) so the row-ILP serializer's existing dispatch
-# stays correct. The column-QWP path adds a post-resolution rewrite
-# (`_dataframe_columnar_rewrite_to_narrow_arrow_targets`) that retargets
-# Arrow narrow sources to their narrow QWP targets after this resolver
-# has run.
-cdef tuple _FIELD_TARGETS = (
+# Many Arrow sources sit in multiple targets' source-sets
+# (`_TARGET_TO_SOURCES`) on purpose, e.g. `col_source_i8_arrow` lives
+# in both `col_target_column_i64` (so row-ILP can serialize it as
+# text via the existing i64 dispatch) and `col_target_column_i8` (so
+# column-QWP can send it as a BYTE wire type). The two `_FIELD_TARGETS_*`
+# tuples disambiguate: row-ILP lists wide targets only; column-QWP
+# lists narrow targets first so they win the resolver loop.
+
+cdef tuple _FIELD_TARGETS_ROW = (
     col_target_t.col_target_skip,
     col_target_t.col_target_column_bool,
     col_target_t.col_target_column_i64,
+    col_target_t.col_target_column_f64,
+    col_target_t.col_target_column_str,
+    col_target_t.col_target_column_ts,
+    col_target_t.col_target_column_arr_f64,
+    col_target_t.col_target_column_decimal)
+
+cdef tuple _FIELD_TARGETS_QWP = (
+    col_target_t.col_target_skip,
+    col_target_t.col_target_column_bool,
+    # Narrow numeric targets first — they own the Arrow narrow
+    # sources (`i8_arrow`, `f32_arrow`, …) so column-QWP emits the
+    # corresponding narrow wire types (BYTE / SHORT / INT / FLOAT)
+    # instead of widening to LONG / DOUBLE. The wide targets follow
+    # for the sources only they accept (NumPy narrow ints, pyobj
+    # ints, `i64_arrow`, `f64_arrow`, …).
+    col_target_t.col_target_column_i8,
+    col_target_t.col_target_column_i16,
+    col_target_t.col_target_column_i32,
+    col_target_t.col_target_column_i64,
+    col_target_t.col_target_column_f32,
     col_target_t.col_target_column_f64,
     col_target_t.col_target_column_str,
     col_target_t.col_target_column_ts,
@@ -1449,13 +1469,13 @@ cdef void_int _dataframe_resolve_source_and_buffers(
             'https://github.com/questdb/py-questdb-client/issues.')
 
 cdef void_int _dataframe_resolve_target(
-        PandasCol pandas_col, col_t* col) except -1:
+        PandasCol pandas_col, col_t* col, tuple field_targets) except -1:
     cdef col_target_t target
     cdef set target_sources
     if col.setup.meta_target in _DIRECT_META_TARGETS:
         col.setup.target = <col_target_t><int>col.setup.meta_target
         return 0
-    for target in _FIELD_TARGETS:
+    for target in field_targets:
         target_sources = _TARGET_TO_SOURCES[target]
         if col.setup.source in target_sources:
             col.setup.target = target
@@ -1509,14 +1529,15 @@ cdef void_int _dataframe_resolve_cols(
 cdef void_int _dataframe_resolve_cols_target_name_and_dc(
         qdb_pystr_buf* b,
         list pandas_cols,
-        col_t_arr* cols) except -1:
+        col_t_arr* cols,
+        tuple field_targets) except -1:
     cdef size_t index
     cdef col_t* col
     cdef PandasCol pandas_col
     for index in range(cols.size):
         col = &cols.d[index]
         pandas_col = pandas_cols[index]
-        _dataframe_resolve_target(pandas_col, col)
+        _dataframe_resolve_target(pandas_col, col, field_targets)
         if col.setup.source not in _TARGET_TO_SOURCES[col.setup.target]:
             raise ValueError(
                 f'Bad value: Column {pandas_col.name!r} ' +
@@ -1553,7 +1574,8 @@ cdef void_int _dataframe_resolve_args(
         line_sender_table_name* c_table_name_out,
         int64_t* at_value_out,
         col_t_arr* cols,
-        bint* any_cols_need_gil_out) except -1:
+        bint* any_cols_need_gil_out,
+        tuple field_targets) except -1:
     cdef ssize_t name_col
     cdef ssize_t at_col
 
@@ -1572,7 +1594,8 @@ cdef void_int _dataframe_resolve_args(
         c_table_name_out)
     at_col = _dataframe_resolve_at(df, cols, at, col_count, at_value_out)
     _dataframe_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
-    _dataframe_resolve_cols_target_name_and_dc(b, pandas_cols, cols)
+    _dataframe_resolve_cols_target_name_and_dc(
+        b, pandas_cols, cols, field_targets)
     qsort(cols.d, col_count, sizeof(col_t), _dataframe_compare_cols)
 
 
@@ -1583,7 +1606,8 @@ cdef void_int _dataframe_plan_build(
         object table_name_col,
         object symbols,
         object at,
-        dataframe_plan_t* plan) except -1:
+        dataframe_plan_t* plan,
+        tuple field_targets) except -1:
     _dataframe_may_import_deps()
     _dataframe_check_is_dataframe(df)
     plan.row_count = len(df)
@@ -1605,7 +1629,8 @@ cdef void_int _dataframe_plan_build(
         &plan.c_table_name,
         &plan.at_value,
         &plan.cols,
-        &plan.any_cols_need_gil)
+        &plan.any_cols_need_gil,
+        field_targets)
 
     # Headers and table names stored in `b` are borrowed by the plan.
     # Serialization rewinds to this point for every row without dropping
@@ -1639,7 +1664,8 @@ def _debug_dataframe_plan(
             table_name_col,
             symbols,
             at,
-            &plan)
+            &plan,
+            _FIELD_TARGETS_ROW)
         for col_index in range(plan.col_count):
             col = &plan.cols.d[col_index]
             cols.append({
@@ -3009,7 +3035,8 @@ cdef void_int _dataframe(
             table_name_col,
             symbols,
             at,
-            &plan)
+            &plan,
+            _FIELD_TARGETS_ROW)
         if (plan.col_count == 0) or (plan.row_count == 0):
             return 0  # Nothing to do.
         line_sender_buffer_clear_marker(ls_buf)
