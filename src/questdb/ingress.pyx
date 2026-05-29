@@ -2484,7 +2484,9 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_i16,
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
-                col_target_t.col_target_column_uuid):
+                col_target_t.col_target_column_uuid,
+                col_target_t.col_target_column_long256,
+                col_target_t.col_target_column_ipv4):
             # Column-QWP-only targets reached via `_FIELD_TARGETS_QWP`.
             # Each target's source-set in `_TARGET_TO_SOURCES` is a
             # singleton, so the source is already constrained by
@@ -3183,6 +3185,31 @@ cdef void_int _dataframe_columnar_append_field(
                 row_count,
                 validity_ptr,
                 &err)
+    elif col.setup.target == col_target_t.col_target_column_long256:
+        # `FixedSizeBinary(32)` is 32 bytes per row, forwarded as the
+        # QuestDB LONG256 wire shape (four LE 64-bit limbs).
+        with nogil:
+            ok = column_sender_chunk_column_long256(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const uint8_t*>data) + row_offset * 32,
+                row_count,
+                validity_ptr,
+                &err)
+    elif col.setup.target == col_target_t.col_target_column_ipv4:
+        # `pa.uint32()` buffer is u32 per row. The Rust FFI encodes
+        # each value LE on the wire; per the C header comment, the
+        # value is `u32::from(Ipv4Addr)` (octet 0 in the high byte).
+        with nogil:
+            ok = column_sender_chunk_column_ipv4(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                (<const uint32_t*>data) + row_offset,
+                row_count,
+                validity_ptr,
+                &err)
     elif col.setup.target == col_target_t.col_target_column_str:
         if col.setup.source == col_source_t.col_source_str_pyobj:
             _dataframe_columnar_append_pyobj_str(
@@ -3286,7 +3313,9 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_i16,
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
-                col_target_t.col_target_column_uuid):
+                col_target_t.col_target_column_uuid,
+                col_target_t.col_target_column_long256,
+                col_target_t.col_target_column_ipv4):
             if plan.pyobj_built != NULL:
                 prebuilt = plan.pyobj_built[col_index]
             else:

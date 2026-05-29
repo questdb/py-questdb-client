@@ -3098,6 +3098,168 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 client.dataframe(df, table_name=table, at='ts')
 
+    # ---------- IPV4 (Category C — pa.uint32) ----------
+
+    def test_ipv4_round_trip(self):
+        """``pa.uint32()`` → IPV4 wire → server stores as IPV4 →
+        egress emits ``pa.uint32()`` (per
+        ``test_type_coverage_round_trip``). Round-trip is value-
+        identity at the u32 level."""
+        import pyarrow as pa
+        import ipaddress
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v IPV4')
+        ips = [
+            '192.168.1.10',
+            '10.0.0.1',
+            '255.255.255.255',
+            '0.0.0.1',  # 0.0.0.0 is the IPV4 null sentinel
+            '127.0.0.1',
+        ]
+        ints = [int(ipaddress.IPv4Address(s)) for s in ips]
+        values = pa.array(ints, type=pa.uint32())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.uint32())
+        self.assertEqual(got.column('v').to_pylist(), ints)
+
+    def test_ipv4_string_coercion_is_unsupported(self):
+        """Unlike UUID (where the server parses VARCHAR strings
+        into UUIDs), QuestDB does NOT currently support VARCHAR →
+        IPV4 coercion at insert time. Writing `pa.string()` IP
+        addresses into an IPV4 column surfaces a server rejection
+        ("type coercion from VARCHAR to IPv4 is not supported").
+        Pin this contract — if a future QuestDB release adds the
+        coercion, this test flips and the IPV4 path joins UUID's
+        string-coercion ergonomics."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v IPV4')
+        ips = ['192.168.1.10', '10.0.0.1', '127.0.0.1']
+        values = pa.array(ips, type=pa.string())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError) as cm:
+                client.dataframe(df, table_name=table, at='ts')
+            self.assertIn('ipv4', str(cm.exception).lower())
+
+    def test_invalid_ipv4_string_is_rejected_by_server(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v IPV4')
+        values = pa.array(
+            ['not-an-ip', '999.999.999.999'], type=pa.string())
+        df = self._make_df_with_ts('v', values, 2)
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError):
+                client.dataframe(df, table_name=table, at='ts')
+
+    def test_pa_uint32_is_routed_to_ipv4_not_long(self):
+        """The strict-mirror policy: on column-QWP, `pa.uint32()`
+        is unambiguously IPV4, not "unsigned 32-bit integer that
+        widens to LONG". A user who wanted LONG must cast to
+        `pa.int64()` before ingest. Pin the resolved behaviour here
+        so a future policy change is a deliberate decision."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        # Pre-create with a LONG column. The server will reject
+        # IPV4 wire values landing in a LONG column with a
+        # schema mismatch — the rejection is itself the proof that
+        # column-QWP sent IPV4 (not LONG) on the wire.
+        self._create_table(table, 'v LONG')
+        values = pa.array([1, 2, 3], type=pa.uint32())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError):
+                client.dataframe(df, table_name=table, at='ts')
+
+    # ---------- LONG256 (Category C — FixedSizeBinary(32)) ----------
+
+    def test_long256_round_trip(self):
+        """``pa.fixed_size_binary(32)`` → LONG256 wire → server
+        stores as LONG256 → egress emits FSB(32). Bytes are
+        forwarded verbatim — same opaque-bytes convention as UUID
+        (matches Polars / Rust-direct: see PR #150)."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG256')
+        # Use distinct 32-byte patterns. The QuestDB wire format
+        # for LONG256 is 4 LE 64-bit limbs, least-significant first.
+        v0 = bytes(range(32))
+        v1 = bytes([i ^ 0xFF for i in range(32)])
+        v2 = bytes([0] * 32)
+        values = pa.array([v0, v1, v2], type=pa.binary(32))
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        col = got.column('v')
+        if isinstance(col.type, pa.BaseExtensionType):
+            got_bytes = col.combine_chunks().storage.to_pylist()
+        else:
+            got_bytes = col.to_pylist()
+        # v2 (all zeros) is the LONG256 null sentinel — server reads
+        # it back as NULL. Document this with the assertion.
+        self.assertEqual(got_bytes[0], v0)
+        self.assertEqual(got_bytes[1], v1)
+        # Index 2 may be None (null sentinel) — pin that contract.
+        self.assertIn(got_bytes[2], (v2, None))
+
+    def test_long256_with_nulls_round_trip(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG256')
+        v0 = bytes(range(32))
+        v2 = bytes(range(32, 64))
+        v4 = bytes([0xAB] * 32)
+        values = pa.array(
+            [v0, None, v2, None, v4], type=pa.binary(32))
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        col = got.column('v')
+        if isinstance(col.type, pa.BaseExtensionType):
+            got_bytes = col.combine_chunks().storage.to_pylist()
+        else:
+            got_bytes = col.to_pylist()
+        self.assertEqual(got_bytes, [v0, None, v2, None, v4])
+
+    def test_fsb32_rejected_by_row_ilp(self):
+        """Row-ILP doesn't list `col_target_column_long256` in
+        `_FIELD_TARGETS_ROW`, so `Sender.dataframe` rejects FSB(32)
+        with `BadDataFrame`. Symmetric to the UUID FSB(16) row-ILP
+        rejection test in PR 2."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        values = pa.array(
+            [bytes(range(32)), bytes(range(32, 64))],
+            type=pa.binary(32))
+        df = self._make_df_with_ts('v', values, 2)
+        conf = (
+            f'tcp::addr={self.qdb_plain.host}:'
+            f'{self.qdb_plain.line_tcp_port};')
+        with qi.Sender.from_conf(conf) as sender:
+            with self.assertRaises(qi.IngressError):
+                sender.dataframe(df, table_name='dummy', at='ts')
+
     def test_pa_uint8_currently_unsupported(self):
         """``pa.uint8()`` is not currently routed by column-ingress
         Arrow detection (``_dataframe_series_resolve_arrow`` only

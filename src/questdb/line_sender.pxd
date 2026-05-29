@@ -823,6 +823,26 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint column_sender_chunk_column_long256(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const uint8_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_column_ipv4(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const uint32_t* data,
+        size_t row_count,
+        const column_sender_validity* validity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint column_sender_chunk_column_ts_nanos(
         column_sender_chunk* chunk,
         const char* name,

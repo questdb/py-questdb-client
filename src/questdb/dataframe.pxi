@@ -106,6 +106,8 @@ cdef enum col_target_t:
     col_target_column_i32 = 13
     col_target_column_f32 = 14
     col_target_column_uuid = 15
+    col_target_column_long256 = 16
+    col_target_column_ipv4 = 17
 
 
 cdef dict _TARGET_NAMES = {
@@ -125,6 +127,8 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_i32: "int",
     col_target_t.col_target_column_f32: "float32",
     col_target_t.col_target_column_uuid: "uuid",
+    col_target_t.col_target_column_long256: "long256",
+    col_target_t.col_target_column_ipv4: "ipv4",
 }
 
 
@@ -177,6 +181,9 @@ cdef enum col_source_t:
     # wrapper, which we strip on input). Column-QWP only; row-ILP
     # has no serializer for this source.
     col_source_fsb16_arrow =            901000
+    # FixedSizeBinary(32) — the canonical shape egress emits for
+    # LONG256 columns. Column-QWP only.
+    col_source_fsb32_arrow =            902000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -269,6 +276,18 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_column_uuid: {
         col_source_t.col_source_fsb16_arrow,
     },
+    col_target_t.col_target_column_long256: {
+        col_source_t.col_source_fsb32_arrow,
+    },
+    col_target_t.col_target_column_ipv4: {
+        # `pa.uint32()` — overlaps with `col_target_column_i64` for
+        # row-ILP, but column-QWP's `_FIELD_TARGETS_QWP` lists IPV4
+        # ahead of i64 so the resolver picks IPV4 on this path. Per
+        # the strict-mirror policy: `pa.uint32()` is unambiguously
+        # IPV4 on column-QWP; counts as unsigned int32 must cast to
+        # `pa.int64()` before ingest.
+        col_source_t.col_source_u32_arrow,
+    },
     col_target_t.col_target_column_str: {
         col_source_t.col_source_str_pyobj,
         col_source_t.col_source_str_utf8_arrow,
@@ -330,12 +349,16 @@ cdef tuple _FIELD_TARGETS_QWP = (
     # Narrow numeric targets first — they own the Arrow narrow
     # sources (`i8_arrow`, `f32_arrow`, …) so column-QWP emits the
     # corresponding narrow wire types (BYTE / SHORT / INT / FLOAT)
-    # instead of widening to LONG / DOUBLE. The wide targets follow
-    # for the sources only they accept (NumPy narrow ints, pyobj
-    # ints, `i64_arrow`, `f64_arrow`, …).
+    # instead of widening to LONG / DOUBLE.
     col_target_t.col_target_column_i8,
     col_target_t.col_target_column_i16,
     col_target_t.col_target_column_i32,
+    # IPV4 must come BEFORE col_target_column_i64: `pa.uint32()` is
+    # in both source sets, and the strict-mirror policy maps it to
+    # IPV4 on column-QWP. Row-ILP's `_FIELD_TARGETS_ROW` doesn't
+    # list IPV4, so `pa.uint32()` keeps its existing LONG-widening
+    # behaviour there.
+    col_target_t.col_target_column_ipv4,
     col_target_t.col_target_column_i64,
     col_target_t.col_target_column_f32,
     col_target_t.col_target_column_f64,
@@ -343,10 +366,10 @@ cdef tuple _FIELD_TARGETS_QWP = (
     col_target_t.col_target_column_ts,
     col_target_t.col_target_column_arr_f64,
     col_target_t.col_target_column_decimal,
-    # QuestDB-extension types: routed by their canonical Arrow
-    # shape (FSB(16) for UUID; future PRs add IPV4 / LONG256 /
-    # GEOHASH here).
-    col_target_t.col_target_column_uuid)
+    # QuestDB-extension types whose Arrow source is unique
+    # (FixedSizeBinary widths).
+    col_target_t.col_target_column_uuid,
+    col_target_t.col_target_column_long256)
 
 
 # Targets that map directly from a meta target.
@@ -503,6 +526,10 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_f32 + col_source_t.col_source_f32_arrow
     col_dispatch_code_column_uuid__fsb16_arrow = \
         col_target_t.col_target_column_uuid + col_source_t.col_source_fsb16_arrow
+    col_dispatch_code_column_long256__fsb32_arrow = \
+        col_target_t.col_target_column_long256 + col_source_t.col_source_fsb32_arrow
+    col_dispatch_code_column_ipv4__u32_arrow = \
+        col_target_t.col_target_column_ipv4 + col_source_t.col_source_u32_arrow
 
 
 # Int values in order for sorting (as needed for API's sequential coupling).
@@ -1283,6 +1310,11 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 16):
         col.setup.source = col_source_t.col_source_fsb16_arrow
+    elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 32):
+        col.setup.source = col_source_t.col_source_fsb32_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_UINT32:
+        col.setup.source = col_source_t.col_source_u32_arrow
     else:
         raise IngressError(
             IngressErrorCode.BadDataFrame,
