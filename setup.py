@@ -96,6 +96,7 @@ def ingress_extension():
         define_macros = [
             ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
             ('QUESTDB_CLIENT_HAS_ARROW', '1'),
+            ('QUESTDB_CLIENT_ENABLE_ARROW', '1'),
         ]
     )
 

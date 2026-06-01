@@ -279,15 +279,11 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_column_long256: {
         col_source_t.col_source_fsb32_arrow,
     },
-    col_target_t.col_target_column_ipv4: {
-        # `pa.uint32()` — overlaps with `col_target_column_i64` for
-        # row-ILP, but column-QWP's `_FIELD_TARGETS_QWP` lists IPV4
-        # ahead of i64 so the resolver picks IPV4 on this path. Per
-        # the strict-mirror policy: `pa.uint32()` is unambiguously
-        # IPV4 on column-QWP; counts as unsigned int32 must cast to
-        # `pa.int64()` before ingest.
-        col_source_t.col_source_u32_arrow,
-    },
+    # The Rust Arrow path treats UInt32 as IPV4 only when Arrow field
+    # metadata says questdb.column_type=ipv4. Pandas drops Arrow field
+    # metadata before it reaches this planner, so plain UInt32 must
+    # resolve through col_target_column_i64 instead.
+    col_target_t.col_target_column_ipv4: set(),
     col_target_t.col_target_column_str: {
         col_source_t.col_source_str_pyobj,
         col_source_t.col_source_str_utf8_arrow,
@@ -353,13 +349,12 @@ cdef tuple _FIELD_TARGETS_QWP = (
     col_target_t.col_target_column_i8,
     col_target_t.col_target_column_i16,
     col_target_t.col_target_column_i32,
-    # IPV4 must come BEFORE col_target_column_i64: `pa.uint32()` is
-    # in both source sets, and the strict-mirror policy maps it to
-    # IPV4 on column-QWP. Row-ILP's `_FIELD_TARGETS_ROW` doesn't
-    # list IPV4, so `pa.uint32()` keeps its existing LONG-widening
-    # behaviour there.
-    col_target_t.col_target_column_ipv4,
     col_target_t.col_target_column_i64,
+    # IPV4 remains a column-QWP target for the wire emitter, but this
+    # pandas planner has no metadata-preserving UInt32 source that can
+    # select it. Metadata-aware IPV4 routing belongs to the Rust Arrow
+    # ingestion path.
+    col_target_t.col_target_column_ipv4,
     col_target_t.col_target_column_f32,
     col_target_t.col_target_column_f64,
     col_target_t.col_target_column_str,

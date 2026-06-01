@@ -2374,12 +2374,13 @@ cdef object _dataframe_columnar_plan_failures(
                     col_source_t.col_source_u16_numpy,
                     col_source_t.col_source_u32_numpy,
                     col_source_t.col_source_u64_numpy,
+                    col_source_t.col_source_u32_arrow,
                     col_source_t.col_source_int_pyobj):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy signed/unsigned int columns '
-                    'or object-dtype int columns.'))
+                    'v1 only supports NumPy signed/unsigned int columns, '
+                    'Arrow uint32 columns, or object-dtype int columns.'))
         elif col.setup.target == col_target_t.col_target_column_f64:
             if col.setup.source not in (
                     col_source_t.col_source_f64_numpy,
@@ -2488,10 +2489,11 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4):
             # Column-QWP-only targets reached via `_FIELD_TARGETS_QWP`.
-            # Each target's source-set in `_TARGET_TO_SOURCES` is a
-            # singleton, so the source is already constrained by
-            # routing. The contiguous-buffer + validity checks above
-            # cover layout; the per-type FFI handles the wire encoding.
+            # Each currently reachable target's source-set in
+            # `_TARGET_TO_SOURCES` is a singleton, so the source is
+            # already constrained by routing. The contiguous-buffer +
+            # validity checks above cover layout; the per-type FFI
+            # handles the wire encoding.
             pass
         else:
             failures.append(_dataframe_columnar_col_failure(
@@ -2528,7 +2530,8 @@ cdef bint _is_pyobj_source(col_source_t source) noexcept nogil:
 cdef bint _is_numpy_widening_source(col_source_t source) noexcept nogil:
     """True if the source goes through column_sender_chunk_append_numpy_column.
     Excludes int64/float64 (which already match the wire type and use
-    the per-type FFI directly) and excludes pyobj sources."""
+    the per-type FFI directly) and excludes pyobj sources. Arrow uint32 is
+    included because its fixed-width buffer layout matches a native u32 array."""
     return (
         source == col_source_t.col_source_bool_numpy or
         source == col_source_t.col_source_i8_numpy or
@@ -2538,6 +2541,7 @@ cdef bint _is_numpy_widening_source(col_source_t source) noexcept nogil:
         source == col_source_t.col_source_u16_numpy or
         source == col_source_t.col_source_u32_numpy or
         source == col_source_t.col_source_u64_numpy or
+        source == col_source_t.col_source_u32_arrow or
         source == col_source_t.col_source_f32_numpy)
 
 
@@ -2575,7 +2579,8 @@ cdef column_sender_numpy_dtype _source_to_numpy_dtype(
         return column_sender_numpy_dtype.column_sender_numpy_u8
     elif source == col_source_t.col_source_u16_numpy:
         return column_sender_numpy_dtype.column_sender_numpy_u16
-    elif source == col_source_t.col_source_u32_numpy:
+    elif (source == col_source_t.col_source_u32_numpy or
+          source == col_source_t.col_source_u32_arrow):
         return column_sender_numpy_dtype.column_sender_numpy_u32
     elif source == col_source_t.col_source_u64_numpy:
         return column_sender_numpy_dtype.column_sender_numpy_u64
@@ -3001,8 +3006,8 @@ cdef void_int _dataframe_columnar_append_field(
             raise RuntimeError('Unsupported columnar bool source.')
     elif col.setup.target == col_target_t.col_target_column_i64:
         # NumPy int64 (matches wire type) uses the per-type FFI;
-        # narrower NumPy ints widen via the NumPy appender; pyobj int
-        # uses the prebuild buffer.
+        # narrower NumPy ints and Arrow UInt32 widen via the NumPy
+        # appender; pyobj int uses the prebuild buffer.
         if col.setup.source == col_source_t.col_source_i64_numpy:
             with nogil:
                 ok = column_sender_chunk_column_i64(

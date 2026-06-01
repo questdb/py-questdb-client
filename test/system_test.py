@@ -3098,26 +3098,21 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 client.dataframe(df, table_name=table, at='ts')
 
-    # ---------- IPV4 (Category C — pa.uint32) ----------
+    # ---------- UInt32 / IPV4 policy ----------
 
-    def test_ipv4_round_trip(self):
-        """``pa.uint32()`` → IPV4 wire → server stores as IPV4 →
-        egress emits ``pa.uint32()`` (per
-        ``test_type_coverage_round_trip``). Round-trip is value-
-        identity at the u32 level."""
+    def test_pa_uint32_round_trip_as_long(self):
+        """Plain ``pa.uint32()`` widens to LONG on Client.dataframe.
+
+        The Rust Arrow ingestion path reserves IPV4 for UInt32 fields
+        with ``questdb.column_type=ipv4`` metadata. Pandas drops Arrow
+        field metadata before it reaches this planner, so this path
+        follows the plain-UInt32 rule.
+        """
         import pyarrow as pa
-        import ipaddress
         self._require_qwp_ws()
         table = self._table()
-        self._create_table(table, 'v IPV4')
-        ips = [
-            '192.168.1.10',
-            '10.0.0.1',
-            '255.255.255.255',
-            '0.0.0.1',  # 0.0.0.0 is the IPV4 null sentinel
-            '127.0.0.1',
-        ]
-        ints = [int(ipaddress.IPv4Address(s)) for s in ips]
+        self._create_table(table, 'v LONG')
+        ints = [1, 2, 3, 0, 4294967295]
         values = pa.array(ints, type=pa.uint32())
         df = self._make_df_with_ts('v', values, 5)
         with qi.Client.from_conf(self._conf()) as client:
@@ -3126,7 +3121,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         with qi.Client.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        self.assertEqual(got.column('v').type, pa.uint32())
+        self.assertEqual(got.column('v').type, pa.int64())
         self.assertEqual(got.column('v').to_pylist(), ints)
 
     def test_ipv4_string_coercion_is_unsupported(self):
@@ -3162,20 +3157,14 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 client.dataframe(df, table_name=table, at='ts')
 
-    def test_pa_uint32_is_routed_to_ipv4_not_long(self):
-        """The strict-mirror policy: on column-QWP, `pa.uint32()`
-        is unambiguously IPV4, not "unsigned 32-bit integer that
-        widens to LONG". A user who wanted LONG must cast to
-        `pa.int64()` before ingest. Pin the resolved behaviour here
-        so a future policy change is a deliberate decision."""
+    def test_pa_uint32_is_routed_to_long_not_ipv4(self):
+        """Plain ``pa.uint32()`` is not enough to select IPV4."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
-        # Pre-create with a LONG column. The server will reject
-        # IPV4 wire values landing in a LONG column with a
-        # schema mismatch — the rejection is itself the proof that
-        # column-QWP sent IPV4 (not LONG) on the wire.
-        self._create_table(table, 'v LONG')
+        # Pre-create with an IPV4 column. The server will reject LONG
+        # wire values landing in IPV4 with a schema mismatch.
+        self._create_table(table, 'v IPV4')
         values = pa.array([1, 2, 3], type=pa.uint32())
         df = self._make_df_with_ts('v', values, 3)
         with qi.Client.from_conf(self._conf()) as client:

@@ -512,6 +512,26 @@ class TestPandasBase:
             self.assertTrue(plan['supported'])
             self.assertEqual(plan['failures'], [])
 
+        def test_columnar_plan_populates_plain_arrow_uint32_as_integer(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+                'seq': pd.Series(
+                    pa.array([1, 4294967295], type=pa.uint32()),
+                    dtype=pd.ArrowDtype(pa.uint32())),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+            self.assertTrue(plan['supported'], plan['failures'])
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df, table_name='trades', at='ts', symbols=False)
+
+            self.assertEqual(result['populated_rows_total'], 2)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_debug_dataframe_columnar_plan_accepts_narrow_numpy_dtypes(self):
             # Step 3 broadened the columnar planner to accept every
             # narrower NumPy numeric dtype + native bool. The shapes
