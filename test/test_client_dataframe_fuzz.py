@@ -1261,6 +1261,65 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
             finally:
                 self._drop_table(table_name)
 
+    def test_targeted_rust_arrow_classifier_numeric_round_trip(self):
+        table_name = f'rt_arrow_numeric_{uuid.uuid4().hex[:8]}'
+        ts_type = pa.timestamp('ms', tz='UTC')
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                pa.array(
+                    [1704067200000, 1704067201000, 1704067202000],
+                    type=ts_type),
+                dtype=pd.ArrowDtype(ts_type)),
+            'seq': pd.Series([1, 2, 3], dtype=np.int64),
+            'u8': pd.Series(
+                pa.array([1, 2, 255], type=pa.uint8()),
+                dtype=pd.ArrowDtype(pa.uint8())),
+            'u16': pd.Series(
+                pa.array([1000, 2000, 3000], type=pa.uint16()),
+                dtype=pd.ArrowDtype(pa.uint16())),
+            'u64': pd.Series(
+                pa.array([1, 2 ** 31, 2 ** 40], type=pa.uint64()),
+                dtype=pd.ArrowDtype(pa.uint64())),
+            'f16': pd.Series(
+                pa.array(np.array([1.5, 2.5, 3.5], dtype=np.float16),
+                         type=pa.float16()),
+                dtype=pd.ArrowDtype(pa.float16())),
+        })
+
+        try:
+            self._drop_table(table_name)
+            with qi.Client.from_conf(self.conf) as client:
+                client.dataframe(df, table_name=table_name, at='ts')
+            self._wait_for_rows(table_name, len(df))
+
+            with qi.Client.from_conf(self.conf) as client:
+                table = client.query(
+                    f'SELECT timestamp, seq, u8, u16, u64, f16 '
+                    f'FROM {table_name} ORDER BY seq').to_arrow()
+
+            actual_ts = table.column('timestamp').to_pandas()
+            if actual_ts.dt.tz is not None:
+                actual_ts = actual_ts.dt.tz_convert(None)
+            expected_ts = pd.Series(
+                ['2024-01-01T00:00:00.000000',
+                 '2024-01-01T00:00:01.000000',
+                 '2024-01-01T00:00:02.000000'],
+                dtype='datetime64[us]')
+            pd.testing.assert_series_equal(
+                actual_ts.astype('datetime64[us]').reset_index(drop=True),
+                expected_ts.reset_index(drop=True),
+                check_names=False)
+            self.assertEqual(table.column('u8').to_pylist(), [1, 2, 255])
+            self.assertEqual(
+                table.column('u16').to_pylist(), [1000, 2000, 3000])
+            self.assertEqual(
+                table.column('u64').to_pylist(), [1, 2 ** 31, 2 ** 40])
+            np.testing.assert_allclose(
+                np.array(table.column('f16').to_pylist(), dtype=np.float32),
+                np.array([1.5, 2.5, 3.5], dtype=np.float32))
+        finally:
+            self._drop_table(table_name)
+
 
 # Late imports for the round-trip class.
 import time  # noqa: E402

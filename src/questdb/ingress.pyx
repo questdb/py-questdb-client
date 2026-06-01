@@ -118,6 +118,7 @@ cdef uint64_t _dataframe_columnar_flush_ns = 0
 cdef uint64_t _dataframe_columnar_sync_calls = 0
 cdef uint64_t _dataframe_columnar_sync_ns = 0
 cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
+cdef size_t _DATAFRAME_ARROW_ROWS_PER_CHUNK = 32000
 
 
 # This value is automatically updated by the `bump2version` tool.
@@ -3384,9 +3385,10 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
         47) == 0
 
 
-cdef void_int _dataframe_columnar_flush(
+cdef void_int _dataframe_columnar_flush_any(
         qwpws_conn* conn,
         column_sender_chunk* chunk,
+        line_sender_buffer* buffer,
         bint retry_after_sync) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_error_code err_code
@@ -3400,7 +3402,10 @@ cdef void_int _dataframe_columnar_flush(
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = column_sender_flush(conn, chunk, &err)
+    if buffer != NULL:
+        ok = column_sender_flush_buffer(conn, buffer, &err)
+    else:
+        ok = column_sender_flush(conn, chunk, &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
@@ -3419,7 +3424,10 @@ cdef void_int _dataframe_columnar_flush(
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
-        ok = column_sender_flush(conn, chunk, &err)
+        if buffer != NULL:
+            ok = column_sender_flush_buffer(conn, buffer, &err)
+        else:
+            ok = column_sender_flush(conn, chunk, &err)
         _ensure_has_gil(&gs)
         if _dataframe_columnar_count_io_stats:
             _dataframe_columnar_flush_calls += 1
@@ -3428,6 +3436,20 @@ cdef void_int _dataframe_columnar_flush(
             return 0
 
     raise c_err_to_py(err)
+
+
+cdef void_int _dataframe_columnar_flush(
+        qwpws_conn* conn,
+        column_sender_chunk* chunk,
+        bint retry_after_sync) except -1:
+    _dataframe_columnar_flush_any(conn, chunk, NULL, retry_after_sync)
+
+
+cdef void_int _dataframe_columnar_flush_buffer(
+        qwpws_conn* conn,
+        line_sender_buffer* buffer,
+        bint retry_after_sync) except -1:
+    _dataframe_columnar_flush_any(conn, NULL, buffer, retry_after_sync)
 
 
 def _debug_dataframe_columnar_io_stats(
@@ -3737,6 +3759,177 @@ def _bench_dataframe_plan_and_populate_column_chunks(
     }
 
 
+cdef bint _dataframe_client_arrow_route_allowed(
+        object df,
+        object table_name,
+        object table_name_col,
+        object symbols,
+        object at) except -1:
+    if table_name_col is not None:
+        return False
+    if not isinstance(table_name, str):
+        return False
+    if symbols != 'auto':
+        return False
+    if isinstance(at, str):
+        try:
+            if at not in df.columns:
+                return False
+            return len(df.columns) > 1
+        except Exception:
+            return False
+    return False
+
+
+cdef bint _dataframe_arrow_at_column_values_allowed(
+        object batch,
+        str at) except -1:
+    cdef int at_index
+    cdef object at_array
+    cdef object at_values_i64
+    cdef object at_min
+
+    at_index = batch.schema.get_field_index(at)
+    if at_index < 0:
+        return False
+
+    at_array = batch.column(at_index)
+    if at_array.type.id != _PYARROW.lib.Type_TIMESTAMP:
+        return False
+    if at_array.null_count != 0:
+        return False
+
+    import pyarrow.compute as pc
+
+    at_values_i64 = pc.cast(at_array, _PYARROW.int64())
+    at_min = pc.min(at_values_i64).as_py()
+    return at_min is None or at_min >= 0
+
+
+cdef bint _dataframe_client_try_arrow_path(
+        questdb_db* db,
+        object df,
+        object table_name,
+        object table_name_col,
+        object symbols,
+        object at) except -1:
+    cdef qdb_pystr_buf* b = NULL
+    cdef qwpws_conn* conn = NULL
+    cdef line_sender_buffer* buffer = NULL
+    cdef line_sender_error* err = NULL
+    cdef PyThreadState* gs = NULL
+    cdef object batch = None
+    cdef object batch_slice = None
+    cdef object exc
+    cdef bint flushed = False
+    cdef bint sync_attempted = False
+    cdef bint force_drop_conn = False
+    cdef bint fallback_to_manual = False
+    cdef size_t row_count = 0
+    cdef size_t row_offset = 0
+    cdef size_t chunk_rows = 0
+
+    if not _dataframe_client_arrow_route_allowed(
+            df, table_name, table_name_col, symbols, at):
+        return False
+
+    _dataframe_may_import_deps()
+    _dataframe_check_is_dataframe(df)
+    if (len(df.columns) == 0) or (len(df) == 0):
+        return True
+
+    try:
+        batch = _PYARROW.RecordBatch.from_pandas(df, preserve_index=False)
+    except MemoryError:
+        raise
+    except Exception:
+        return False
+
+    row_count = batch.num_rows
+    if row_count == 0 or batch.num_columns == 0:
+        return True
+    if not _dataframe_arrow_at_column_values_allowed(batch, at):
+        return False
+
+    b = qdb_pystr_buf_new()
+    try:
+        _ensure_doesnt_have_gil(&gs)
+        conn = questdb_db_borrow_conn(db, &err)
+        _ensure_has_gil(&gs)
+        if conn == NULL:
+            raise c_err_to_py(err)
+
+        try:
+            row_offset = 0
+            while row_offset < row_count:
+                chunk_rows = _DATAFRAME_ARROW_ROWS_PER_CHUNK
+                if chunk_rows > row_count - row_offset:
+                    chunk_rows = row_count - row_offset
+                batch_slice = batch.slice(row_offset, chunk_rows)
+
+                buffer = line_sender_buffer_new_qwp_ws()
+                if buffer == NULL:
+                    raise MemoryError(
+                        'line_sender_buffer_new_qwp_ws returned NULL')
+                reserve_buffer(buffer, 65536)
+
+                try:
+                    _dataframe_append_arrow_record_batch(
+                        buffer,
+                        b,
+                        batch_slice,
+                        table_name,
+                        at)
+                except IngressError as exc:
+                    if (not flushed and exc.code in (
+                            IngressErrorCode.ArrowUnsupportedColumnKind,
+                            IngressErrorCode.ArrowIngest,
+                            IngressErrorCode.InvalidApiCall)):
+                        fallback_to_manual = True
+                        break
+                    raise
+
+                if line_sender_buffer_row_count(buffer) != 0:
+                    _dataframe_columnar_flush_buffer(
+                        conn,
+                        buffer,
+                        row_offset != 0)
+                    flushed = True
+
+                line_sender_buffer_free(buffer)
+                buffer = NULL
+                row_offset += chunk_rows
+
+            if fallback_to_manual:
+                return False
+
+            sync_attempted = True
+            _dataframe_columnar_sync(conn)
+        except:
+            force_drop_conn = True
+            if (conn != NULL and flushed and not sync_attempted and
+                    not qwpws_conn_must_close(conn)):
+                try:
+                    _dataframe_columnar_sync(conn)
+                    force_drop_conn = False
+                except Exception:
+                    pass
+            raise
+
+        return True
+    finally:
+        _ensure_has_gil(&gs)
+        if conn != NULL:
+            if force_drop_conn:
+                questdb_db_drop_conn(db, conn)
+            else:
+                questdb_db_return_conn(db, conn)
+        if buffer != NULL:
+            line_sender_buffer_free(buffer)
+        if b != NULL:
+            qdb_pystr_buf_free(b)
+
+
 cdef class Client:
     """
     Pooled QWP/WebSocket client.
@@ -3843,16 +4036,19 @@ cdef class Client:
         Supports a column-QWP v1 subset: fixed ``table_name``, non-null
         designated timestamp column, and the following per-column dtypes:
 
-        - **Numeric**: NumPy ``bool/int{8,16,32,64}/uint{8..64}/float{32,64}``
-          (narrow types widen to LONG/DOUBLE on the wire). Arrow
-          ``pa.int{8,16,32,64}`` and ``pa.float{32,64}`` map to the
-          corresponding narrow wire types (BYTE/SHORT/INT/FLOAT/LONG/
-          DOUBLE) without widening; ``pa.uint*`` is rejected until a
-          policy is settled.
+        - **Numeric**: NumPy ``bool/int{8,16,32,64}/uint{8..64}/float{32,64}``.
+          Arrow ``pa.int{8,16,32,64}``, ``pa.float{16,32,64}``, and
+          ``pa.uint{8,16,32,64}`` are accepted by the Rust Arrow batch route
+          when the frame uses a fixed table name, ``symbols='auto'``, and a
+          designated timestamp column name. Unsigned Arrow values follow the
+          Rust Arrow policy: ``UInt8`` widens to ``SHORT``, ``UInt16`` to
+          ``INT``, ``UInt32`` to ``LONG``, and ``UInt64`` is reinterpreted as
+          signed ``LONG``.
         - **String / Symbol**: object-dtype ``str``, ``pa.string()``,
           ``pa.large_string()``, ``pd.CategoricalDtype`` of strings.
-        - **Timestamp**: NumPy ``datetime64[ns/us]`` and ``pa.timestamp``
-          with unit ``ns`` or ``us`` (tz-aware accepted).
+        - **Timestamp**: NumPy ``datetime64`` units accepted by pandas and
+          ``pa.timestamp`` with unit ``s``, ``ms``, ``us``, or ``ns``
+          (tz-aware accepted on Arrow-backed columns in the Rust Arrow route).
         - **Decimal**: ``decimal.Decimal`` objects, ``pa.decimal{32,64,
           128,256}``.
         - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
@@ -3886,6 +4082,15 @@ cdef class Client:
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
+            if _dataframe_client_try_arrow_path(
+                    db,
+                    df,
+                    table_name,
+                    table_name_col,
+                    symbols,
+                    at):
+                return self
+
             _dataframe_plan_build(
                 b,
                 df,

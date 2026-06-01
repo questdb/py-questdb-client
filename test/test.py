@@ -249,6 +249,49 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['qwp1_frames'], 0)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_client_dataframe_routes_rust_arrow_classifier_probe(self):
+        ts_type = pyarrow.timestamp('ms', tz='UTC')
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                pyarrow.array(
+                    [1704067200000, 1704067201000, 1704067202000],
+                    type=ts_type),
+                dtype=pd.ArrowDtype(ts_type)),
+            'u8': pd.Series(
+                pyarrow.array([1, 2, None], type=pyarrow.uint8()),
+                dtype=pd.ArrowDtype(pyarrow.uint8())),
+            'u16': pd.Series(
+                pyarrow.array([1000, None, 3000], type=pyarrow.uint16()),
+                dtype=pd.ArrowDtype(pyarrow.uint16())),
+            'u64': pd.Series(
+                pyarrow.array([1, 2 ** 63, None], type=pyarrow.uint64()),
+                dtype=pd.ArrowDtype(pyarrow.uint64())),
+            'f16': pd.Series(
+                pyarrow.array(np.array([1.5, 2.5, 3.5], dtype=np.float16),
+                              type=pyarrow.float16()),
+                dtype=pd.ArrowDtype(pyarrow.float16())),
+        })
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.Client.from_conf(conf)
+            try:
+                client.dataframe(df, table_name='arrow_probe', at='ts')
+            finally:
+                client.close()
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreater(stats['qwp1_frames'], 0)
+        self.assertEqual(stats['binary_frames'], stats['qwp1_frames'])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_client_close_waits_for_active_dataframe(self):
         df = pd.DataFrame({
             'ts': pd.Series([

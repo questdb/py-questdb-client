@@ -994,6 +994,12 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint column_sender_flush_buffer(
+        qwpws_conn* conn,
+        line_sender_buffer* buffer,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint column_sender_sync(
         qwpws_conn* conn,
         column_sender_ack_level ack_level,
