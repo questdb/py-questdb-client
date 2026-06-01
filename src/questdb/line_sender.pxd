@@ -199,6 +199,26 @@ cdef extern from "questdb/ingress/line_sender.h":
         size_t max_name_len
         ) noexcept nogil
 
+    line_sender_buffer* line_sender_buffer_new_qwp_ws(
+        ) noexcept nogil
+
+    bint line_sender_buffer_append_arrow(
+        line_sender_buffer* buffer,
+        line_sender_table_name table,
+        ArrowArray* array,
+        const ArrowSchema* schema,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_append_arrow_at_column(
+        line_sender_buffer* buffer,
+        line_sender_table_name table,
+        ArrowArray* array,
+        const ArrowSchema* schema,
+        line_sender_column_name ts_column,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     void line_sender_buffer_free(
         line_sender_buffer* buffer
         ) noexcept nogil

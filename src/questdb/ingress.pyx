@@ -3494,6 +3494,137 @@ def _debug_dataframe_columnar_plan(
         qdb_pystr_buf_free(b)
 
 
+cdef void_int _dataframe_append_arrow_record_batch(
+        line_sender_buffer* buffer,
+        qdb_pystr_buf* b,
+        object batch,
+        object table_name,
+        object at) except -1:
+    cdef ArrowArray array
+    cdef ArrowSchema schema
+    cdef line_sender_table_name c_table_name
+    cdef line_sender_column_name c_ts_column
+    cdef line_sender_error* err = NULL
+    cdef bint ok
+    cdef bint at_is_column = False
+
+    if not isinstance(table_name, str):
+        raise TypeError('table_name must be str for Arrow batch append.')
+    if at is None or isinstance(at, ServerTimestampType):
+        at_is_column = False
+    elif isinstance(at, str):
+        at_is_column = True
+    else:
+        raise TypeError(
+            'at must be a timestamp column name, ServerTimestamp, or None '
+            'for Arrow batch append.')
+
+    qdb_pystr_buf_clear(b)
+    str_to_table_name(b, <PyObject*>table_name, &c_table_name)
+    if at_is_column:
+        str_to_column_name(b, at, &c_ts_column)
+
+    memset(&array, 0, sizeof(ArrowArray))
+    memset(&schema, 0, sizeof(ArrowSchema))
+    try:
+        batch._export_to_c(<uintptr_t>&array, <uintptr_t>&schema)
+        if at_is_column:
+            with nogil:
+                ok = line_sender_buffer_append_arrow_at_column(
+                    buffer,
+                    c_table_name,
+                    &array,
+                    &schema,
+                    c_ts_column,
+                    &err)
+        else:
+            with nogil:
+                ok = line_sender_buffer_append_arrow(
+                    buffer,
+                    c_table_name,
+                    &array,
+                    &schema,
+                    &err)
+        if not ok:
+            raise c_err_to_py(err)
+    finally:
+        # The Rust FFI consumes `array` and clears `array.release`.
+        # Keep the guard here for Python-side failures before the call.
+        if array.release != NULL:
+            array.release(&array)
+        if schema.release != NULL:
+            schema.release(&schema)
+
+
+def _bench_dataframe_append_arrow_buffer(
+        object df,
+        *,
+        object table_name=None,
+        object at=None,
+        size_t iterations=1):
+    """
+    Internal benchmark hook for the Rust Arrow batch ingestion path.
+
+    This builds a pyarrow RecordBatch from ``df`` and appends it through
+    ``line_sender_buffer_append_arrow`` / ``_at_column``. It does not flush
+    to a server; it exists to compare the Rust classifier path against the
+    current Python dataframe planner before changing public ingestion
+    routing. It is intentionally kept out of ``__all__``.
+    """
+    cdef size_t iteration
+    cdef line_sender_buffer* buffer = NULL
+    cdef qdb_pystr_buf* b = NULL
+    cdef object batch
+    cdef size_t row_count = 0
+    cdef size_t col_count = 0
+    cdef size_t last_buffer_rows = 0
+    cdef size_t last_buffer_size = 0
+    cdef size_t total_buffer_rows = 0
+
+    if iterations == 0:
+        raise ValueError('iterations must be greater than zero')
+
+    _dataframe_may_import_deps()
+    _dataframe_check_is_dataframe(df)
+    batch = _PYARROW.RecordBatch.from_pandas(df, preserve_index=False)
+    row_count = batch.num_rows
+    col_count = batch.num_columns
+
+    for iteration in range(iterations):
+        buffer = line_sender_buffer_new_qwp_ws()
+        if buffer == NULL:
+            raise MemoryError('line_sender_buffer_new_qwp_ws returned NULL')
+        b = qdb_pystr_buf_new()
+        try:
+            reserve_buffer(buffer, 65536)
+            _dataframe_append_arrow_record_batch(
+                buffer,
+                b,
+                batch,
+                table_name,
+                at)
+            last_buffer_rows = line_sender_buffer_row_count(buffer)
+            last_buffer_size = line_sender_buffer_size(buffer)
+            total_buffer_rows += last_buffer_rows
+        finally:
+            if buffer != NULL:
+                line_sender_buffer_free(buffer)
+                buffer = NULL
+            if b != NULL:
+                qdb_pystr_buf_free(b)
+                b = NULL
+
+    return {
+        'iterations': iterations,
+        'row_count': row_count,
+        'col_count': col_count,
+        'logical_cells': row_count * col_count,
+        'last_buffer_rows': last_buffer_rows,
+        'last_buffer_size': last_buffer_size,
+        'total_buffer_rows': total_buffer_rows,
+    }
+
+
 def _bench_dataframe_plan_and_populate_column_chunks(
         object df,
         *,
