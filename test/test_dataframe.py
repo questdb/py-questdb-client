@@ -734,6 +734,37 @@ class TestPandasBase:
             self.assertEqual(plan['failures'], [])
             self.assertEqual(plan['normalizations'], [])
 
+        def test_debug_dataframe_columnar_plan_preserves_large_string_category(self):
+            symbols = pd.Series(
+                pa.array(
+                    ['alpha', 'beta', None, 'alpha'],
+                    type=pa.large_string()),
+                dtype=pd.ArrowDtype(pa.large_string())).astype('category')
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02'),
+                    pd.Timestamp('2024-01-01 00:00:03')],
+                    dtype='datetime64[ns]'),
+                'sym': symbols,
+                'seq': pd.Series([1, 2, 3, 4], dtype='int64'),
+            })
+
+            row_plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts')
+            sym_col = next(
+                col for col in row_plan['cols']
+                if col['orig_name'] == 'sym')
+            self.assertFalse(sym_col['large_string_cast_to_utf8'])
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+            self.assertEqual(plan['normalizations'], [])
+
         def test_bench_dataframe_plan_and_populate_column_chunks(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
@@ -2281,6 +2312,30 @@ class TestPandasBase:
         def test_cat_i8_symbol(self):
             self._test_cat_symbol(30)
             self._test_cat_symbol(127)
+
+        def test_cat_large_string_symbol(self):
+            df = pd.DataFrame({
+                'a': pd.Series(
+                    pa.array(
+                        ['alpha', 'beta', None, 'alpha'],
+                        type=pa.large_string()),
+                    dtype=pd.ArrowDtype(pa.large_string())).astype('category'),
+                'b': [1, 2, 3, 4],
+            })
+
+            buf = _dataframe(
+                self.version,
+                df,
+                table_name='tbl1',
+                symbols=True,
+                at=qi.ServerTimestamp)
+
+            self.assertEqual(
+                buf,
+                b'tbl1,a=alpha b=1i\n'
+                b'tbl1,a=beta b=2i\n'
+                b'tbl1 b=3i\n'
+                b'tbl1,a=alpha b=4i\n')
 
         def test_cat_i16_symbol(self):
             self._test_cat_symbol(128)

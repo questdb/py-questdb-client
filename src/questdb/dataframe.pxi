@@ -81,6 +81,7 @@ cdef struct col_cursor_t:
     ArrowArray* chunk  # Current chunk.
     size_t chunk_index
     size_t offset  # i.e. the element index (not byte offset)
+    bint dictionary_large_offsets
 
 
 cdef enum col_target_t:
@@ -1203,18 +1204,6 @@ cdef void_int _dataframe_category_series_as_arrow(
     cdef const char* format
     cdef list chunks = _dataframe_series_to_arrow_chunks(pandas_col)
 
-    # Pandas 3.x with pyarrow may produce large_string ('U') dictionary
-    # values. Cast to regular string ('u') so the existing category
-    # accessors and symbol-dictionary FFI helpers (which use int32
-    # offsets) work unchanged.
-    if (len(chunks) > 0 and
-            hasattr(chunks[0].type, 'value_type') and
-            chunks[0].type.value_type == _PYARROW.large_string()):
-        col.setup.large_string_cast_to_utf8 = True
-        target_type = _PYARROW.dictionary(
-            chunks[0].type.index_type, _PYARROW.string())
-        chunks = [chunk.cast(target_type) for chunk in chunks]
-
     _dataframe_export_arrow_chunks(chunks, col)
 
     format = col.setup.arrow_schema.format
@@ -1232,7 +1221,8 @@ cdef void_int _dataframe_category_series_as_arrow(
             f'Got {(<bytes>format).decode("utf-8")!r}.')
 
     format = col.setup.arrow_schema.dictionary.format
-    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0):
+    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0 and
+            strncmp(format, _ARROW_FMT_LRG_UTF8_STRING, 1) != 0):
         raise IngressError(
             IngressErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
@@ -1534,6 +1524,12 @@ cdef void _dataframe_init_cursor(col_t* col) noexcept nogil:
     col.cursor.chunk = col.setup.chunks.chunks
     col.cursor.chunk_index = 0
     col.cursor.offset = col.cursor.chunk.offset
+    col.cursor.dictionary_large_offsets = (
+        col.setup.arrow_schema.dictionary != NULL and
+        strncmp(
+            col.setup.arrow_schema.dictionary.format,
+            _ARROW_FMT_LRG_UTF8_STRING,
+            1) == 0)
 
 
 cdef void_int _dataframe_resolve_cols(
@@ -1768,13 +1764,23 @@ cdef inline void _dataframe_arrow_get_cat_value(
         size_t* len_out,
         const char** buf_out) noexcept nogil:
     cdef int32_t* value_index_access
+    cdef int64_t* value_lrg_index_access
     cdef int32_t value_begin
+    cdef int64_t value_lrg_begin
     cdef uint8_t* value_char_access
-    value_index_access = <int32_t*>cursor.chunk.dictionary.buffers[1]
-    value_begin = value_index_access[key]
-    len_out[0] = value_index_access[key + 1] - value_begin
     value_char_access = <uint8_t*>cursor.chunk.dictionary.buffers[2]
-    buf_out[0] = <const char*>&value_char_access[value_begin]
+    if cursor.dictionary_large_offsets:
+        value_lrg_index_access = <int64_t*>cursor.chunk.dictionary.buffers[1]
+        value_lrg_begin = value_lrg_index_access[key]
+        len_out[0] = <size_t>(
+            value_lrg_index_access[key + 1] - value_lrg_begin)
+        buf_out[0] = <const char*>&value_char_access[
+            <size_t>value_lrg_begin]
+    else:
+        value_index_access = <int32_t*>cursor.chunk.dictionary.buffers[1]
+        value_begin = value_index_access[key]
+        len_out[0] = value_index_access[key + 1] - value_begin
+        buf_out[0] = <const char*>&value_char_access[value_begin]
 
 
 cdef inline bint _dataframe_arrow_get_cat_i8(

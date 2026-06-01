@@ -2461,8 +2461,8 @@ cdef object _dataframe_columnar_plan_failures(
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 requires Arrow UTF-8 dictionary offsets and byte '
-                    'buffers for categorical symbols.'))
+                    'v1 requires Arrow UTF-8 or LargeUtf8 dictionary offsets '
+                    'and byte buffers for categorical symbols.'))
         elif col.setup.target == col_target_t.col_target_at:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
