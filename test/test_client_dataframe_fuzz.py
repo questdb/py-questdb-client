@@ -52,6 +52,7 @@ import os
 import random
 import secrets
 import unittest
+import uuid
 
 import numpy as np
 
@@ -1078,6 +1079,12 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
         raise RuntimeError(
             f'WAL apply timed out: {expected} rows expected on {table_name}')
 
+    def _drop_table(self, table_name):
+        try:
+            self.qdb.http_sql_query(f'DROP TABLE IF EXISTS {table_name}')
+        except Exception:
+            pass
+
     # Round-trip generators avoid QuestDB's sentinel-value collisions:
     # INT64_MIN aliases LONG null, NaN aliases DOUBLE null. The fuzz
     # generators in this module deliberately sprinkle those values to
@@ -1132,11 +1139,7 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
             table_name = f'rt_{iter_idx}_{iter_seed:016x}'
             try:
                 df, shape, n_rows = self._build_simple_frame(rng)
-                try:
-                    self.qdb.http_sql_query(
-                        f'DROP TABLE IF EXISTS {table_name}')
-                except Exception:
-                    pass
+                self._drop_table(table_name)
                 with qi.Client.from_conf(self.conf) as client:
                     client.dataframe(df, table_name=table_name, at='ts')
                 self._wait_for_rows(table_name, n_rows)
@@ -1162,11 +1165,7 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
                     (iter_seed, shape if 'shape' in locals() else '?',
                      type(exc).__name__, repr(exc)))
                 # Try to drop the table to keep iterations independent.
-                try:
-                    self.qdb.http_sql_query(
-                        f'DROP TABLE IF EXISTS {table_name}')
-                except Exception:
-                    pass
+                self._drop_table(table_name)
 
         if failures:
             preview = '\n'.join(
@@ -1175,6 +1174,92 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
             self.fail(
                 f'{len(failures)}/{len(seeds)} iterations failed.\n'
                 f'(showing first 5)\n{preview}')
+
+    def test_targeted_payload_semantics(self):
+        table_name = f'rt_payload_{uuid.uuid4().hex[:8]}'
+        ts_values = np.array([
+            '2024-01-01T00:00:00.123456',
+            '2024-01-01T00:00:01.654321',
+            '2024-01-01T00:00:02.000000',
+            '2024-01-01T00:00:03.999999',
+        ], dtype='datetime64[us]')
+        large_text_values = ['alpha', 'bravo', None, 'cafe']
+        dict_text_values = ['EUR', 'USD', None, 'EUR']
+        df = pd.DataFrame({
+            'ts': pd.Series(ts_values),
+            'seq': pd.Series([1, 2, 3, 4], dtype=np.int64),
+            'large_text': pd.Series(
+                pa.array(large_text_values, type=pa.large_string()),
+                dtype=pd.ArrowDtype(pa.large_string())),
+            'dict_text': pd.Series(
+                pa.array(dict_text_values, type=pa.large_string()),
+                dtype=pd.ArrowDtype(pa.large_string())).astype('category'),
+        })
+
+        try:
+            self._drop_table(table_name)
+            with qi.Client.from_conf(self.conf) as client:
+                client.dataframe(df, table_name=table_name, at='ts')
+            self._wait_for_rows(table_name, len(df))
+
+            with qi.Client.from_conf(self.conf) as client:
+                table = client.query(
+                    f'SELECT timestamp, seq, large_text, dict_text '
+                    f'FROM {table_name} ORDER BY seq').to_arrow()
+
+            self.assertEqual(table.num_rows, len(df))
+            actual_ts = table.column('timestamp').to_pandas()
+            if actual_ts.dt.tz is not None:
+                actual_ts = actual_ts.dt.tz_convert(None)
+            expected_ts = pd.Series(ts_values)
+            pd.testing.assert_series_equal(
+                actual_ts.astype('datetime64[us]').reset_index(drop=True),
+                expected_ts.astype('datetime64[us]'),
+                check_names=False)
+            self.assertEqual(
+                table.column('large_text').to_pylist(),
+                large_text_values)
+            self.assertEqual(
+                table.column('dict_text').to_pylist(),
+                dict_text_values)
+        finally:
+            self._drop_table(table_name)
+
+    def test_targeted_timestamp_units_round_trip(self):
+        source_values = [
+            '2024-01-01T00:00:00.000000',
+            '2024-01-01T00:00:01.123000',
+            '2024-01-01T00:00:02.456000',
+        ]
+        for unit in ('s', 'ms', 'us', 'ns'):
+            table_name = f'rt_ts_{unit}_{uuid.uuid4().hex[:8]}'
+            ts_values = np.array(source_values, dtype=f'datetime64[{unit}]')
+            df = pd.DataFrame({
+                'ts': pd.Series(ts_values),
+                'seq': pd.Series([1, 2, 3], dtype=np.int64),
+            })
+
+            try:
+                self._drop_table(table_name)
+                with qi.Client.from_conf(self.conf) as client:
+                    client.dataframe(df, table_name=table_name, at='ts')
+                self._wait_for_rows(table_name, len(df))
+
+                with qi.Client.from_conf(self.conf) as client:
+                    table = client.query(
+                        f'SELECT timestamp, seq FROM {table_name} '
+                        f'ORDER BY seq').to_arrow()
+
+                actual_ts = table.column('timestamp').to_pandas()
+                if actual_ts.dt.tz is not None:
+                    actual_ts = actual_ts.dt.tz_convert(None)
+                expected_ts = pd.Series(ts_values).astype('datetime64[us]')
+                pd.testing.assert_series_equal(
+                    actual_ts.astype('datetime64[us]').reset_index(drop=True),
+                    expected_ts.reset_index(drop=True),
+                    check_names=False)
+            finally:
+                self._drop_table(table_name)
 
 
 # Late imports for the round-trip class.
