@@ -2724,6 +2724,16 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 value_arr, dtype=pd.ArrowDtype(value_arr.type)),
         })
 
+    def _arrow_series(self, values, arrow_type):
+        import pyarrow as pa
+        arr = pa.array(values, type=arrow_type)
+        return pd.array(arr, dtype=pd.ArrowDtype(arr.type))
+
+    def _assert_table_empty(self, table):
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(f'SELECT count() FROM {table}').to_arrow()
+        self.assertEqual(got.column(0).to_pylist(), [0])
+
     # ---------- happy-path round-trips ----------
 
     def test_int8_round_trip(self):
@@ -3184,6 +3194,150 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got.column('v').type, pa.int64())
         self.assertEqual(got.column('v').to_pylist(), ints)
 
+    def test_pa_uint64_reinterprets_as_signed_long(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG')
+        values = pa.array([0, 2 ** 63 + 1, 2 ** 64 - 1], type=pa.uint64())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int64())
+        self.assertEqual(
+            got.column('v').to_pylist(),
+            [0, -9223372036854775807, -1])
+
+    # ---------- TIMESTAMP validation policy ----------
+
+    def test_arrow_designated_timestamp_null_rejected_before_publish(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG')
+        ts_type = pa.timestamp('us', tz='UTC')
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                [1700000000_000000, None], ts_type),
+            'v': self._arrow_series([1, 2], pa.int64()),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError) as cm:
+                client.dataframe(df, table_name=table, at='ts')
+        self.assertIn('null', str(cm.exception).lower())
+        self._assert_table_empty(table)
+
+    def test_arrow_designated_timestamp_negative_rejected_before_publish(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG')
+        ts_type = pa.timestamp('us', tz='UTC')
+        df = pd.DataFrame({
+            'ts': self._arrow_series([-1, 1700000000_000000], ts_type),
+            'v': self._arrow_series([1, 2], pa.int64()),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError) as cm:
+                client.dataframe(df, table_name=table, at='ts')
+        self.assertIn('unix epoch', str(cm.exception).lower())
+        self._assert_table_empty(table)
+
+    def test_arrow_timestamp_field_null_rejected_before_publish(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'event_ts TIMESTAMP, v LONG')
+        ts_type = pa.timestamp('us', tz='UTC')
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                [1700000000_000000, 1700000001_000000], ts_type),
+            'event_ts': self._arrow_series(
+                [1700000002_000000, None], ts_type),
+            'v': self._arrow_series([1, 2], pa.int64()),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError) as cm:
+                client.dataframe(df, table_name=table, at='ts')
+        self.assertIn('event_ts', str(cm.exception))
+        self.assertIn('null', str(cm.exception).lower())
+        self._assert_table_empty(table)
+
+    def test_arrow_timestamp_field_negative_rejected_before_publish(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'event_ts TIMESTAMP, v LONG')
+        ts_type = pa.timestamp('us', tz='UTC')
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                [1700000000_000000, 1700000001_000000], ts_type),
+            'event_ts': self._arrow_series(
+                [-1, 1700000002_000000], ts_type),
+            'v': self._arrow_series([1, 2], pa.int64()),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.IngressError) as cm:
+                client.dataframe(df, table_name=table, at='ts')
+        self.assertIn('event_ts', str(cm.exception))
+        self.assertIn('unix epoch', str(cm.exception).lower())
+        self._assert_table_empty(table)
+
+    def test_arrow_multi_chunk_buffer_reuse_boundary_rows(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, seq LONG, price DOUBLE) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        rows = 64_001
+        ts_values = 1_700_000_000_000_000 + np.arange(rows, dtype=np.int64)
+        seq_values = np.arange(rows, dtype=np.int64)
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                ts_values,
+                pa.timestamp('us', tz='UTC')),
+            'seq': self._arrow_series(seq_values, pa.int64()),
+            'price': self._arrow_series(
+                seq_values.astype(np.float64) * 0.25,
+                pa.float64()),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
+            qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
+            try:
+                client.dataframe(df, table_name=table, at='ts')
+            finally:
+                io_stats = qi._debug_dataframe_columnar_io_stats(
+                    enabled=False)
+                arrow_stats = qi._debug_dataframe_arrow_stats(enabled=False)
+        self.assertEqual(io_stats['flush_calls'], 3)
+        self.assertEqual(io_stats['sync_calls'], 1)
+        self.assertEqual(arrow_stats['slices'], 3)
+        self.assertEqual(arrow_stats['buffer_allocations'], 1)
+        self.assertEqual(arrow_stats['fallbacks'], 0)
+        self.assertEqual(arrow_stats['completed'], 1)
+
+        self.qdb_plain.retry_check_table(table, min_rows=rows)
+        with qi.Client.from_conf(self._conf()) as client:
+            count = client.query(
+                f'SELECT count() FROM {table}').to_arrow()
+            expected_seq = [0, 31999, 32000, 32001, 63999, 64000]
+            got = client.query(
+                f'SELECT seq, price FROM {table} '
+                f'WHERE seq IN ({", ".join(str(v) for v in expected_seq)}) '
+                f'ORDER BY seq').to_arrow()
+        self.assertEqual(count.column(0).to_pylist(), [rows])
+        self.assertEqual(got.column('seq').to_pylist(), expected_seq)
+        self.assertEqual(
+            got.column('price').to_pylist(),
+            [value * 0.25 for value in expected_seq])
+
     def test_ipv4_string_coercion_is_unsupported(self):
         """Unlike UUID (where the server parses VARCHAR strings
         into UUIDs), QuestDB does NOT currently support VARCHAR →
@@ -3309,22 +3463,22 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 sender.dataframe(df, table_name='dummy', at='ts')
 
-    def test_pa_uint8_currently_unsupported(self):
-        """``pa.uint8()`` is not currently routed by column-ingress
-        Arrow detection (``_dataframe_series_resolve_arrow`` only
-        handles signed int8/16/32/64). It has no direct QuestDB
-        unsigned-type analogue and we haven't decided whether to
-        widen to SHORT or reject. Pinned here so any future support
-        is a deliberate change, not a silent regression."""
+    def test_pa_uint8_round_trip_as_short(self):
+        """Plain ``pa.uint8()`` widens to SHORT on Client.dataframe."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
-        self._create_table(table, 'v LONG')
+        self._create_table(table, 'v SHORT')
         values = pa.array([0, 1, 255], type=pa.uint8())
         df = self._make_df_with_ts('v', values, 3)
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError):
-                client.dataframe(df, table_name=table, at='ts')
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int16())
+        self.assertEqual(got.column('v').to_pylist(), [0, 1, 255])
 
 
 if __name__ == '__main__':

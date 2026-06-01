@@ -16,8 +16,10 @@ Mirrors the seed-and-replay convention from
 Every iteration drives ``Client.dataframe()`` round-trip through a local
 ``QwpAckServer`` fixture (no real QuestDB required) and asserts:
 
-  - Frames the v1 planner rejects raise ``UnsupportedDataFrameShapeError``
-    BEFORE any QWP/WebSocket binary frame is published.
+  - Frames the v1 planner rejects raise before any QWP/WebSocket binary frame
+    is published. Most shape rejections raise
+    ``UnsupportedDataFrameShapeError``; Arrow validation rejections surface as
+    ``IngressError``.
   - Frames the v1 planner accepts complete without raising and produce at
     least one QWP1 binary frame at the server (unless the frame is empty,
     in which case ``Client.dataframe()`` is a no-op).
@@ -638,6 +640,17 @@ class TestClientDataframeFuzz(unittest.TestCase):
                 f'rejection published a binary frame; '
                 f'{self._seed_msg(iter_seed)}')
             return cur
+        except qi.IngressError as exc:
+            self.assertFalse(
+                expected_supported,
+                f'Client raised IngressError for an expected-supported frame; '
+                f'{self._seed_msg(iter_seed)}: {exc.code}: {exc}')
+            cur = self.server.snapshot()['binary_frames']
+            self.assertEqual(
+                cur, prev_binary_frames,
+                f'IngressError rejection published a binary frame; '
+                f'{self._seed_msg(iter_seed)}: {exc.code}: {exc}')
+            return cur
         # Accept path.
         self.assertTrue(
             expected_supported,
@@ -682,14 +695,6 @@ class TestClientDataframeFuzz(unittest.TestCase):
                         iter_seed, prev)
                 except AssertionError as exc:
                     failures.append((iter_seed, type(exc).__name__, str(exc)))
-                    prev = self.server.snapshot()['binary_frames']
-                except qi.IngressError as exc:
-                    # Unexpected IngressError (not Unsupported...): real
-                    # finding. Record with seed and keep going so we
-                    # surface every failing seed in one run.
-                    failures.append((
-                        iter_seed, type(exc).__name__,
-                        f'{exc.code}: {exc}'))
                     prev = self.server.snapshot()['binary_frames']
                 except Exception as exc:  # noqa: BLE001 — fuzz triage
                     failures.append((

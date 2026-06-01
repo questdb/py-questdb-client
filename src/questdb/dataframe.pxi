@@ -211,6 +211,9 @@ cdef dict _PYOBJ_SOURCE_DESCR = {
 }
 
 
+# Compatibility matrix for the Python dataframe planner. `Client.dataframe()`
+# uses the Rust Arrow RecordBatch route as the canonical Arrow policy when its
+# public routing constraints are satisfied.
 cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_skip: {
         col_source_t.col_source_nulls,

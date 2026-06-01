@@ -118,6 +118,20 @@ cdef uint64_t _dataframe_columnar_flush_ns = 0
 cdef uint64_t _dataframe_columnar_sync_calls = 0
 cdef uint64_t _dataframe_columnar_sync_ns = 0
 cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
+cdef bint _dataframe_arrow_count_stats = False
+cdef uint64_t _dataframe_arrow_calls = 0
+cdef uint64_t _dataframe_arrow_route_rejections = 0
+cdef uint64_t _dataframe_arrow_materialize_failures = 0
+cdef uint64_t _dataframe_arrow_empty_frames = 0
+cdef uint64_t _dataframe_arrow_batches = 0
+cdef uint64_t _dataframe_arrow_rows = 0
+cdef uint64_t _dataframe_arrow_columns = 0
+cdef uint64_t _dataframe_arrow_slices = 0
+cdef uint64_t _dataframe_arrow_slice_rows = 0
+cdef uint64_t _dataframe_arrow_buffer_allocations = 0
+cdef uint64_t _dataframe_arrow_flushed_chunks = 0
+cdef uint64_t _dataframe_arrow_fallbacks = 0
+cdef uint64_t _dataframe_arrow_completed = 0
 cdef size_t _DATAFRAME_ARROW_ROWS_PER_CHUNK = 32000
 
 
@@ -3373,6 +3387,27 @@ cdef void_int _dataframe_columnar_sync(qwpws_conn* conn) except -1:
         raise c_err_to_py(err)
 
 
+cdef bint _dataframe_columnar_force_drop_after_error(
+        qwpws_conn* conn,
+        bint flushed,
+        bint flush_attempted,
+        bint sync_attempted):
+    # Exceptions during a dataframe publish can leave in-flight deferred
+    # frames on the connection. If rows were flushed and the closing sync was
+    # not attempted yet, one defensive sync can make the connection reusable.
+    if conn == NULL:
+        return False
+    if not flush_attempted:
+        return qwpws_conn_must_close(conn)
+    if flushed and not sync_attempted and not qwpws_conn_must_close(conn):
+        try:
+            _dataframe_columnar_sync(conn)
+            return False
+        except Exception:
+            pass
+    return True
+
+
 cdef bint _dataframe_columnar_is_deferred_capacity_error(
         line_sender_error* err) noexcept:
     cdef size_t msg_len = 0
@@ -3480,6 +3515,61 @@ def _debug_dataframe_columnar_io_stats(
         'sync_calls': _dataframe_columnar_sync_calls,
         'sync_s': _dataframe_columnar_sync_ns / 1_000_000_000.0,
         'flush_retry_syncs': _dataframe_columnar_flush_retry_syncs,
+    }
+
+
+def _debug_dataframe_arrow_stats(
+        object enabled=None,
+        bint reset=False):
+    """
+    Internal benchmark hook for Client.dataframe Arrow fast-path routing.
+    """
+    global _dataframe_arrow_count_stats
+    global _dataframe_arrow_calls
+    global _dataframe_arrow_route_rejections
+    global _dataframe_arrow_materialize_failures
+    global _dataframe_arrow_empty_frames
+    global _dataframe_arrow_batches
+    global _dataframe_arrow_rows
+    global _dataframe_arrow_columns
+    global _dataframe_arrow_slices
+    global _dataframe_arrow_slice_rows
+    global _dataframe_arrow_buffer_allocations
+    global _dataframe_arrow_flushed_chunks
+    global _dataframe_arrow_fallbacks
+    global _dataframe_arrow_completed
+
+    if reset:
+        _dataframe_arrow_calls = 0
+        _dataframe_arrow_route_rejections = 0
+        _dataframe_arrow_materialize_failures = 0
+        _dataframe_arrow_empty_frames = 0
+        _dataframe_arrow_batches = 0
+        _dataframe_arrow_rows = 0
+        _dataframe_arrow_columns = 0
+        _dataframe_arrow_slices = 0
+        _dataframe_arrow_slice_rows = 0
+        _dataframe_arrow_buffer_allocations = 0
+        _dataframe_arrow_flushed_chunks = 0
+        _dataframe_arrow_fallbacks = 0
+        _dataframe_arrow_completed = 0
+    if enabled is not None:
+        _dataframe_arrow_count_stats = bool(enabled)
+    return {
+        'enabled': _dataframe_arrow_count_stats,
+        'calls': _dataframe_arrow_calls,
+        'route_rejections': _dataframe_arrow_route_rejections,
+        'materialize_failures': _dataframe_arrow_materialize_failures,
+        'empty_frames': _dataframe_arrow_empty_frames,
+        'batches': _dataframe_arrow_batches,
+        'rows': _dataframe_arrow_rows,
+        'columns': _dataframe_arrow_columns,
+        'slices': _dataframe_arrow_slices,
+        'slice_rows': _dataframe_arrow_slice_rows,
+        'buffer_allocations': _dataframe_arrow_buffer_allocations,
+        'flushed_chunks': _dataframe_arrow_flushed_chunks,
+        'fallbacks': _dataframe_arrow_fallbacks,
+        'completed': _dataframe_arrow_completed,
     }
 
 
@@ -3781,31 +3871,6 @@ cdef bint _dataframe_client_arrow_route_allowed(
     return False
 
 
-cdef bint _dataframe_arrow_at_column_values_allowed(
-        object batch,
-        str at) except -1:
-    cdef int at_index
-    cdef object at_array
-    cdef object at_values_i64
-    cdef object at_min
-
-    at_index = batch.schema.get_field_index(at)
-    if at_index < 0:
-        return False
-
-    at_array = batch.column(at_index)
-    if at_array.type.id != _PYARROW.lib.Type_TIMESTAMP:
-        return False
-    if at_array.null_count != 0:
-        return False
-
-    import pyarrow.compute as pc
-
-    at_values_i64 = pc.cast(at_array, _PYARROW.int64())
-    at_min = pc.min(at_values_i64).as_py()
-    return at_min is None or at_min >= 0
-
-
 cdef bint _dataframe_client_try_arrow_path(
         questdb_db* db,
         object df,
@@ -3825,17 +3890,41 @@ cdef bint _dataframe_client_try_arrow_path(
     cdef bint sync_attempted = False
     cdef bint force_drop_conn = False
     cdef bint fallback_to_manual = False
+    cdef bint count_arrow_stats = False
+    cdef bint flush_attempted = False
     cdef size_t row_count = 0
     cdef size_t row_offset = 0
     cdef size_t chunk_rows = 0
+    global _dataframe_arrow_calls
+    global _dataframe_arrow_route_rejections
+    global _dataframe_arrow_materialize_failures
+    global _dataframe_arrow_empty_frames
+    global _dataframe_arrow_batches
+    global _dataframe_arrow_rows
+    global _dataframe_arrow_columns
+    global _dataframe_arrow_slices
+    global _dataframe_arrow_slice_rows
+    global _dataframe_arrow_buffer_allocations
+    global _dataframe_arrow_flushed_chunks
+    global _dataframe_arrow_fallbacks
+    global _dataframe_arrow_completed
+
+    count_arrow_stats = _dataframe_arrow_count_stats
+    if count_arrow_stats:
+        _dataframe_arrow_calls += 1
 
     if not _dataframe_client_arrow_route_allowed(
             df, table_name, table_name_col, symbols, at):
+        if count_arrow_stats:
+            _dataframe_arrow_route_rejections += 1
         return False
 
     _dataframe_may_import_deps()
     _dataframe_check_is_dataframe(df)
     if (len(df.columns) == 0) or (len(df) == 0):
+        if count_arrow_stats:
+            _dataframe_arrow_empty_frames += 1
+            _dataframe_arrow_completed += 1
         return True
 
     try:
@@ -3843,13 +3932,20 @@ cdef bint _dataframe_client_try_arrow_path(
     except MemoryError:
         raise
     except Exception:
+        if count_arrow_stats:
+            _dataframe_arrow_materialize_failures += 1
         return False
 
     row_count = batch.num_rows
     if row_count == 0 or batch.num_columns == 0:
+        if count_arrow_stats:
+            _dataframe_arrow_empty_frames += 1
+            _dataframe_arrow_completed += 1
         return True
-    if not _dataframe_arrow_at_column_values_allowed(batch, at):
-        return False
+    if count_arrow_stats:
+        _dataframe_arrow_batches += 1
+        _dataframe_arrow_rows += row_count
+        _dataframe_arrow_columns += batch.num_columns
 
     b = qdb_pystr_buf_new()
     try:
@@ -3860,18 +3956,23 @@ cdef bint _dataframe_client_try_arrow_path(
             raise c_err_to_py(err)
 
         try:
+            buffer = line_sender_buffer_new_qwp_ws()
+            if buffer == NULL:
+                raise MemoryError(
+                    'line_sender_buffer_new_qwp_ws returned NULL')
+            if count_arrow_stats:
+                _dataframe_arrow_buffer_allocations += 1
+            reserve_buffer(buffer, 65536)
+
             row_offset = 0
             while row_offset < row_count:
                 chunk_rows = _DATAFRAME_ARROW_ROWS_PER_CHUNK
                 if chunk_rows > row_count - row_offset:
                     chunk_rows = row_count - row_offset
                 batch_slice = batch.slice(row_offset, chunk_rows)
-
-                buffer = line_sender_buffer_new_qwp_ws()
-                if buffer == NULL:
-                    raise MemoryError(
-                        'line_sender_buffer_new_qwp_ws returned NULL')
-                reserve_buffer(buffer, 65536)
+                if count_arrow_stats:
+                    _dataframe_arrow_slices += 1
+                    _dataframe_arrow_slice_rows += chunk_rows
 
                 try:
                     _dataframe_append_arrow_record_batch(
@@ -3881,23 +3982,24 @@ cdef bint _dataframe_client_try_arrow_path(
                         table_name,
                         at)
                 except IngressError as exc:
-                    if (not flushed and exc.code in (
-                            IngressErrorCode.ArrowUnsupportedColumnKind,
-                            IngressErrorCode.ArrowIngest,
-                            IngressErrorCode.InvalidApiCall)):
+                    if (not flushed and exc.code ==
+                            IngressErrorCode.ArrowUnsupportedColumnKind):
+                        if count_arrow_stats:
+                            _dataframe_arrow_fallbacks += 1
                         fallback_to_manual = True
                         break
                     raise
 
                 if line_sender_buffer_row_count(buffer) != 0:
+                    flush_attempted = True
                     _dataframe_columnar_flush_buffer(
                         conn,
                         buffer,
                         row_offset != 0)
                     flushed = True
+                    if count_arrow_stats:
+                        _dataframe_arrow_flushed_chunks += 1
 
-                line_sender_buffer_free(buffer)
-                buffer = NULL
                 row_offset += chunk_rows
 
             if fallback_to_manual:
@@ -3905,15 +4007,11 @@ cdef bint _dataframe_client_try_arrow_path(
 
             sync_attempted = True
             _dataframe_columnar_sync(conn)
+            if count_arrow_stats:
+                _dataframe_arrow_completed += 1
         except:
-            force_drop_conn = True
-            if (conn != NULL and flushed and not sync_attempted and
-                    not qwpws_conn_must_close(conn)):
-                try:
-                    _dataframe_columnar_sync(conn)
-                    force_drop_conn = False
-                except Exception:
-                    pass
+            force_drop_conn = _dataframe_columnar_force_drop_after_error(
+                conn, flushed, flush_attempted, sync_attempted)
             raise
 
         return True
@@ -4049,6 +4147,8 @@ cdef class Client:
         - **Timestamp**: NumPy ``datetime64`` units accepted by pandas and
           ``pa.timestamp`` with unit ``s``, ``ms``, ``us``, or ``ns``
           (tz-aware accepted on Arrow-backed columns in the Rust Arrow route).
+          QuestDB ``TIMESTAMP`` columns cannot contain nulls/NaT or values
+          before the Unix epoch.
         - **Decimal**: ``decimal.Decimal`` objects, ``pa.decimal{32,64,
           128,256}``.
         - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
@@ -4076,6 +4176,7 @@ cdef class Client:
         cdef bint flushed = False
         cdef bint sync_attempted = False
         cdef bint force_drop_conn = False
+        cdef bint flush_attempted = False
         cdef size_t rows_per_chunk
         cdef size_t row_offset
         cdef size_t chunk_rows
@@ -4132,6 +4233,7 @@ cdef class Client:
                         row_offset,
                         chunk_rows)
                     if column_sender_chunk_row_count(chunk) != 0:
+                        flush_attempted = True
                         _dataframe_columnar_flush(
                             conn,
                             chunk,
@@ -4144,24 +4246,8 @@ cdef class Client:
                 sync_attempted = True
                 _dataframe_columnar_sync(conn)
             except:
-                # Any exception during the chunk loop or the closing
-                # sync leaves the conn in a state we can't trust for
-                # recycling: it may hold in-flight uncommitted frames
-                # that the next borrower's first flush would commit
-                # alongside their own (round-3 #1 — "dirty sender
-                # pollutes next borrow"). Try one defensive sync to
-                # recover; if that succeeds, the conn is clean and we
-                # can recycle it. Otherwise force-drop in the finally.
-                force_drop_conn = True
-                if (conn != NULL and flushed and not sync_attempted and
-                        not qwpws_conn_must_close(conn)):
-                    try:
-                        _dataframe_columnar_sync(conn)
-                        # Defensive sync committed all previously-
-                        # flushed chunks; conn is recyclable.
-                        force_drop_conn = False
-                    except Exception:
-                        pass
+                force_drop_conn = _dataframe_columnar_force_drop_after_error(
+                    conn, flushed, flush_attempted, sync_attempted)
                 raise
 
             return self

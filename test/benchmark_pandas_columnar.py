@@ -378,9 +378,31 @@ def _finish_columnar_io_stats(timed_calls):
     if timed_calls:
         stats["flush_s_per_call"] = stats["flush_s"] / timed_calls
         stats["sync_s_per_call"] = stats["sync_s"] / timed_calls
+        stats["flush_calls_per_call"] = (
+            stats["flush_calls"] / timed_calls)
+        stats["sync_calls_per_call"] = stats["sync_calls"] / timed_calls
     else:
         stats["flush_s_per_call"] = None
         stats["sync_s_per_call"] = None
+        stats["flush_calls_per_call"] = None
+        stats["sync_calls_per_call"] = None
+    return stats
+
+
+def _finish_dataframe_arrow_stats(timed_calls):
+    stats = dict(qi._debug_dataframe_arrow_stats(enabled=False))
+    if timed_calls:
+        stats["calls_per_call"] = stats["calls"] / timed_calls
+        stats["slices_per_call"] = stats["slices"] / timed_calls
+        stats["buffer_allocations_per_call"] = (
+            stats["buffer_allocations"] / timed_calls)
+        stats["flushed_chunks_per_call"] = (
+            stats["flushed_chunks"] / timed_calls)
+    else:
+        stats["calls_per_call"] = None
+        stats["slices_per_call"] = None
+        stats["buffer_allocations_per_call"] = None
+        stats["flushed_chunks_per_call"] = None
     return stats
 
 
@@ -400,10 +422,12 @@ def run_client_ack(
         conf = _make_ack_conf(server)
         with qi.Client.from_conf(conf) as client:
             qi._debug_dataframe_columnar_io_stats(enabled=False, reset=True)
+            qi._debug_dataframe_arrow_stats(enabled=False, reset=True)
             for _ in range(warmups):
                 client.dataframe(df, table_name="bench_numeric", at="ts")
 
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
+            qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
             try:
                 start = time.perf_counter()
                 for _ in range(iterations):
@@ -417,6 +441,7 @@ def run_client_ack(
                 total_s = time.perf_counter() - start
             finally:
                 columnar_io_stats = _finish_columnar_io_stats(iterations)
+                arrow_stats = _finish_dataframe_arrow_stats(iterations)
 
         stats = server.snapshot()
         reconnects_after_first = max(0, stats["accepted_connections"] - 1)
@@ -439,6 +464,7 @@ def run_client_ack(
         last = {
             "ack_server": stats,
             "ack_delay_s": ack_delay_s,
+            "arrow_stats": arrow_stats,
             "columnar_io_stats": columnar_io_stats,
             "pool_conf": conf,
             "reconnects_after_first": reconnects_after_first,
@@ -591,13 +617,6 @@ def run_real_client_path(
         setup_sqls=(),
         reset_sqls=()):
     setup_results = execute_sqls(http_base, setup_sqls)
-    chunk_plan = qi._bench_dataframe_plan_and_populate_column_chunks(
-        df,
-        table_name=table_name,
-        at="ts")
-    if chunk_plan["row_path_cell_emissions"] != 0:
-        raise AssertionError(
-            "real-client plan emitted row-path cells before timed run")
     reset_count = 0
     samples = []
     cpu_samples = []
@@ -612,16 +631,17 @@ def run_real_client_path(
         def once():
             client.dataframe(df, table_name=table_name, at="ts")
             return {
-                "flushes": chunk_plan["populated_chunks"],
-                "syncs": 1,
                 "table_name": table_name,
             }
 
+        qi._debug_dataframe_columnar_io_stats(enabled=False, reset=True)
+        qi._debug_dataframe_arrow_stats(enabled=False, reset=True)
         for _ in range(warmups):
             reset()
             once()
 
         qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
+        qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
         try:
             for _ in range(iterations):
                 reset()
@@ -630,12 +650,13 @@ def run_real_client_path(
                 cpu_samples.append(cpu_elapsed)
         finally:
             columnar_io_stats = _finish_columnar_io_stats(iterations)
+            arrow_stats = _finish_dataframe_arrow_stats(iterations)
 
     if last is None:
         last = {}
     last.update({
+        "arrow_stats": arrow_stats,
         "columnar_io_stats": columnar_io_stats,
-        "chunk_plan": chunk_plan,
         "conf": conf,
         "path": "real-client",
         "reset_sql_count": reset_count,
