@@ -1191,26 +1191,10 @@ cdef const char* _ARROW_FMT_UTF8_STRING = 'u'
 cdef const char* _ARROW_FMT_LRG_UTF8_STRING = 'U'
 
 
-cdef list _dataframe_cast_large_string_chunks_to_utf8(
-        list chunks,
-        col_t* col):
-    # Down-cast large_string ("U") to utf8 ("u") so the legacy
-    # row-path serializer's cell dispatch works. The columnar path's
-    # generic Arrow appender supports `U` natively (narrows offsets at
-    # encode time), so this cast is row-path-only — but the planner is
-    # shared, so we do it here.
-    if (len(chunks) > 0 and chunks[0].type == _PYARROW.large_string()):
-        col.setup.large_string_cast_to_utf8 = True
-        return [chunk.cast(_PYARROW.string()) for chunk in chunks]
-    return chunks
-
-
 cdef void_int _dataframe_string_series_as_arrow(
         PandasCol pandas_col, col_t* col) except -1:
     _dataframe_export_arrow_chunks(
-        _dataframe_cast_large_string_chunks_to_utf8(
-            _dataframe_series_to_arrow_chunks(pandas_col),
-            col),
+        _dataframe_series_to_arrow_chunks(pandas_col),
         col)
 
 
@@ -1220,11 +1204,13 @@ cdef void_int _dataframe_category_series_as_arrow(
     cdef list chunks = _dataframe_series_to_arrow_chunks(pandas_col)
 
     # Pandas 3.x with pyarrow may produce large_string ('U') dictionary
-    # values. Cast to regular string ('u') so our existing category
-    # accessors (which use int32 offsets) work unchanged.
+    # values. Cast to regular string ('u') so the existing category
+    # accessors and symbol-dictionary FFI helpers (which use int32
+    # offsets) work unchanged.
     if (len(chunks) > 0 and
             hasattr(chunks[0].type, 'value_type') and
             chunks[0].type.value_type == _PYARROW.large_string()):
+        col.setup.large_string_cast_to_utf8 = True
         target_type = _PYARROW.dictionary(
             chunks[0].type.index_type, _PYARROW.string())
         chunks = [chunk.cast(target_type) for chunk in chunks]
@@ -1255,11 +1241,14 @@ cdef void_int _dataframe_category_series_as_arrow(
 
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
     cdef bint is_decimal_col = False
-    if arrowtype.id in (
-            _PYARROW.lib.Type_STRING,
-            _PYARROW.lib.Type_LARGE_STRING):
+    if arrowtype.id == _PYARROW.lib.Type_STRING:
         _dataframe_string_series_as_arrow(pandas_col, col)
         col.setup.source = col_source_t.col_source_str_utf8_arrow
+        col.scale = 0
+        return 0
+    elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
+        _dataframe_string_series_as_arrow(pandas_col, col)
+        col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
         col.scale = 0
         return 0
 
@@ -1288,8 +1277,6 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_BOOL:
         col.setup.source = col_source_t.col_source_bool_arrow
-    elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
-        col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
     elif arrowtype.id == _PYARROW.lib.Type_FLOAT:
         col.setup.source = col_source_t.col_source_f32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_DOUBLE:

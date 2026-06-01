@@ -707,7 +707,7 @@ class TestPandasBase:
                   'source_code': None,
                   'reason': 'v1 requires at least one non-timestamp data column.'},))
 
-        def test_debug_dataframe_columnar_plan_reports_large_string_cast(self):
+        def test_debug_dataframe_columnar_plan_preserves_large_string(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
                     pd.Timestamp('2024-01-01 00:00:00'),
@@ -719,20 +719,20 @@ class TestPandasBase:
                 'seq': pd.Series([1, 2], dtype='int64'),
             })
 
+            row_plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts')
+            label_col = next(
+                col for col in row_plan['cols']
+                if col['orig_name'] == 'label')
+            self.assertEqual(label_col['source_code'], 406000)
+            self.assertFalse(label_col['large_string_cast_to_utf8'])
+
             plan = qi._debug_dataframe_columnar_plan(
                 df, table_name='trades', at='ts')
 
             self.assertTrue(plan['supported'])
             self.assertEqual(plan['failures'], [])
-            self.assertEqual(
-                plan['normalizations'],
-                [{
-                    'column': 'label',
-                    'target': 'string',
-                    'source_code': 402000,
-                    'action': 'arrow_large_string_cast_to_utf8',
-                    'copy_expected': True,
-                }])
+            self.assertEqual(plan['normalizations'], [])
 
         def test_bench_dataframe_plan_and_populate_column_chunks(self):
             df = pd.DataFrame({

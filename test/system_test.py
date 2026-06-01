@@ -2854,6 +2854,23 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(
             got.column('nullable_d').to_pylist(), [4.5, None, -6.25])
 
+    def test_large_utf8_round_trip(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v VARCHAR')
+        values = pa.array(
+            ['alpha', None, 'gamma', 'delta', 'epsilon'],
+            type=pa.large_string())
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').to_pylist(), values.to_pylist())
+
     # ---------- null handling ----------
 
     def test_short_is_non_nullable_nulls_become_zero(self):
