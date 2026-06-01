@@ -2375,22 +2375,25 @@ cdef object _dataframe_columnar_plan_failures(
                     col_source_t.col_source_u32_numpy,
                     col_source_t.col_source_u64_numpy,
                     col_source_t.col_source_u32_arrow,
+                    col_source_t.col_source_i64_arrow,
                     col_source_t.col_source_int_pyobj):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
                     'v1 only supports NumPy signed/unsigned int columns, '
-                    'Arrow uint32 columns, or object-dtype int columns.'))
+                    'Arrow uint32/int64 columns, or object-dtype int '
+                    'columns.'))
         elif col.setup.target == col_target_t.col_target_column_f64:
             if col.setup.source not in (
                     col_source_t.col_source_f64_numpy,
                     col_source_t.col_source_f32_numpy,
+                    col_source_t.col_source_f64_arrow,
                     col_source_t.col_source_float_pyobj):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy float32/float64 or object-'
-                    'dtype float columns.'))
+                    'v1 only supports NumPy float32/float64, Arrow '
+                    'float64, or object-dtype float columns.'))
         elif col.setup.target == col_target_t.col_target_column_ts:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
@@ -3005,10 +3008,12 @@ cdef void_int _dataframe_columnar_append_field(
         else:
             raise RuntimeError('Unsupported columnar bool source.')
     elif col.setup.target == col_target_t.col_target_column_i64:
-        # NumPy int64 (matches wire type) uses the per-type FFI;
+        # int64 sources that match the wire type use the per-type FFI;
         # narrower NumPy ints and Arrow UInt32 widen via the NumPy
         # appender; pyobj int uses the prebuild buffer.
-        if col.setup.source == col_source_t.col_source_i64_numpy:
+        if col.setup.source in (
+                col_source_t.col_source_i64_numpy,
+                col_source_t.col_source_i64_arrow):
             with nogil:
                 ok = column_sender_chunk_column_i64(
                     chunk,
@@ -3057,7 +3062,9 @@ cdef void_int _dataframe_columnar_append_field(
         else:
             raise RuntimeError('Unsupported columnar int source.')
     elif col.setup.target == col_target_t.col_target_column_f64:
-        if col.setup.source == col_source_t.col_source_f64_numpy:
+        if col.setup.source in (
+                col_source_t.col_source_f64_numpy,
+                col_source_t.col_source_f64_arrow):
             with nogil:
                 ok = column_sender_chunk_column_f64(
                     chunk,

@@ -2811,6 +2811,49 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             got.column('v').to_pylist(),
             [-1.5, 0.0, 0.5, 1.0, 3.140000104904175])
 
+    def test_arrow_wide_numeric_sources_round_trip(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, arrow_l LONG, nullable_l LONG, '
+            'arrow_d DOUBLE, nullable_d DOUBLE) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        ts = pa.array(
+            [1700000000_000000, 1700000001_000000, 1700000002_000000],
+            type=pa.timestamp('us', tz='UTC'))
+        df = pd.DataFrame({
+            'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
+            'arrow_l': pd.Series(
+                pa.array([1, None, -3], type=pa.int64()),
+                dtype=pd.ArrowDtype(pa.int64())),
+            'nullable_l': pd.Series(
+                [4, pd.NA, -6], dtype=pd.Int64Dtype()),
+            'arrow_d': pd.Series(
+                pa.array([1.5, None, -3.25], type=pa.float64()),
+                dtype=pd.ArrowDtype(pa.float64())),
+            'nullable_d': pd.Series(
+                [4.5, pd.NA, -6.25], dtype=pd.Float64Dtype()),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT arrow_l, nullable_l, arrow_d, nullable_d '
+                f'FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('arrow_l').type, pa.int64())
+        self.assertEqual(got.column('nullable_l').type, pa.int64())
+        self.assertEqual(got.column('arrow_d').type, pa.float64())
+        self.assertEqual(got.column('nullable_d').type, pa.float64())
+        self.assertEqual(got.column('arrow_l').to_pylist(), [1, None, -3])
+        self.assertEqual(got.column('nullable_l').to_pylist(), [4, None, -6])
+        self.assertEqual(
+            got.column('arrow_d').to_pylist(), [1.5, None, -3.25])
+        self.assertEqual(
+            got.column('nullable_d').to_pylist(), [4.5, None, -6.25])
+
     # ---------- null handling ----------
 
     def test_short_is_non_nullable_nulls_become_zero(self):

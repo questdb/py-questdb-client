@@ -532,6 +532,34 @@ class TestPandasBase:
             self.assertEqual(result['populated_rows_total'], 2)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
+        def test_columnar_plan_accepts_arrow_wide_numeric_sources(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'arrow_i64': pd.Series(
+                    pa.array([1, None, -3], type=pa.int64()),
+                    dtype=pd.ArrowDtype(pa.int64())),
+                'nullable_i64': pd.Series(
+                    [4, pd.NA, -6], dtype=pd.Int64Dtype()),
+                'arrow_f64': pd.Series(
+                    pa.array([1.5, None, -3.25], type=pa.float64()),
+                    dtype=pd.ArrowDtype(pa.float64())),
+                'nullable_f64': pd.Series(
+                    [4.5, pd.NA, -6.25], dtype=pd.Float64Dtype()),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+            self.assertTrue(plan['supported'], plan['failures'])
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df, table_name='trades', at='ts', symbols=False)
+
+            self.assertEqual(result['populated_rows_total'], 3)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_debug_dataframe_columnar_plan_accepts_narrow_numpy_dtypes(self):
             # Step 3 broadened the columnar planner to accept every
             # narrower NumPy numeric dtype + native bool. The shapes
