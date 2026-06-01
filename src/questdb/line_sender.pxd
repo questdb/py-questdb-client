@@ -49,7 +49,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_array_error,
         line_sender_error_protocol_version_error,
         line_sender_error_invalid_decimal,
-        line_sender_error_server_rejection
+        line_sender_error_server_rejection,
+        line_sender_error_arrow_unsupported_column_kind,
+        line_sender_error_arrow_ingest
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,

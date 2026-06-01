@@ -128,9 +128,15 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(err.qwp_ws_error.category, qi.QwpWsErrorCategory.ParseError)
 
     def test_python_only_error_codes_do_not_overlap_ffi_codes(self):
-        self.assertNotEqual(
-            qi.IngressErrorCode.BadDataFrame,
-            qi.IngressErrorCode.ServerRejection)
+        code_values = [code.value for code in qi.IngressErrorCode]
+
+        self.assertEqual(len(code_values), len(set(code_values)))
+        self.assertGreater(
+            qi.IngressErrorCode.BadDataFrame.value,
+            qi.IngressErrorCode.ArrowIngest.value)
+        self.assertGreater(
+            qi.IngressErrorCode.Cancelled.value,
+            qi.IngressErrorCode.ArrowIngest.value)
 
     def test_unsupported_dataframe_shape_error_carries_failures(self):
         err = qi.UnsupportedDataFrameShapeError(

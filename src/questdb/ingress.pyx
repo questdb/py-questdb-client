@@ -163,8 +163,10 @@ class IngressErrorCode(Enum):
     ArrayError = line_sender_error_array_error
     ProtocolVersionError = line_sender_error_protocol_version_error
     DecimalError = line_sender_error_invalid_decimal
-    BadDataFrame = <int>line_sender_error_server_rejection + 1
-    Cancelled = <int>line_sender_error_server_rejection + 2
+    ArrowUnsupportedColumnKind = line_sender_error_arrow_unsupported_column_kind
+    ArrowIngest = line_sender_error_arrow_ingest
+    BadDataFrame = <int>line_sender_error_arrow_ingest + 1
+    Cancelled = <int>line_sender_error_arrow_ingest + 2
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -247,6 +249,10 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ProtocolVersionError
     elif code == line_sender_error_invalid_decimal:
         return IngressErrorCode.DecimalError
+    elif code == line_sender_error_arrow_unsupported_column_kind:
+        return IngressErrorCode.ArrowUnsupportedColumnKind
+    elif code == line_sender_error_arrow_ingest:
+        return IngressErrorCode.ArrowIngest
     else:
         raise ValueError('Internal error converting error code.')
 
