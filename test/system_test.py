@@ -34,11 +34,12 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.2.0'
+QUESTDB_VERSION = '9.4.1'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
+FIRST_QWP_WS_RELEASE = (9, 4, 1)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -116,9 +117,9 @@ class TestWithDatabase(unittest.TestCase):
         return conf
 
     def _require_qwp_ws(self):
-        if not os.environ.get('QDB_REPO_PATH'):
+        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
             self.skipTest(
-                'QWP/WebSocket integration tests require repo-backed QWP support')
+                'QWP/WebSocket integration tests require QuestDB 9.4.1+')
 
     def _require_qwp_fuzz(self):
         self._require_qwp_ws()
