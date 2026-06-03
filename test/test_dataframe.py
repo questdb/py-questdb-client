@@ -804,7 +804,7 @@ class TestPandasBase:
                     pa.array([1000, None, 3000], type=pa.uint16()),
                     dtype=pd.ArrowDtype(pa.uint16())),
                 'u64': pd.Series(
-                    pa.array([1, 2 ** 63, None], type=pa.uint64()),
+                    pa.array([1, 2 ** 63 - 1, None], type=pa.uint64()),
                     dtype=pd.ArrowDtype(pa.uint64())),
                 'f16': pd.Series(
                     pa.array(np.array([1.5, 2.5, 3.5], dtype=np.float16),
@@ -831,6 +831,26 @@ class TestPandasBase:
             self.assertEqual(result['last_buffer_rows'], 3)
             self.assertEqual(result['total_buffer_rows'], 6)
             self.assertGreater(result['last_buffer_size'], 0)
+
+        def test_bench_dataframe_append_arrow_buffer_rejects_uint64_above_i64_max(self):
+            ts_type = pa.timestamp('ms', tz='UTC')
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pa.array([1704067200000, 1704067201000], type=ts_type),
+                    dtype=pd.ArrowDtype(ts_type)),
+                'u64': pd.Series(
+                    pa.array([1, 2 ** 63], type=pa.uint64()),
+                    dtype=pd.ArrowDtype(pa.uint64())),
+            })
+
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    r'UInt64 value 9223372036854775808 .* exceeds i64::MAX'):
+                qi._bench_dataframe_append_arrow_buffer(
+                    df,
+                    table_name='trades',
+                    at='ts',
+                    iterations=1)
 
         def test_bench_dataframe_plan_and_populate_splits_chunks(self):
             df = pd.DataFrame({

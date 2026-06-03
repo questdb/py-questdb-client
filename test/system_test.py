@@ -3194,12 +3194,13 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got.column('v').type, pa.int64())
         self.assertEqual(got.column('v').to_pylist(), ints)
 
-    def test_pa_uint64_reinterprets_as_signed_long(self):
+    def test_pa_uint64_within_i64_range_round_trips_as_long(self):
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
         self._create_table(table, 'v LONG')
-        values = pa.array([0, 2 ** 63 + 1, 2 ** 64 - 1], type=pa.uint64())
+        ints = [0, 2 ** 63 - 1, 42]
+        values = pa.array(ints, type=pa.uint64())
         df = self._make_df_with_ts('v', values, 3)
         with qi.Client.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
@@ -3208,9 +3209,70 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int64())
-        self.assertEqual(
-            got.column('v').to_pylist(),
-            [0, -9223372036854775807, -1])
+        self.assertEqual(got.column('v').to_pylist(), ints)
+
+    def test_arrow_classifier_numeric_mix_round_trips_on_real_server(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        ts_type = pa.timestamp('ms', tz='UTC')
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                pa.array(
+                    [1704067200000, 1704067201000, 1704067202000],
+                    type=ts_type),
+                dtype=pd.ArrowDtype(ts_type)),
+            'u8': pd.Series(
+                pa.array([1, 2, None], type=pa.uint8()),
+                dtype=pd.ArrowDtype(pa.uint8())),
+            'u16': pd.Series(
+                pa.array([1000, None, 3000], type=pa.uint16()),
+                dtype=pd.ArrowDtype(pa.uint16())),
+            'u32': pd.Series(
+                pa.array([1, 2 ** 31, 2 ** 32 - 1], type=pa.uint32()),
+                dtype=pd.ArrowDtype(pa.uint32())),
+            'u64': pd.Series(
+                pa.array([1, 2 ** 63 - 1, None], type=pa.uint64()),
+                dtype=pd.ArrowDtype(pa.uint64())),
+            'f16': pd.Series(
+                pa.array(np.array([1.5, 2.5, 3.5], dtype=np.float16),
+                         type=pa.float16()),
+                dtype=pd.ArrowDtype(pa.float16())),
+        })
+
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT u8, u16, u32, u64, f16 FROM {table} '
+                'ORDER BY timestamp'
+            ).to_arrow()
+
+        self.assertEqual(got.column('u8').type, pa.int32())
+        self.assertEqual(got.column('u16').type, pa.int32())
+        self.assertEqual(got.column('u32').type, pa.int64())
+        self.assertEqual(got.column('u64').type, pa.int64())
+        self.assertEqual(got.column('f16').type, pa.float32())
+        self.assertEqual(got.column('u8').to_pylist(), [1, 2, None])
+        self.assertEqual(got.column('u16').to_pylist(), [1000, None, 3000])
+        self.assertEqual(got.column('u32').to_pylist(), [1, 2 ** 31, 2 ** 32 - 1])
+        self.assertEqual(got.column('u64').to_pylist(), [1, 2 ** 63 - 1, None])
+        self.assertEqual(got.column('f16').to_pylist(), [1.5, 2.5, 3.5])
+
+    def test_pa_uint64_above_i64_max_rejected_before_publish(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG')
+        values = pa.array([0, 2 ** 63], type=pa.uint64())
+        df = self._make_df_with_ts('v', values, 2)
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaisesRegex(
+                    qi.IngressError,
+                    r'UInt64 value 9223372036854775808 .* exceeds i64::MAX'):
+                client.dataframe(df, table_name=table, at='ts')
+        self._assert_table_empty(table)
 
     # ---------- TIMESTAMP validation policy ----------
 
