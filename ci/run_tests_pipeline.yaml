@@ -92,7 +92,7 @@ stages:
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
-              JAVA_HOME: $(JAVA_HOME_17_X64)
+              JAVA_HOME: $(JAVA_HOME_25_X64)
           - script: python3 proj.py test 1
             displayName: "Test vs master"
             env:
