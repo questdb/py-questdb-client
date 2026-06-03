@@ -54,7 +54,7 @@ else:
         def test_no_pandas(self):
             buf = qi.Buffer(protocol_version=2)
             exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
-            with self.assertRaisesRegex(ImportError, exp):
+            with self.assertRaisesRegex(qi.IngressError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
 
 
@@ -539,6 +539,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(row_stats['accepted_connections'], 1)
         self.assertGreaterEqual(row_stats['qwp1_frames'], 1)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_benchmark_schema_sql_report_uses_schema_table(self):
         from benchmark_pandas_columnar import schema_sql_report
 
