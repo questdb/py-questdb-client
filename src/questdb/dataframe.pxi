@@ -3077,6 +3077,7 @@ cdef void_int _dataframe(
     cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
     cdef bint had_gil
     cdef bint was_serializing_cell = False
+    cdef bint was_auto_flush = False
     cdef bint plan_has_content
 
     try:
