@@ -269,6 +269,92 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(arrow_stats['completed'], 1)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_client_dataframe_explicit_symbols_use_arrow_path(self):
+        df = pd.DataFrame({
+            'ts': pd.Series([
+                pd.Timestamp('2024-01-01 00:00:00'),
+                pd.Timestamp('2024-01-01 00:00:01'),
+                pd.Timestamp('2024-01-01 00:00:02')],
+                dtype='datetime64[ns]'),
+            'region': ['us-east', 'us-west', 'us-east'],
+            'note': ['alpha', 'beta', 'gamma'],
+            'seq': pd.Series([1, 2, 3], dtype='int64'),
+        })
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.Client.from_conf(conf)
+            try:
+                qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
+                try:
+                    client.dataframe(
+                        df,
+                        table_name='trades',
+                        at='ts',
+                        symbols=['region'])
+                finally:
+                    arrow_stats = qi._debug_dataframe_arrow_stats(
+                        enabled=False)
+            finally:
+                client.close()
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+        self.assertEqual(arrow_stats['calls'], 1)
+        self.assertEqual(arrow_stats['route_rejections'], 0)
+        self.assertEqual(arrow_stats['fallbacks'], 0)
+        self.assertEqual(arrow_stats['completed'], 1)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_client_dataframe_symbols_true_uses_arrow_path(self):
+        df = pd.DataFrame({
+            'ts': pd.Series([
+                pd.Timestamp('2024-01-01 00:00:00'),
+                pd.Timestamp('2024-01-01 00:00:01')],
+                dtype='datetime64[ns]'),
+            'region': ['us-east', 'us-west'],
+            'seq': pd.Series([1, 2], dtype='int64'),
+        })
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.Client.from_conf(conf)
+            try:
+                qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
+                try:
+                    client.dataframe(
+                        df,
+                        table_name='trades',
+                        at='ts',
+                        symbols=True)
+                finally:
+                    arrow_stats = qi._debug_dataframe_arrow_stats(
+                        enabled=False)
+            finally:
+                client.close()
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+        self.assertEqual(arrow_stats['calls'], 1)
+        self.assertEqual(arrow_stats['route_rejections'], 0)
+        self.assertEqual(arrow_stats['fallbacks'], 0)
+        self.assertEqual(arrow_stats['completed'], 1)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_client_dataframe_rejects_timestamp_only_before_publication(self):
         df = pd.DataFrame({
             'ts': pd.Series([

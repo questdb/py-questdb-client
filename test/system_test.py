@@ -3338,6 +3338,44 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             got.column('price').to_pylist(),
             [value * 0.25 for value in expected_seq])
 
+    def test_arrow_explicit_symbol_list_auto_creates_symbol_column(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                [1700000000_000000, 1700000001_000000, 1700000002_000000],
+                pa.timestamp('us', tz='UTC')),
+            'region': ['us-east', 'us-west', 'us-east'],
+            'note': ['alpha', 'beta', 'gamma'],
+            'seq': pd.Series([1, 2, 3], dtype='int64'),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
+            try:
+                client.dataframe(
+                    df,
+                    table_name=table,
+                    at='ts',
+                    symbols=['region'])
+            finally:
+                arrow_stats = qi._debug_dataframe_arrow_stats(enabled=False)
+
+        self.assertEqual(arrow_stats['route_rejections'], 0)
+        self.assertEqual(arrow_stats['fallbacks'], 0)
+        self.assertEqual(arrow_stats['completed'], 1)
+        resp = self.qdb_plain.retry_check_table(table, min_rows=3)
+        col_types = {c['name']: c['type'] for c in resp['columns']}
+        self.assertEqual(col_types['region'], 'SYMBOL')
+        self.assertEqual(col_types['note'], 'VARCHAR')
+        self.assertEqual(col_types['seq'], 'LONG')
+        scrubbed = [row[:-1] for row in resp['dataset']]
+        self.assertEqual(
+            scrubbed,
+            [['us-east', 'alpha', 1],
+             ['us-west', 'beta', 2],
+             ['us-east', 'gamma', 3]])
+
     def test_ipv4_string_coercion_is_unsupported(self):
         """Unlike UUID (where the server parses VARCHAR strings
         into UUIDs), QuestDB does NOT currently support VARCHAR →

@@ -133,6 +133,9 @@ cdef uint64_t _dataframe_arrow_flushed_chunks = 0
 cdef uint64_t _dataframe_arrow_fallbacks = 0
 cdef uint64_t _dataframe_arrow_completed = 0
 cdef size_t _DATAFRAME_ARROW_ROWS_PER_CHUNK = 32000
+cdef bytes _DATAFRAME_ARROW_MD_COLUMN_TYPE = b'questdb.column_type'
+cdef bytes _DATAFRAME_ARROW_MD_SYMBOL = b'questdb.symbol'
+cdef bytes _DATAFRAME_ARROW_MD_SYMBOL_VALUE = b'true'
 
 
 # This value is automatically updated by the `bump2version` tool.
@@ -3859,7 +3862,10 @@ cdef bint _dataframe_client_arrow_route_allowed(
         return False
     if not isinstance(table_name, str):
         return False
-    if symbols != 'auto':
+    if not (
+            symbols == 'auto' or
+            symbols is True or
+            isinstance(symbols, (tuple, list))):
         return False
     if isinstance(at, str):
         try:
@@ -3869,6 +3875,122 @@ cdef bint _dataframe_client_arrow_route_allowed(
         except Exception:
             return False
     return False
+
+
+cdef bint _dataframe_arrow_type_is_string_like(object arrow_type) except -1:
+    if arrow_type.id == _PYARROW.lib.Type_STRING:
+        return True
+    if arrow_type.id == _PYARROW.lib.Type_LARGE_STRING:
+        return True
+    if hasattr(_PYARROW.lib, 'Type_STRING_VIEW'):
+        return arrow_type.id == _PYARROW.lib.Type_STRING_VIEW
+    return False
+
+
+cdef bint _dataframe_arrow_type_is_dictionary(object arrow_type) except -1:
+    return arrow_type.id == _PYARROW.lib.Type_DICTIONARY
+
+
+cdef object _dataframe_arrow_resolve_symbol_indices(
+        object df,
+        object symbols,
+        object at):
+    cdef size_t col_count = len(df.columns)
+    cdef size_t col_index = 0
+    cdef size_t at_index = 0
+    cdef bint has_at_index = False
+    cdef object symbol
+    cdef set indices = set()
+
+    if symbols == 'auto' or symbols is True:
+        return None
+    if not isinstance(symbols, (tuple, list)):
+        raise TypeError(
+            f'Bad argument `symbols`: Must be a bool or a tuple or list '+
+            'of column names (str) or indices (int).')
+
+    if isinstance(at, str):
+        _dataframe_get_loc(df, at, 'at', &at_index)
+        has_at_index = True
+
+    for symbol in symbols:
+        if isinstance(symbol, str):
+            _dataframe_get_loc(df, symbol, 'symbols', &col_index)
+        elif isinstance(symbol, int):
+            _bind_col_index('symbol', symbol, col_count, &col_index)
+        else:
+            raise TypeError(
+                f'Bad argument `symbols`: Elements must ' +
+                'be a column name (str) or index (int).')
+        if has_at_index and col_index == at_index:
+            raise ValueError(
+                f'Bad argument `symbols`: Cannot use the `at` column ' +
+                f'({df.columns[at_index]!r}) as a symbol column.')
+        indices.add(col_index)
+
+    return indices
+
+
+cdef object _dataframe_arrow_batch_with_symbol_policy(
+        object batch,
+        object df,
+        object symbols,
+        object at):
+    cdef object symbol_indices = None
+    cdef object fields = []
+    cdef object arrays = []
+    cdef object field
+    cdef object arrow_type
+    cdef object metadata
+    cdef Py_ssize_t idx = 0
+    cdef bint force_all_strings = False
+    cdef bint want_symbol = False
+    cdef bint changed = False
+
+    if symbols == 'auto':
+        return batch
+
+    force_all_strings = symbols is True
+    symbol_indices = _dataframe_arrow_resolve_symbol_indices(df, symbols, at)
+
+    for idx in range(batch.num_columns):
+        field = batch.schema.field(idx)
+        arrow_type = field.type
+        if force_all_strings:
+            want_symbol = (
+                _dataframe_arrow_type_is_dictionary(arrow_type) or
+                _dataframe_arrow_type_is_string_like(arrow_type))
+        else:
+            want_symbol = (
+                symbol_indices is not None and idx in symbol_indices)
+
+        if want_symbol:
+            if _dataframe_arrow_type_is_dictionary(arrow_type):
+                fields.append(field)
+            elif _dataframe_arrow_type_is_string_like(arrow_type):
+                metadata = dict(field.metadata or {})
+                metadata[_DATAFRAME_ARROW_MD_COLUMN_TYPE] = b'symbol'
+                metadata[_DATAFRAME_ARROW_MD_SYMBOL] = (
+                    _DATAFRAME_ARROW_MD_SYMBOL_VALUE)
+                fields.append(field.with_metadata(metadata))
+                changed = True
+            else:
+                return None
+        else:
+            if _dataframe_arrow_type_is_dictionary(arrow_type):
+                # Explicit symbol lists disable categorical auto-symboling.
+                # Fall back to the manual planner rather than silently
+                # reclassifying a non-listed categorical as SYMBOL.
+                return None
+            fields.append(field)
+        arrays.append(batch.column(idx))
+
+    if not changed:
+        return batch
+
+    return _PYARROW.RecordBatch.from_arrays(
+        arrays,
+        schema=_PYARROW.schema(fields, metadata=batch.schema.metadata))
 
 
 cdef bint _dataframe_client_try_arrow_path(
@@ -3929,6 +4051,12 @@ cdef bint _dataframe_client_try_arrow_path(
 
     try:
         batch = _PYARROW.RecordBatch.from_pandas(df, preserve_index=False)
+        batch = _dataframe_arrow_batch_with_symbol_policy(
+            batch, df, symbols, at)
+        if batch is None:
+            if count_arrow_stats:
+                _dataframe_arrow_fallbacks += 1
+            return False
     except MemoryError:
         raise
     except Exception:
@@ -4137,8 +4265,8 @@ cdef class Client:
         - **Numeric**: NumPy ``bool/int{8,16,32,64}/uint{8..64}/float{32,64}``.
           Arrow ``pa.int{8,16,32,64}``, ``pa.float{16,32,64}``, and
           ``pa.uint{8,16,32,64}`` are accepted by the Rust Arrow batch route
-          when the frame uses a fixed table name, ``symbols='auto'``, and a
-          designated timestamp column name. Unsigned Arrow values follow the
+          when the frame uses a fixed table name and a designated timestamp
+          column name. Unsigned Arrow values follow the
           Rust Arrow policy: ``UInt8`` widens to ``SHORT``, ``UInt16`` to
           ``INT``, ``UInt32`` to ``LONG``, and ``UInt64`` is reinterpreted as
           signed ``LONG``.
