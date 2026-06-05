@@ -1,9 +1,10 @@
 # Egress (QWP/WebSocket reader) Cython glue.
 #
-# Bridges the Rust `line_reader_*` FFI (gated behind `sync-reader-ws`
-# + `arrow` features in c-questdb-client) onto a Python `QueryResult`
-# that exposes `__arrow_c_stream__()` via a pyarrow.RecordBatchReader.
-# pandas 3.0 / pyarrow / polars / duckdb consume the dunder directly.
+# `QueryResult` exposes the Arrow PyCapsule Interface
+# (`__arrow_c_stream__`) directly off the Rust cursor, so polars /
+# duckdb / pandas 3.0 / any Arrow-native consumer can read query
+# results without pyarrow. `to_arrow`, `to_pandas`, `iter_arrow`,
+# `iter_pandas` are convenience wrappers that lazy-import pyarrow.
 
 
 cdef inline object _reader_err_code_to_py(line_reader_error_code code):
@@ -270,8 +271,314 @@ cdef object _ensure_pyarrow():
     except ImportError:
         raise IngressError(
             IngressErrorCode.InvalidApiCall,
-            'pyarrow is required for Client.query(); install pyarrow >= 14')
+            'pyarrow is required for this method; install pyarrow >= 14, '
+            'or consume the result via __arrow_c_stream__ '
+            '(e.g. polars.from_arrow / duckdb.from_arrow).')
     return pyarrow
+
+
+cdef size_t _arrow_metadata_byte_len(const char* md) noexcept:
+    cdef int32_t n
+    cdef int32_t klen
+    cdef int32_t vlen
+    cdef size_t pos
+    cdef int32_t i
+    memcpy(&n, md, sizeof(int32_t))
+    pos = sizeof(int32_t)
+    for i in range(n):
+        memcpy(&klen, md + pos, sizeof(int32_t))
+        pos += sizeof(int32_t) + <size_t>klen
+        memcpy(&vlen, md + pos, sizeof(int32_t))
+        pos += sizeof(int32_t) + <size_t>vlen
+    return pos
+
+
+cdef void _arrow_schema_clone_release(ArrowSchema* schema) noexcept:
+    cdef int64_t i
+    if schema.format != NULL:
+        free(<void*>schema.format)
+        schema.format = NULL
+    if schema.name != NULL:
+        free(<void*>schema.name)
+        schema.name = NULL
+    if schema.metadata != NULL:
+        free(<void*>schema.metadata)
+        schema.metadata = NULL
+    if schema.children != NULL:
+        for i in range(schema.n_children):
+            if schema.children[i] != NULL:
+                if schema.children[i].release != NULL:
+                    schema.children[i].release(schema.children[i])
+                free(schema.children[i])
+        free(schema.children)
+        schema.children = NULL
+    if schema.dictionary != NULL:
+        if schema.dictionary.release != NULL:
+            schema.dictionary.release(schema.dictionary)
+        free(schema.dictionary)
+        schema.dictionary = NULL
+    schema.release = NULL
+
+
+cdef int _arrow_schema_deep_clone(const ArrowSchema* src, ArrowSchema* dst) noexcept:
+    cdef size_t format_len
+    cdef size_t name_len
+    cdef size_t metadata_len
+    cdef int64_t i
+    cdef ArrowSchema* child
+    memset(dst, 0, sizeof(ArrowSchema))
+    dst.flags = src.flags
+    dst.n_children = src.n_children
+    if src.format != NULL:
+        format_len = strlen(src.format)
+        dst.format = <const char*>malloc(format_len + 1)
+        if dst.format == NULL:
+            _arrow_schema_clone_release(dst)
+            return -1
+        memcpy(<void*>dst.format, src.format, format_len + 1)
+    if src.name != NULL:
+        name_len = strlen(src.name)
+        dst.name = <const char*>malloc(name_len + 1)
+        if dst.name == NULL:
+            _arrow_schema_clone_release(dst)
+            return -1
+        memcpy(<void*>dst.name, src.name, name_len + 1)
+    if src.metadata != NULL:
+        metadata_len = _arrow_metadata_byte_len(src.metadata)
+        dst.metadata = <const char*>malloc(metadata_len)
+        if dst.metadata == NULL:
+            _arrow_schema_clone_release(dst)
+            return -1
+        memcpy(<void*>dst.metadata, src.metadata, metadata_len)
+    if src.n_children > 0:
+        dst.children = <ArrowSchema**>calloc(
+            <size_t>src.n_children, sizeof(ArrowSchema*))
+        if dst.children == NULL:
+            _arrow_schema_clone_release(dst)
+            return -1
+        for i in range(src.n_children):
+            child = <ArrowSchema*>malloc(sizeof(ArrowSchema))
+            if child == NULL:
+                _arrow_schema_clone_release(dst)
+                return -1
+            dst.children[i] = child
+            if _arrow_schema_deep_clone(src.children[i], child) != 0:
+                _arrow_schema_clone_release(dst)
+                return -1
+    if src.dictionary != NULL:
+        dst.dictionary = <ArrowSchema*>malloc(sizeof(ArrowSchema))
+        if dst.dictionary == NULL:
+            _arrow_schema_clone_release(dst)
+            return -1
+        if _arrow_schema_deep_clone(src.dictionary, dst.dictionary) != 0:
+            _arrow_schema_clone_release(dst)
+            return -1
+    dst.release = _arrow_schema_clone_release
+    return 0
+
+
+cdef class _QueryStreamProducer:
+    """Holder for the Rust-cursor-backed ArrowArrayStream.
+
+    The Arrow stream struct itself is owned by the enclosing PyCapsule;
+    this object owns just the cached `(schema, array)` and the
+    `_CursorHandle` keep-alive. Refcount is bumped on capsule creation
+    and dropped by the stream's release callback so the consumer's
+    capsule lifetime governs everything downstream.
+    """
+    cdef _CursorHandle cursor_handle
+    cdef ArrowSchema cached_schema
+    cdef ArrowArray cached_array
+    cdef bint has_cached_schema
+    cdef bint has_cached_array
+    cdef bint exhausted
+    cdef char* last_error
+
+    def __cinit__(self):
+        self.cursor_handle = None
+        self.has_cached_schema = False
+        self.has_cached_array = False
+        self.exhausted = False
+        self.last_error = NULL
+        memset(&self.cached_schema, 0, sizeof(ArrowSchema))
+        memset(&self.cached_array, 0, sizeof(ArrowArray))
+
+    cdef void _free_cached(self) noexcept:
+        if self.has_cached_schema:
+            if self.cached_schema.release != NULL:
+                self.cached_schema.release(&self.cached_schema)
+            self.has_cached_schema = False
+        if self.has_cached_array:
+            if self.cached_array.release != NULL:
+                self.cached_array.release(&self.cached_array)
+            self.has_cached_array = False
+
+    def __dealloc__(self):
+        self._free_cached()
+        if self.last_error != NULL:
+            free(self.last_error)
+            self.last_error = NULL
+
+
+cdef void _qs_set_error(_QueryStreamProducer prod, const char* msg, size_t msg_len) noexcept:
+    if prod.last_error != NULL:
+        free(prod.last_error)
+        prod.last_error = NULL
+    prod.last_error = <char*>malloc(msg_len + 1)
+    if prod.last_error == NULL:
+        return
+    memcpy(prod.last_error, msg, msg_len)
+    prod.last_error[msg_len] = 0
+
+
+cdef int _qs_pull(_QueryStreamProducer prod) noexcept:
+    cdef line_reader_cursor* cursor
+    cdef ArrowArray local_array
+    cdef ArrowSchema local_schema
+    cdef line_reader_error* err = NULL
+    cdef line_reader_arrow_batch_result result
+    cdef const char* err_msg = NULL
+    cdef size_t err_len = 0
+    if prod.exhausted:
+        return 0
+    if prod.cursor_handle is None or prod.cursor_handle._cursor == NULL:
+        _qs_set_error(prod, b'cursor is closed', 16)
+        prod.exhausted = True
+        return -1
+    cursor = prod.cursor_handle._cursor
+    memset(&local_array, 0, sizeof(ArrowArray))
+    memset(&local_schema, 0, sizeof(ArrowSchema))
+    with nogil:
+        result = line_reader_cursor_next_arrow_batch(
+            cursor, &local_array, &local_schema, &err)
+    if result == line_reader_arrow_batch_ok:
+        if not prod.has_cached_schema:
+            memcpy(&prod.cached_schema, &local_schema, sizeof(ArrowSchema))
+            prod.has_cached_schema = True
+        else:
+            if local_schema.release != NULL:
+                local_schema.release(&local_schema)
+        memcpy(&prod.cached_array, &local_array, sizeof(ArrowArray))
+        prod.has_cached_array = True
+        return 0
+    if result == line_reader_arrow_batch_end:
+        prod.exhausted = True
+        if prod.cursor_handle._reader_ref is not None:
+            prod.cursor_handle._reader_ref._must_close = False
+        return 0
+    if err != NULL:
+        err_msg = line_reader_error_msg(err, &err_len)
+        if err_msg != NULL:
+            _qs_set_error(prod, err_msg, err_len)
+        else:
+            _qs_set_error(prod, b'arrow batch fetch failed', 24)
+        line_reader_error_free(err)
+    else:
+        _qs_set_error(
+            prod,
+            b'arrow batch fetch error without err_out', 39)
+    prod.exhausted = True
+    return -1
+
+
+cdef int _qs_get_schema(ArrowArrayStream* stream, ArrowSchema* out) noexcept with gil:
+    cdef _QueryStreamProducer prod
+    if stream == NULL or stream.private_data == NULL:
+        return 22  # EINVAL
+    prod = <_QueryStreamProducer>stream.private_data
+    if not prod.has_cached_schema:
+        if _qs_pull(prod) != 0:
+            return 5  # EIO
+    if not prod.has_cached_schema:
+        if _qs_install_empty_struct_schema(prod) != 0:
+            return 12  # ENOMEM
+    if _arrow_schema_deep_clone(&prod.cached_schema, out) != 0:
+        _qs_set_error(prod, b'failed to clone ArrowSchema', 27)
+        return 12  # ENOMEM
+    return 0
+
+
+cdef int _qs_install_empty_struct_schema(_QueryStreamProducer prod) noexcept:
+    """For an empty result set, fabricate a zero-column struct schema
+    so consumers (polars / pyarrow) iterate to a clean end-of-stream
+    instead of erroring on missing schema."""
+    cdef char* fmt = <char*>malloc(3)
+    if fmt == NULL:
+        return -1
+    fmt[0] = b'+'
+    fmt[1] = b's'
+    fmt[2] = 0
+    memset(&prod.cached_schema, 0, sizeof(ArrowSchema))
+    prod.cached_schema.format = fmt
+    prod.cached_schema.release = _arrow_schema_clone_release
+    prod.has_cached_schema = True
+    return 0
+
+
+cdef int _qs_get_next(ArrowArrayStream* stream, ArrowArray* out) noexcept with gil:
+    cdef _QueryStreamProducer prod
+    memset(out, 0, sizeof(ArrowArray))
+    if stream == NULL or stream.private_data == NULL:
+        return 22  # EINVAL
+    prod = <_QueryStreamProducer>stream.private_data
+    if not prod.has_cached_array:
+        if _qs_pull(prod) != 0:
+            return 5  # EIO
+    if prod.has_cached_array:
+        memcpy(out, &prod.cached_array, sizeof(ArrowArray))
+        memset(&prod.cached_array, 0, sizeof(ArrowArray))
+        prod.has_cached_array = False
+        return 0
+    return 0
+
+
+cdef const char* _qs_get_last_error(ArrowArrayStream* stream) noexcept:
+    cdef _QueryStreamProducer prod
+    if stream == NULL or stream.private_data == NULL:
+        return NULL
+    prod = <_QueryStreamProducer>stream.private_data
+    return <const char*>prod.last_error
+
+
+cdef void _qs_release(ArrowArrayStream* stream) noexcept with gil:
+    cdef _QueryStreamProducer prod
+    if stream == NULL or stream.private_data == NULL:
+        return
+    prod = <_QueryStreamProducer>stream.private_data
+    stream.private_data = NULL
+    stream.release = NULL
+    Py_DECREF(prod)
+
+
+cdef void _qs_capsule_destructor(object capsule) noexcept:
+    cdef ArrowArrayStream* stream
+    if not PyCapsule_IsValid(capsule, b'arrow_array_stream'):
+        return
+    stream = <ArrowArrayStream*>PyCapsule_GetPointer(
+        capsule, b'arrow_array_stream')
+    if stream == NULL:
+        return
+    if stream.release != NULL:
+        stream.release(stream)
+    free(stream)
+
+
+cdef object _make_query_stream_capsule(_CursorHandle handle):
+    cdef _QueryStreamProducer prod
+    cdef ArrowArrayStream* stream
+    prod = _QueryStreamProducer()
+    prod.cursor_handle = handle
+    stream = <ArrowArrayStream*>calloc(1, sizeof(ArrowArrayStream))
+    if stream == NULL:
+        raise MemoryError()
+    stream.get_schema = _qs_get_schema
+    stream.get_next = _qs_get_next
+    stream.get_last_error = _qs_get_last_error
+    stream.release = _qs_release
+    Py_INCREF(prod)
+    stream.private_data = <void*>prod
+    return PyCapsule_New(
+        <void*>stream, b'arrow_array_stream', _qs_capsule_destructor)
 
 
 _NUMPY_NULLABLE_CACHE = None
@@ -335,20 +642,25 @@ def _debug_egress_pool_stats(client):
 class QueryResult:
     """Result of ``Client.query(sql)``.
 
-    Streams query rows as Arrow RecordBatches. The result is **single-use**:
-    each materialisation method (``to_pandas``, ``to_arrow``, ``iter_arrow``,
+    Streams query rows as Arrow record batches. **Single-use**: each
+    materialisation method (``to_pandas``, ``to_arrow``, ``iter_arrow``,
     ``iter_pandas``, or the ``__arrow_c_stream__`` PyCapsule protocol)
-    consumes the underlying cursor. Calling any of them twice — or calling
-    one after another — raises ``IngressError``.
+    consumes the underlying cursor; the second consumption raises
+    ``IngressError``.
+
+    ``__arrow_c_stream__`` is native — the cursor's record batches are
+    exposed directly through the Arrow C Data Interface, so polars /
+    duckdb / pandas 3.0 / any Arrow-native consumer can read query
+    results without pyarrow installed. ``to_arrow`` / ``to_pandas`` /
+    ``iter_arrow`` / ``iter_pandas`` are convenience wrappers that
+    do require pyarrow.
 
     Example::
 
         with client.query('SELECT * FROM trades WHERE ts > $1') as result:
-            df = result.to_pandas()
-
-    The class is also a valid PyCapsule producer
-    (``pd.DataFrame.from_arrow(result)`` / ``pa.Table.from_arrow(result)``
-    / ``pl.DataFrame(result)`` / ``duckdb.from_arrow(result)``).
+            df = polars.from_arrow(result)              # no pyarrow
+            # df = result.to_pandas()                   # pyarrow required
+            # table = pa.table(result)                  # pyarrow required
     """
 
     def __init__(self, _CursorHandle cursor_handle):
@@ -363,12 +675,34 @@ class QueryResult:
         self._consumed = True
         return _build_record_batch_reader(self._cursor_handle)
 
+    def _take_cursor_handle(self):
+        if self._consumed:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'QueryResult already consumed')
+        if self._cursor_handle is None:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'QueryResult cursor was closed')
+        self._consumed = True
+        handle = self._cursor_handle
+        self._cursor_handle = None
+        return handle
+
     def __arrow_c_stream__(self, requested_schema=None):
-        reader = self._take_reader()
-        return reader.__arrow_c_stream__(requested_schema=requested_schema)
+        if requested_schema is not None:
+            raise NotImplementedError(
+                'requested_schema is not supported; consume the stream '
+                'and project on the consumer side.')
+        return _make_query_stream_capsule(self._take_cursor_handle())
 
     def to_arrow(self):
-        """Read the full result into a ``pyarrow.Table``."""
+        """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
+
+        Pyarrow-free alternative: ``polars.from_arrow(result)`` /
+        ``duckdb.from_arrow(result)`` / ``pa.table(result)`` consume
+        the ``__arrow_c_stream__`` capsule directly.
+        """
         return self._take_reader().read_all()
 
     def to_pandas(self, *, dtype_backend=None, types_mapper=None):

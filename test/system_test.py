@@ -2052,6 +2052,41 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_polars_from_arrow_consumes_capsule(self):
+        """``Client.query`` exposes ``__arrow_c_stream__`` directly off
+        the Rust cursor, so polars can consume it without pyarrow being
+        the import-time mediator. Pins that contract: the polars frame
+        round-trips the rows and our lazy ``_PYARROW`` global stays
+        unset by the call."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        table_name = 't_egress_polars_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG, vc VARCHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {table_name} VALUES "
+                f"('2024-01-01T00:00:00Z', 42, 'hello'), "
+                f"('2024-01-02T00:00:00Z', 7, 'world')")
+            self.qdb_plain.retry_check_table(table_name, min_rows=2)
+            with qi.Client.from_conf(self._conf()) as client:
+                with client.query(
+                        f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
+                        ) as result:
+                    df = pl.from_arrow(result)
+            self.assertEqual(df.shape, (2, 2))
+            self.assertEqual(df['lg'].to_list(), [42, 7])
+            self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_bad_sql_raises_ingress_error(self):
         """Server-side parse error surfaces as an ``IngressError`` from
         ``client.query`` with a usable message."""
@@ -3372,19 +3407,15 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         })
         with qi.Client.from_conf(self._conf()) as client:
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
-            qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
             try:
-                client.dataframe(df, table_name=table, at='ts')
+                client.dataframe(
+                    df, table_name=table, at='ts',
+                    max_rows_per_batch=32000)
             finally:
                 io_stats = qi._debug_dataframe_columnar_io_stats(
                     enabled=False)
-                arrow_stats = qi._debug_dataframe_arrow_stats(enabled=False)
         self.assertEqual(io_stats['flush_calls'], 3)
         self.assertEqual(io_stats['sync_calls'], 1)
-        self.assertEqual(arrow_stats['slices'], 3)
-        self.assertEqual(arrow_stats['buffer_allocations'], 1)
-        self.assertEqual(arrow_stats['fallbacks'], 0)
-        self.assertEqual(arrow_stats['completed'], 1)
 
         self.qdb_plain.retry_check_table(table, min_rows=rows)
         with qi.Client.from_conf(self._conf()) as client:
@@ -3414,19 +3445,12 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'seq': pd.Series([1, 2, 3], dtype='int64'),
         })
         with qi.Client.from_conf(self._conf()) as client:
-            qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
-            try:
-                client.dataframe(
-                    df,
-                    table_name=table,
-                    at='ts',
-                    symbols=['region'])
-            finally:
-                arrow_stats = qi._debug_dataframe_arrow_stats(enabled=False)
+            client.dataframe(
+                df,
+                table_name=table,
+                at='ts',
+                symbols=['region'])
 
-        self.assertEqual(arrow_stats['route_rejections'], 0)
-        self.assertEqual(arrow_stats['fallbacks'], 0)
-        self.assertEqual(arrow_stats['completed'], 1)
         resp = self.qdb_plain.retry_check_table(table, min_rows=3)
         col_types = {c['name']: c['type'] for c in resp['columns']}
         self.assertEqual(col_types['region'], 'SYMBOL')

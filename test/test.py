@@ -41,9 +41,13 @@ NUMPY_VERSION = _parse_version(np.__version__)
 try:
     import pandas as pd
     import numpy
-    import pyarrow
 except ImportError:
     pd = None
+
+try:
+    import pyarrow
+except ImportError:
+    pyarrow = None
 
 if pd is not None:
     from test_dataframe import TestPandasProtocolVersionV1
@@ -53,7 +57,7 @@ else:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
             buf = qi.Buffer(protocol_version=2)
-            exp = 'Missing.*`pandas.*pyarrow`.*readthedocs.*installation.html.'
+            exp = 'Missing.*`pandas`.*`numpy`.*readthedocs.*installation.html.'
             with self.assertRaisesRegex(qi.IngressError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
 
@@ -215,146 +219,6 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertGreater(stats['binary_bytes'], 0)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
-    def test_client_dataframe_arrow_path_reuses_buffer_across_chunks(self):
-        rows = 64_001
-        ts_values = 1_700_000_000_000_000 + np.arange(rows, dtype=np.int64)
-        seq_values = np.arange(rows, dtype=np.int64)
-        df = pd.DataFrame({
-            'ts': pd.Series(
-                pyarrow.array(
-                    ts_values,
-                    type=pyarrow.timestamp('us', tz='UTC')),
-                dtype=pd.ArrowDtype(pyarrow.timestamp('us', tz='UTC'))),
-            'seq': pd.Series(
-                pyarrow.array(seq_values, type=pyarrow.int64()),
-                dtype=pd.ArrowDtype(pyarrow.int64())),
-            'price': pd.Series(seq_values.astype(np.float64) * 0.25),
-        })
-
-        with QwpAckServer() as server:
-            conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
-                'pool_reap=manual;')
-            client = qi.Client.from_conf(conf)
-            try:
-                qi._debug_dataframe_columnar_io_stats(
-                    enabled=True, reset=True)
-                qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
-                try:
-                    client.dataframe(df, table_name='trades', at='ts')
-                finally:
-                    io_stats = qi._debug_dataframe_columnar_io_stats(
-                        enabled=False)
-                    arrow_stats = qi._debug_dataframe_arrow_stats(
-                        enabled=False)
-            finally:
-                client.close()
-
-            stats = server.snapshot()
-
-        self.assertEqual(stats['errors'], [])
-        self.assertEqual(stats['accepted_connections'], 1)
-        self.assertGreaterEqual(stats['binary_frames'], 3)
-        self.assertEqual(io_stats['flush_calls'], 3)
-        self.assertEqual(io_stats['sync_calls'], 1)
-        self.assertEqual(arrow_stats['calls'], 1)
-        self.assertEqual(arrow_stats['route_rejections'], 0)
-        self.assertEqual(arrow_stats['batches'], 1)
-        self.assertEqual(arrow_stats['slices'], 3)
-        self.assertEqual(arrow_stats['buffer_allocations'], 1)
-        self.assertEqual(arrow_stats['flushed_chunks'], 3)
-        self.assertEqual(arrow_stats['fallbacks'], 0)
-        self.assertEqual(arrow_stats['completed'], 1)
-
-    @unittest.skipIf(pd is None, 'pandas not installed')
-    def test_client_dataframe_explicit_symbols_use_arrow_path(self):
-        df = pd.DataFrame({
-            'ts': pd.Series([
-                pd.Timestamp('2024-01-01 00:00:00'),
-                pd.Timestamp('2024-01-01 00:00:01'),
-                pd.Timestamp('2024-01-01 00:00:02')],
-                dtype='datetime64[ns]'),
-            'region': ['us-east', 'us-west', 'us-east'],
-            'note': ['alpha', 'beta', 'gamma'],
-            'seq': pd.Series([1, 2, 3], dtype='int64'),
-        })
-
-        with QwpAckServer() as server:
-            conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
-                'pool_reap=manual;')
-            client = qi.Client.from_conf(conf)
-            try:
-                qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
-                try:
-                    client.dataframe(
-                        df,
-                        table_name='trades',
-                        at='ts',
-                        symbols=['region'])
-                finally:
-                    arrow_stats = qi._debug_dataframe_arrow_stats(
-                        enabled=False)
-            finally:
-                client.close()
-
-            stats = server.snapshot()
-
-        self.assertEqual(stats['errors'], [])
-        self.assertEqual(stats['accepted_connections'], 1)
-        self.assertGreaterEqual(stats['binary_frames'], 1)
-        self.assertEqual(arrow_stats['calls'], 1)
-        self.assertEqual(arrow_stats['route_rejections'], 0)
-        self.assertEqual(arrow_stats['fallbacks'], 0)
-        self.assertEqual(arrow_stats['completed'], 1)
-
-    @unittest.skipIf(pd is None, 'pandas not installed')
-    def test_client_dataframe_symbols_true_uses_arrow_path(self):
-        df = pd.DataFrame({
-            'ts': pd.Series([
-                pd.Timestamp('2024-01-01 00:00:00'),
-                pd.Timestamp('2024-01-01 00:00:01')],
-                dtype='datetime64[ns]'),
-            'region': ['us-east', 'us-west'],
-            'seq': pd.Series([1, 2], dtype='int64'),
-        })
-
-        with QwpAckServer() as server:
-            conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
-                'pool_reap=manual;')
-            client = qi.Client.from_conf(conf)
-            try:
-                qi._debug_dataframe_arrow_stats(enabled=True, reset=True)
-                try:
-                    client.dataframe(
-                        df,
-                        table_name='trades',
-                        at='ts',
-                        symbols=True)
-                finally:
-                    arrow_stats = qi._debug_dataframe_arrow_stats(
-                        enabled=False)
-            finally:
-                client.close()
-
-            stats = server.snapshot()
-
-        self.assertEqual(stats['errors'], [])
-        self.assertEqual(stats['accepted_connections'], 1)
-        self.assertGreaterEqual(stats['binary_frames'], 1)
-        self.assertEqual(arrow_stats['calls'], 1)
-        self.assertEqual(arrow_stats['route_rejections'], 0)
-        self.assertEqual(arrow_stats['fallbacks'], 0)
-        self.assertEqual(arrow_stats['completed'], 1)
-
-    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_client_dataframe_rejects_timestamp_only_before_publication(self):
         df = pd.DataFrame({
             'ts': pd.Series([
@@ -435,7 +299,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 "reap_idle\\(\\) can't be called: Client is closed"):
             client.reap_idle()
 
-    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pd is None or pyarrow is None,
+                     'pandas + pyarrow not installed')
     def test_client_dataframe_syncs_before_returning_after_late_flush_error(self):
         labels = ['a'] * 64000
         labels.append('x' * 1_200_000)
@@ -499,13 +364,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertNotIn('manual_chunk_plan_error', last)
         self.assertEqual(last['rows_ingested'], 2)
         self.assertFalse(last['columnar_io_stats']['enabled'])
-        self.assertFalse(last['arrow_stats']['enabled'])
-        self.assertEqual(last['arrow_stats']['calls'], 1)
-        self.assertEqual(last['arrow_stats']['fallbacks'], 0)
-        self.assertEqual(last['arrow_stats']['completed'], 1)
-        self.assertEqual(
-            last['columnar_io_stats']['flush_calls'],
-            last['arrow_stats']['flushed_chunks'])
+        self.assertGreaterEqual(last['columnar_io_stats']['flush_calls'], 1)
         self.assertEqual(last['columnar_io_stats']['sync_calls'], 1)
         self.assertGreaterEqual(last['columnar_io_stats']['flush_s'], 0.0)
         self.assertGreaterEqual(last['columnar_io_stats']['sync_s'], 0.0)

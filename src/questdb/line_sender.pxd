@@ -199,26 +199,6 @@ cdef extern from "questdb/ingress/line_sender.h":
         size_t max_name_len
         ) noexcept nogil
 
-    line_sender_buffer* line_sender_buffer_new_qwp_ws(
-        ) noexcept nogil
-
-    bint line_sender_buffer_append_arrow(
-        line_sender_buffer* buffer,
-        line_sender_table_name table,
-        ArrowArray* array,
-        const ArrowSchema* schema,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint line_sender_buffer_append_arrow_at_column(
-        line_sender_buffer* buffer,
-        line_sender_table_name table,
-        ArrowArray* array,
-        const ArrowSchema* schema,
-        line_sender_column_name ts_column,
-        line_sender_error** err_out
-        ) noexcept nogil
-
     void line_sender_buffer_free(
         line_sender_buffer* buffer
         ) noexcept nogil
@@ -765,121 +745,11 @@ cdef extern from "questdb/ingress/column_sender.h":
         const column_sender_chunk* chunk
         ) noexcept nogil
 
-    bint column_sender_chunk_column_i8(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int8_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_i16(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int16_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_i32(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int32_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_i64(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int64_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_f32(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const float* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_f64(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const double* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
     bint column_sender_chunk_column_bool(
         column_sender_chunk* chunk,
         const char* name,
         size_t name_len,
         const uint8_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_uuid(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const uint8_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_long256(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const uint8_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_ipv4(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const uint32_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_ts_nanos(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int64_t* data,
-        size_t row_count,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_column_ts_micros(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int64_t* data,
         size_t row_count,
         const column_sender_validity* validity,
         line_sender_error** err_out
@@ -897,44 +767,14 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_symbol_dict_i8(
+    bint column_sender_chunk_column_binary(
         column_sender_chunk* chunk,
         const char* name,
         size_t name_len,
-        const int8_t* codes,
+        const int32_t* offsets,
+        const uint8_t* bytes,
+        size_t bytes_len,
         size_t row_count,
-        const int32_t* dict_offsets,
-        size_t dict_offsets_len,
-        const uint8_t* dict_bytes,
-        size_t dict_bytes_len,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_symbol_dict_i16(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int16_t* codes,
-        size_t row_count,
-        const int32_t* dict_offsets,
-        size_t dict_offsets_len,
-        const uint8_t* dict_bytes,
-        size_t dict_bytes_len,
-        const column_sender_validity* validity,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_chunk_symbol_dict_i32(
-        column_sender_chunk* chunk,
-        const char* name,
-        size_t name_len,
-        const int32_t* codes,
-        size_t row_count,
-        const int32_t* dict_offsets,
-        size_t dict_offsets_len,
-        const uint8_t* dict_bytes,
-        size_t dict_bytes_len,
         const column_sender_validity* validity,
         line_sender_error** err_out
         ) noexcept nogil
@@ -957,7 +797,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         column_sender_chunk* chunk,
         const char* name,
         size_t name_len,
-        const ArrowArray* array,
+        ArrowArray* array,
         const ArrowSchema* schema,
         size_t row_offset,
         size_t row_count,
@@ -976,6 +816,38 @@ cdef extern from "questdb/ingress/column_sender.h":
         column_sender_numpy_f32 = 8
         column_sender_numpy_f64 = 9
         column_sender_numpy_bool = 10
+        column_sender_numpy_f16 = 11
+        column_sender_numpy_datetime64_s = 12
+        column_sender_numpy_datetime64_ms = 13
+        column_sender_numpy_datetime64_us = 14
+        column_sender_numpy_datetime64_ns = 15
+        column_sender_numpy_timedelta64_s = 16
+        column_sender_numpy_timedelta64_ms = 17
+        column_sender_numpy_timedelta64_us = 18
+        column_sender_numpy_timedelta64_ns = 19
+        column_sender_numpy_s16 = 20
+        column_sender_numpy_s32 = 21
+        column_sender_numpy_decimal_s8 = 22
+        column_sender_numpy_decimal_s16 = 23
+        column_sender_numpy_decimal_s32 = 24
+        column_sender_numpy_u32_ipv4 = 25
+        column_sender_numpy_u16_char = 26
+        column_sender_numpy_geohash_i8 = 27
+        column_sender_numpy_geohash_i16 = 28
+        column_sender_numpy_geohash_i32 = 29
+        column_sender_numpy_geohash_i64 = 30
+        column_sender_numpy_f64_ndarray = 31
+        column_sender_numpy_datetime64_m = 32
+        column_sender_numpy_datetime64_h = 33
+        column_sender_numpy_datetime64_D = 34
+        column_sender_numpy_datetime64_M = 35
+        column_sender_numpy_datetime64_Y = 36
+
+    cdef struct column_sender_numpy_extras:
+        int8_t decimal_scale
+        uint8_t geohash_bits
+        uint8_t array_ndim
+        const uint32_t* array_shape
 
     bint column_sender_chunk_append_numpy_column(
         column_sender_chunk* chunk,
@@ -985,6 +857,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         const uint8_t* data,
         size_t row_count,
         const column_sender_validity* validity,
+        const column_sender_numpy_extras* extras,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -994,15 +867,59 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_flush_buffer(
-        qwpws_conn* conn,
-        line_sender_buffer* buffer,
-        line_sender_error** err_out
-        ) noexcept nogil
-
     bint column_sender_sync(
         qwpws_conn* conn,
         column_sender_ack_level ack_level,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_flush_arrow_batch(
+        qwpws_conn* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        ArrowSchema* schema,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_flush_arrow_batch_at_column(
+        qwpws_conn* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        ArrowSchema* schema,
+        line_sender_column_name ts_column,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    cdef enum column_sender_arrow_override_kind:
+        column_sender_arrow_override_symbol = 0
+        column_sender_arrow_override_ipv4 = 1
+        column_sender_arrow_override_char = 2
+        column_sender_arrow_override_geohash = 3
+
+    cdef struct column_sender_arrow_override:
+        const char* column
+        size_t column_len
+        uint32_t kind
+        uint32_t arg
+
+    bint column_sender_flush_arrow_batch_with_overrides(
+        qwpws_conn* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        ArrowSchema* schema,
+        const column_sender_arrow_override* overrides,
+        size_t overrides_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_flush_arrow_batch_at_column_with_overrides(
+        qwpws_conn* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        ArrowSchema* schema,
+        line_sender_column_name ts_column,
+        const column_sender_arrow_override* overrides,
+        size_t overrides_len,
         line_sender_error** err_out
         ) noexcept nogil
 

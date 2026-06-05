@@ -56,18 +56,26 @@ __all__ = [
 from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
     INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
-from libc.string cimport strncmp, memset, memcpy
+from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan
 from libc.errno cimport errno
 # from libc.stdio cimport stderr, fprintf
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
+from cpython.datetime cimport (
+    PyDateTime_GET_YEAR, PyDateTime_GET_MONTH, PyDateTime_GET_DAY,
+    PyDateTime_DATE_GET_HOUR, PyDateTime_DATE_GET_MINUTE,
+    PyDateTime_DATE_GET_SECOND, PyDateTime_DATE_GET_MICROSECOND,
+)
 from cpython.bool cimport bool
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.memoryview cimport PyMemoryView_FromMemory
+from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
+                                PyCapsule_New)
+from cpython.ref cimport Py_INCREF, Py_DECREF
 
 from .line_sender cimport *
 from .rpyutils cimport *
@@ -95,7 +103,9 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
 
 import sys
 import datetime
+import ipaddress
 import os
+import uuid
 import threading
 import collections
 import time
@@ -118,24 +128,6 @@ cdef uint64_t _dataframe_columnar_flush_ns = 0
 cdef uint64_t _dataframe_columnar_sync_calls = 0
 cdef uint64_t _dataframe_columnar_sync_ns = 0
 cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
-cdef bint _dataframe_arrow_count_stats = False
-cdef uint64_t _dataframe_arrow_calls = 0
-cdef uint64_t _dataframe_arrow_route_rejections = 0
-cdef uint64_t _dataframe_arrow_materialize_failures = 0
-cdef uint64_t _dataframe_arrow_empty_frames = 0
-cdef uint64_t _dataframe_arrow_batches = 0
-cdef uint64_t _dataframe_arrow_rows = 0
-cdef uint64_t _dataframe_arrow_columns = 0
-cdef uint64_t _dataframe_arrow_slices = 0
-cdef uint64_t _dataframe_arrow_slice_rows = 0
-cdef uint64_t _dataframe_arrow_buffer_allocations = 0
-cdef uint64_t _dataframe_arrow_flushed_chunks = 0
-cdef uint64_t _dataframe_arrow_fallbacks = 0
-cdef uint64_t _dataframe_arrow_completed = 0
-cdef size_t _DATAFRAME_ARROW_ROWS_PER_CHUNK = 32000
-cdef bytes _DATAFRAME_ARROW_MD_COLUMN_TYPE = b'questdb.column_type'
-cdef bytes _DATAFRAME_ARROW_MD_SYMBOL = b'questdb.symbol'
-cdef bytes _DATAFRAME_ARROW_MD_SYMBOL_VALUE = b'true'
 
 
 # This value is automatically updated by the `bump2version` tool.
@@ -1430,8 +1422,10 @@ cdef class Buffer:
         not using the buffer explicitly. It supports the same parameters
         and also supports auto-flushing.
 
-        This feature requires the ``pandas``, ``numpy`` and ``pyarrow``
-        package to be installed.
+        Requires ``pandas`` and ``numpy``. ``pyarrow`` is only needed
+        when the frame contains ``pd.ArrowDtype`` / ``pd.Categorical`` /
+        ``string`` dtype columns — purely NumPy / object dtypes work
+        without it.
 
         Adding a dataframe can trigger auto-flushing behaviour,
         even between rows of the same dataframe. To avoid this, you can
@@ -2254,29 +2248,9 @@ cdef bint _dataframe_columnar_plan_has_validity(
 cdef size_t _dataframe_columnar_rows_per_chunk(
         dataframe_plan_t* plan,
         size_t max_rows_per_chunk) noexcept nogil:
-    cdef size_t col_index
-    cdef col_t* col
-    cdef size_t rows_per_chunk
-    cdef bint has_symbol = False
-    cdef bint has_string = False
-
-    if max_rows_per_chunk != 0:
-        rows_per_chunk = max_rows_per_chunk
-    else:
-        rows_per_chunk = 250000
-        for col_index in range(plan.col_count):
-            col = &plan.cols.d[col_index]
-            if col.setup.target == col_target_t.col_target_column_str:
-                has_string = True
-            elif col.setup.target == col_target_t.col_target_symbol:
-                has_symbol = True
-        if has_string:
-            rows_per_chunk = 32000
-        elif plan.col_count > 8:
-            rows_per_chunk = 64000
-        elif has_symbol:
-            rows_per_chunk = 100000
-
+    # Clamp to a hard safety upper bound and align to 8 rows when the plan
+    # carries a validity bitmap (chunk boundary must be byte-aligned).
+    cdef size_t rows_per_chunk = max_rows_per_chunk
     if rows_per_chunk > 1000000:
         rows_per_chunk = 1000000
     if rows_per_chunk == 0:
@@ -2551,71 +2525,11 @@ cdef bint _is_pyobj_source(col_source_t source) noexcept nogil:
         source == col_source_t.col_source_str_pyobj or
         source == col_source_t.col_source_int_pyobj or
         source == col_source_t.col_source_float_pyobj or
-        source == col_source_t.col_source_bool_pyobj)
-
-
-cdef bint _is_numpy_widening_source(col_source_t source) noexcept nogil:
-    """True if the source goes through column_sender_chunk_append_numpy_column.
-    Excludes int64/float64 (which already match the wire type and use
-    the per-type FFI directly) and excludes pyobj sources. Arrow uint32 is
-    included because its fixed-width buffer layout matches a native u32 array."""
-    return (
-        source == col_source_t.col_source_bool_numpy or
-        source == col_source_t.col_source_i8_numpy or
-        source == col_source_t.col_source_i16_numpy or
-        source == col_source_t.col_source_i32_numpy or
-        source == col_source_t.col_source_u8_numpy or
-        source == col_source_t.col_source_u16_numpy or
-        source == col_source_t.col_source_u32_numpy or
-        source == col_source_t.col_source_u64_numpy or
-        source == col_source_t.col_source_u32_arrow or
-        source == col_source_t.col_source_f32_numpy)
-
-
-cdef size_t _numpy_dtype_element_size(
-        column_sender_numpy_dtype dtype) noexcept nogil:
-    """Byte size of one source element for `data + row_offset * element_size`."""
-    if dtype == column_sender_numpy_dtype.column_sender_numpy_bool:
-        return 1
-    elif (dtype == column_sender_numpy_dtype.column_sender_numpy_i8 or
-          dtype == column_sender_numpy_dtype.column_sender_numpy_u8):
-        return 1
-    elif (dtype == column_sender_numpy_dtype.column_sender_numpy_i16 or
-          dtype == column_sender_numpy_dtype.column_sender_numpy_u16):
-        return 2
-    elif (dtype == column_sender_numpy_dtype.column_sender_numpy_i32 or
-          dtype == column_sender_numpy_dtype.column_sender_numpy_u32 or
-          dtype == column_sender_numpy_dtype.column_sender_numpy_f32):
-        return 4
-    else:
-        return 8
-
-
-cdef column_sender_numpy_dtype _source_to_numpy_dtype(
-        col_source_t source) noexcept nogil:
-    # Caller guards via _is_numpy_widening_source first.
-    if source == col_source_t.col_source_bool_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_bool
-    elif source == col_source_t.col_source_i8_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_i8
-    elif source == col_source_t.col_source_i16_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_i16
-    elif source == col_source_t.col_source_i32_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_i32
-    elif source == col_source_t.col_source_u8_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_u8
-    elif source == col_source_t.col_source_u16_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_u16
-    elif (source == col_source_t.col_source_u32_numpy or
-          source == col_source_t.col_source_u32_arrow):
-        return column_sender_numpy_dtype.column_sender_numpy_u32
-    elif source == col_source_t.col_source_u64_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_u64
-    elif source == col_source_t.col_source_f32_numpy:
-        return column_sender_numpy_dtype.column_sender_numpy_f32
-    else:
-        # Unreachable per _is_numpy_widening_source.
-        return column_sender_numpy_dtype.column_sender_numpy_bool
+        source == col_source_t.col_source_bool_pyobj or
+        source == col_source_t.col_source_uuid_pyobj or
+        source == col_source_t.col_source_ipv4_pyobj or
+        source == col_source_t.col_source_datetime_pyobj or
+        source == col_source_t.col_source_bytes_pyobj)
 
 
 cdef inline void _pyobj_set_validity_bit(uint8_t* bitmap, size_t row) noexcept nogil:
@@ -2893,6 +2807,273 @@ cdef pyobj_built_t* _dataframe_columnar_build_bool_pyobj(
     return b
 
 
+cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef uint8_t* buf = NULL
+    cdef size_t buf_bytes = row_count * 16 if row_count > 0 else 16
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t i
+    cdef object le_bytes
+
+    try:
+        buf = <uint8_t*>calloc(buf_bytes, sizeof(uint8_t))
+        if buf == NULL:
+            raise MemoryError()
+        b.data = <void*>buf
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        for i in range(row_count):
+            cell = access[i]
+            if isinstance(<object>cell, _uuid.UUID):
+                # `.int.to_bytes(16, 'little')` produces exactly the
+                # QuestDB UUID wire layout: bytes 0..8 = lo half LE,
+                # bytes 8..16 = hi half LE. One C-implemented call +
+                # one 16-byte memcpy per row.
+                le_bytes = (<object>cell).int.to_bytes(16, 'little')
+                memcpy(buf + i * 16, PyBytes_AsString(le_bytes), 16)
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.has_nulls = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected UUID, '
+                    f'got {_fqn(type(<object>cell))}.')
+
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
+cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef uint32_t* values = NULL
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t i
+
+    try:
+        values = <uint32_t*>calloc(row_count if row_count > 0 else 1,
+                                   sizeof(uint32_t))
+        if values == NULL:
+            raise MemoryError()
+        b.data = <void*>values
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        for i in range(row_count):
+            cell = access[i]
+            if isinstance(<object>cell, _ipaddress.IPv4Address):
+                values[i] = <uint32_t>int(<object>cell)
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.has_nulls = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected '
+                    f'ipaddress.IPv4Address, got {_fqn(type(<object>cell))}.')
+
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
+cdef inline int64_t _days_from_civil(int y, int m, int d) noexcept nogil:
+    cdef int y_adj = y - 1 if m <= 2 else y
+    cdef int era = (y_adj if y_adj >= 0 else y_adj - 399) // 400
+    cdef int yoe = y_adj - era * 400
+    cdef int m_adj = m - 3 if m > 2 else m + 9
+    cdef int doy = (153 * m_adj + 2) // 5 + d - 1
+    cdef int doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return <int64_t>era * 146097 + <int64_t>doe - 719468
+
+
+cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef int64_t* values = NULL
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t i
+    cdef object dt
+    cdef object epoch_aware = datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc)
+    cdef object delta
+    cdef int year, month, day, hour, minute, second, us
+    cdef int64_t days
+
+    try:
+        values = <int64_t*>calloc(row_count if row_count > 0 else 1,
+                                  sizeof(int64_t))
+        if values == NULL:
+            raise MemoryError()
+        b.data = <void*>values
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        for i in range(row_count):
+            cell = access[i]
+            if isinstance(<object>cell, datetime.datetime):
+                dt = <object>cell
+                if dt.tzinfo is None:
+                    # Fast path: C-level field extraction + Howard
+                    # Hinnant days_from_civil; no Python timedelta /
+                    # int arithmetic per row.
+                    year = PyDateTime_GET_YEAR(dt)
+                    month = PyDateTime_GET_MONTH(dt)
+                    day = PyDateTime_GET_DAY(dt)
+                    hour = PyDateTime_DATE_GET_HOUR(dt)
+                    minute = PyDateTime_DATE_GET_MINUTE(dt)
+                    second = PyDateTime_DATE_GET_SECOND(dt)
+                    us = PyDateTime_DATE_GET_MICROSECOND(dt)
+                    days = _days_from_civil(year, month, day)
+                    values[i] = (
+                        days * 86_400_000_000
+                        + <int64_t>hour * 3_600_000_000
+                        + <int64_t>minute * 60_000_000
+                        + <int64_t>second * 1_000_000
+                        + <int64_t>us)
+                else:
+                    delta = dt - epoch_aware
+                    values[i] = <int64_t>(
+                        delta.days * 86_400_000_000
+                        + delta.seconds * 1_000_000
+                        + delta.microseconds)
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.has_nulls = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected '
+                    f'datetime.datetime, got {_fqn(type(<object>cell))}.')
+
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
+cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef Py_ssize_t blob_len
+    cdef const char* blob_buf
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t bytes_cap = 16
+    cdef uint8_t* new_bytes
+    cdef size_t bytes_used = 0
+    cdef size_t i
+
+    try:
+        b.str_offsets = <int32_t*>calloc(row_count + 1, sizeof(int32_t))
+        if b.str_offsets == NULL:
+            raise MemoryError()
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        b.str_bytes = <uint8_t*>malloc(bytes_cap)
+        if b.str_bytes == NULL:
+            raise MemoryError()
+
+        for i in range(row_count):
+            cell = access[i]
+            if PyBytes_CheckExact(cell):
+                blob_len = PyBytes_GET_SIZE(<object>cell)
+                blob_buf = PyBytes_AsString(<object>cell)
+                while bytes_used + <size_t>blob_len > bytes_cap:
+                    bytes_cap *= 2
+                    if bytes_cap > (<size_t>(2_147_483_647)):
+                        raise IngressError(
+                            IngressErrorCode.BadDataFrame,
+                            f'Bad column {df_col_name!r}: column total bytes '
+                            'exceeds the QWP wire binary offset table '
+                            'limit (2 GiB).')
+                    new_bytes = <uint8_t*>realloc(b.str_bytes, bytes_cap)
+                    if new_bytes == NULL:
+                        raise MemoryError()
+                    b.str_bytes = new_bytes
+                if blob_len > 0:
+                    memcpy(b.str_bytes + bytes_used, blob_buf, <size_t>blob_len)
+                bytes_used += <size_t>blob_len
+                b.str_offsets[i + 1] = <int32_t>bytes_used
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.str_offsets[i + 1] = <int32_t>bytes_used
+                b.has_nulls = True
+            else:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected bytes, '
+                    f'got {_fqn(type(<object>cell))}.')
+
+        b.str_bytes_len = bytes_used
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
 cdef void_int _dataframe_columnar_prebuild_pyobj(
         object df,
         dataframe_plan_t* plan) except -1:
@@ -2931,6 +3112,18 @@ cdef void_int _dataframe_columnar_prebuild_pyobj(
                 col, plan.row_count, df.columns[col.setup.orig_index])
         elif col.setup.source == col_source_t.col_source_bool_pyobj:
             plan.pyobj_built[i] = _dataframe_columnar_build_bool_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+        elif col.setup.source == col_source_t.col_source_uuid_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_uuid_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+        elif col.setup.source == col_source_t.col_source_ipv4_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_ipv4_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+        elif col.setup.source == col_source_t.col_source_datetime_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_datetime_pyobj(
+                col, plan.row_count, df.columns[col.setup.orig_index])
+        elif col.setup.source == col_source_t.col_source_bytes_pyobj:
+            plan.pyobj_built[i] = _dataframe_columnar_build_bytes_pyobj(
                 col, plan.row_count, df.columns[col.setup.orig_index])
 
 
@@ -2976,6 +3169,102 @@ cdef void_int _dataframe_columnar_append_pyobj_str(
         raise c_err_to_py(err)
 
 
+cdef void_int _dataframe_columnar_append_pyobj_simple(
+        column_sender_chunk* chunk,
+        col_t* col,
+        pyobj_built_t* prebuilt,
+        size_t row_offset,
+        size_t row_count,
+        size_t elem_size,
+        column_sender_numpy_dtype dtype) except -1:
+    cdef line_sender_error* err = NULL
+    cdef column_sender_validity validity
+    cdef const column_sender_validity* validity_ptr = NULL
+    cdef bint ok = False
+
+    if prebuilt == NULL:
+        raise RuntimeError('PyObject column missing pre-built buffer.')
+    if prebuilt.has_nulls:
+        if row_offset % 8 != 0:
+            raise RuntimeError(
+                'PyObject column with nulls requires byte-aligned '
+                'chunk boundaries.')
+        validity.bits = prebuilt.validity + (row_offset // 8)
+        validity.bit_len = row_count
+        validity_ptr = &validity
+    with nogil:
+        ok = column_sender_chunk_append_numpy_column(
+            chunk,
+            col.name.buf,
+            col.name.len,
+            dtype,
+            (<const uint8_t*>prebuilt.data) + row_offset * elem_size,
+            row_count,
+            validity_ptr,
+            NULL,
+            &err)
+    if not ok:
+        raise c_err_to_py(err)
+
+
+cdef void_int _dataframe_columnar_append_pyobj_bytes(
+        column_sender_chunk* chunk,
+        col_t* col,
+        pyobj_built_t* prebuilt,
+        size_t row_offset,
+        size_t row_count) except -1:
+    cdef line_sender_error* err = NULL
+    cdef column_sender_validity validity
+    cdef const column_sender_validity* validity_ptr = NULL
+    cdef bint ok = False
+
+    if prebuilt == NULL:
+        raise RuntimeError('PyObject bytes column missing pre-built buffer.')
+    if prebuilt.has_nulls:
+        if row_offset % 8 != 0:
+            raise RuntimeError(
+                'PyObject bytes column with nulls requires byte-aligned '
+                'chunk boundaries.')
+        validity.bits = prebuilt.validity + (row_offset // 8)
+        validity.bit_len = row_count
+        validity_ptr = &validity
+    with nogil:
+        ok = column_sender_chunk_column_binary(
+            chunk,
+            col.name.buf,
+            col.name.len,
+            prebuilt.str_offsets + row_offset,
+            prebuilt.str_bytes,
+            prebuilt.str_bytes_len,
+            row_count,
+            validity_ptr,
+            &err)
+    if not ok:
+        raise c_err_to_py(err)
+
+
+cdef void_int _dataframe_columnar_call_arrow_append(
+        column_sender_chunk* chunk,
+        col_t* col,
+        size_t row_offset,
+        size_t row_count) except -1:
+    cdef line_sender_error* err = NULL
+    cdef bint ok = False
+    with nogil:
+        ok = column_sender_chunk_append_arrow_column(
+            chunk,
+            col.name.buf,
+            col.name.len,
+            &col.setup.chunks.chunks[0],
+            &col.setup.arrow_schema,
+            row_offset,
+            row_count,
+            &err)
+    if not ok:
+        raise c_err_to_py(err)
+    return 0
+
+
 cdef void_int _dataframe_columnar_append_field(
         column_sender_chunk* chunk,
         col_t* col,
@@ -2996,7 +3285,7 @@ cdef void_int _dataframe_columnar_append_field(
         _dataframe_columnar_validity(arr, row_offset, row_count, &validity))
     cdef bint ok = False
 
-    cdef column_sender_numpy_dtype np_dtype
+    cdef column_sender_numpy_dtype numpy_dtype
     cdef size_t element_size
 
     if col.setup.target == col_target_t.col_target_column_bool:
@@ -3028,39 +3317,12 @@ cdef void_int _dataframe_columnar_append_field(
                     (<const uint8_t*>data) + row_offset,
                     row_count,
                     validity_ptr,
+                    NULL,
                     &err)
         else:
             raise RuntimeError('Unsupported columnar bool source.')
     elif col.setup.target == col_target_t.col_target_column_i64:
-        # int64 sources that match the wire type use the per-type FFI;
-        # narrower NumPy ints and Arrow UInt32 widen via the NumPy
-        # appender; pyobj int uses the prebuild buffer.
-        if col.setup.source in (
-                col_source_t.col_source_i64_numpy,
-                col_source_t.col_source_i64_arrow):
-            with nogil:
-                ok = column_sender_chunk_column_i64(
-                    chunk,
-                    col.name.buf,
-                    col.name.len,
-                    (<const int64_t*>data) + row_offset,
-                    row_count,
-                    validity_ptr,
-                    &err)
-        elif _is_numpy_widening_source(col.setup.source):
-            np_dtype = _source_to_numpy_dtype(col.setup.source)
-            element_size = _numpy_dtype_element_size(np_dtype)
-            with nogil:
-                ok = column_sender_chunk_append_numpy_column(
-                    chunk,
-                    col.name.buf,
-                    col.name.len,
-                    np_dtype,
-                    (<const uint8_t*>data) + row_offset * element_size,
-                    row_count,
-                    validity_ptr,
-                    &err)
-        elif col.setup.source == col_source_t.col_source_int_pyobj:
+        if col.setup.source == col_source_t.col_source_int_pyobj:
             if prebuilt == NULL:
                 raise RuntimeError(
                     'PyObject int column missing pre-built buffer.')
@@ -3075,39 +3337,92 @@ cdef void_int _dataframe_columnar_append_field(
             else:
                 validity_ptr = NULL
             with nogil:
-                ok = column_sender_chunk_column_i64(
+                ok = column_sender_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    (<const int64_t*>prebuilt.data) + row_offset,
+                    column_sender_numpy_dtype.column_sender_numpy_i64,
+                    (<const uint8_t*>prebuilt.data) + row_offset * 8,
                     row_count,
                     validity_ptr,
+                    NULL,
                     &err)
         else:
-            raise RuntimeError('Unsupported columnar int source.')
-    elif col.setup.target == col_target_t.col_target_column_f64:
-        if col.setup.source in (
-                col_source_t.col_source_f64_numpy,
-                col_source_t.col_source_f64_arrow):
-            with nogil:
-                ok = column_sender_chunk_column_f64(
-                    chunk,
-                    col.name.buf,
-                    col.name.len,
-                    (<const double*>data) + row_offset,
-                    row_count,
-                    validity_ptr,
-                    &err)
-        elif col.setup.source == col_source_t.col_source_f32_numpy:
+            # Rust widens narrow ints to a sentinel-safe wire (i8/i16 → INT,
+            # i32/u32/u64 → LONG); see questdb-rs NumpyDtype::*WidenTo*.
+            if col.setup.source in (
+                    col_source_t.col_source_i64_numpy,
+                    col_source_t.col_source_i64_arrow):
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i64
+                element_size = 8
+            elif col.setup.source == col_source_t.col_source_i8_numpy:
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i8
+                element_size = 1
+            elif col.setup.source == col_source_t.col_source_i16_numpy:
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i16
+                element_size = 2
+            elif col.setup.source == col_source_t.col_source_i32_numpy:
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i32
+                element_size = 4
+            elif col.setup.source == col_source_t.col_source_u8_numpy:
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u8
+                element_size = 1
+            elif col.setup.source == col_source_t.col_source_u16_numpy:
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u16
+                element_size = 2
+            elif col.setup.source in (
+                    col_source_t.col_source_u32_numpy,
+                    col_source_t.col_source_u32_arrow):
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u32
+                element_size = 4
+            elif col.setup.source == col_source_t.col_source_u64_numpy:
+                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u64
+                element_size = 8
+            else:
+                raise RuntimeError('Unsupported columnar int source.')
             with nogil:
                 ok = column_sender_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    column_sender_numpy_dtype.column_sender_numpy_f32,
-                    (<const uint8_t*>data) + row_offset * 4,
+                    numpy_dtype,
+                    (<const uint8_t*>data) + row_offset * element_size,
                     row_count,
                     validity_ptr,
+                    NULL,
+                    &err)
+    elif col.setup.target == col_target_t.col_target_column_f64:
+        if col.setup.source in (
+                col_source_t.col_source_f64_numpy,
+                col_source_t.col_source_f64_arrow):
+            numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_f64
+            element_size = 8
+            with nogil:
+                ok = column_sender_chunk_append_numpy_column(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    numpy_dtype,
+                    (<const uint8_t*>data) + row_offset * element_size,
+                    row_count,
+                    validity_ptr,
+                    NULL,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_f32_numpy:
+            # Rust emits FLOAT wire for numpy f32; server widens to DOUBLE
+            # column if needed.
+            numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_f32
+            element_size = 4
+            with nogil:
+                ok = column_sender_chunk_append_numpy_column(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    numpy_dtype,
+                    (<const uint8_t*>data) + row_offset * element_size,
+                    row_count,
+                    validity_ptr,
+                    NULL,
                     &err)
         elif col.setup.source == col_source_t.col_source_float_pyobj:
             if prebuilt == NULL:
@@ -3124,161 +3439,105 @@ cdef void_int _dataframe_columnar_append_field(
             else:
                 validity_ptr = NULL
             with nogil:
-                ok = column_sender_chunk_column_f64(
+                ok = column_sender_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    (<const double*>prebuilt.data) + row_offset,
+                    column_sender_numpy_dtype.column_sender_numpy_f64,
+                    (<const uint8_t*>prebuilt.data) + row_offset * 8,
                     row_count,
                     validity_ptr,
+                    NULL,
                     &err)
         else:
             raise RuntimeError('Unsupported columnar float source.')
     elif col.setup.target == col_target_t.col_target_column_ts:
-        # tz_arrow Arrow chunks store UTC int64 at buffers[1] just like
-        # numpy datetime64[ns,UTC] does; QuestDB TIMESTAMP is UTC-naive
-        # internally, so we forward the same buffer to the same FFI as
-        # the bare-numpy path. Wall-time-in-tz columns (e.g.
-        # datetime64[ns, "America/New_York"]) are pandas-stored as UTC
-        # moments + tz metadata, so this is also lossless.
-        if col.setup.source in (
-                col_source_t.col_source_dt64ns_numpy,
-                col_source_t.col_source_dt64ns_tz_arrow):
+        if col.setup.source == col_source_t.col_source_dt64ns_numpy:
             with nogil:
-                ok = column_sender_chunk_column_ts_nanos(
+                ok = column_sender_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    (<const int64_t*>data) + row_offset,
+                    column_sender_numpy_dtype.column_sender_numpy_datetime64_ns,
+                    (<const uint8_t*>data) + row_offset * 8,
                     row_count,
                     validity_ptr,
+                    NULL,
+                    &err)
+        elif col.setup.source == col_source_t.col_source_dt64us_numpy:
+            with nogil:
+                ok = column_sender_chunk_append_numpy_column(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    column_sender_numpy_dtype.column_sender_numpy_datetime64_us,
+                    (<const uint8_t*>data) + row_offset * 8,
+                    row_count,
+                    validity_ptr,
+                    NULL,
                     &err)
         elif col.setup.source in (
-                col_source_t.col_source_dt64us_numpy,
+                col_source_t.col_source_dt64ns_tz_arrow,
                 col_source_t.col_source_dt64us_tz_arrow):
-            with nogil:
-                ok = column_sender_chunk_column_ts_micros(
-                    chunk,
-                    col.name.buf,
-                    col.name.len,
-                    (<const int64_t*>data) + row_offset,
-                    row_count,
-                    validity_ptr,
-                    &err)
+            _dataframe_columnar_call_arrow_append(
+                chunk, col, row_offset, row_count)
+            return 0
+        elif col.setup.source == col_source_t.col_source_datetime_pyobj:
+            _dataframe_columnar_append_pyobj_simple(
+                chunk, col, prebuilt, row_offset, row_count, 8,
+                column_sender_numpy_dtype.column_sender_numpy_datetime64_us)
+            return 0
         else:
             raise RuntimeError('Unsupported columnar timestamp field source.')
-    elif col.setup.target == col_target_t.col_target_column_i8:
-        with nogil:
-            ok = column_sender_chunk_column_i8(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const int8_t*>data) + row_offset,
-                row_count,
-                validity_ptr,
-                &err)
-    elif col.setup.target == col_target_t.col_target_column_i16:
-        with nogil:
-            ok = column_sender_chunk_column_i16(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const int16_t*>data) + row_offset,
-                row_count,
-                validity_ptr,
-                &err)
-    elif col.setup.target == col_target_t.col_target_column_i32:
-        with nogil:
-            ok = column_sender_chunk_column_i32(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const int32_t*>data) + row_offset,
-                row_count,
-                validity_ptr,
-                &err)
-    elif col.setup.target == col_target_t.col_target_column_f32:
-        with nogil:
-            ok = column_sender_chunk_column_f32(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const float*>data) + row_offset,
-                row_count,
-                validity_ptr,
-                &err)
+    elif col.setup.target in (
+            col_target_t.col_target_column_i8,
+            col_target_t.col_target_column_i16,
+            col_target_t.col_target_column_i32,
+            col_target_t.col_target_column_f32,
+            col_target_t.col_target_column_long256):
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
     elif col.setup.target == col_target_t.col_target_column_uuid:
-        # `FixedSizeBinary(16)` Arrow buffer is 16 bytes per row;
-        # forward the offset-adjusted byte pointer directly. The Rust
-        # FFI reads it as the QuestDB UUID wire shape (two 64-bit
-        # little-endian halves).
-        with nogil:
-            ok = column_sender_chunk_column_uuid(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const uint8_t*>data) + row_offset * 16,
-                row_count,
-                validity_ptr,
-                &err)
-    elif col.setup.target == col_target_t.col_target_column_long256:
-        # `FixedSizeBinary(32)` is 32 bytes per row, forwarded as the
-        # QuestDB LONG256 wire shape (four LE 64-bit limbs).
-        with nogil:
-            ok = column_sender_chunk_column_long256(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const uint8_t*>data) + row_offset * 32,
-                row_count,
-                validity_ptr,
-                &err)
+        if col.setup.source == col_source_t.col_source_uuid_pyobj:
+            _dataframe_columnar_append_pyobj_simple(
+                chunk, col, prebuilt, row_offset, row_count, 16,
+                column_sender_numpy_dtype.column_sender_numpy_s16)
+            return 0
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
     elif col.setup.target == col_target_t.col_target_column_ipv4:
-        # `pa.uint32()` buffer is u32 per row. The Rust FFI encodes
-        # each value LE on the wire; per the C header comment, the
-        # value is `u32::from(Ipv4Addr)` (octet 0 in the high byte).
-        with nogil:
-            ok = column_sender_chunk_column_ipv4(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                (<const uint32_t*>data) + row_offset,
-                row_count,
-                validity_ptr,
-                &err)
+        if col.setup.source == col_source_t.col_source_ipv4_pyobj:
+            _dataframe_columnar_append_pyobj_simple(
+                chunk, col, prebuilt, row_offset, row_count, 4,
+                column_sender_numpy_dtype.column_sender_numpy_u32_ipv4)
+            return 0
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
+    elif col.setup.target == col_target_t.col_target_column_binary:
+        if col.setup.source == col_source_t.col_source_bytes_pyobj:
+            _dataframe_columnar_append_pyobj_bytes(
+                chunk, col, prebuilt, row_offset, row_count)
+            return 0
+        raise RuntimeError('Unsupported columnar binary field source.')
     elif col.setup.target == col_target_t.col_target_column_str:
         if col.setup.source == col_source_t.col_source_str_pyobj:
             _dataframe_columnar_append_pyobj_str(
                 chunk, col, prebuilt, row_offset, row_count)
             return 0  # err already raised inside on failure
-        # Route through the generic Arrow appender. Rust dispatches on
-        # the schema's format string, so utf8 ("u") and large_utf8 ("U")
-        # are handled uniformly without a Python-side cast.
-        with nogil:
-            ok = column_sender_chunk_append_arrow_column(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                &col.setup.chunks.chunks[0],
-                &col.setup.arrow_schema,
-                row_offset,
-                row_count,
-                &err)
+        # Rust dispatches on the schema format string for utf8 ("u") and
+        # large_utf8 ("U").
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
     elif col.setup.target == col_target_t.col_target_symbol:
-        # Route through the generic Arrow appender. The Rust side reads
-        # the dictionary from arr.dictionary and dispatches on the
-        # outer schema's index format (c / s / i) to the matching
-        # symbol_dict_i* call.
-        with nogil:
-            ok = column_sender_chunk_append_arrow_column(
-                chunk,
-                col.name.buf,
-                col.name.len,
-                &col.setup.chunks.chunks[0],
-                &col.setup.arrow_schema,
-                row_offset,
-                row_count,
-                &err)
+        # Rust reads the dictionary from arr.dictionary and dispatches on
+        # the outer schema's index format (c / s / i).
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
     else:
         raise RuntimeError('Unsupported columnar field target.')
 
@@ -3289,15 +3548,30 @@ cdef void_int _dataframe_columnar_append_field(
 cdef void_int _dataframe_columnar_append_at(
         column_sender_chunk* chunk,
         col_t* col,
+        pyobj_built_t* prebuilt,
         size_t row_offset,
         size_t row_count) except -1:
     cdef line_sender_error* err = NULL
-    cdef const int64_t* data = <const int64_t*>(
-        col.setup.chunks.chunks[0].buffers[1])
+    cdef const int64_t* data
     cdef bint ok = False
 
-    # See _dataframe_columnar_append_field's column_ts comment:
-    # tz_arrow chunks store the same UTC int64 layout at buffers[1].
+    if col.setup.source == col_source_t.col_source_datetime_pyobj:
+        if prebuilt == NULL:
+            raise RuntimeError(
+                'PyObject datetime designated TS missing pre-built buffer.')
+        data = <const int64_t*>prebuilt.data
+        with nogil:
+            ok = column_sender_chunk_designated_timestamp_micros(
+                chunk,
+                data + row_offset,
+                row_count,
+                &err)
+        if not ok:
+            raise c_err_to_py(err)
+        return 0
+
+    data = <const int64_t*>(col.setup.chunks.chunks[0].buffers[1])
+
     if col.setup.source in (
             col_source_t.col_source_dt64ns_numpy,
             col_source_t.col_source_dt64ns_tz_arrow):
@@ -3331,13 +3605,16 @@ cdef void_int _dataframe_columnar_populate_chunk(
     cdef size_t col_index
     cdef col_t* col
     cdef col_t* at_col = NULL
+    cdef size_t at_col_index = 0
     cdef size_t field_count = 0
     cdef pyobj_built_t* prebuilt = NULL
+    cdef pyobj_built_t* at_prebuilt = NULL
 
     for col_index in range(plan.col_count):
         col = &plan.cols.d[col_index]
         if col.setup.target == col_target_t.col_target_at:
             at_col = col
+            at_col_index = col_index
         elif col.setup.target in (
                 col_target_t.col_target_column_bool,
                 col_target_t.col_target_column_i64,
@@ -3351,7 +3628,8 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
                 col_target_t.col_target_column_long256,
-                col_target_t.col_target_column_ipv4):
+                col_target_t.col_target_column_ipv4,
+                col_target_t.col_target_column_binary):
             if plan.pyobj_built != NULL:
                 prebuilt = plan.pyobj_built[col_index]
             else:
@@ -3365,7 +3643,10 @@ cdef void_int _dataframe_columnar_populate_chunk(
             'Validated columnar plan has no non-timestamp data columns.')
     if at_col == NULL:
         raise RuntimeError('Validated columnar plan has no timestamp column.')
-    _dataframe_columnar_append_at(chunk, at_col, row_offset, row_count)
+    if plan.pyobj_built != NULL:
+        at_prebuilt = plan.pyobj_built[at_col_index]
+    _dataframe_columnar_append_at(
+        chunk, at_col, at_prebuilt, row_offset, row_count)
 
 
 cdef void_int _dataframe_columnar_sync(qwpws_conn* conn) except -1:
@@ -3423,10 +3704,9 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
         47) == 0
 
 
-cdef void_int _dataframe_columnar_flush_any(
+cdef void_int _dataframe_columnar_flush(
         qwpws_conn* conn,
         column_sender_chunk* chunk,
-        line_sender_buffer* buffer,
         bint retry_after_sync) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_error_code err_code
@@ -3440,10 +3720,7 @@ cdef void_int _dataframe_columnar_flush_any(
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    if buffer != NULL:
-        ok = column_sender_flush_buffer(conn, buffer, &err)
-    else:
-        ok = column_sender_flush(conn, chunk, &err)
+    ok = column_sender_flush(conn, chunk, &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
@@ -3462,10 +3739,7 @@ cdef void_int _dataframe_columnar_flush_any(
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
-        if buffer != NULL:
-            ok = column_sender_flush_buffer(conn, buffer, &err)
-        else:
-            ok = column_sender_flush(conn, chunk, &err)
+        ok = column_sender_flush(conn, chunk, &err)
         _ensure_has_gil(&gs)
         if _dataframe_columnar_count_io_stats:
             _dataframe_columnar_flush_calls += 1
@@ -3476,18 +3750,69 @@ cdef void_int _dataframe_columnar_flush_any(
     raise c_err_to_py(err)
 
 
-cdef void_int _dataframe_columnar_flush(
+cdef void_int _dataframe_arrow_flush_batch(
         qwpws_conn* conn,
-        column_sender_chunk* chunk,
+        line_sender_table_name table,
+        ArrowArray* array,
+        ArrowSchema* schema,
+        line_sender_column_name* ts_column,
+        const column_sender_arrow_override* overrides,
+        size_t overrides_len,
         bint retry_after_sync) except -1:
-    _dataframe_columnar_flush_any(conn, chunk, NULL, retry_after_sync)
+    cdef line_sender_error* err = NULL
+    cdef line_sender_error_code err_code
+    cdef bint ok = False
+    cdef PyThreadState* gs = NULL
+    cdef uint64_t start_ns = 0
+    global _dataframe_columnar_flush_calls
+    global _dataframe_columnar_flush_ns
+    global _dataframe_columnar_flush_retry_syncs
 
+    if _dataframe_columnar_count_io_stats:
+        start_ns = time.perf_counter_ns()
+    _ensure_doesnt_have_gil(&gs)
+    if ts_column != NULL:
+        ok = column_sender_flush_arrow_batch_at_column_with_overrides(
+            conn, table, array, schema, ts_column[0],
+            overrides, overrides_len, &err)
+    else:
+        ok = column_sender_flush_arrow_batch_with_overrides(
+            conn, table, array, schema,
+            overrides, overrides_len, &err)
+    _ensure_has_gil(&gs)
+    if _dataframe_columnar_count_io_stats:
+        _dataframe_columnar_flush_calls += 1
+        _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
+    if ok:
+        return 0
 
-cdef void_int _dataframe_columnar_flush_buffer(
-        qwpws_conn* conn,
-        line_sender_buffer* buffer,
-        bint retry_after_sync) except -1:
-    _dataframe_columnar_flush_any(conn, NULL, buffer, retry_after_sync)
+    err_code = line_sender_error_get_code(err)
+    if (retry_after_sync and err_code == line_sender_error_invalid_api_call and
+            _dataframe_columnar_is_deferred_capacity_error(err)):
+        if _dataframe_columnar_count_io_stats:
+            _dataframe_columnar_flush_retry_syncs += 1
+        line_sender_error_free(err)
+        err = NULL
+        _dataframe_columnar_sync(conn)
+        if _dataframe_columnar_count_io_stats:
+            start_ns = time.perf_counter_ns()
+        _ensure_doesnt_have_gil(&gs)
+        if ts_column != NULL:
+            ok = column_sender_flush_arrow_batch_at_column_with_overrides(
+                conn, table, array, schema, ts_column[0],
+                overrides, overrides_len, &err)
+        else:
+            ok = column_sender_flush_arrow_batch_with_overrides(
+                conn, table, array, schema,
+                overrides, overrides_len, &err)
+        _ensure_has_gil(&gs)
+        if _dataframe_columnar_count_io_stats:
+            _dataframe_columnar_flush_calls += 1
+            _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
+        if ok:
+            return 0
+
+    raise c_err_to_py(err)
 
 
 def _debug_dataframe_columnar_io_stats(
@@ -3518,61 +3843,6 @@ def _debug_dataframe_columnar_io_stats(
         'sync_calls': _dataframe_columnar_sync_calls,
         'sync_s': _dataframe_columnar_sync_ns / 1_000_000_000.0,
         'flush_retry_syncs': _dataframe_columnar_flush_retry_syncs,
-    }
-
-
-def _debug_dataframe_arrow_stats(
-        object enabled=None,
-        bint reset=False):
-    """
-    Internal benchmark hook for Client.dataframe Arrow fast-path routing.
-    """
-    global _dataframe_arrow_count_stats
-    global _dataframe_arrow_calls
-    global _dataframe_arrow_route_rejections
-    global _dataframe_arrow_materialize_failures
-    global _dataframe_arrow_empty_frames
-    global _dataframe_arrow_batches
-    global _dataframe_arrow_rows
-    global _dataframe_arrow_columns
-    global _dataframe_arrow_slices
-    global _dataframe_arrow_slice_rows
-    global _dataframe_arrow_buffer_allocations
-    global _dataframe_arrow_flushed_chunks
-    global _dataframe_arrow_fallbacks
-    global _dataframe_arrow_completed
-
-    if reset:
-        _dataframe_arrow_calls = 0
-        _dataframe_arrow_route_rejections = 0
-        _dataframe_arrow_materialize_failures = 0
-        _dataframe_arrow_empty_frames = 0
-        _dataframe_arrow_batches = 0
-        _dataframe_arrow_rows = 0
-        _dataframe_arrow_columns = 0
-        _dataframe_arrow_slices = 0
-        _dataframe_arrow_slice_rows = 0
-        _dataframe_arrow_buffer_allocations = 0
-        _dataframe_arrow_flushed_chunks = 0
-        _dataframe_arrow_fallbacks = 0
-        _dataframe_arrow_completed = 0
-    if enabled is not None:
-        _dataframe_arrow_count_stats = bool(enabled)
-    return {
-        'enabled': _dataframe_arrow_count_stats,
-        'calls': _dataframe_arrow_calls,
-        'route_rejections': _dataframe_arrow_route_rejections,
-        'materialize_failures': _dataframe_arrow_materialize_failures,
-        'empty_frames': _dataframe_arrow_empty_frames,
-        'batches': _dataframe_arrow_batches,
-        'rows': _dataframe_arrow_rows,
-        'columns': _dataframe_arrow_columns,
-        'slices': _dataframe_arrow_slices,
-        'slice_rows': _dataframe_arrow_slice_rows,
-        'buffer_allocations': _dataframe_arrow_buffer_allocations,
-        'flushed_chunks': _dataframe_arrow_flushed_chunks,
-        'fallbacks': _dataframe_arrow_fallbacks,
-        'completed': _dataframe_arrow_completed,
     }
 
 
@@ -3609,134 +3879,88 @@ def _debug_dataframe_columnar_plan(
         qdb_pystr_buf_free(b)
 
 
-cdef void_int _dataframe_append_arrow_record_batch(
-        line_sender_buffer* buffer,
-        qdb_pystr_buf* b,
-        object batch,
-        object table_name,
-        object at) except -1:
-    cdef ArrowArray array
-    cdef ArrowSchema schema
-    cdef line_sender_table_name c_table_name
-    cdef line_sender_column_name c_ts_column
-    cdef line_sender_error* err = NULL
-    cdef bint ok
-    cdef bint at_is_column = False
-
-    if not isinstance(table_name, str):
-        raise TypeError('table_name must be str for Arrow batch append.')
-    if at is None or isinstance(at, ServerTimestampType):
-        at_is_column = False
-    elif isinstance(at, str):
-        at_is_column = True
-    else:
-        raise TypeError(
-            'at must be a timestamp column name, ServerTimestamp, or None '
-            'for Arrow batch append.')
-
-    qdb_pystr_buf_clear(b)
-    str_to_table_name(b, <PyObject*>table_name, &c_table_name)
-    if at_is_column:
-        str_to_column_name(b, at, &c_ts_column)
-
-    memset(&array, 0, sizeof(ArrowArray))
-    memset(&schema, 0, sizeof(ArrowSchema))
-    try:
-        batch._export_to_c(<uintptr_t>&array, <uintptr_t>&schema)
-        if at_is_column:
-            with nogil:
-                ok = line_sender_buffer_append_arrow_at_column(
-                    buffer,
-                    c_table_name,
-                    &array,
-                    &schema,
-                    c_ts_column,
-                    &err)
-        else:
-            with nogil:
-                ok = line_sender_buffer_append_arrow(
-                    buffer,
-                    c_table_name,
-                    &array,
-                    &schema,
-                    &err)
-        if not ok:
-            raise c_err_to_py(err)
-    finally:
-        # The Rust FFI consumes `array` and clears `array.release`.
-        # Keep the guard here for Python-side failures before the call.
-        if array.release != NULL:
-            array.release(&array)
-        if schema.release != NULL:
-            schema.release(&schema)
-
-
-def _bench_dataframe_append_arrow_buffer(
-        object df,
+def _bench_dataframe_flush_arrow_batch(
+        object arrow_source,
         *,
         object table_name=None,
         object at=None,
+        object conf=None,
         size_t iterations=1):
     """
-    Internal benchmark hook for the Rust Arrow batch ingestion path.
+    Internal benchmark hook for `column_sender_flush_arrow_batch` FFI.
 
-    This builds a pyarrow RecordBatch from ``df`` and appends it through
-    ``line_sender_buffer_append_arrow`` / ``_at_column``. It does not flush
-    to a server; it exists to compare the Rust classifier path against the
-    current Python dataframe planner before changing public ingestion
-    routing. It is intentionally kept out of ``__all__``.
+    `arrow_source` must expose the Arrow PyCapsule Interface
+    (`__arrow_c_stream__`) — pa.RecordBatch, pa.Table, pa.RecordBatchReader,
+    pl.DataFrame, or any other Arrow-native container. Pandas frames are
+    not accepted here on purpose: this hook benches the Arrow FFI itself,
+    not pandas→Arrow conversion. Use `_bench_dataframe_plan_and_populate_
+    column_chunks` for the pandas chunk-based path. Intentionally kept out
+    of `__all__`.
     """
     cdef size_t iteration
-    cdef line_sender_buffer* buffer = NULL
-    cdef qdb_pystr_buf* b = NULL
-    cdef object batch
     cdef size_t row_count = 0
     cdef size_t col_count = 0
-    cdef size_t last_buffer_rows = 0
-    cdef size_t last_buffer_size = 0
-    cdef size_t total_buffer_rows = 0
+    cdef size_t completed = 0
+    cdef questdb_db* db = NULL
+    cdef qwpws_conn* conn = NULL
+    cdef line_sender_error* err = NULL
+    cdef qdb_pystr_buf* b = NULL
+    cdef PyThreadState* gs = NULL
+    cdef bytes conf_bytes
+    cdef bint any_flushed = False
 
     if iterations == 0:
         raise ValueError('iterations must be greater than zero')
+    if conf is None:
+        raise ValueError('conf is required for flush_arrow_batch bench.')
+    if not hasattr(arrow_source, '__arrow_c_stream__'):
+        raise TypeError(
+            '_bench_dataframe_flush_arrow_batch requires an Arrow-native '
+            'source exposing __arrow_c_stream__ '
+            '(pa.RecordBatch / pa.Table / pl.DataFrame / RecordBatchReader). '
+            f'Got {type(arrow_source).__name__}.')
 
-    _dataframe_may_import_deps()
-    _dataframe_check_is_dataframe(df)
-    batch = _PYARROW.RecordBatch.from_pandas(df, preserve_index=False)
-    row_count = batch.num_rows
-    col_count = batch.num_columns
+    row_count = int(
+        getattr(arrow_source, 'num_rows', None)
+        or getattr(arrow_source, 'height', None)
+        or 0)
+    col_count = int(
+        getattr(arrow_source, 'num_columns', None)
+        or getattr(arrow_source, 'width', None)
+        or 0)
 
-    for iteration in range(iterations):
-        buffer = line_sender_buffer_new_qwp_ws()
-        if buffer == NULL:
-            raise MemoryError('line_sender_buffer_new_qwp_ws returned NULL')
-        b = qdb_pystr_buf_new()
+    conf_bytes = conf.encode('utf-8') if isinstance(conf, str) else conf
+    db = questdb_db_connect(conf_bytes, len(conf_bytes), &err)
+    if db == NULL:
+        raise c_err_to_py(err)
+    b = qdb_pystr_buf_new()
+    try:
+        _ensure_doesnt_have_gil(&gs)
+        conn = questdb_db_borrow_conn(db, &err)
+        _ensure_has_gil(&gs)
+        if conn == NULL:
+            raise c_err_to_py(err)
         try:
-            reserve_buffer(buffer, 65536)
-            _dataframe_append_arrow_record_batch(
-                buffer,
-                b,
-                batch,
-                table_name,
-                at)
-            last_buffer_rows = line_sender_buffer_row_count(buffer)
-            last_buffer_size = line_sender_buffer_size(buffer)
-            total_buffer_rows += last_buffer_rows
+            for iteration in range(iterations):
+                _ingest_arrow_capsule_stream(
+                    conn, b, arrow_source, table_name, at,
+                    None, &any_flushed)
+            _dataframe_columnar_sync(conn)
+            completed = iterations
         finally:
-            if buffer != NULL:
-                line_sender_buffer_free(buffer)
-                buffer = NULL
-            if b != NULL:
-                qdb_pystr_buf_free(b)
-                b = NULL
+            questdb_db_return_conn(db, conn)
+    finally:
+        if b != NULL:
+            qdb_pystr_buf_free(b)
+        if db != NULL:
+            questdb_db_close(db)
 
     return {
         'iterations': iterations,
         'row_count': row_count,
         'col_count': col_count,
         'logical_cells': row_count * col_count,
-        'last_buffer_rows': last_buffer_rows,
-        'last_buffer_size': last_buffer_size,
-        'total_buffer_rows': total_buffer_rows,
+        'completed': completed,
     }
 
 
@@ -3748,7 +3972,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
         object symbols='auto',
         object at=None,
         size_t iterations=1,
-        size_t max_rows_per_chunk=0):
+        size_t max_rows_per_chunk=16384):
     """
     Internal benchmark hook for Layer 1 pandas columnar work.
 
@@ -3802,18 +4026,18 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                 rows_per_chunk = _dataframe_columnar_rows_per_chunk(
                     &plan,
                     max_rows_per_chunk)
+                chunk = column_sender_chunk_new(
+                    plan.c_table_name.buf,
+                    plan.c_table_name.len,
+                    &err)
+                if chunk == NULL:
+                    raise c_err_to_py(err)
                 row_offset = 0
                 while row_offset < plan.row_count:
+                    column_sender_chunk_clear(chunk)
                     chunk_rows = rows_per_chunk
                     if chunk_rows > plan.row_count - row_offset:
                         chunk_rows = plan.row_count - row_offset
-                    chunk = column_sender_chunk_new(
-                        plan.c_table_name.buf,
-                        plan.c_table_name.len,
-                        &err)
-                    if chunk == NULL:
-                        raise c_err_to_py(err)
-
                     _dataframe_columnar_populate_chunk(
                         &plan,
                         chunk,
@@ -3823,8 +4047,6 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                     if populated_rows != 0:
                         populated_chunks += 1
                         populated_rows_total += populated_rows
-                    column_sender_chunk_free(chunk)
-                    chunk = NULL
                     row_offset += chunk_rows
             finally:
                 if chunk != NULL:
@@ -3852,228 +4074,503 @@ def _bench_dataframe_plan_and_populate_column_chunks(
     }
 
 
-cdef bint _dataframe_client_arrow_route_allowed(
-        object df,
+cdef object _POLARS = None
+cdef object _POLARS_DATAFRAME_T = None
+cdef object _POLARS_LAZYFRAME_T = None
+
+
+cdef bint _try_import_polars():
+    global _POLARS, _POLARS_DATAFRAME_T, _POLARS_LAZYFRAME_T
+    if _POLARS is not None:
+        return True
+    try:
+        import polars
+    except ImportError:
+        return False
+    _POLARS = polars
+    _POLARS_DATAFRAME_T = polars.DataFrame
+    _POLARS_LAZYFRAME_T = polars.LazyFrame
+    return True
+
+
+cdef bint _is_polars_dataframe_or_lazy(object obj):
+    if not _try_import_polars():
+        return False
+    return isinstance(obj, (_POLARS_DATAFRAME_T, _POLARS_LAZYFRAME_T))
+
+
+cdef void_int _ingest_arrow_capsule_stream(
+        qwpws_conn* conn,
+        qdb_pystr_buf* b,
+        object stream_owner,
         object table_name,
-        object table_name_col,
-        object symbols,
-        object at) except -1:
-    if table_name_col is not None:
-        return False
-    if not isinstance(table_name, str):
-        return False
-    if not (
-            symbols == 'auto' or
-            symbols is True or
-            isinstance(symbols, (tuple, list))):
-        return False
-    if isinstance(at, str):
-        try:
-            if at not in df.columns:
-                return False
-            return len(df.columns) > 1
-        except Exception:
-            return False
-    return False
-
-
-cdef bint _dataframe_arrow_type_is_string_like(object arrow_type) except -1:
-    if arrow_type.id == _PYARROW.lib.Type_STRING:
-        return True
-    if arrow_type.id == _PYARROW.lib.Type_LARGE_STRING:
-        return True
-    if hasattr(_PYARROW.lib, 'Type_STRING_VIEW'):
-        return arrow_type.id == _PYARROW.lib.Type_STRING_VIEW
-    return False
-
-
-cdef bint _dataframe_arrow_type_is_dictionary(object arrow_type) except -1:
-    return arrow_type.id == _PYARROW.lib.Type_DICTIONARY
-
-
-cdef object _dataframe_arrow_resolve_symbol_indices(
-        object df,
-        object symbols,
-        object at):
-    cdef size_t col_count = len(df.columns)
-    cdef size_t col_index = 0
-    cdef size_t at_index = 0
-    cdef bint has_at_index = False
-    cdef object symbol
-    cdef set indices = set()
-
-    if symbols == 'auto' or symbols is True:
-        return None
-    if not isinstance(symbols, (tuple, list)):
+        object at,
+        object validated_overrides,
+        bint* any_flushed) except -1:
+    cdef object stream_capsule = stream_owner.__arrow_c_stream__()
+    if not PyCapsule_IsValid(stream_capsule, b'arrow_array_stream'):
         raise TypeError(
-            f'Bad argument `symbols`: Must be a bool or a tuple or list '+
-            'of column names (str) or indices (int).')
+            '__arrow_c_stream__ did not return a valid arrow_array_stream '
+            'PyCapsule.')
 
-    if isinstance(at, str):
-        _dataframe_get_loc(df, at, 'at', &at_index)
-        has_at_index = True
+    cdef ArrowArrayStream* stream = <ArrowArrayStream*>PyCapsule_GetPointer(
+        stream_capsule, b'arrow_array_stream')
 
-    for symbol in symbols:
-        if isinstance(symbol, str):
-            _dataframe_get_loc(df, symbol, 'symbols', &col_index)
-        elif isinstance(symbol, int):
-            _bind_col_index('symbol', symbol, col_count, &col_index)
+    cdef line_sender_table_name c_table_name
+    cdef line_sender_column_name c_ts_column
+    cdef line_sender_column_name* c_ts_column_ptr = NULL
+    cdef ArrowSchema schema
+    cdef ArrowArray batch
+    cdef int rc
+    cdef const char* stream_err
+    cdef bint at_is_column = False
+    cdef bint schema_valid = False
+    cdef column_sender_arrow_override* c_overrides = NULL
+    cdef size_t c_overrides_len = 0
+    cdef size_t i
+    cdef object name_bytes
+    cdef int kind_int
+    cdef int arg_int
+
+    if not isinstance(table_name, str):
+        raise TypeError(
+            'table_name must be str for Arrow-native DataFrame input.')
+    if at is None or isinstance(at, ServerTimestampType):
+        at_is_column = False
+    elif isinstance(at, str):
+        at_is_column = True
+    else:
+        raise TypeError(
+            'at must be a column name str, ServerTimestamp, or None '
+            'for Arrow-native DataFrame input.')
+
+    qdb_pystr_buf_clear(b)
+    str_to_table_name(b, <PyObject*>table_name, &c_table_name)
+    if at_is_column:
+        str_to_column_name(b, at, &c_ts_column)
+        c_ts_column_ptr = &c_ts_column
+
+    if validated_overrides is not None:
+        c_overrides_len = len(validated_overrides)
+        c_overrides = <column_sender_arrow_override*>calloc(
+            c_overrides_len, sizeof(column_sender_arrow_override))
+        if c_overrides == NULL:
+            raise MemoryError()
+        for i in range(c_overrides_len):
+            name_bytes, kind_int, arg_int = validated_overrides[i]
+            c_overrides[i].column = PyBytes_AsString(name_bytes)
+            c_overrides[i].column_len = PyBytes_GET_SIZE(name_bytes)
+            c_overrides[i].kind = <uint32_t>kind_int
+            c_overrides[i].arg = <uint32_t>arg_int
+
+    memset(&schema, 0, sizeof(ArrowSchema))
+    rc = stream.get_schema(stream, &schema)
+    if rc != 0:
+        stream_err = stream.get_last_error(stream)
+        if c_overrides != NULL:
+            free(c_overrides)
+        raise IngressError(
+            IngressErrorCode.InvalidApiCall,
+            f'Arrow stream get_schema failed: '
+            f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
+    schema_valid = True
+
+    try:
+        while True:
+            memset(&batch, 0, sizeof(ArrowArray))
+            rc = stream.get_next(stream, &batch)
+            if rc != 0:
+                stream_err = stream.get_last_error(stream)
+                raise IngressError(
+                    IngressErrorCode.InvalidApiCall,
+                    f'Arrow stream get_next failed: '
+                    f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
+            if batch.release == NULL:
+                break
+            try:
+                _dataframe_arrow_flush_batch(
+                    conn, c_table_name, &batch, &schema, c_ts_column_ptr,
+                    c_overrides, c_overrides_len,
+                    any_flushed[0])
+                any_flushed[0] = True
+            finally:
+                if batch.release != NULL:
+                    batch.release(&batch)
+    finally:
+        if schema_valid and schema.release != NULL:
+            schema.release(&schema)
+        if c_overrides != NULL:
+            free(c_overrides)
+
+
+cdef object _validate_schema_overrides(object schema_overrides):
+    """Convert the public schema_overrides dict into a list of
+    (name_bytes, kind_int, arg_int) tuples. Returns None if empty.
+
+    Keeping `name_bytes` alive on the Python side lets the C overrides
+    array borrow the underlying char* without an extra copy.
+    """
+    if not schema_overrides:
+        return None
+    if not isinstance(schema_overrides, dict):
+        raise TypeError(
+            'schema_overrides must be a dict mapping column name to '
+            "one of: 'symbol', 'ipv4', 'char', or ('geohash', bits).")
+    cdef list out = []
+    cdef object name, override, kind, value
+    cdef int kind_int
+    cdef int arg_int
+    for name, override in schema_overrides.items():
+        if not isinstance(name, str):
+            raise TypeError(
+                f'schema_overrides key must be str, got '
+                f'{type(name).__name__}.')
+        if isinstance(override, str):
+            kind = override
+            value = None
+        elif isinstance(override, tuple) and len(override) == 2:
+            kind, value = override
         else:
             raise TypeError(
-                f'Bad argument `symbols`: Elements must ' +
-                'be a column name (str) or index (int).')
-        if has_at_index and col_index == at_index:
+                f'schema_overrides[{name!r}] has invalid shape '
+                f'{override!r}; expected str or (kind, value) tuple.')
+        arg_int = 0
+        if kind == 'symbol':
+            kind_int = <int>column_sender_arrow_override_symbol
+        elif kind == 'ipv4':
+            kind_int = <int>column_sender_arrow_override_ipv4
+        elif kind == 'char':
+            kind_int = <int>column_sender_arrow_override_char
+        elif kind == 'geohash':
+            if not isinstance(value, int) or value < 1 or value > 60:
+                raise ValueError(
+                    f'schema_overrides[{name!r}] geohash bits must '
+                    f'be int in 1..=60, got {value!r}.')
+            kind_int = <int>column_sender_arrow_override_geohash
+            arg_int = value
+        else:
             raise ValueError(
-                f'Bad argument `symbols`: Cannot use the `at` column ' +
-                f'({df.columns[at_index]!r}) as a symbol column.')
-        indices.add(col_index)
+                f'schema_overrides[{name!r}] kind {kind!r} not '
+                "in {'symbol', 'ipv4', 'char', 'geohash'}.")
+        out.append((name.encode('utf-8'), kind_int, arg_int))
+    return out
 
-    return indices
+
+cdef object _capsule_get_column_names(object sliceable):
+    """Return list of str column names from polars / pyarrow input,
+    or None if the input doesn't expose a uniform name list."""
+    cdef object names
+    names = getattr(sliceable, 'column_names', None)
+    if names is not None:
+        return list(names)
+    names = getattr(sliceable, 'columns', None)
+    if names is not None:
+        return list(names)
+    return None
 
 
-cdef object _dataframe_arrow_batch_with_symbol_policy(
-        object batch,
-        object df,
-        object symbols,
-        object at):
-    cdef object symbol_indices = None
-    cdef object fields = []
-    cdef object arrays = []
-    cdef object field
-    cdef object arrow_type
-    cdef object metadata
-    cdef Py_ssize_t idx = 0
-    cdef bint force_all_strings = False
-    cdef bint want_symbol = False
-    cdef bint changed = False
+cdef bint _capsule_polars_dtype_is_string_like(object dtype):
+    """polars: Utf8 / String / Categorical / Enum count as string-like."""
+    if _POLARS is None:
+        return False
+    if dtype == _POLARS.Utf8:
+        return True
+    if isinstance(dtype, _POLARS.Categorical):
+        return True
+    cdef object enum_t = getattr(_POLARS, 'Enum', None)
+    if enum_t is not None and isinstance(dtype, enum_t):
+        return True
+    return False
 
-    if symbols == 'auto':
-        return batch
 
-    force_all_strings = symbols is True
-    symbol_indices = _dataframe_arrow_resolve_symbol_indices(df, symbols, at)
+cdef bint _capsule_pyarrow_type_is_string_like(object field_type):
+    """pyarrow: utf8 / large_utf8 / utf8_view, plus Dictionary whose
+    value type is one of those."""
+    if _PYARROW is None:
+        return False
+    if (_PYARROW.types.is_string(field_type)
+            or _PYARROW.types.is_large_string(field_type)):
+        return True
+    if _PYARROW.types.is_dictionary(field_type):
+        value_type = field_type.value_type
+        if (_PYARROW.types.is_string(value_type)
+                or _PYARROW.types.is_large_string(value_type)):
+            return True
+    return False
 
-    for idx in range(batch.num_columns):
-        field = batch.schema.field(idx)
-        arrow_type = field.type
-        if force_all_strings:
-            want_symbol = (
-                _dataframe_arrow_type_is_dictionary(arrow_type) or
-                _dataframe_arrow_type_is_string_like(arrow_type))
+
+cdef object _capsule_get_string_column_names(object sliceable):
+    """Return names of all string-like columns (utf8 / large_utf8 /
+    utf8_view / dict-of-utf8). Supports polars DataFrame and pyarrow
+    Table / RecordBatch. Returns None if schema introspection is not
+    available on the input."""
+    cdef object schema
+    cdef object out
+    cdef object name
+    cdef object dtype
+    cdef object field_type
+    cdef int i
+    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
+        out = []
+        for name, dtype in sliceable.schema.items():
+            if _capsule_polars_dtype_is_string_like(dtype):
+                out.append(name)
+        return out
+    if _PYARROW is None:
+        try:
+            _dataframe_require_pyarrow()
+        except ImportError:
+            return None
+    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
+        schema = sliceable.schema
+        out = []
+        for i in range(len(schema.names)):
+            field_type = schema.field(i).type
+            if _capsule_pyarrow_type_is_string_like(field_type):
+                out.append(schema.names[i])
+        return out
+    return None
+
+
+cdef object _capsule_column_is_string_like(object sliceable, str name):
+    """Returns True iff `name` is a string-like column on `sliceable`,
+    False iff it is some other type, or None if schema introspection
+    is not available on the input."""
+    cdef object dtype
+    cdef object field_type
+    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
+        try:
+            dtype = sliceable.schema[name]
+        except KeyError:
+            raise KeyError(
+                f'symbols column {name!r} not found in the dataframe.')
+        return _capsule_polars_dtype_is_string_like(dtype)
+    if _PYARROW is None:
+        try:
+            _dataframe_require_pyarrow()
+        except ImportError:
+            return None
+    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
+        try:
+            field_type = sliceable.schema.field(name).type
+        except (KeyError, ValueError):
+            raise KeyError(
+                f'symbols column {name!r} not found in the dataframe.')
+        return _capsule_pyarrow_type_is_string_like(field_type)
+    return None
+
+
+cdef object _capsule_get_dict_string_column_names(object sliceable):
+    """Return names of dict-encoded string-like columns (polars
+    Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8)).
+    Returns None if schema introspection is not available."""
+    cdef object schema
+    cdef object out
+    cdef object name
+    cdef object dtype
+    cdef object field_type
+    cdef object value_type
+    cdef object enum_t
+    cdef int i
+    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
+        out = []
+        enum_t = getattr(_POLARS, 'Enum', None)
+        for name, dtype in sliceable.schema.items():
+            if isinstance(dtype, _POLARS.Categorical):
+                out.append(name)
+            elif enum_t is not None and isinstance(dtype, enum_t):
+                out.append(name)
+        return out
+    if _PYARROW is None:
+        try:
+            _dataframe_require_pyarrow()
+        except ImportError:
+            return None
+    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
+        schema = sliceable.schema
+        out = []
+        for i in range(len(schema.names)):
+            field_type = schema.field(i).type
+            if _PYARROW.types.is_dictionary(field_type):
+                value_type = field_type.value_type
+                if (_PYARROW.types.is_string(value_type)
+                        or _PYARROW.types.is_large_string(value_type)):
+                    out.append(schema.names[i])
+        return out
+    return None
+
+
+cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
+    """Translate `symbols` into a list of
+    (name_bytes, column_sender_arrow_override_symbol, arg) tuples
+    matching the shape returned by _validate_schema_overrides. Returns:
+
+    - []   for None / 'auto' (no overrides, Rust default applies —
+           Dictionary columns auto-classify as SymbolDict).
+    - list for True (auto-detect str cols) / False (force NotSymbol
+           on every dict-encoded str col) / List[str] / List[int].
+    - None if resolution requires introspection not available on the
+           input; caller falls back to Manual plan.
+
+    arg=0 in the tuple means "mark as SYMBOL"; arg=1 means "force
+    NOT-SYMBOL" (Rust decodes dict to VARCHAR on emit). See
+    column_sender.h `column_sender_arrow_override::arg`.
+
+    Raises IngressError(BadDataFrame) when an explicitly-named symbols
+    entry targets a non-string column (matches Manual plan semantics).
+    """
+    cdef list out
+    cdef int kind_int = <int>column_sender_arrow_override_symbol
+    cdef object col_names
+    cdef object entry
+    cdef object name
+    cdef object is_str
+    cdef int idx
+
+    if symbols is None or symbols == 'auto':
+        return []
+
+    if symbols is False:
+        col_names = _capsule_get_dict_string_column_names(sliceable)
+        if col_names is None:
+            return None
+        out = []
+        for entry in col_names:
+            out.append((entry.encode('utf-8'), kind_int, 1))
+        return out
+
+    if symbols is True:
+        col_names = _capsule_get_string_column_names(sliceable)
+        if col_names is None:
+            return None
+        out = []
+        for entry in col_names:
+            out.append((entry.encode('utf-8'), kind_int, 0))
+        return out
+
+    if not isinstance(symbols, (list, tuple)):
+        return None
+
+    out = []
+    col_names = None
+    for entry in symbols:
+        if isinstance(entry, str):
+            name = entry
+        elif isinstance(entry, int):
+            if col_names is None:
+                col_names = _capsule_get_column_names(sliceable)
+                if col_names is None:
+                    return None
+            idx = <int>entry
+            if idx < 0 or idx >= len(col_names):
+                raise ValueError(
+                    f'symbols index {idx} out of range '
+                    f'(have {len(col_names)} columns).')
+            name = col_names[idx]
         else:
-            want_symbol = (
-                symbol_indices is not None and idx in symbol_indices)
-
-        if want_symbol:
-            if _dataframe_arrow_type_is_dictionary(arrow_type):
-                fields.append(field)
-            elif _dataframe_arrow_type_is_string_like(arrow_type):
-                metadata = dict(field.metadata or {})
-                metadata[_DATAFRAME_ARROW_MD_COLUMN_TYPE] = b'symbol'
-                metadata[_DATAFRAME_ARROW_MD_SYMBOL] = (
-                    _DATAFRAME_ARROW_MD_SYMBOL_VALUE)
-                fields.append(field.with_metadata(metadata))
-                changed = True
-            else:
-                return None
-        else:
-            if _dataframe_arrow_type_is_dictionary(arrow_type):
-                # Explicit symbol lists disable categorical auto-symboling.
-                # Fall back to the manual planner rather than silently
-                # reclassifying a non-listed categorical as SYMBOL.
-                return None
-            fields.append(field)
-        arrays.append(batch.column(idx))
-
-    if not changed:
-        return batch
-
-    return _PYARROW.RecordBatch.from_arrays(
-        arrays,
-        schema=_PYARROW.schema(fields, metadata=batch.schema.metadata))
+            raise TypeError(
+                f'symbols entry must be str or int, got '
+                f'{type(entry).__name__}.')
+        is_str = _capsule_column_is_string_like(sliceable, name)
+        if is_str is None:
+            return None
+        if not is_str:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f'Bad argument `symbols`: column {name!r} is not a '
+                f'strings column.')
+        out.append((name.encode('utf-8'), kind_int, 0))
+    return out
 
 
-cdef bint _dataframe_client_try_arrow_path(
+cdef object _merge_capsule_overrides(
+        object symbol_overrides, object validated_overrides):
+    """Merge symbol overrides into validated schema_overrides.
+    schema_overrides take precedence on name collision."""
+    cdef set explicit_names
+    cdef list merged
+    cdef object entry
+    if not symbol_overrides and validated_overrides is None:
+        return None
+    if not symbol_overrides:
+        return validated_overrides
+    if validated_overrides is None:
+        return symbol_overrides
+    explicit_names = {entry[0] for entry in validated_overrides}
+    merged = list(validated_overrides)
+    for entry in symbol_overrides:
+        if entry[0] not in explicit_names:
+            merged.append(entry)
+    return merged
+
+
+cdef bint _dataframe_client_try_capsule_path(
         questdb_db* db,
         object df,
         object table_name,
         object table_name_col,
         object symbols,
-        object at) except -1:
+        object at,
+        size_t max_rows_per_batch,
+        object schema_overrides) except -1:
     cdef qdb_pystr_buf* b = NULL
     cdef qwpws_conn* conn = NULL
-    cdef line_sender_buffer* buffer = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
-    cdef object batch = None
-    cdef object batch_slice = None
-    cdef object exc
-    cdef bint flushed = False
+    cdef object stream_owner = df
+    cdef object sliceable = None
+    cdef bint any_flushed = False
     cdef bint sync_attempted = False
     cdef bint force_drop_conn = False
-    cdef bint fallback_to_manual = False
-    cdef bint count_arrow_stats = False
-    cdef bint flush_attempted = False
-    cdef size_t row_count = 0
-    cdef size_t row_offset = 0
-    cdef size_t chunk_rows = 0
-    global _dataframe_arrow_calls
-    global _dataframe_arrow_route_rejections
-    global _dataframe_arrow_materialize_failures
-    global _dataframe_arrow_empty_frames
-    global _dataframe_arrow_batches
-    global _dataframe_arrow_rows
-    global _dataframe_arrow_columns
-    global _dataframe_arrow_slices
-    global _dataframe_arrow_slice_rows
-    global _dataframe_arrow_buffer_allocations
-    global _dataframe_arrow_flushed_chunks
-    global _dataframe_arrow_fallbacks
-    global _dataframe_arrow_completed
+    cdef object row_count_obj = None
+    cdef Py_ssize_t total_rows = 0
+    cdef Py_ssize_t offset = 0
+    cdef Py_ssize_t chunk_rows
+    cdef object validated_overrides
+    cdef object symbol_overrides
+    cdef object merged_overrides
 
-    count_arrow_stats = _dataframe_arrow_count_stats
-    if count_arrow_stats:
-        _dataframe_arrow_calls += 1
-
-    if not _dataframe_client_arrow_route_allowed(
-            df, table_name, table_name_col, symbols, at):
-        if count_arrow_stats:
-            _dataframe_arrow_route_rejections += 1
+    if table_name_col is not None:
         return False
 
-    _dataframe_may_import_deps()
-    _dataframe_check_is_dataframe(df)
-    if (len(df.columns) == 0) or (len(df) == 0):
-        if count_arrow_stats:
-            _dataframe_arrow_empty_frames += 1
-            _dataframe_arrow_completed += 1
-        return True
-
-    try:
-        batch = _PYARROW.RecordBatch.from_pandas(df, preserve_index=False)
-        batch = _dataframe_arrow_batch_with_symbol_policy(
-            batch, df, symbols, at)
-        if batch is None:
-            if count_arrow_stats:
-                _dataframe_arrow_fallbacks += 1
-            return False
-    except MemoryError:
-        raise
-    except Exception:
-        if count_arrow_stats:
-            _dataframe_arrow_materialize_failures += 1
+    # Normalize df into a `sliceable`:
+    # - polars LazyFrame  → materialize via .collect(engine='streaming')
+    #   (polars 1.0+; falls back to eager .collect() on older versions).
+    #   The streaming engine lowers peak memory during plan execution
+    #   but still returns one in-memory DataFrame. polars also exposes
+    #   LazyFrame.collect_batches() for true per-batch streaming, but
+    #   it is marked unstable in upstream docs and explicitly flagged
+    #   as "much slower than native sinks"; we stick with the stable
+    #   API and slice the materialized DataFrame downstream.
+    # - has __arrow_c_stream__ (polars DataFrame, pa.Table, pa.RecordBatch,
+    #   duckdb / cudf / modin / pyarrow-backed pandas 2.2+) → use as-is
+    # - has __arrow_c_array__ only (single Arrow array exporter) → wrap to
+    #   pa.Table
+    if _is_polars_dataframe_or_lazy(df) and isinstance(
+            df, _POLARS_LAZYFRAME_T):
+        try:
+            sliceable = df.collect(engine='streaming')
+        except TypeError:
+            sliceable = df.collect()
+    elif hasattr(df, '__arrow_c_stream__'):
+        sliceable = df
+    elif hasattr(df, '__arrow_c_array__'):
+        _dataframe_require_pyarrow()
+        sliceable = _PYARROW.Table.from_batches(
+            [_PYARROW.record_batch(df)])
+    else:
         return False
 
-    row_count = batch.num_rows
-    if row_count == 0 or batch.num_columns == 0:
-        if count_arrow_stats:
-            _dataframe_arrow_empty_frames += 1
-            _dataframe_arrow_completed += 1
-        return True
-    if count_arrow_stats:
-        _dataframe_arrow_batches += 1
-        _dataframe_arrow_rows += row_count
-        _dataframe_arrow_columns += batch.num_columns
+    symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
+    if symbol_overrides is None:
+        return False
+    validated_overrides = _validate_schema_overrides(schema_overrides)
+    merged_overrides = _merge_capsule_overrides(
+        symbol_overrides, validated_overrides)
+
+    row_count_obj = getattr(sliceable, 'num_rows', None)
+    if row_count_obj is None:
+        row_count_obj = getattr(sliceable, 'height', None)
 
     b = qdb_pystr_buf_new()
     try:
@@ -4084,62 +4581,33 @@ cdef bint _dataframe_client_try_arrow_path(
             raise c_err_to_py(err)
 
         try:
-            buffer = line_sender_buffer_new_qwp_ws()
-            if buffer == NULL:
-                raise MemoryError(
-                    'line_sender_buffer_new_qwp_ws returned NULL')
-            if count_arrow_stats:
-                _dataframe_arrow_buffer_allocations += 1
-            reserve_buffer(buffer, 65536)
-
-            row_offset = 0
-            while row_offset < row_count:
-                chunk_rows = _DATAFRAME_ARROW_ROWS_PER_CHUNK
-                if chunk_rows > row_count - row_offset:
-                    chunk_rows = row_count - row_offset
-                batch_slice = batch.slice(row_offset, chunk_rows)
-                if count_arrow_stats:
-                    _dataframe_arrow_slices += 1
-                    _dataframe_arrow_slice_rows += chunk_rows
-
-                try:
-                    _dataframe_append_arrow_record_batch(
-                        buffer,
-                        b,
-                        batch_slice,
-                        table_name,
-                        at)
-                except IngressError as exc:
-                    if (not flushed and exc.code ==
-                            IngressErrorCode.ArrowUnsupportedColumnKind):
-                        if count_arrow_stats:
-                            _dataframe_arrow_fallbacks += 1
-                        fallback_to_manual = True
-                        break
-                    raise
-
-                if line_sender_buffer_row_count(buffer) != 0:
-                    flush_attempted = True
-                    _dataframe_columnar_flush_buffer(
-                        conn,
-                        buffer,
-                        row_offset != 0)
-                    flushed = True
-                    if count_arrow_stats:
-                        _dataframe_arrow_flushed_chunks += 1
-
-                row_offset += chunk_rows
-
-            if fallback_to_manual:
-                return False
-
+            if row_count_obj is not None and hasattr(sliceable, 'slice'):
+                total_rows = <Py_ssize_t>row_count_obj
+                if total_rows == 0:
+                    sync_attempted = True
+                    _dataframe_columnar_sync(conn)
+                    return True
+                offset = 0
+                while offset < total_rows:
+                    chunk_rows = max_rows_per_batch
+                    if chunk_rows > total_rows - offset:
+                        chunk_rows = total_rows - offset
+                    stream_owner = sliceable.slice(offset, chunk_rows)
+                    _ingest_arrow_capsule_stream_with_hint(
+                        conn, b, stream_owner, table_name, at,
+                        merged_overrides,
+                        &any_flushed, max_rows_per_batch)
+                    offset += chunk_rows
+            else:
+                _ingest_arrow_capsule_stream_with_hint(
+                    conn, b, sliceable, table_name, at,
+                    merged_overrides,
+                    &any_flushed, max_rows_per_batch)
             sync_attempted = True
             _dataframe_columnar_sync(conn)
-            if count_arrow_stats:
-                _dataframe_arrow_completed += 1
         except:
             force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                conn, flushed, flush_attempted, sync_attempted)
+                conn, any_flushed, any_flushed, sync_attempted)
             raise
 
         return True
@@ -4150,10 +4618,41 @@ cdef bint _dataframe_client_try_arrow_path(
                 questdb_db_drop_conn(db, conn)
             else:
                 questdb_db_return_conn(db, conn)
-        if buffer != NULL:
-            line_sender_buffer_free(buffer)
         if b != NULL:
             qdb_pystr_buf_free(b)
+
+
+cdef void_int _ingest_arrow_capsule_stream_with_hint(
+        qwpws_conn* conn,
+        qdb_pystr_buf* b,
+        object stream_owner,
+        object table_name,
+        object at,
+        object validated_overrides,
+        bint* any_flushed,
+        size_t max_rows_per_batch) except -1:
+    try:
+        _ingest_arrow_capsule_stream(
+            conn, b, stream_owner, table_name, at, validated_overrides,
+            any_flushed)
+    except IngressError as exc:
+        if _is_batch_too_large_error(exc):
+            raise IngressError(
+                exc.code,
+                f'{exc}\nHint: reduce `max_rows_per_batch` (current: '
+                f'{max_rows_per_batch}) and retry.') from exc
+        raise
+
+
+cdef bint _is_batch_too_large_error(object exc):
+    cdef str msg
+    if not isinstance(exc, IngressError):
+        return False
+    msg = str(exc).lower()
+    return (
+        ('row_count' in msg and ('exceeds' in msg or 'too large' in msg))
+        or 'batch too large' in msg
+        or ('value_data' in msg and 'exceeds' in msg))
 
 
 cdef class Client:
@@ -4255,7 +4754,9 @@ cdef class Client:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
+            max_rows_per_batch: int = 16384,
+            schema_overrides: Optional[Dict[str, object]] = None):
         """
         Ingest a pandas DataFrame through the pooled columnar QWP path.
 
@@ -4312,13 +4813,17 @@ cdef class Client:
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
-            if _dataframe_client_try_arrow_path(
+            if max_rows_per_batch <= 0:
+                raise ValueError('max_rows_per_batch must be >= 1.')
+            if _dataframe_client_try_capsule_path(
                     db,
                     df,
                     table_name,
                     table_name_col,
                     symbols,
-                    at):
+                    at,
+                    max_rows_per_batch,
+                    schema_overrides):
                 return self
 
             _dataframe_plan_build(
@@ -4335,7 +4840,8 @@ cdef class Client:
 
             _dataframe_columnar_validate_plan(df, &plan)
             _dataframe_columnar_prebuild_pyobj(df, &plan)
-            rows_per_chunk = _dataframe_columnar_rows_per_chunk(&plan, 0)
+            rows_per_chunk = _dataframe_columnar_rows_per_chunk(
+                &plan, max_rows_per_batch)
 
             _ensure_doesnt_have_gil(&gs)
             conn = questdb_db_borrow_conn(db, &err)
@@ -4343,33 +4849,30 @@ cdef class Client:
             if conn == NULL:
                 raise c_err_to_py(err)
 
+            chunk = column_sender_chunk_new(
+                plan.c_table_name.buf,
+                plan.c_table_name.len,
+                &err)
+            if chunk == NULL:
+                raise c_err_to_py(err)
             try:
                 row_offset = 0
                 while row_offset < plan.row_count:
+                    column_sender_chunk_clear(chunk)
                     chunk_rows = rows_per_chunk
                     if chunk_rows > plan.row_count - row_offset:
                         chunk_rows = plan.row_count - row_offset
-                    chunk = column_sender_chunk_new(
-                        plan.c_table_name.buf,
-                        plan.c_table_name.len,
-                        &err)
-                    if chunk == NULL:
-                        raise c_err_to_py(err)
-
                     _dataframe_columnar_populate_chunk(
                         &plan,
                         chunk,
                         row_offset,
                         chunk_rows)
-                    if column_sender_chunk_row_count(chunk) != 0:
-                        flush_attempted = True
-                        _dataframe_columnar_flush(
-                            conn,
-                            chunk,
-                            row_offset != 0)
-                        flushed = True
-                    column_sender_chunk_free(chunk)
-                    chunk = NULL
+                    flush_attempted = True
+                    _dataframe_columnar_flush(
+                        conn,
+                        chunk,
+                        row_offset != 0)
+                    flushed = True
                     row_offset += chunk_rows
 
                 sync_attempted = True
@@ -4433,7 +4936,6 @@ cdef class Client:
         cdef questdb_db* db
         db = self._begin_db_use('query')
         try:
-            _ensure_pyarrow()
             reader_handle = _borrow_reader_from_pool(db)
             cursor_handle = _execute_query(reader_handle, sql)
         finally:

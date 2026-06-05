@@ -1,6 +1,8 @@
 # See: dataframe.md for technical overview.
 
 from decimal import Decimal
+import ipaddress as _ipaddress
+import uuid as _uuid
 
 from cpython.bytes cimport PyBytes_AsString
 from .mpdecimal_compat cimport decimal_pyobj_to_binary
@@ -109,6 +111,7 @@ cdef enum col_target_t:
     col_target_column_uuid = 15
     col_target_column_long256 = 16
     col_target_column_ipv4 = 17
+    col_target_column_binary = 18
 
 
 cdef dict _TARGET_NAMES = {
@@ -130,6 +133,7 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_uuid: "uuid",
     col_target_t.col_target_column_long256: "long256",
     col_target_t.col_target_column_ipv4: "ipv4",
+    col_target_t.col_target_column_binary: "binary",
 }
 
 
@@ -185,6 +189,11 @@ cdef enum col_source_t:
     # FixedSizeBinary(32) — the canonical shape egress emits for
     # LONG256 columns. Column-QWP only.
     col_source_fsb32_arrow =            902000
+    # PyObject sniff outputs for QuestDB-specific wire kinds.
+    col_source_uuid_pyobj =             903100
+    col_source_ipv4_pyobj =             904100
+    col_source_datetime_pyobj =         905100
+    col_source_bytes_pyobj =            906100
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -208,6 +217,10 @@ cdef dict _PYOBJ_SOURCE_DESCR = {
     col_source_t.col_source_float_pyobj: "float",
     col_source_t.col_source_str_pyobj: "str",
     col_source_t.col_source_decimal_pyobj: "Decimal",
+    col_source_t.col_source_uuid_pyobj: "UUID",
+    col_source_t.col_source_ipv4_pyobj: "IPv4Address",
+    col_source_t.col_source_datetime_pyobj: "datetime",
+    col_source_t.col_source_bytes_pyobj: "bytes",
 }
 
 
@@ -279,15 +292,21 @@ cdef dict _TARGET_TO_SOURCES = {
     },
     col_target_t.col_target_column_uuid: {
         col_source_t.col_source_fsb16_arrow,
+        col_source_t.col_source_uuid_pyobj,
     },
     col_target_t.col_target_column_long256: {
         col_source_t.col_source_fsb32_arrow,
+    },
+    col_target_t.col_target_column_binary: {
+        col_source_t.col_source_bytes_pyobj,
     },
     # The Rust Arrow path treats UInt32 as IPV4 only when Arrow field
     # metadata says questdb.column_type=ipv4. Pandas drops Arrow field
     # metadata before it reaches this planner, so plain UInt32 must
     # resolve through col_target_column_i64 instead.
-    col_target_t.col_target_column_ipv4: set(),
+    col_target_t.col_target_column_ipv4: {
+        col_source_t.col_source_ipv4_pyobj,
+    },
     col_target_t.col_target_column_str: {
         col_source_t.col_source_str_pyobj,
         col_source_t.col_source_str_utf8_arrow,
@@ -300,7 +319,8 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
         col_source_t.col_source_dt64us_numpy,
-        col_source_t.col_source_dt64us_tz_arrow
+        col_source_t.col_source_dt64us_tz_arrow,
+        col_source_t.col_source_datetime_pyobj,
     },
     col_target_t.col_target_column_arr_f64: {
         col_source_t.col_source_arr_f64_numpyobj,
@@ -317,6 +337,7 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_dt64ns_tz_arrow,
         col_source_t.col_source_dt64us_numpy,
         col_source_t.col_source_dt64us_tz_arrow,
+        col_source_t.col_source_datetime_pyobj,
     },
 }
 
@@ -368,7 +389,8 @@ cdef tuple _FIELD_TARGETS_QWP = (
     # QuestDB-extension types whose Arrow source is unique
     # (FixedSizeBinary widths).
     col_target_t.col_target_column_uuid,
-    col_target_t.col_target_column_long256)
+    col_target_t.col_target_column_long256,
+    col_target_t.col_target_column_binary)
 
 
 # Targets that map directly from a meta target.
@@ -525,10 +547,20 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_f32 + col_source_t.col_source_f32_arrow
     col_dispatch_code_column_uuid__fsb16_arrow = \
         col_target_t.col_target_column_uuid + col_source_t.col_source_fsb16_arrow
+    col_dispatch_code_column_uuid__uuid_pyobj = \
+        col_target_t.col_target_column_uuid + col_source_t.col_source_uuid_pyobj
     col_dispatch_code_column_long256__fsb32_arrow = \
         col_target_t.col_target_column_long256 + col_source_t.col_source_fsb32_arrow
     col_dispatch_code_column_ipv4__u32_arrow = \
         col_target_t.col_target_column_ipv4 + col_source_t.col_source_u32_arrow
+    col_dispatch_code_column_ipv4__ipv4_pyobj = \
+        col_target_t.col_target_column_ipv4 + col_source_t.col_source_ipv4_pyobj
+    col_dispatch_code_column_ts__datetime_pyobj = \
+        col_target_t.col_target_column_ts + col_source_t.col_source_datetime_pyobj
+    col_dispatch_code_at__datetime_pyobj = \
+        col_target_t.col_target_at + col_source_t.col_source_datetime_pyobj
+    col_dispatch_code_column_binary__bytes_pyobj = \
+        col_target_t.col_target_column_binary + col_source_t.col_source_bytes_pyobj
 
 
 # Int values in order for sorting (as needed for API's sequential coupling).
@@ -731,18 +763,7 @@ cdef uint64_t _dataframe_row_path_emissions = 0
 
 
 cdef object _dataframe_may_import_deps():
-    """"
-    Lazily import module dependencies on first use to avoid startup overhead.
-
-    $ cat imp_test.py 
-    import numpy
-    import pandas
-    import pyarrow
-
-    $ time python3 ./imp_test.py
-    python3 ./imp_test.py  0.56s user 1.60s system 852% cpu 0.254 total
-    """
-    global _NUMPY, _PANDAS, _PYARROW, _PANDAS_NA
+    global _NUMPY, _PANDAS, _PANDAS_NA
     global _NUMPY_BOOL
     global _NUMPY_UINT8
     global _NUMPY_INT8
@@ -761,11 +782,10 @@ cdef object _dataframe_may_import_deps():
     try:
         import pandas
         import numpy
-        import pyarrow
     except ImportError as ie:
         raise ImportError(
-            'Missing dependencies: `pandas`, `numpy` and `pyarrow` must all ' +
-            'be installed to use the `.dataframe()` method. ' +
+            'Missing dependencies: `pandas` and `numpy` must be installed ' +
+            'to use the `.dataframe()` method. ' +
             'See: https://py-questdb-client.readthedocs.io/' +
             'en/latest/installation.html.') from ie
     _NUMPY = numpy
@@ -784,7 +804,27 @@ cdef object _dataframe_may_import_deps():
     _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
+
+
+cdef object _dataframe_require_pyarrow():
+    global _PYARROW
+    if _PYARROW is not None:
+        return
+    try:
+        import pyarrow
+    except ImportError as ie:
+        raise ImportError(
+            '`pyarrow` is required for this DataFrame path '
+            '(ArrowDtype columns, pyarrow Table/RecordBatch sources, '
+            'schema_overrides). Install with `pip install pyarrow`.') from ie
     _PYARROW = pyarrow
+
+
+def _debug_dataframe_pyarrow_loaded():
+    """Internal: True iff `.dataframe()` has lazily imported pyarrow in
+    this process. Intended for tests that verify a code path stayed
+    pyarrow-free."""
+    return _PYARROW is not None
 
 
 cdef object _dataframe_check_is_dataframe(object df):
@@ -1042,6 +1082,7 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
                 'Raise an issue if you think it should be supported: ' +
                 'https://github.com/questdb/py-questdb-client/issues.')
     elif isinstance(dtype, _PANDAS.ArrowDtype):
+        _dataframe_require_pyarrow()
         arrow_type = dtype.pyarrow_dtype
         if arrow_type.id == _PYARROW.lib.Type_TIMESTAMP:
             if arrow_type.unit == "ns":
@@ -1159,6 +1200,7 @@ cdef void_int _dataframe_series_as_pybuf(
 
 cdef list _dataframe_series_to_arrow_chunks(PandasCol pandas_col):
     cdef object array
+    _dataframe_require_pyarrow()
     array = _PYARROW.Array.from_pandas(pandas_col.series)
     if isinstance(array, _PYARROW.ChunkedArray):
         return array.chunks
@@ -1234,6 +1276,7 @@ cdef void_int _dataframe_category_series_as_arrow(
 
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
     cdef bint is_decimal_col = False
+    _dataframe_require_pyarrow()
     if arrowtype.id == _PYARROW.lib.Type_STRING:
         _dataframe_string_series_as_arrow(pandas_col, col)
         col.setup.source = col_source_t.col_source_str_utf8_arrow
@@ -1367,12 +1410,13 @@ cdef void_int _dataframe_series_sniff_pyobj(
                         'Unsupported object column containing a numpy array ' +
                         f'of an unsupported element type {arr_type_name}.')
             elif PyBytes_CheckExact(obj):
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
-                    f'Bad column {pandas_col.name!r}: ' +
-                    'Unsupported object column containing bytes.' +
-                    'If this is a string column, decode it first. ' +
-                    'See: https://stackoverflow.com/questions/40389764/')
+                col.setup.source = col_source_t.col_source_bytes_pyobj
+            elif isinstance(<object>obj, _uuid.UUID):
+                col.setup.source = col_source_t.col_source_uuid_pyobj
+            elif isinstance(<object>obj, _ipaddress.IPv4Address):
+                col.setup.source = col_source_t.col_source_ipv4_pyobj
+            elif isinstance(<object>obj, datetime.datetime):
+                col.setup.source = col_source_t.col_source_datetime_pyobj
             elif isinstance(<object>obj, Decimal):
                 col.setup.source = col_source_t.col_source_decimal_pyobj
             else:

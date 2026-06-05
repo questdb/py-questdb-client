@@ -13,47 +13,52 @@ From version 3.0.0, this library depends on ``numpy>=1.21.0``.
 Optional Dependencies
 ---------------------
 
-Ingesting dataframes also require the following
-dependencies to be installed:
+DataFrame ingest requires ``pandas`` (bundled in the ``dataframe`` extra).
 
-* ``pandas``
-* ``pyarrow``
+The following extras pull in optional libraries on demand:
 
-These are bundled as the ``dataframe`` extra.
+* ``dataframe`` → ``pandas``
+* ``pyarrow`` → ``pyarrow`` (only needed when you ingest
+  ``pd.ArrowDtype`` / ``pd.Categorical`` / ``string`` dtype columns,
+  ``pa.Table`` / ``pa.RecordBatch`` sources, an ``__arrow_c_array__``
+  single-batch object, or pass ``schema_overrides=`` to a path that
+  needs metadata patching from Python). It is also required for
+  ``Client.query()`` egress.
+* ``polars`` → ``polars`` (Polars frames go through the Arrow
+  PyCapsule Interface end-to-end and **do not** need pyarrow,
+  including with ``schema_overrides=``).
 
-Without this option, you may still ingest data row-by-row.
+Without these extras, you may still ingest data row-by-row through
+``Sender.row()`` and ``Buffer.row()``.
 
 PIP
 ---
 
-You can install it (or update it) globally by running::
+DataFrame ingest (pandas only)::
 
     python3 -m pip install -U questdb[dataframe]
 
+DataFrame ingest with pyarrow features::
 
-Or, from within a virtual environment::
+    python3 -m pip install -U questdb[dataframe,pyarrow]
 
-    pip install -U questdb[dataframe]
+Polars ingest::
 
+    python3 -m pip install -U questdb[polars]
 
-If you don't need to work with dataframes::
-    
+Row-only::
+
     python3 -m pip install -U questdb
 
 Poetry
 ------
 
-If you're using poetry, you can add ``questdb`` as a dependency::
+Equivalents for poetry::
 
     poetry add questdb[dataframe]
-
-Similarly, if you don't need to work with dataframes::
-
+    poetry add questdb[dataframe,pyarrow]
+    poetry add questdb[polars]
     poetry add questdb
-
-or to update the dependency::
-
-    poetry update questdb
 
 
 Verifying the Installation

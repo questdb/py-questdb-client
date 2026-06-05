@@ -1,11 +1,15 @@
-from libc.stdint cimport uint8_t, uint32_t
+from libc.stdint cimport uint8_t, uint32_t, uint64_t, int64_t
 from libc.stddef cimport size_t
 from cpython.object cimport PyObject
 from .rpyutils cimport *
 
 # Mirror the subset of libmpdec types that CPython embeds in Decimal objects.
-ctypedef size_t mpd_uint_t
-ctypedef Py_ssize_t mpd_ssize_t
+# Matches the typedef in `mpdecimal_compat.h` for 64-bit platforms; clang
+# distinguishes `unsigned long` (size_t on LP64) from `unsigned long long`
+# (uint64_t) even when they share size, so use the exact stdint type to
+# avoid -Wincompatible-pointer-types when assigning from `decimal_digits`.
+ctypedef uint64_t mpd_uint_t
+ctypedef int64_t mpd_ssize_t
 
 cdef extern from "mpdecimal_compat.h":
     ctypedef struct mpd_t:
@@ -59,7 +63,7 @@ cdef inline int decimal_pyobj_to_binary(
                 f'Decimal scale {-mpd.exp} exceeds the maximum supported scale of 76')
         scale[0] = -mpd.exp
 
-    if not qdb_mpd_to_bigendian(digits_ptr, mpd.len, MPD_RADIX, exp, (flag_low & MPD_FLAG_SIGN) != 0, unscaled, &out_size):
+    if not qdb_mpd_to_bigendian(<const size_t*>digits_ptr, mpd.len, MPD_RADIX, exp, (flag_low & MPD_FLAG_SIGN) != 0, unscaled, &out_size):
         raise ingress_error_cls(
             bad_dataframe_code,
             'Decimal mantissa too large; maximum supported size is 32 bytes.')
