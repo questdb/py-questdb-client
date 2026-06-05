@@ -471,8 +471,65 @@ class TestWriterMixingInOneChunk(unittest.TestCase):
 
 
 class TestPandasPlannerRouting(unittest.TestCase):
-    """Pandas inputs without schema_overrides use the manual dataframe
-    planner rather than the Arrow capsule route."""
+    """Pandas object columns use the manual dataframe planner; Arrow-backed
+    pandas columns can use the capsule route."""
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_arrow_backed_pandas_uses_capsule_without_overrides(self):
+        import numpy as np
+        import pandas as pd
+        ts_type = pa.timestamp('ms', tz='UTC')
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                pa.array(
+                    [1704067200000, 1704067201000, 1704067202000],
+                    type=ts_type),
+                dtype=pd.ArrowDtype(ts_type)),
+            'u64': pd.Series(
+                pa.array([1, 2 ** 63 - 1, None], type=pa.uint64()),
+                dtype=pd.ArrowDtype(pa.uint64())),
+            'f16': pd.Series(
+                pa.array(np.array([1.5, 2.5, 3.5], dtype=np.float16),
+                         type=pa.float16()),
+                dtype=pd.ArrowDtype(pa.float16())),
+        })
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(df, table_name='arrow_pandas', at='ts')
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_arrow_backed_pandas_symbol_override_uses_capsule(self):
+        import pandas as pd
+        ts_type = pa.timestamp('us', tz='UTC')
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                pa.array([1704067200000000, 1704067201000000],
+                         type=ts_type),
+                dtype=pd.ArrowDtype(ts_type)),
+            'region': pd.array(
+                pa.array(['us-east', 'us-west'], type=pa.string()),
+                dtype=pd.ArrowDtype(pa.string())),
+            'v': pd.Series([1, 2], dtype='int64'),
+        })
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='arrow_pandas_symbols',
+                    at='ts', symbols=['region'])
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_pyobj_str_bad_cell_fails_before_borrowing_conn(self):

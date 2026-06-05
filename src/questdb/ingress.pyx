@@ -4308,6 +4308,21 @@ cdef bint _capsule_pyarrow_type_is_string_like(object field_type):
     return False
 
 
+cdef bint _capsule_pandas_dtype_is_string_like(object dtype) except -1:
+    cdef object storage
+    cdef object arrow_type
+    if _PANDAS is None:
+        return False
+    if isinstance(dtype, _PANDAS.StringDtype):
+        storage = getattr(dtype, 'storage', None)
+        return storage == 'pyarrow'
+    if isinstance(dtype, _PANDAS.ArrowDtype):
+        _dataframe_require_pyarrow()
+        arrow_type = dtype.pyarrow_dtype
+        return _capsule_pyarrow_type_is_string_like(arrow_type)
+    return False
+
+
 cdef object _capsule_get_string_column_names(object sliceable):
     """Return names of all string-like columns (utf8 / large_utf8 /
     utf8_view / dict-of-utf8). Supports polars DataFrame and pyarrow
@@ -4319,6 +4334,13 @@ cdef object _capsule_get_string_column_names(object sliceable):
     cdef object dtype
     cdef object field_type
     cdef int i
+    if _is_pandas_dataframe_object(sliceable):
+        _dataframe_may_import_deps()
+        out = []
+        for name, dtype in sliceable.dtypes.items():
+            if _capsule_pandas_dtype_is_string_like(dtype):
+                out.append(name)
+        return out
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         out = []
         for name, dtype in sliceable.schema.items():
@@ -4347,6 +4369,14 @@ cdef object _capsule_column_is_string_like(object sliceable, str name):
     is not available on the input."""
     cdef object dtype
     cdef object field_type
+    if _is_pandas_dataframe_object(sliceable):
+        _dataframe_may_import_deps()
+        try:
+            dtype = sliceable.dtypes[name]
+        except KeyError:
+            raise KeyError(
+                f'symbols column {name!r} not found in the dataframe.')
+        return _capsule_pandas_dtype_is_string_like(dtype)
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         try:
             dtype = sliceable.schema[name]
@@ -4532,6 +4562,58 @@ cdef bint _is_pandas_dataframe_object(object obj):
     return False
 
 
+cdef bint _pandas_dataframe_requires_manual_planner(object df) except -1:
+    cdef object dtype
+    cdef object storage
+    if not _is_pandas_dataframe_object(df):
+        return False
+    _dataframe_may_import_deps()
+    try:
+        for dtype in df.dtypes:
+            if isinstance(dtype, _NUMPY_OBJECT):
+                return True
+            if isinstance(dtype, _PANDAS.StringDtype):
+                storage = getattr(dtype, 'storage', None)
+                if storage != 'pyarrow':
+                    return True
+    except Exception:
+        return True
+    return False
+
+
+cdef bint _pandas_dataframe_is_timestamp_only_at(
+        object df,
+        object at) except -1:
+    if not _is_pandas_dataframe_object(df) or not isinstance(at, str):
+        return False
+    try:
+        return len(df.columns) == 1 and df.columns[0] == at
+    except Exception:
+        return False
+
+
+cdef Py_ssize_t _capsule_row_count(object sliceable) except -2:
+    cdef object row_count_obj = getattr(sliceable, 'num_rows', None)
+    if row_count_obj is None:
+        row_count_obj = getattr(sliceable, 'height', None)
+    if row_count_obj is not None:
+        return <Py_ssize_t>row_count_obj
+    if _is_pandas_dataframe_object(sliceable):
+        return <Py_ssize_t>len(sliceable)
+    return -1
+
+
+cdef object _capsule_slice_rows(
+        object sliceable,
+        Py_ssize_t offset,
+        Py_ssize_t row_count):
+    if hasattr(sliceable, 'slice'):
+        return sliceable.slice(offset, row_count)
+    if _is_pandas_dataframe_object(sliceable):
+        return sliceable.iloc[offset:offset + row_count]
+    return None
+
+
 cdef bint _dataframe_client_try_capsule_path(
         questdb_db* db,
         object df,
@@ -4550,7 +4632,7 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef bint any_flushed = False
     cdef bint sync_attempted = False
     cdef bint force_drop_conn = False
-    cdef object row_count_obj = None
+    cdef object row_slice = None
     cdef Py_ssize_t total_rows = 0
     cdef Py_ssize_t offset = 0
     cdef Py_ssize_t chunk_rows
@@ -4560,7 +4642,10 @@ cdef bint _dataframe_client_try_capsule_path(
 
     validated_overrides = _validate_schema_overrides(schema_overrides)
 
-    if validated_overrides is None and _is_pandas_dataframe_object(df):
+    if _pandas_dataframe_requires_manual_planner(df):
+        return False
+
+    if _pandas_dataframe_is_timestamp_only_at(df, at):
         return False
 
     if table_name_col is not None:
@@ -4600,9 +4685,7 @@ cdef bint _dataframe_client_try_capsule_path(
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
 
-    row_count_obj = getattr(sliceable, 'num_rows', None)
-    if row_count_obj is None:
-        row_count_obj = getattr(sliceable, 'height', None)
+    total_rows = _capsule_row_count(sliceable)
 
     b = qdb_pystr_buf_new()
     try:
@@ -4613,8 +4696,7 @@ cdef bint _dataframe_client_try_capsule_path(
             raise c_err_to_py(err)
 
         try:
-            if row_count_obj is not None and hasattr(sliceable, 'slice'):
-                total_rows = <Py_ssize_t>row_count_obj
+            if total_rows >= 0:
                 if total_rows == 0:
                     sync_attempted = True
                     _dataframe_columnar_sync(conn)
@@ -4624,7 +4706,11 @@ cdef bint _dataframe_client_try_capsule_path(
                     chunk_rows = max_rows_per_batch
                     if chunk_rows > total_rows - offset:
                         chunk_rows = total_rows - offset
-                    stream_owner = sliceable.slice(offset, chunk_rows)
+                    row_slice = _capsule_slice_rows(
+                        sliceable, offset, chunk_rows)
+                    if row_slice is None:
+                        return False
+                    stream_owner = row_slice
                     _ingest_arrow_capsule_stream_with_hint(
                         conn, b, stream_owner, table_name, at,
                         merged_overrides,

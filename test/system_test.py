@@ -2691,10 +2691,8 @@ class TestEgressPool(unittest.TestCase):
 class TestColumnIngressNarrowTypes(unittest.TestCase):
     """End-to-end tests for the narrow Arrow primitive types added to
     ``Client.dataframe`` column ingress: ``pa.int8/16/32`` →
-    BYTE/SHORT/INT, ``pa.float32`` → FLOAT. DATE
-    (``pa.timestamp('ms')``) is deferred to a follow-up PR — it
-    touches the shared row-ILP classifier and needs row-ILP
-    serializer support to ship safely.
+    BYTE/SHORT/INT, unsigned Arrow integers, ``pa.float16/32``,
+    and Arrow timestamp units through the QWP/WebSocket classifier.
 
     The contract: client-side dispatch is a pure function of the
     Arrow input dtype (no content sniffing, no schema hints), and
@@ -2714,10 +2712,9 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         TestWithDatabase.tearDownClass.__func__(cls)
 
     def _require_qwp_ws(self):
-        if not os.environ.get('QDB_REPO_PATH'):
+        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
             self.skipTest(
-                'Narrow-type column ingress tests need a QWP-enabled '
-                'QuestDB build (QDB_REPO_PATH).')
+                'QWP/WebSocket integration tests require QuestDB 9.4.1+')
 
     def _conf(self):
         return (f'qwpws::addr={self.qdb_plain.host}:'
@@ -3440,8 +3437,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'ts': self._arrow_series(
                 [1700000000_000000, 1700000001_000000, 1700000002_000000],
                 pa.timestamp('us', tz='UTC')),
-            'region': ['us-east', 'us-west', 'us-east'],
-            'note': ['alpha', 'beta', 'gamma'],
+            'region': self._arrow_series(
+                ['us-east', 'us-west', 'us-east'], pa.string()),
+            'note': self._arrow_series(
+                ['alpha', 'beta', 'gamma'], pa.string()),
             'seq': pd.Series([1, 2, 3], dtype='int64'),
         })
         with qi.Client.from_conf(self._conf()) as client:
