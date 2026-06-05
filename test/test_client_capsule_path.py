@@ -413,7 +413,7 @@ class TestBenchFlushArrowBatch(unittest.TestCase):
         with QwpAckServer() as server:
             with self.assertRaisesRegex(
                     qi.IngressError,
-                    r'UInt64 value 9223372036854775808 .* exceeds i64::MAX'):
+                    r'UInt64 value 9223372036854775808 .* does not fit QuestDB LONG'):
                 qi._bench_dataframe_flush_arrow_batch(
                     batch,
                     table_name='trades',
@@ -470,13 +470,12 @@ class TestWriterMixingInOneChunk(unittest.TestCase):
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
 
-class TestMustCloseForceDrop(unittest.TestCase):
-    """Plan Q4: a mid-chunk Python-side exception must force-drop the
-    conn so the next dataframe() call opens a fresh one (no in-flight
-    uncommitted frames recycled across users)."""
+class TestPandasPlannerRouting(unittest.TestCase):
+    """Pandas inputs without schema_overrides use the manual dataframe
+    planner rather than the Arrow capsule route."""
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
-    def test_pyobj_str_bad_cell_force_drops_conn(self):
+    def test_pyobj_str_bad_cell_fails_before_borrowing_conn(self):
         import pandas as pd
         df_bad = pd.DataFrame({
             'name': pd.Series(['alpha', 12345, None], dtype='object'),
@@ -502,9 +501,11 @@ class TestMustCloseForceDrop(unittest.TestCase):
             finally:
                 client.close()
             stats = server.snapshot()
-        # Two distinct conns: the first force-dropped after the
-        # exception, the second freshly opened for df_good.
-        self.assertGreaterEqual(stats['accepted_connections'], 2)
+        # The bad pandas frame fails during manual-plan validation before a
+        # connection is borrowed. The good frame is the only publish.
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
 
 if __name__ == '__main__':

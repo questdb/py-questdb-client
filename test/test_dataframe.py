@@ -835,6 +835,38 @@ class TestPandasBase:
             self.assertEqual(result['last_populated_rows'], 2)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
+        def test_bench_dataframe_plan_reuses_arrow_import_across_three_chunks(self):
+            labels = [
+                'alpha', None, 'beta', 'gamma',
+                None, 'delta', 'epsilon', 'zeta',
+                'eta', None, 'theta', 'iota',
+                'kappa', 'lambda', None, 'mu',
+                'nu', 'xi', None, 'omicron',
+            ]
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=20, freq='s'),
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(labels),
+                'label': pd.Series(
+                    pa.array(labels, type=pa.string()),
+                    dtype='string[pyarrow]'),
+                'seq': pd.Series(range(20), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=3)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 3)
+            self.assertEqual(result['populated_rows_total'], 20)
+            self.assertEqual(result['last_populated_rows'], 4)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_bench_dataframe_plan_and_populate_aligns_pyobj_chunks(self):
             # Regression: PyObject-sourced columns can carry nulls (or
             # always be bitmaps in the bool_pyobj case). The chunk-size

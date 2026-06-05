@@ -576,6 +576,7 @@ cdef struct col_setup_t:
     size_t orig_index
     Py_buffer pybuf
     ArrowSchema arrow_schema  # Schema of first chunk.
+    column_sender_arrow_import* arrow_import
     col_source_t source
     meta_target_t meta_target
     col_target_t target
@@ -602,6 +603,10 @@ cdef void col_t_release(col_t* col) noexcept:
 
     if Py_buffer_obj_is_set(&col.setup.pybuf):
         PyBuffer_Release(&col.setup.pybuf)  # Note: Sets `.pybuf.obj` to NULL.
+
+    if col.setup.arrow_import != NULL:
+        column_sender_arrow_import_free(col.setup.arrow_import)
+        col.setup.arrow_import = NULL
 
     for chunk_index in range(col.setup.chunks.n_chunks):
         chunk = &col.setup.chunks.chunks[chunk_index]

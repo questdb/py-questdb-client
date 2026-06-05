@@ -333,7 +333,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
             stats = server.snapshot()
 
         self.assertEqual(stats['errors'], [])
-        self.assertEqual(stats['qwp1_frames'], 3)
+        # Three data chunks fit before the oversized final chunk fails
+        # locally. Error cleanup then emits one sync frame so those deferred
+        # chunks are committed before dataframe() returns.
+        self.assertEqual(stats['qwp1_frames'], 4)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_real_benchmark_paths_use_qwp_websocket_ack_flow(self):

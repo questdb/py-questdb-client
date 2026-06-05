@@ -3306,7 +3306,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         with qi.Client.from_conf(self._conf()) as client:
             with self.assertRaisesRegex(
                     qi.IngressError,
-                    r'UInt64 value 9223372036854775808 .* exceeds i64::MAX'):
+                    r'UInt64 value 9223372036854775808 .* does not fit QuestDB LONG'):
                 client.dataframe(df, table_name=table, at='ts')
         self._assert_table_empty(table)
 

@@ -3250,16 +3250,23 @@ cdef void_int _dataframe_columnar_call_arrow_append(
         size_t row_count) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
+    cdef column_sender_arrow_import* imported = col.setup.arrow_import
     with nogil:
-        ok = column_sender_chunk_append_arrow_column(
-            chunk,
-            col.name.buf,
-            col.name.len,
-            &col.setup.chunks.chunks[0],
-            &col.setup.arrow_schema,
-            row_offset,
-            row_count,
-            &err)
+        if imported == NULL:
+            imported = column_sender_arrow_import_new(
+                &col.setup.chunks.chunks[0],
+                &col.setup.arrow_schema,
+                &err)
+        if imported != NULL:
+            ok = column_sender_chunk_append_arrow_import(
+                chunk,
+                col.name.buf,
+                col.name.len,
+                imported,
+                row_offset,
+                row_count,
+                &err)
+    col.setup.arrow_import = imported
     if not ok:
         raise c_err_to_py(err)
     return 0
@@ -3930,7 +3937,9 @@ def _bench_dataframe_flush_arrow_batch(
         or 0)
 
     conf_bytes = conf.encode('utf-8') if isinstance(conf, str) else conf
+    _ensure_doesnt_have_gil(&gs)
     db = questdb_db_connect(conf_bytes, len(conf_bytes), &err)
+    _ensure_has_gil(&gs)
     if db == NULL:
         raise c_err_to_py(err)
     b = qdb_pystr_buf_new()
@@ -4504,6 +4513,25 @@ cdef object _merge_capsule_overrides(
     return merged
 
 
+cdef bint _is_pandas_dataframe_object(object obj):
+    cdef object cls
+    cdef object module
+    cdef object name
+    if _PANDAS is not None and isinstance(obj, _PANDAS.DataFrame):
+        return True
+    try:
+        for cls in type(obj).__mro__:
+            module = getattr(cls, '__module__', '')
+            name = getattr(cls, '__name__', '')
+            if (name == 'DataFrame' and
+                    isinstance(module, str) and
+                    (module == 'pandas' or module.startswith('pandas.'))):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 cdef bint _dataframe_client_try_capsule_path(
         questdb_db* db,
         object df,
@@ -4529,6 +4557,11 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef object validated_overrides
     cdef object symbol_overrides
     cdef object merged_overrides
+
+    validated_overrides = _validate_schema_overrides(schema_overrides)
+
+    if validated_overrides is None and _is_pandas_dataframe_object(df):
+        return False
 
     if table_name_col is not None:
         return False
@@ -4564,7 +4597,6 @@ cdef bint _dataframe_client_try_capsule_path(
     symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
     if symbol_overrides is None:
         return False
-    validated_overrides = _validate_schema_overrides(schema_overrides)
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
 

@@ -686,6 +686,9 @@ cdef extern from "questdb/ingress/column_sender.h":
     cdef struct column_sender_chunk:
         pass
 
+    cdef struct column_sender_arrow_import:
+        pass
+
     cdef struct column_sender_validity:
         const uint8_t* bits
         size_t bit_len
@@ -791,6 +794,26 @@ cdef extern from "questdb/ingress/column_sender.h":
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
+        ) noexcept nogil
+
+    column_sender_arrow_import* column_sender_arrow_import_new(
+        ArrowArray* array,
+        const ArrowSchema* schema,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_append_arrow_import(
+        column_sender_chunk* chunk,
+        const char* name,
+        size_t name_len,
+        const column_sender_arrow_import* imported,
+        size_t row_offset,
+        size_t row_count,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    void column_sender_arrow_import_free(
+        column_sender_arrow_import* imported
         ) noexcept nogil
 
     bint column_sender_chunk_append_arrow_column(
