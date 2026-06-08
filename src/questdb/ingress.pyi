@@ -895,15 +895,33 @@ class Client:
 
     def dataframe(
         self,
-        df: pd.DataFrame,
+        df: Any,
         *,
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
+        max_rows_per_batch: int = 16384,
+        schema_overrides: Optional[Dict[str, object]] = None,
     ) -> Client:
         """
-        Ingest a pandas DataFrame through the pooled columnar QWP path.
+        Ingest a dataframe through the pooled columnar QWP path.
+
+        ``df`` accepts any of:
+
+        - **pandas** ``pandas.DataFrame`` (NumPy-backed columns route
+          through the legacy planner; pyarrow-backed columns route
+          through the Arrow C Stream capsule path).
+        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
+          ``LazyFrame`` is materialised via
+          ``.collect(engine='streaming')`` (eager ``.collect()`` on
+          polars < 1.0).
+        - **pyarrow** ``pa.Table``, ``pa.RecordBatch``, and
+          ``pa.RecordBatchReader``.
+        - Any object exposing the Arrow C Data Interface — i.e. with
+          ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
+          pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
+          exporters, wrapped into a one-batch ``pa.Table``).
         """
 
     def reap_idle(self) -> int:
