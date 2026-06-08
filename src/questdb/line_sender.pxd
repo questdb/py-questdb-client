@@ -740,12 +740,14 @@ cdef extern from "questdb/ingress/column_sender.h":
         column_sender_chunk* chunk
         ) noexcept nogil
 
-    void column_sender_chunk_clear(
-        column_sender_chunk* chunk
+    bint column_sender_chunk_clear(
+        column_sender_chunk* chunk,
+        line_sender_error** err_out
         ) noexcept nogil
 
     size_t column_sender_chunk_row_count(
-        const column_sender_chunk* chunk
+        const column_sender_chunk* chunk,
+        line_sender_error** err_out
         ) noexcept nogil
 
     bint column_sender_chunk_column_bool(

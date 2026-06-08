@@ -3915,6 +3915,11 @@ def _bench_dataframe_flush_arrow_batch(
     cdef PyThreadState* gs = NULL
     cdef bytes conf_bytes
     cdef bint any_flushed = False
+    cdef line_sender_table_name c_table_name
+    cdef line_sender_column_name c_ts_column
+    cdef line_sender_column_name* c_ts_column_ptr = NULL
+    cdef ArrowSchema c_schema
+    cdef bint at_is_column = False
 
     if iterations == 0:
         raise ValueError('iterations must be greater than zero')
@@ -3926,6 +3931,17 @@ def _bench_dataframe_flush_arrow_batch(
             'source exposing __arrow_c_stream__ '
             '(pa.RecordBatch / pa.Table / pl.DataFrame / RecordBatchReader). '
             f'Got {type(arrow_source).__name__}.')
+    if not isinstance(table_name, str):
+        raise TypeError(
+            'table_name must be str for Arrow-native DataFrame input.')
+    if at is None or isinstance(at, ServerTimestampType):
+        at_is_column = False
+    elif isinstance(at, str):
+        at_is_column = True
+    else:
+        raise TypeError(
+            'at must be a column name str, ServerTimestamp, or None '
+            'for Arrow-native DataFrame input.')
 
     row_count = int(
         getattr(arrow_source, 'num_rows', None)
@@ -3943,7 +3959,13 @@ def _bench_dataframe_flush_arrow_batch(
     if db == NULL:
         raise c_err_to_py(err)
     b = qdb_pystr_buf_new()
+    memset(&c_schema, 0, sizeof(ArrowSchema))
     try:
+        str_to_table_name(b, <PyObject*>table_name, &c_table_name)
+        if at_is_column:
+            str_to_column_name(b, at, &c_ts_column)
+            c_ts_column_ptr = &c_ts_column
+
         _ensure_doesnt_have_gil(&gs)
         conn = questdb_db_borrow_conn(db, &err)
         _ensure_has_gil(&gs)
@@ -3951,14 +3973,16 @@ def _bench_dataframe_flush_arrow_batch(
             raise c_err_to_py(err)
         try:
             for iteration in range(iterations):
-                _ingest_arrow_capsule_stream(
-                    conn, b, arrow_source, table_name, at,
-                    None, &any_flushed)
+                _capsule_consume_stream(
+                    conn, arrow_source, c_table_name, c_ts_column_ptr,
+                    &c_schema, NULL, 0, &any_flushed)
             _dataframe_columnar_sync(conn)
             completed = iterations
         finally:
             questdb_db_return_conn(db, conn)
     finally:
+        if c_schema.release != NULL:
+            c_schema.release(&c_schema)
         if b != NULL:
             qdb_pystr_buf_free(b)
         if db != NULL:
@@ -4043,7 +4067,8 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                     raise c_err_to_py(err)
                 row_offset = 0
                 while row_offset < plan.row_count:
-                    column_sender_chunk_clear(chunk)
+                    if not column_sender_chunk_clear(chunk, &err):
+                        raise c_err_to_py(err)
                     chunk_rows = rows_per_chunk
                     if chunk_rows > plan.row_count - row_offset:
                         chunk_rows = plan.row_count - row_offset
@@ -4052,7 +4077,9 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                         chunk,
                         row_offset,
                         chunk_rows)
-                    populated_rows = column_sender_chunk_row_count(chunk)
+                    populated_rows = column_sender_chunk_row_count(chunk, &err)
+                    if populated_rows == <size_t>-1:
+                        raise c_err_to_py(err)
                     if populated_rows != 0:
                         populated_chunks += 1
                         populated_rows_total += populated_rows
@@ -4108,108 +4135,59 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
     return isinstance(obj, (_POLARS_DATAFRAME_T, _POLARS_LAZYFRAME_T))
 
 
-cdef void_int _ingest_arrow_capsule_stream(
+cdef void_int _capsule_consume_stream(
         qwpws_conn* conn,
-        qdb_pystr_buf* b,
         object stream_owner,
-        object table_name,
-        object at,
-        object validated_overrides,
+        line_sender_table_name c_table_name,
+        line_sender_column_name* c_ts_column_ptr,
+        ArrowSchema* c_schema,
+        const column_sender_arrow_override* c_overrides,
+        size_t c_overrides_len,
         bint* any_flushed) except -1:
+    # `c_schema` is in/out and owned by the caller: zero-init on first
+    # call (this function populates it via get_schema), reused as-is on
+    # subsequent calls (Arrow C Data Interface guarantees slices of the
+    # same source share schema), and released by the caller.
     cdef object stream_capsule = stream_owner.__arrow_c_stream__()
     if not PyCapsule_IsValid(stream_capsule, b'arrow_array_stream'):
         raise TypeError(
             '__arrow_c_stream__ did not return a valid arrow_array_stream '
             'PyCapsule.')
-
     cdef ArrowArrayStream* stream = <ArrowArrayStream*>PyCapsule_GetPointer(
         stream_capsule, b'arrow_array_stream')
-
-    cdef line_sender_table_name c_table_name
-    cdef line_sender_column_name c_ts_column
-    cdef line_sender_column_name* c_ts_column_ptr = NULL
-    cdef ArrowSchema schema
     cdef ArrowArray batch
     cdef int rc
     cdef const char* stream_err
-    cdef bint at_is_column = False
-    cdef bint schema_valid = False
-    cdef column_sender_arrow_override* c_overrides = NULL
-    cdef size_t c_overrides_len = 0
-    cdef size_t i
-    cdef object name_bytes
-    cdef int kind_int
-    cdef int arg_int
 
-    if not isinstance(table_name, str):
-        raise TypeError(
-            'table_name must be str for Arrow-native DataFrame input.')
-    if at is None or isinstance(at, ServerTimestampType):
-        at_is_column = False
-    elif isinstance(at, str):
-        at_is_column = True
-    else:
-        raise TypeError(
-            'at must be a column name str, ServerTimestamp, or None '
-            'for Arrow-native DataFrame input.')
+    if c_schema.release == NULL:
+        rc = stream.get_schema(stream, c_schema)
+        if rc != 0:
+            stream_err = stream.get_last_error(stream)
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                f'Arrow stream get_schema failed: '
+                f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
 
-    qdb_pystr_buf_clear(b)
-    str_to_table_name(b, <PyObject*>table_name, &c_table_name)
-    if at_is_column:
-        str_to_column_name(b, at, &c_ts_column)
-        c_ts_column_ptr = &c_ts_column
-
-    if validated_overrides is not None:
-        c_overrides_len = len(validated_overrides)
-        c_overrides = <column_sender_arrow_override*>calloc(
-            c_overrides_len, sizeof(column_sender_arrow_override))
-        if c_overrides == NULL:
-            raise MemoryError()
-        for i in range(c_overrides_len):
-            name_bytes, kind_int, arg_int = validated_overrides[i]
-            c_overrides[i].column = PyBytes_AsString(name_bytes)
-            c_overrides[i].column_len = PyBytes_GET_SIZE(name_bytes)
-            c_overrides[i].kind = <uint32_t>kind_int
-            c_overrides[i].arg = <uint32_t>arg_int
-
-    memset(&schema, 0, sizeof(ArrowSchema))
-    rc = stream.get_schema(stream, &schema)
-    if rc != 0:
-        stream_err = stream.get_last_error(stream)
-        if c_overrides != NULL:
-            free(c_overrides)
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
-            f'Arrow stream get_schema failed: '
-            f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
-    schema_valid = True
-
-    try:
-        while True:
-            memset(&batch, 0, sizeof(ArrowArray))
-            rc = stream.get_next(stream, &batch)
-            if rc != 0:
-                stream_err = stream.get_last_error(stream)
-                raise IngressError(
-                    IngressErrorCode.InvalidApiCall,
-                    f'Arrow stream get_next failed: '
-                    f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
-            if batch.release == NULL:
-                break
-            try:
-                _dataframe_arrow_flush_batch(
-                    conn, c_table_name, &batch, &schema, c_ts_column_ptr,
-                    c_overrides, c_overrides_len,
-                    any_flushed[0])
-                any_flushed[0] = True
-            finally:
-                if batch.release != NULL:
-                    batch.release(&batch)
-    finally:
-        if schema_valid and schema.release != NULL:
-            schema.release(&schema)
-        if c_overrides != NULL:
-            free(c_overrides)
+    while True:
+        memset(&batch, 0, sizeof(ArrowArray))
+        rc = stream.get_next(stream, &batch)
+        if rc != 0:
+            stream_err = stream.get_last_error(stream)
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                f'Arrow stream get_next failed: '
+                f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
+        if batch.release == NULL:
+            break
+        try:
+            _dataframe_arrow_flush_batch(
+                conn, c_table_name, &batch, c_schema, c_ts_column_ptr,
+                c_overrides, c_overrides_len,
+                any_flushed[0])
+            any_flushed[0] = True
+        finally:
+            if batch.release != NULL:
+                batch.release(&batch)
 
 
 cdef object _validate_schema_overrides(object schema_overrides):
@@ -4627,7 +4605,6 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef qwpws_conn* conn = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
-    cdef object stream_owner = df
     cdef object sliceable = None
     cdef bint any_flushed = False
     cdef bint sync_attempted = False
@@ -4639,31 +4616,32 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef object validated_overrides
     cdef object symbol_overrides
     cdef object merged_overrides
-
-    validated_overrides = _validate_schema_overrides(schema_overrides)
+    cdef bint can_slice = False
+    cdef line_sender_table_name c_table_name
+    cdef line_sender_column_name c_ts_column
+    cdef line_sender_column_name* c_ts_column_ptr = NULL
+    cdef ArrowSchema c_schema
+    cdef column_sender_arrow_override* c_overrides = NULL
+    cdef size_t c_overrides_len = 0
+    cdef bint at_is_column = False
+    cdef size_t i
+    cdef object name_bytes
+    cdef int kind_int
+    cdef int arg_int
 
     if _pandas_dataframe_requires_manual_planner(df):
         return False
-
     if _pandas_dataframe_is_timestamp_only_at(df, at):
         return False
-
     if table_name_col is not None:
         return False
 
-    # Normalize df into a `sliceable`:
-    # - polars LazyFrame  → materialize via .collect(engine='streaming')
-    #   (polars 1.0+; falls back to eager .collect() on older versions).
-    #   The streaming engine lowers peak memory during plan execution
-    #   but still returns one in-memory DataFrame. polars also exposes
-    #   LazyFrame.collect_batches() for true per-batch streaming, but
-    #   it is marked unstable in upstream docs and explicitly flagged
-    #   as "much slower than native sinks"; we stick with the stable
-    #   API and slice the materialized DataFrame downstream.
-    # - has __arrow_c_stream__ (polars DataFrame, pa.Table, pa.RecordBatch,
-    #   duckdb / cudf / modin / pyarrow-backed pandas 2.2+) → use as-is
-    # - has __arrow_c_array__ only (single Arrow array exporter) → wrap to
-    #   pa.Table
+    validated_overrides = _validate_schema_overrides(schema_overrides)
+
+    # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
+    # peak memory. `LazyFrame.collect_batches()` would stream natively
+    # but upstream marks it unstable and "much slower than native sinks",
+    # so we materialize and slice downstream.
     if _is_polars_dataframe_or_lazy(df) and isinstance(
             df, _POLARS_LAZYFRAME_T):
         try:
@@ -4687,8 +4665,43 @@ cdef bint _dataframe_client_try_capsule_path(
 
     total_rows = _capsule_row_count(sliceable)
 
+    can_slice = (total_rows >= 0) and (
+        hasattr(sliceable, 'slice')
+        or _is_pandas_dataframe_object(sliceable))
+
+    if not isinstance(table_name, str):
+        raise TypeError(
+            'table_name must be str for Arrow-native DataFrame input.')
+    if at is None or isinstance(at, ServerTimestampType):
+        at_is_column = False
+    elif isinstance(at, str):
+        at_is_column = True
+    else:
+        raise TypeError(
+            'at must be a column name str, ServerTimestamp, or None '
+            'for Arrow-native DataFrame input.')
+
     b = qdb_pystr_buf_new()
+    memset(&c_schema, 0, sizeof(ArrowSchema))
     try:
+        str_to_table_name(b, <PyObject*>table_name, &c_table_name)
+        if at_is_column:
+            str_to_column_name(b, at, &c_ts_column)
+            c_ts_column_ptr = &c_ts_column
+
+        if merged_overrides is not None:
+            c_overrides_len = len(merged_overrides)
+            c_overrides = <column_sender_arrow_override*>calloc(
+                c_overrides_len, sizeof(column_sender_arrow_override))
+            if c_overrides == NULL:
+                raise MemoryError()
+            for i in range(c_overrides_len):
+                name_bytes, kind_int, arg_int = merged_overrides[i]
+                c_overrides[i].column = PyBytes_AsString(name_bytes)
+                c_overrides[i].column_len = PyBytes_GET_SIZE(name_bytes)
+                c_overrides[i].kind = <uint32_t>kind_int
+                c_overrides[i].arg = <uint32_t>arg_int
+
         _ensure_doesnt_have_gil(&gs)
         conn = questdb_db_borrow_conn(db, &err)
         _ensure_has_gil(&gs)
@@ -4696,11 +4709,12 @@ cdef bint _dataframe_client_try_capsule_path(
             raise c_err_to_py(err)
 
         try:
-            if total_rows >= 0:
-                if total_rows == 0:
-                    sync_attempted = True
-                    _dataframe_columnar_sync(conn)
-                    return True
+            if not can_slice:
+                _capsule_consume_stream_with_hint(
+                    conn, sliceable, c_table_name, c_ts_column_ptr,
+                    &c_schema, c_overrides, c_overrides_len,
+                    &any_flushed, max_rows_per_batch, False)
+            else:
                 offset = 0
                 while offset < total_rows:
                     chunk_rows = max_rows_per_batch
@@ -4708,19 +4722,11 @@ cdef bint _dataframe_client_try_capsule_path(
                         chunk_rows = total_rows - offset
                     row_slice = _capsule_slice_rows(
                         sliceable, offset, chunk_rows)
-                    if row_slice is None:
-                        return False
-                    stream_owner = row_slice
-                    _ingest_arrow_capsule_stream_with_hint(
-                        conn, b, stream_owner, table_name, at,
-                        merged_overrides,
-                        &any_flushed, max_rows_per_batch)
+                    _capsule_consume_stream_with_hint(
+                        conn, row_slice, c_table_name, c_ts_column_ptr,
+                        &c_schema, c_overrides, c_overrides_len,
+                        &any_flushed, max_rows_per_batch, True)
                     offset += chunk_rows
-            else:
-                _ingest_arrow_capsule_stream_with_hint(
-                    conn, b, sliceable, table_name, at,
-                    merged_overrides,
-                    &any_flushed, max_rows_per_batch)
             sync_attempted = True
             _dataframe_columnar_sync(conn)
         except:
@@ -4736,29 +4742,47 @@ cdef bint _dataframe_client_try_capsule_path(
                 questdb_db_drop_conn(db, conn)
             else:
                 questdb_db_return_conn(db, conn)
+        if c_schema.release != NULL:
+            c_schema.release(&c_schema)
+        if c_overrides != NULL:
+            free(c_overrides)
         if b != NULL:
             qdb_pystr_buf_free(b)
 
 
-cdef void_int _ingest_arrow_capsule_stream_with_hint(
+cdef void_int _capsule_consume_stream_with_hint(
         qwpws_conn* conn,
-        qdb_pystr_buf* b,
         object stream_owner,
-        object table_name,
-        object at,
-        object validated_overrides,
+        line_sender_table_name c_table_name,
+        line_sender_column_name* c_ts_column_ptr,
+        ArrowSchema* c_schema,
+        const column_sender_arrow_override* c_overrides,
+        size_t c_overrides_len,
         bint* any_flushed,
-        size_t max_rows_per_batch) except -1:
+        size_t max_rows_per_batch,
+        bint can_slice) except -1:
+    cdef str hint
     try:
-        _ingest_arrow_capsule_stream(
-            conn, b, stream_owner, table_name, at, validated_overrides,
-            any_flushed)
+        _capsule_consume_stream(
+            conn, stream_owner, c_table_name, c_ts_column_ptr, c_schema,
+            c_overrides, c_overrides_len, any_flushed)
     except IngressError as exc:
         if _is_batch_too_large_error(exc):
+            if can_slice:
+                hint = (
+                    f'reduce `max_rows_per_batch` (current: '
+                    f'{max_rows_per_batch}) and retry.')
+            else:
+                hint = (
+                    f'this is a streaming Arrow source (e.g. '
+                    f'pa.RecordBatchReader); batch size is set by the '
+                    f'producer and `max_rows_per_batch` (current: '
+                    f'{max_rows_per_batch}) does not bound it. '
+                    f'Materialise to a `pa.Table` '
+                    f'(`pa.Table.from_batches(reader)`) or re-batch '
+                    f'at the source before passing.')
             raise IngressError(
-                exc.code,
-                f'{exc}\nHint: reduce `max_rows_per_batch` (current: '
-                f'{max_rows_per_batch}) and retry.') from exc
+                exc.code, f'{exc}\nHint: {hint}') from exc
         raise
 
 
@@ -4992,7 +5016,8 @@ cdef class Client:
             try:
                 row_offset = 0
                 while row_offset < plan.row_count:
-                    column_sender_chunk_clear(chunk)
+                    if not column_sender_chunk_clear(chunk, &err):
+                        raise c_err_to_py(err)
                     chunk_rows = rows_per_chunk
                     if chunk_rows > plan.row_count - row_offset:
                         chunk_rows = plan.row_count - row_offset
