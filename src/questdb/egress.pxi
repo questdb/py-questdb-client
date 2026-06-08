@@ -265,18 +265,6 @@ cdef _CursorHandle _execute_query(_ReaderHandle reader_handle, str sql):
     return handle
 
 
-cdef object _ensure_pyarrow():
-    try:
-        import pyarrow
-    except ImportError:
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
-            'pyarrow is required for this method; install pyarrow >= 14, '
-            'or consume the result via __arrow_c_stream__ '
-            '(e.g. polars.from_arrow / duckdb.from_arrow).')
-    return pyarrow
-
-
 cdef size_t _arrow_metadata_byte_len(const char* md) noexcept:
     cdef int32_t n
     cdef int32_t klen
