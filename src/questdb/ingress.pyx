@@ -3779,11 +3779,11 @@ cdef void_int _dataframe_arrow_flush_batch(
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
     if ts_column != NULL:
-        ok = column_sender_flush_arrow_batch_at_column_with_overrides(
+        ok = column_sender_flush_arrow_batch_at_column(
             conn, table, array, schema, ts_column[0],
             overrides, overrides_len, &err)
     else:
-        ok = column_sender_flush_arrow_batch_with_overrides(
+        ok = column_sender_flush_arrow_batch(
             conn, table, array, schema,
             overrides, overrides_len, &err)
     _ensure_has_gil(&gs)
@@ -3805,11 +3805,11 @@ cdef void_int _dataframe_arrow_flush_batch(
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
         if ts_column != NULL:
-            ok = column_sender_flush_arrow_batch_at_column_with_overrides(
+            ok = column_sender_flush_arrow_batch_at_column(
                 conn, table, array, schema, ts_column[0],
                 overrides, overrides_len, &err)
         else:
-            ok = column_sender_flush_arrow_batch_with_overrides(
+            ok = column_sender_flush_arrow_batch(
                 conn, table, array, schema,
                 overrides, overrides_len, &err)
         _ensure_has_gil(&gs)

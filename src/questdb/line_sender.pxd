@@ -896,23 +896,6 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_flush_arrow_batch(
-        qwpws_conn* conn,
-        line_sender_table_name table,
-        ArrowArray* array,
-        ArrowSchema* schema,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_flush_arrow_batch_at_column(
-        qwpws_conn* conn,
-        line_sender_table_name table,
-        ArrowArray* array,
-        ArrowSchema* schema,
-        line_sender_column_name ts_column,
-        line_sender_error** err_out
-        ) noexcept nogil
-
     cdef enum column_sender_arrow_override_kind:
         column_sender_arrow_override_symbol = 0
         column_sender_arrow_override_ipv4 = 1
@@ -925,7 +908,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         uint32_t kind
         uint32_t arg
 
-    bint column_sender_flush_arrow_batch_with_overrides(
+    bint column_sender_flush_arrow_batch(
         qwpws_conn* conn,
         line_sender_table_name table,
         ArrowArray* array,
@@ -935,7 +918,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_flush_arrow_batch_at_column_with_overrides(
+    bint column_sender_flush_arrow_batch_at_column(
         qwpws_conn* conn,
         line_sender_table_name table,
         ArrowArray* array,
