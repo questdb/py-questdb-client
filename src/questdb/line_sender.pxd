@@ -1053,10 +1053,10 @@ cdef extern from "questdb/egress/line_reader.h":
         line_reader* reader
         ) noexcept nogil
 
-    size_t questdb_db_reader_free_count(
+    size_t questdb_db_dbg_reader_free_count(
         questdb_db* db
         ) noexcept nogil
 
-    size_t questdb_db_reader_in_use_count(
+    size_t questdb_db_dbg_reader_in_use_count(
         questdb_db* db
         ) noexcept nogil

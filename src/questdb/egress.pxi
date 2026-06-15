@@ -621,10 +621,10 @@ def _debug_egress_pool_stats(client):
     if db == NULL:
         return None
     # FFI exposes the counts via the Rust QuestDb methods; we surface
-    # them through the column_sender_chunk debug accessors below.
+    # them through the diagnostic-only `dbg_` reader-pool accessors.
     return (
-        questdb_db_reader_in_use_count(db),
-        questdb_db_reader_free_count(db))
+        questdb_db_dbg_reader_in_use_count(db),
+        questdb_db_dbg_reader_free_count(db))
 
 
 class QueryResult:

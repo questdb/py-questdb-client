@@ -184,5 +184,4 @@ setup(
     cmdclass={'build_ext': questdb_build_ext},
     zip_safe = False,
     package_dir={'': 'src'},
-    test_suite="tests",
-    packages=find_packages('src', exclude=['test']))
+    packages=find_packages('src'))
