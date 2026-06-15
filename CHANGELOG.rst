@@ -49,6 +49,14 @@ QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
 PyCapsule protocol (``__arrow_c_stream__``) — the latter without
 requiring pyarrow.
 
+Errors
+******
+
+Adds :class:`UnsupportedDataFrameShapeError` (raised when a DataFrame
+cannot be expressed on the QWP columnar path) and the
+:class:`IngressErrorCode` members ``ServerRejection``,
+``ArrowUnsupportedColumnKind``, ``ArrowIngest`` and ``Cancelled``.
+
 4.1.0 (2025-11-28)
 ------------------
 

@@ -1895,12 +1895,13 @@ class TaggedEnum(Enum):
         """
         if tag is None:
             return None
+        elif isinstance(tag, cls):
+            return tag
         elif isinstance(tag, str):
             for entry in cls:
                 if entry.tag == tag:
                     return entry
-        elif isinstance(tag, cls):
-            return tag
+            raise ValueError(f'Invalid value for {cls.__name__}: {tag!r}')
         else:
             raise ValueError(f'Invalid value for {cls.__name__}: {tag!r}')
 
@@ -2085,17 +2086,20 @@ cdef object parse_conf_str(
     if c_conf_str == NULL:
         raise c_parse_conf_err_to_py(err)
 
-    c_buf1 = questdb_conf_str_service(c_conf_str, &c_len1)
-    service = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
+    c_iter = NULL
+    try:
+        c_buf1 = questdb_conf_str_service(c_conf_str, &c_len1)
+        service = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
 
-    c_iter = questdb_conf_str_iter_pairs(c_conf_str)
-    while questdb_conf_str_iter_next(c_iter, &c_buf1, &c_len1, &c_buf2, &c_len2):
-        key = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
-        value = PyUnicode_FromStringAndSize(c_buf2, <Py_ssize_t>c_len2)
-        params[key] = value
-
-    questdb_conf_str_iter_free(c_iter)
-    questdb_conf_str_free(c_conf_str)
+        c_iter = questdb_conf_str_iter_pairs(c_conf_str)
+        while questdb_conf_str_iter_next(c_iter, &c_buf1, &c_len1, &c_buf2, &c_len2):
+            key = PyUnicode_FromStringAndSize(c_buf1, <Py_ssize_t>c_len1)
+            value = PyUnicode_FromStringAndSize(c_buf2, <Py_ssize_t>c_len2)
+            params[key] = value
+    finally:
+        if c_iter != NULL:
+            questdb_conf_str_iter_free(c_iter)
+        questdb_conf_str_free(c_conf_str)
 
     # We now need to parse the various values in the dict from their
     # string values to their Python types, as expected by the overrides
@@ -2556,7 +2560,6 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
     cdef size_t i
     cdef Py_ssize_t utf8_len
     cdef const char* utf8_buf
-    cdef object py_bytes
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t bytes_cap = 16
     cdef uint8_t* new_bytes
@@ -2577,9 +2580,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
         for i in range(row_count):
             cell = access[i]
             if PyUnicode_CheckExact(cell):
-                py_bytes = (<object>cell).encode('utf-8')
-                utf8_len = PyBytes_GET_SIZE(py_bytes)
-                utf8_buf = PyBytes_AsString(py_bytes)
+                utf8_buf = PyUnicode_AsUTF8AndSize(cell, &utf8_len)
                 if bytes_used + <size_t>utf8_len > <size_t>2_147_483_647:
                     raise IngressError(
                         IngressErrorCode.BadDataFrame,
@@ -2822,6 +2823,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
     cdef object le_bytes
+    cdef object uuid_cls = _uuid.UUID
 
     try:
         buf = <uint8_t*>calloc(buf_bytes, sizeof(uint8_t))
@@ -2834,7 +2836,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
                 raise MemoryError()
         for i in range(row_count):
             cell = access[i]
-            if isinstance(<object>cell, _uuid.UUID):
+            if isinstance(<object>cell, uuid_cls):
                 # `.int.to_bytes(16, 'little')` produces exactly the
                 # QuestDB UUID wire layout: bytes 0..8 = lo half LE,
                 # bytes 8..16 = hi half LE. One C-implemented call +
@@ -2875,6 +2877,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
     cdef uint32_t* values = NULL
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
+    cdef object ipv4_cls = _ipaddress.IPv4Address
 
     try:
         values = <uint32_t*>calloc(row_count if row_count > 0 else 1,
@@ -2888,7 +2891,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
                 raise MemoryError()
         for i in range(row_count):
             cell = access[i]
-            if isinstance(<object>cell, _ipaddress.IPv4Address):
+            if isinstance(<object>cell, ipv4_cls):
                 values[i] = <uint32_t>int(<object>cell)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
@@ -2937,6 +2940,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
     cdef object dt
     cdef object epoch_aware = datetime.datetime(
         1970, 1, 1, tzinfo=datetime.timezone.utc)
+    cdef object datetime_cls = datetime.datetime
     cdef object delta
     cdef int year, month, day, hour, minute, second, us
     cdef int64_t days
@@ -2953,7 +2957,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                 raise MemoryError()
         for i in range(row_count):
             cell = access[i]
-            if isinstance(<object>cell, datetime.datetime):
+            if isinstance(<object>cell, datetime_cls):
                 dt = <object>cell
                 if dt.tzinfo is None:
                     # Fast path: C-level field extraction + Howard
@@ -3681,7 +3685,7 @@ cdef bint _dataframe_columnar_force_drop_after_error(
         qwpws_conn* conn,
         bint flushed,
         bint flush_attempted,
-        bint sync_attempted):
+        bint sync_attempted) noexcept:
     # Exceptions during a dataframe publish can leave in-flight deferred
     # frames on the connection. If rows were flushed and the closing sync was
     # not attempted yet, one defensive sync can make the connection reusable.
@@ -4288,6 +4292,7 @@ cdef bint _capsule_pyarrow_type_is_string_like(object field_type):
 cdef bint _capsule_pandas_dtype_is_string_like(object dtype) except -1:
     cdef object storage
     cdef object arrow_type
+    cdef object cat_dtype
     if _PANDAS is None:
         return False
     if isinstance(dtype, _PANDAS.StringDtype):
@@ -4297,6 +4302,11 @@ cdef bint _capsule_pandas_dtype_is_string_like(object dtype) except -1:
         _dataframe_require_pyarrow()
         arrow_type = dtype.pyarrow_dtype
         return _capsule_pyarrow_type_is_string_like(arrow_type)
+    if isinstance(dtype, _PANDAS.CategoricalDtype):
+        cat_dtype = dtype.categories.dtype
+        if cat_dtype == object:
+            return True
+        return _capsule_pandas_dtype_is_string_like(cat_dtype)
     return False
 
 
@@ -4388,6 +4398,14 @@ cdef object _capsule_get_dict_string_column_names(object sliceable):
     cdef object value_type
     cdef object enum_t
     cdef int i
+    if _is_pandas_dataframe_object(sliceable):
+        _dataframe_may_import_deps()
+        out = []
+        for name, dtype in sliceable.dtypes.items():
+            if (isinstance(dtype, _PANDAS.CategoricalDtype)
+                    and _capsule_pandas_dtype_is_string_like(dtype)):
+                out.append(name)
+        return out
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         out = []
         enum_t = getattr(_POLARS, 'Enum', None)
@@ -4442,6 +4460,8 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     cdef object name
     cdef object is_str
     cdef int idx
+    cdef set listed
+    cdef object dict_names
 
     if symbols is None or symbols == 'auto':
         return []
@@ -4469,6 +4489,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
 
     out = []
     col_names = None
+    listed = set()
     for entry in symbols:
         if isinstance(entry, str):
             name = entry
@@ -4495,7 +4516,21 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
                 IngressErrorCode.BadDataFrame,
                 f'Bad argument `symbols`: column {name!r} is not a '
                 f'strings column.')
+        listed.add(name)
         out.append((name.encode('utf-8'), kind_int, 0))
+
+    # An explicit symbols list must classify every dict-encoded
+    # (categorical) string column: an unlisted one is ambiguous on the
+    # columnar path, so reject rather than silently auto-symbolizing it.
+    dict_names = _capsule_get_dict_string_column_names(sliceable)
+    if dict_names is None:
+        return None
+    for name in dict_names:
+        if name not in listed:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f'Bad argument `symbols`: dict-encoded column {name!r} '
+                f'must be listed in `symbols` or use symbols="auto".')
     return out
 
 
@@ -4679,6 +4714,9 @@ cdef bint _dataframe_client_try_capsule_path(
         raise TypeError(
             'at must be a column name str, ServerTimestamp, or None '
             'for Arrow-native DataFrame input.')
+
+    if total_rows == 0:
+        return True
 
     b = qdb_pystr_buf_new()
     memset(&c_schema, 0, sizeof(ArrowSchema))
@@ -4972,6 +5010,12 @@ cdef class Client:
         try:
             if max_rows_per_batch <= 0:
                 raise ValueError('max_rows_per_batch must be >= 1.')
+            if not isinstance(at, str) and not (
+                    isinstance(at, int) and not isinstance(at, bool)):
+                raise UnsupportedDataFrameShapeError(
+                    'Client.dataframe requires `at` to name the designated '
+                    'timestamp column (by name or index); scalar timestamps '
+                    'are not supported on the columnar path.')
             if _dataframe_client_try_capsule_path(
                     db,
                     df,

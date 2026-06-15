@@ -106,8 +106,7 @@ class UnsupportedDataFrameShapeError(IngressError):
     A DataFrame shape is not supported by the optimized columnar client path.
     """
 
-    @property
-    def column_failures(self) -> tuple: ...
+    column_failures: tuple
 
 
 class ServerTimestampType:

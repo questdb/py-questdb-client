@@ -79,6 +79,13 @@ Connection
 
   Default: 1.
 
+* ``qwp_ws_progress`` - QWP/WebSocket-only, ``background`` | ``manual``:
+  Whether frame acknowledgements are progressed on a background thread
+  (``background``) or only when the sender's drive/await/flush methods are
+  called (``manual``).
+
+  Default: ``background``.
+
 .. _sender_conf_auth:
 
 Authentication

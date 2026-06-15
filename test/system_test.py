@@ -2087,6 +2087,110 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def _make_table(self, table_name, rows):
+        self._exec(
+            f'CREATE TABLE {table_name} '
+            '(ts TIMESTAMP, lg LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        values = ', '.join(
+            f"('2024-01-01T00:00:0{i % 10}.000000Z', {i})"
+            for i in range(rows))
+        self._exec(f'INSERT INTO {table_name} VALUES {values}')
+        self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+    def test_query_result_single_use(self):
+        """A ``QueryResult`` is single-use: a second materialisation, or
+        any materialisation after ``close()``, raises ``InvalidApiCall``.
+        Also pins the ``__arrow_c_stream__`` ``requested_schema``
+        rejection."""
+        table_name = 't_egress_single_' + uuid.uuid4().hex[:8]
+        try:
+            self._make_table(table_name, 1)
+            sql = f'SELECT lg FROM {table_name}'
+            with qi.Client.from_conf(self._conf()) as client:
+                result = client.query(sql)
+                result.to_arrow()
+                with self.assertRaises(qi.IngressError) as cm:
+                    result.to_arrow()
+                self.assertEqual(
+                    cm.exception.code, qi.IngressErrorCode.InvalidApiCall)
+
+                closed = client.query(sql)
+                closed.close()
+                with self.assertRaises(qi.IngressError):
+                    closed.to_pandas()
+
+                stream = client.query(sql)
+                with self.assertRaises(NotImplementedError):
+                    stream.__arrow_c_stream__(requested_schema=object())
+                stream.close()
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_cancel_is_safe_and_idempotent(self):
+        """``cancel()`` drives the FFI cancel on a live cursor without
+        raising, is idempotent, and is a no-op after ``close()``."""
+        table_name = 't_egress_cancel_' + uuid.uuid4().hex[:8]
+        try:
+            self._make_table(table_name, 8)
+            sql = f'SELECT lg FROM {table_name}'
+            with qi.Client.from_conf(self._conf()) as client:
+                with client.query(sql) as result:
+                    result.cancel()
+                    result.cancel()
+
+                closed = client.query(sql)
+                closed.close()
+                closed.cancel()
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_capsule_path_no_leak(self):
+        """Loop the native ``__arrow_c_stream__`` paths — full consume,
+        abandoned (un-consumed) capsule, and empty result — and assert no
+        ``QueryResult`` is leaked. Exercises the producer refcount dance
+        and the capsule destructor under repetition for leak detectors."""
+        import gc
+        table_name = 't_egress_leak_' + uuid.uuid4().hex[:8]
+        empty_name = 't_egress_leak_empty_' + uuid.uuid4().hex[:8]
+        try:
+            self._make_table(table_name, 4)
+            self._exec(
+                f'CREATE TABLE {empty_name} '
+                '(ts TIMESTAMP, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            sql = f'SELECT lg FROM {table_name}'
+            empty_sql = f'SELECT lg FROM {empty_name} WHERE lg = -1'
+            with qi.Client.from_conf(self._conf()) as client:
+                gc.collect()
+                before = sum(
+                    1 for o in gc.get_objects()
+                    if type(o) is qi.QueryResult)
+                for _ in range(64):
+                    client.query(sql).to_arrow()
+                    abandoned = client.query(sql)
+                    capsule = abandoned.__arrow_c_stream__()
+                    del capsule
+                    del abandoned
+                    client.query(empty_sql).to_arrow()
+                gc.collect()
+                after = sum(
+                    1 for o in gc.get_objects()
+                    if type(o) is qi.QueryResult)
+            self.assertEqual(after, before)
+        finally:
+            for name in (table_name, empty_name):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {name}')
+                except Exception:
+                    pass
+
     def test_bad_sql_raises_ingress_error(self):
         """Server-side parse error surfaces as an ``IngressError`` from
         ``client.query`` with a usable message."""

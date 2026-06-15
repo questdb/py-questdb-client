@@ -50,6 +50,8 @@ cdef extern from "Python.h":
 
     bint PyUnicode_CheckExact(PyObject* o)
 
+    const char* PyUnicode_AsUTF8AndSize(PyObject* o, Py_ssize_t* size) except NULL
+
     bint PyBool_Check(PyObject* o)
 
     bint PyLong_CheckExact(PyObject* o)

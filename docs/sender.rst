@@ -888,6 +888,63 @@ Key differences from ILP:
 * **No protocol version.** QWP has its own versioning. The ``protocol_version``
   parameter and property are not applicable and will raise an error.
 
+.. _sender_qwp_ws:
+
+QWP/WebSocket
+-------------
+
+QWP/WebSocket (``qwpws``, or ``qwpwss`` for TLS) is an acknowledged streaming
+transport. Each flush publishes a frame identified by a monotonically
+increasing **frame sequence number (FSN)**; the server acknowledges frames as
+it durably applies them, so the client can confirm delivery.
+
+* **Confirming delivery.** :func:`Sender.flush_and_get_fsn` flushes and returns
+  the FSN of the published frame; :func:`Sender.flush_and_keep_and_get_fsn`
+  does the same without clearing the buffer. :func:`Sender.await_acked_fsn`
+  blocks until a given FSN is acknowledged (or a timeout elapses), and
+  :func:`Sender.acked_fsn` / :func:`Sender.published_fsn` report progress
+  without blocking.
+
+* **Progress modes.** With the default ``qwp_ws_progress=background``,
+  acknowledgements are progressed on a background thread. With
+  ``qwp_ws_progress=manual``, the application must call
+  :func:`Sender.drive_once` (or one of the flush/await methods) to pump the
+  connection.
+
+* **Server diagnostics.** Per-frame server feedback is delivered to the
+  ``qwp_ws_error_handler`` callback, or polled via
+  :func:`Sender.poll_qwp_ws_error` as :class:`QwpWsError` values
+  (:func:`Sender.qwp_ws_errors_dropped` reports how many were dropped when no
+  handler kept up). A diagnostic with a ``halt`` policy is terminal: the next
+  sender call raises :class:`IngressServerRejectionError`.
+
+* **Draining on close.** :func:`Sender.close_drain` waits for outstanding
+  frames to be acknowledged before closing.
+
+* **Standalone buffers.** As with QWP/UDP, use :func:`Buffer.qwp` or
+  :func:`Sender.new_buffer`.
+
+.. _query_egress:
+
+Querying data
+=============
+
+:class:`Client` reads query results back over the QWP/WebSocket read endpoint.
+:func:`Client.query` returns a single-use :class:`QueryResult` that streams rows
+as Arrow record batches::
+
+    with qi.Client.from_conf('qwpws::addr=localhost:9000;') as client:
+        with client.query('SELECT * FROM trades WHERE ts > $1') as result:
+            df = result.to_pandas()
+
+A :class:`QueryResult` can be materialised with ``to_arrow`` / ``to_pandas`` or
+streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas`` (all require
+pyarrow). It also implements the Arrow C stream PyCapsule protocol
+(``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
+``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
+Each result is consumed once; call :func:`QueryResult.cancel` to ask the server
+to stop streaming and :func:`QueryResult.close` to release resources.
+
 ILP/HTTP is available from:
 
 * QuestDB 7.3.10 and later.

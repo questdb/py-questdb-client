@@ -53,6 +53,22 @@ try:
 except ImportError:
     pyarrow = None
 
+from test_client_capsule_path import (
+    TestCapsulePathPyArrow,
+    TestCapsulePathPolars,
+    TestSchemaOverrides,
+    TestPyArrowRecordBatchDirect,
+    TestSchemaOverridesPandas,
+    TestBenchFlushArrowBatch,
+    TestCapsulePathPolarsMissing,
+    TestWriterMixingInOneChunk,
+    TestPandasPlannerRouting,
+)
+from test_client_dataframe_fuzz import (
+    TestClientDataframeFuzz,
+    TestClientDataframeRoundTrip,
+)
+
 if pd is not None:
     from test_dataframe import TestPandasProtocolVersionV1
     from test_dataframe import TestPandasProtocolVersionV2
