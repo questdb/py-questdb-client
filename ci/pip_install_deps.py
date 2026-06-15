@@ -77,12 +77,18 @@ def install_pandas3_and_numpy():
 def should_use_pandas3(py_version=None):
     if py_version is None:
         py_version = sys.version_info[:2]
-    return py_version >= (3, 11)
+    # Pandas 3 ships no 32-bit wheels, so only take the pandas 3 / numpy 2
+    # path on 64-bit interpreters. On 32-bit (e.g. win32) the pandas 3 install
+    # would be silently skipped, fastparquet would then drag in a numpy-1-built
+    # pandas 2.0.3 alongside numpy 2, and importing pandas would crash.
+    is_64bits = sys.maxsize > 2 ** 32
+    return is_64bits and py_version >= (3, 11)
 
 
 def install_default_pandas_and_numpy():
-    # Pandas 3 currently requires Python 3.11+, so keep 3.10 wheel tests on
-    # the pandas 2 / numpy 1.x-compatible path unless explicitly overridden.
+    # Pandas 3 requires Python 3.11+ and ships only 64-bit wheels, so keep
+    # 3.10 and all 32-bit wheel tests on the pandas 2 / numpy 1.x-compatible
+    # path unless explicitly overridden.
     if should_use_pandas3():
         install_pandas3_and_numpy()
     else:
