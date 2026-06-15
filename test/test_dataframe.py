@@ -1897,14 +1897,19 @@ class TestPandasBase:
                 self.assertTrue(exp_df.equals(deser_df))
 
             # fastparquet doesn't roundtrip with pyarrow parquet properly.
-            # It decays categories to object and UInt8 to float64.
+            # It decays categories to plain strings and UInt8 to float64.
             # We need to set up special case expected results for that.
+            # The decayed string column comes back as whatever this pandas
+            # infers for a string column: object on pandas < 3, but the new
+            # default string dtype (StringDtype(na_value=nan)) on pandas >= 3.
+            # Derive it instead of hardcoding so the test is version-agnostic.
+            str_dtype = pd.Series(['x']).dtype
             fallback_exp_dtypes = [
-                np.dtype('O'),
+                str_dtype,
                 np.dtype('int16'),
                 np.dtype('float64'),
                 np.dtype('float64')]
-            fallback_df = df.astype({'s': 'object', 'b': 'float64'})
+            fallback_df = df.astype({'s': str_dtype, 'b': 'float64'})
 
             df_eq(df, pa2pa_df, exp_dtypes)
             if fp_wrote:
