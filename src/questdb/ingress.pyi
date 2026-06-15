@@ -29,22 +29,25 @@ __all__ = [
     "IngressErrorCode",
     "IngressServerRejectionError",
     "Protocol",
+    "QueryResult",
     "Sender",
     "QwpWsError",
     "QwpWsErrorCategory",
     "QwpWsErrorPolicy",
     "QwpWsProgress",
+    "ServerTimestamp",
     "ServerTimestampType",
     "TimestampMicros",
     "TimestampNanos",
     "TlsCa",
     "UnsupportedDataFrameShapeError",
+    "WARN_HIGH_RECONNECTS",
 ]
 
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -111,6 +114,11 @@ class ServerTimestampType:
     """
     A placeholder value to indicate using a server-generated-timestamp.
     """
+
+
+ServerTimestamp: ServerTimestampType
+
+WARN_HIGH_RECONNECTS: bool
 
 
 class TimestampMicros:
@@ -924,6 +932,11 @@ class Client:
           exporters, wrapped into a one-batch ``pa.Table``).
         """
 
+    def query(self, sql: str) -> QueryResult:
+        """
+        Execute a SQL query and return a :class:`QueryResult`.
+        """
+
     def reap_idle(self) -> int:
         """
         Manually reap idle above-pool-size connections.
@@ -935,6 +948,43 @@ class Client:
         """
 
     def __exit__(self, exc_type, _exc_val, _exc_tb): ...
+
+
+class QueryResult:
+    """
+    Result of :meth:`Client.query`. Single-use: each materialisation
+    method consumes the underlying cursor.
+    """
+
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any: ...
+
+    def to_arrow(self) -> Any:
+        """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
+
+    def to_pandas(
+        self,
+        *,
+        dtype_backend: Optional[str] = None,
+        types_mapper: Optional[Callable[[Any], Any]] = None,
+    ) -> pd.DataFrame:
+        """Read the full result into a ``pandas.DataFrame``. Requires pyarrow."""
+
+    def iter_arrow(self) -> Iterator[Any]:
+        """Iterate result batches as ``pyarrow.RecordBatch``."""
+
+    def iter_pandas(self, **to_pandas_kwargs: Any) -> Iterator[pd.DataFrame]:
+        """Iterate result batches as ``pandas.DataFrame``."""
+
+    def cancel(self) -> None:
+        """Ask the server to stop streaming. Idempotent."""
+
+    def close(self) -> None:
+        """Release the cursor and reader. Idempotent."""
+
+    def __enter__(self) -> QueryResult: ...
+
+    def __exit__(self, exc_type, exc_val, exc_tb): ...
+
 
 class Sender:
     """

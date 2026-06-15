@@ -24,12 +24,52 @@ questdb.ingress
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.ingress.Client
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.QueryResult
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: questdb.ingress.IngressError
    :members:
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.ingress.IngressServerRejectionError
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.UnsupportedDataFrameShapeError
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: questdb.ingress.IngressErrorCode
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.QwpWsError
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.QwpWsErrorCategory
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.QwpWsErrorPolicy
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ingress.QwpWsProgress
    :members:
    :undoc-members:
    :show-inheritance:

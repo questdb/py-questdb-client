@@ -2580,15 +2580,14 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
                 py_bytes = (<object>cell).encode('utf-8')
                 utf8_len = PyBytes_GET_SIZE(py_bytes)
                 utf8_buf = PyBytes_AsString(py_bytes)
-                # Grow bytes buffer to fit.
+                if bytes_used + <size_t>utf8_len > <size_t>2_147_483_647:
+                    raise IngressError(
+                        IngressErrorCode.BadDataFrame,
+                        f'Bad column {df_col_name!r}: column total UTF-8 '
+                        'bytes exceeds the QWP wire varchar offset table '
+                        'limit (2 GiB).')
                 while bytes_used + <size_t>utf8_len > bytes_cap:
                     bytes_cap *= 2
-                    if bytes_cap > (<size_t>(2_147_483_647)):
-                        raise IngressError(
-                            IngressErrorCode.BadDataFrame,
-                            f'Bad column {df_col_name!r}: column total UTF-8 '
-                            'bytes exceeds the QWP wire varchar offset table '
-                            'limit (2 GiB).')
                     new_bytes = <uint8_t*>realloc(b.str_bytes, bytes_cap)
                     if new_bytes == NULL:
                         raise MemoryError()
@@ -2736,7 +2735,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_float_pyobj(
             elif PyLong_CheckExact(cell) or PyBool_Check(cell):
                 # Accept widening of int / bool to float, matching how
                 # Python implicitly converts when you do float(x).
-                values[i] = <double>PyLong_AsLongLong(cell)
+                values[i] = PyFloat_AsDouble(cell)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             elif _dataframe_is_null_pyobj(cell):
@@ -3036,14 +3035,14 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
             if PyBytes_CheckExact(cell):
                 blob_len = PyBytes_GET_SIZE(<object>cell)
                 blob_buf = PyBytes_AsString(<object>cell)
+                if bytes_used + <size_t>blob_len > <size_t>2_147_483_647:
+                    raise IngressError(
+                        IngressErrorCode.BadDataFrame,
+                        f'Bad column {df_col_name!r}: column total bytes '
+                        'exceeds the QWP wire binary offset table '
+                        'limit (2 GiB).')
                 while bytes_used + <size_t>blob_len > bytes_cap:
                     bytes_cap *= 2
-                    if bytes_cap > (<size_t>(2_147_483_647)):
-                        raise IngressError(
-                            IngressErrorCode.BadDataFrame,
-                            f'Bad column {df_col_name!r}: column total bytes '
-                            'exceeds the QWP wire binary offset table '
-                            'limit (2 GiB).')
                     new_bytes = <uint8_t*>realloc(b.str_bytes, bytes_cap)
                     if new_bytes == NULL:
                         raise MemoryError()
@@ -6208,9 +6207,9 @@ cdef class Sender:
             ok = line_sender_flush(sender, c_buf, &err)
         else:
             ok = line_sender_flush_and_keep(sender, c_buf, &err)
+        _ensure_has_gil(&gs)
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
-        _ensure_has_gil(&gs)
         if not ok:
             if c_buf == self._buffer._impl:
                 # Prevent a follow-up call to `.close(flush=True)` (as is
@@ -6223,6 +6222,16 @@ cdef class Sender:
                 raise c_err_to_py_fmt(err, _FLUSH_FMT)
             else:
                 raise c_err_to_py(err)
+
+    cdef inline void_int _check_qwp_ws(self, str method) except -1:
+        if self._impl == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                f'{method}() can\'t be called: Sender is closed.')
+        if not _is_qwp_ws_protocol(self._c_protocol):
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                f'{method}() is only supported for QWP/WebSocket senders.')
 
     def flush_and_get_fsn(self, Buffer buffer=None):
         """
@@ -6240,10 +6249,7 @@ cdef class Sender:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Cannot flush explicitly inside a transaction')
-        if sender == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'flush_and_get_fsn() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('flush_and_get_fsn')
         if buffer is not None:
             buffer._check_impl()
             c_buf = buffer._impl
@@ -6277,10 +6283,7 @@ cdef class Sender:
             raise IngressError(
                 IngressErrorCode.InvalidApiCall,
                 'Cannot flush explicitly inside a transaction')
-        if sender == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'flush_and_keep_and_get_fsn() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('flush_and_keep_and_get_fsn')
         if buffer is not None:
             buffer._check_impl()
             c_buf = buffer._impl
@@ -6306,10 +6309,7 @@ cdef class Sender:
         cdef line_sender_qwpws_fsn fsn
         cdef line_sender_error* err = NULL
 
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'published_fsn() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('published_fsn')
         if not line_sender_qwpws_published_fsn(self._impl, &fsn, &err):
             raise c_err_to_py(err)
         if fsn.has_value:
@@ -6324,10 +6324,7 @@ cdef class Sender:
         cdef line_sender_qwpws_fsn fsn
         cdef line_sender_error* err = NULL
 
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'acked_fsn() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('acked_fsn')
         if not line_sender_qwpws_acked_fsn(self._impl, &fsn, &err):
             raise c_err_to_py(err)
         if fsn.has_value:
@@ -6345,10 +6342,7 @@ cdef class Sender:
         cdef cbool reached = False
         cdef bint ok = False
 
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'await_acked_fsn() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('await_acked_fsn')
         if not isinstance(fsn, int) or isinstance(fsn, bool):
             raise TypeError('"fsn" must be a non-negative int.')
         if fsn < 0:
@@ -6377,10 +6371,7 @@ cdef class Sender:
         cdef cbool progressed = False
         cdef bint ok = False
 
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'drive_once() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('drive_once')
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_drive_once(self._impl, &progressed, &err)
         _ensure_has_gil(&gs)
@@ -6396,10 +6387,7 @@ cdef class Sender:
         cdef line_sender_qwpws_error* qwp_err = NULL
         cdef line_sender_qwpws_error_view view
 
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'poll_qwp_ws_error() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('poll_qwp_ws_error')
         if not line_sender_qwpws_poll_error(self._impl, &qwp_err, &err):
             raise c_err_to_py(err)
         if qwp_err == NULL:
@@ -6417,10 +6405,7 @@ cdef class Sender:
         cdef line_sender_error* err = NULL
         cdef uint64_t dropped = 0
 
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'qwp_ws_errors_dropped() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('qwp_ws_errors_dropped')
         if not line_sender_qwpws_errors_dropped(self._impl, &dropped, &err):
             raise c_err_to_py(err)
         return dropped
@@ -6434,10 +6419,7 @@ cdef class Sender:
         cdef PyThreadState* gs = NULL
         cdef bint ok = False
 
-        if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'close_drain() can\'t be called: Sender is closed.')
+        self._check_qwp_ws('close_drain')
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_close_drain(self._impl, &err)
         _ensure_has_gil(&gs)

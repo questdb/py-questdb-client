@@ -32,7 +32,11 @@ from qwp_ws_ack_server import QwpAckServer
 import questdb.ingress as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
-    from system_test import TestWithDatabase
+    from system_test import (
+        TestWithDatabase,
+        TestEgressWithDatabase,
+        TestEgressPool,
+        TestColumnIngressNarrowTypes)
 
 from fixture import _parse_version
 
@@ -2028,6 +2032,32 @@ class TestUninitializedBuffer(unittest.TestCase):
                     qi.Sender(qi.Protocol.Tcp, '127.0.0.1', server.port) as sender:
                 server.accept()
                 sender.flush(self._make_uninit())
+
+
+class TestBufferFactory(unittest.TestCase):
+    def test_direct_construction_deprecated(self):
+        with self.assertWarns(DeprecationWarning):
+            buf = qi.Buffer(2)
+        self.assertEqual(len(buf), 0)
+
+    def test_ilp_factory(self):
+        buf = qi.Buffer.ilp()
+        self.assertEqual(len(buf), 0)
+        buf.row('tbl', columns={'x': 1}, at=qi.ServerTimestamp)
+        self.assertGreater(len(bytes(buf)), 0)
+
+    def test_ilp_invalid_version(self):
+        for bad in (0, 4):
+            with self.assertRaises(qi.IngressError) as cm:
+                qi.Buffer.ilp(bad)
+            self.assertEqual(
+                cm.exception.code, qi.IngressErrorCode.ProtocolVersionError)
+
+    def test_qwp_factory(self):
+        buf = qi.Buffer.qwp()
+        self.assertIsInstance(buf, qi.Buffer)
+        self.assertEqual(len(buf), 0)
+        self.assertGreater(buf.capacity(), 0)
 
 
 if __name__ == '__main__':

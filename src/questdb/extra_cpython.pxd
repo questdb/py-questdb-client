@@ -58,6 +58,8 @@ cdef extern from "Python.h":
 
     double PyFloat_AS_DOUBLE(PyObject* o)
 
+    double PyFloat_AsDouble(PyObject* o) except? -1.0
+
     long long PyLong_AsLongLong(PyObject* o) except? -1
 
     PyObject* PyErr_Occurred()

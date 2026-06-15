@@ -520,7 +520,7 @@ cdef int _qs_get_next(ArrowArrayStream* stream, ArrowArray* out) noexcept with g
     return 0
 
 
-cdef const char* _qs_get_last_error(ArrowArrayStream* stream) noexcept:
+cdef const char* _qs_get_last_error(ArrowArrayStream* stream) noexcept with gil:
     cdef _QueryStreamProducer prod
     if stream == NULL or stream.private_data == NULL:
         return NULL
@@ -565,8 +565,13 @@ cdef object _make_query_stream_capsule(_CursorHandle handle):
     stream.release = _qs_release
     Py_INCREF(prod)
     stream.private_data = <void*>prod
-    return PyCapsule_New(
-        <void*>stream, b'arrow_array_stream', _qs_capsule_destructor)
+    try:
+        return PyCapsule_New(
+            <void*>stream, b'arrow_array_stream', _qs_capsule_destructor)
+    except:
+        Py_DECREF(prod)
+        free(stream)
+        raise
 
 
 _NUMPY_NULLABLE_CACHE = None

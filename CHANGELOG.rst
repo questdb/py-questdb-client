@@ -5,6 +5,50 @@ Changelog
 
 =========
 
+Unreleased
+----------
+
+Features
+~~~~~~~~
+
+QWP Ingestion Protocol
+**********************
+
+Adds support for the QuestDB Wire Protocol (QWP) alongside the existing
+ILP transports.
+
+- **QWP/UDP** (``qwpudp::``): fire-and-forget datagram ingestion,
+  defaulting to port 9007. New configuration keys ``max_datagram_size``
+  and ``multicast_ttl``; ``protocol_version`` does not apply.
+- **QWP/WebSocket** (``qwpws::`` / ``qwpwss::``): acknowledged streaming
+  ingestion with frame-sequence-number (FSN) tracking. New ``Sender``
+  methods ``flush_and_get_fsn``, ``flush_and_keep_and_get_fsn``,
+  ``published_fsn``, ``acked_fsn``, ``await_acked_fsn``, ``drive_once``,
+  ``poll_qwp_ws_error``, ``qwp_ws_errors_dropped`` and ``close_drain``.
+  Server diagnostics are reported through a ``qwp_ws_error_handler``
+  callback or polled as :class:`QwpWsError` values; terminal server
+  rejections raise :class:`IngressServerRejectionError`.
+
+Additional configuration keys ``tls_roots_password``,
+``retry_max_backoff_millis`` and ``qwp_ws_progress`` are also accepted.
+
+Buffer Factories
+****************
+
+``Buffer.ilp()`` and ``Buffer.qwp()`` construct protocol-specific
+buffers. Direct ``Buffer(...)`` construction is deprecated in favour of
+these factories and ``Sender.new_buffer()``.
+
+Query Egress
+************
+
+Adds :class:`Client` with :meth:`Client.query`, returning a
+:class:`QueryResult` that streams rows as Arrow record batches over the
+QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
+``to_pandas``, ``iter_arrow``, ``iter_pandas`` or the Arrow C stream
+PyCapsule protocol (``__arrow_c_stream__``) — the latter without
+requiring pyarrow.
+
 4.1.0 (2025-11-28)
 ------------------
 
