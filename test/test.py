@@ -33,6 +33,24 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
 
 from fixture import _parse_version
 
+# OIDC auth tests (pure-Python; no compiled extension required).
+# Imported here so they are picked up by ``unittest.main()`` in CI.
+from test_auth import (
+    TestDeviceFlow,
+    TestNonInteractive,
+    TestRefresh,
+    TestFileCache,
+    TestDiscovery,
+    TestRestAdapter,
+    TestAdapters,
+    TestConcurrency,
+    TestConfigHelpers,
+    TestEndpointValidation,
+    TestCacheKey,
+    TestTransportSecurity,
+    TestRendererSecurity,
+)
+
 NUMPY_VERSION = _parse_version(np.__version__)
 
 try:

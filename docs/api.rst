@@ -67,3 +67,46 @@ questdb.ingress
    :members:
    :undoc-members:
    :show-inheritance:
+
+questdb.auth
+============
+
+See the :ref:`oidc_auth` guide for an overview.
+
+.. autofunction:: questdb.auth.connect
+
+.. autoclass:: questdb.auth.QuestDB
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.OidcDeviceAuth
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.OidcConfig
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcConfigError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcInteractionRequired
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcDeviceFlowError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcTimeoutError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcAuthError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcNetworkError
+   :show-inheritance:

@@ -6,7 +6,7 @@ Dependency
 ==========
 
 The Python QuestDB client does not have any additional run-time dependencies and
-will run on any version of Python >= 3.9 on most platforms and architectures.
+will run on any version of Python >= 3.10 on most platforms and architectures.
 
 From version 3.0.0, this library depends on ``numpy>=1.21.0``.
 
@@ -22,6 +22,12 @@ dependencies to be installed:
 These are bundled as the ``dataframe`` extra.
 
 Without this option, you may still ingest data row-by-row.
+
+The :ref:`OIDC authentication helper <oidc_auth>` (:mod:`questdb.auth`) needs
+no extra dependencies for ``token()`` / ``headers()``. Some of its conveniences
+import the following lazily, only when used: ``pandas`` (for ``sql()``),
+``sqlalchemy`` and ``psycopg`` / ``psycopg2`` (PG-wire adapters), ``qrcode``
+(QR-code prompt) and ``IPython`` (rich Jupyter prompt).
 
 PIP
 ---

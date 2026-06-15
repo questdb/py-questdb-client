@@ -1,0 +1,614 @@
+################################################################################
+##     ___                  _   ____  ____
+##    / _ \ _   _  ___  ___| |_|  _ \| __ )
+##   | | | | | | |/ _ \/ __| __| | | |  _ \
+##   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+##    \__\_\\__,_|\___||___/\__|____/|____/
+##
+##  Copyright (c) 2014-2019 Appsicle
+##  Copyright (c) 2019-2024 QuestDB
+##
+##  Licensed under the Apache License, Version 2.0 (the "License");
+##  you may not use this file except in compliance with the License.
+##  You may obtain a copy of the License at
+##
+##  http://www.apache.org/licenses/LICENSE-2.0
+##
+##  Unless required by applicable law or agreed to in writing, software
+##  distributed under the License is distributed on an "AS IS" BASIS,
+##  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+##  See the License for the specific language governing permissions and
+##  limitations under the License.
+##
+################################################################################
+
+"""The OAuth 2.0 device authorization grant (RFC 8628) token manager."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import threading
+import time
+import urllib.parse
+import webbrowser
+from typing import Any, Dict, Optional
+
+from ._cache import TokenSet, make_cache
+from ._discovery import OidcConfig, resolve_config, validate_endpoint_origins
+from ._errors import (
+    OidcConfigError,
+    OidcDeviceFlowError,
+    OidcError,
+    OidcInteractionRequired,
+    OidcNetworkError,
+    OidcTimeoutError,
+)
+from ._http import build_ssl_context, post_form
+from ._render import (
+    Renderer,
+    _safe_link_url,
+    detect_interactive,
+    in_ipython_kernel,
+    make_renderer,
+)
+
+DEVICE_CODE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
+REFRESH_GRANT = 'refresh_token'
+
+_VALID_FLOWS = ('auto', 'device', 'loopback')
+
+# A non-positive expires_in is non-conformant; treat it as "unknown".
+_DEFAULT_EXPIRES_IN = 3600
+
+
+class _SystemClock:
+    """Real time source; the default for :class:`OidcDeviceAuth`."""
+    sleep = staticmethod(time.sleep)
+    monotonic = staticmethod(time.monotonic)
+    now = staticmethod(time.time)
+
+
+_SYSTEM_CLOCK = _SystemClock()
+
+
+def _decode_jwt_claims(token: Optional[str]) -> Dict[str, Any]:
+    """
+    Best-effort decode of a JWT payload **without signature verification**.
+
+    Used only to show a friendly identity in the sign-in message. QuestDB
+    performs the real validation. Returns ``{}`` for opaque/invalid tokens.
+    """
+    if not token or token.count('.') < 2:
+        return {}
+    try:
+        payload = token.split('.')[1]
+        payload += '=' * (-len(payload) % 4)  # restore base64 padding
+        raw = base64.urlsafe_b64decode(payload.encode('ascii'))
+        claims = json.loads(raw)
+        return claims if isinstance(claims, dict) else {}
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return {}
+
+
+def _identity_from_claims(claims: Dict[str, Any]) -> Optional[str]:
+    for key in ('email', 'preferred_username', 'upn', 'name', 'sub'):
+        value = claims.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+class OidcDeviceAuth:
+    """
+    Acquire and refresh an OIDC token via the device authorization grant.
+
+    The token is presented to QuestDB over the auth paths it already
+    supports: HTTP ``Authorization: Bearer`` or PG-wire ``_sso`` (token as
+    password). The flow runs entirely client-side; QuestDB is never in the
+    token-acquisition path.
+
+    Most users only ever call :meth:`token` (or :meth:`headers`). The first
+    call runs the interactive device flow; subsequent calls return the cached
+    token and refresh it silently (synchronously, on the first call made after
+    it nears expiry — there is no background thread). Acquisition is
+    serialized so concurrent callers don't double-prompt, while a valid cached
+    token is returned without blocking on another thread's in-progress
+    sign-in.
+
+    .. code-block:: python
+
+        from questdb.auth import OidcDeviceAuth
+
+        # Discover everything from the QuestDB server:
+        auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
+        token = auth.token()        # device flow on first use, else cached
+
+    Or fully explicit (no server discovery):
+
+    .. code-block:: python
+
+        auth = OidcDeviceAuth(
+            client_id="questdb",
+            device_authorization_endpoint="https://idp/.../device",
+            token_endpoint="https://idp/.../token",
+            scope="openid groups",
+            groups_in_token=True,
+            audience="questdb",
+            cache="memory")
+    """
+
+    def __init__(
+            self,
+            client_id: str,
+            device_authorization_endpoint: str,
+            token_endpoint: str,
+            *,
+            scope: str = 'openid',
+            groups_in_token: bool = True,
+            audience: Optional[str] = None,
+            issuer: Optional[str] = None,
+            cache: Any = 'memory',
+            insecure: bool = False,
+            ca_bundle: Optional[str] = None,
+            open_browser: bool = False,
+            interactive: Optional[bool] = None,
+            qr: bool = False,
+            renderer: Optional[Renderer] = None,
+            default_interval: int = 5,
+            _clock=None):  # injectable time source for testing
+        if not client_id:
+            raise OidcConfigError('client_id is required')
+        if not device_authorization_endpoint:
+            raise OidcConfigError('device_authorization_endpoint is required')
+        if not token_endpoint:
+            raise OidcConfigError('token_endpoint is required')
+
+        # Sending the id_token requires the ``openid`` scope.
+        if groups_in_token and 'openid' not in scope.split():
+            scope = ('openid ' + scope).strip()
+
+        self.config = OidcConfig(
+            client_id=client_id,
+            token_endpoint=token_endpoint,
+            device_authorization_endpoint=device_authorization_endpoint,
+            scope=scope,
+            groups_in_token=groups_in_token,
+            audience=audience,
+            issuer=issuer)
+
+        # Enforce the credential-endpoint co-location / issuer pin on every
+        # construction path (not just discovery), so the documented guarantee
+        # holds for the explicit constructor too.
+        validate_endpoint_origins(
+            self.config.token_endpoint,
+            self.config.device_authorization_endpoint,
+            self.config.issuer)
+
+        # `insecure` permits plaintext http only to QuestDB (e.g. a local dev
+        # server). The IdP is always held to https — or loopback http — by
+        # _idp_post, so the device code / refresh token are never sent in
+        # cleartext over the network even when this is set.
+        self.insecure = insecure
+        self.open_browser = open_browser
+        self._interactive = interactive
+        self._default_interval = default_interval
+        self._cache = make_cache(cache)
+        self._ctx = build_ssl_context(ca_bundle)
+        self._renderer = renderer if renderer is not None else make_renderer(qr=qr)
+        # Serializes token *acquisition* (a silent refresh or the interactive
+        # sign-in) only. Concurrent callers are possible via the threaded
+        # SQLAlchemy/psycopg adapters: without this, several connections
+        # opening as the token expires would run overlapping refreshes, and
+        # with refresh-token rotation all but one would fail and force a
+        # spurious re-prompt. It is NOT held on the fast path, so a caller with
+        # a valid cached token never blocks behind another thread's sign-in.
+        self._lock = threading.Lock()
+        self._tokens: Optional[TokenSet] = None
+        clock = _clock or _SYSTEM_CLOCK
+        self._sleep = clock.sleep
+        self._monotonic = clock.monotonic
+        self._now = clock.now
+
+    # -- construction -------------------------------------------------------
+
+    @classmethod
+    def from_questdb(
+            cls,
+            url: str,
+            *,
+            client_id: Optional[str] = None,
+            scope: Optional[str] = None,
+            audience: Optional[str] = None,
+            groups_in_token: Optional[bool] = None,
+            issuer: Optional[str] = None,
+            discovery_url: Optional[str] = None,
+            token_endpoint: Optional[str] = None,
+            device_authorization_endpoint: Optional[str] = None,
+            flow: str = 'auto',
+            cache: Any = 'memory',
+            insecure: bool = False,
+            ca_bundle: Optional[str] = None,
+            open_browser: bool = False,
+            interactive: Optional[bool] = None,
+            qr: bool = False,
+            renderer: Optional[Renderer] = None,
+            _clock=None) -> 'OidcDeviceAuth':  # injectable time source
+        """
+        Build an :class:`OidcDeviceAuth` by discovering config from QuestDB.
+
+        Reads ``{url}/settings`` for the OIDC client id, scope, endpoints and
+        groups mode, falling back to the IdP ``.well-known`` document for the
+        device-authorization endpoint when QuestDB does not advertise it.
+        Any explicit keyword overrides discovery.
+        """
+        _validate_flow(flow)
+        ctx = build_ssl_context(ca_bundle)
+        cfg = resolve_config(
+            questdb_url=url,
+            client_id=client_id,
+            scope=scope,
+            audience=audience,
+            groups_in_token=groups_in_token,
+            token_endpoint=token_endpoint,
+            device_authorization_endpoint=device_authorization_endpoint,
+            issuer=issuer,
+            discovery_url=discovery_url,
+            ctx=ctx,
+            insecure=insecure)
+        return cls(
+            client_id=cfg.client_id,
+            device_authorization_endpoint=cfg.device_authorization_endpoint,
+            token_endpoint=cfg.token_endpoint,
+            scope=cfg.scope,
+            groups_in_token=cfg.groups_in_token,
+            audience=cfg.audience,
+            issuer=cfg.issuer,
+            cache=cache,
+            insecure=insecure,
+            ca_bundle=ca_bundle,
+            open_browser=open_browser,
+            interactive=interactive,
+            qr=qr,
+            renderer=renderer,
+            _clock=_clock)
+
+    # -- public API ---------------------------------------------------------
+
+    def token(self) -> str:
+        """
+        Return a valid token for QuestDB, acquiring or refreshing as needed.
+
+        Returns the ``id_token`` when the server expects groups encoded in the
+        token (``acl.oidc.groups.encoded.in.token=true``), otherwise the
+        ``access_token`` — mirroring QuestDB's own selection logic.
+        """
+        return self._select(self._obtain_tokens())
+
+    def headers(self) -> Dict[str, str]:
+        """Return ``{"Authorization": "Bearer <token>"}``."""
+        return {'Authorization': f'Bearer {self.token()}'}
+
+    @property
+    def cache_key(self) -> str:
+        """
+        Identifies the token's security context for caching.
+
+        Two sessions share a cached token only when they would accept the same
+        one: same IdP token endpoint (**path included**, so multi-tenant realms
+        sharing a host don't collide), client id, scope *set* (order-insensitive),
+        and audience. The QuestDB URL is deliberately excluded — the same IdP
+        token is valid against any QuestDB that trusts it.
+        """
+        c = self.config
+        scope = ' '.join(sorted(c.scope.split())) if c.scope else ''
+        return '\x1f'.join([
+            c.issuer or '',
+            _normalize_url(c.token_endpoint),
+            c.client_id,
+            scope,
+            c.audience or ''])
+
+    def clear(self) -> None:
+        """Forget the cached token (forces a fresh sign-in next time)."""
+        # Serialize against acquisition so a concurrent refresh/sign-in can't
+        # re-populate the cache right after we clear it.
+        with self._lock:
+            self._tokens = None
+            self._cache.clear(self.cache_key)
+
+    # -- token lifecycle ----------------------------------------------------
+
+    def _select(self, tokens: TokenSet) -> str:
+        if self.config.groups_in_token:
+            if not tokens.id_token:
+                raise OidcConfigError(
+                    'Server expects groups encoded in the token but the IdP '
+                    'returned no id_token. Ensure the "openid" scope is '
+                    'requested (current scope: '
+                    f'{self.config.scope!r}).')
+            return tokens.id_token
+        if not tokens.access_token:
+            raise OidcConfigError('IdP returned no access_token.')
+        return tokens.access_token
+
+    def _has_required_token(self, tokens: TokenSet) -> bool:
+        """
+        True if ``tokens`` carries the kind :meth:`_select` will return — the
+        ``id_token`` when groups are encoded in the token, else the
+        ``access_token``. The cache gate and the post-refresh check share this
+        predicate so they can't disagree with ``_select``.
+        """
+        if self.config.groups_in_token:
+            return bool(tokens.id_token)
+        return bool(tokens.access_token)
+
+    def _obtain_tokens(self) -> TokenSet:
+        # Fast path: return a valid cached token without taking the lock, so a
+        # caller with a usable token never blocks behind another thread's
+        # in-progress refresh or interactive sign-in.
+        tokens = self._valid_cached()
+        if tokens is not None:
+            return tokens
+        # Slow path: serialize acquisition so concurrent callers don't run
+        # overlapping refreshes or double-prompt; the loser re-checks and
+        # reuses the winner's freshly acquired token.
+        with self._lock:
+            tokens = self._valid_cached()
+            if tokens is not None:
+                return tokens
+            return self._acquire()
+
+    def _valid_cached(self) -> Optional[TokenSet]:
+        tokens = self._tokens
+        if tokens is None:
+            tokens = self._cache.load(self.cache_key)
+            if tokens is not None:
+                self._tokens = tokens
+        if (tokens is not None and tokens.is_valid(self._now())
+                and self._has_required_token(tokens)):
+            return tokens
+        return None
+
+    def _acquire(self) -> TokenSet:
+        # Called while holding self._lock. Try a silent refresh, else run the
+        # interactive device flow.
+        tokens = self._tokens
+        if tokens is not None and tokens.refresh_token:
+            try:
+                refreshed = self._refresh(tokens)
+            except OidcNetworkError:
+                # Transient connectivity failure: the refresh token is still
+                # valid, so re-authenticating won't help (the interactive flow
+                # needs the same network) and would needlessly re-prompt.
+                # Surface it — the cached token + refresh_token are kept, so a
+                # later call retries the refresh.
+                raise
+            except OidcError:
+                # The refresh token was rejected (expired/revoked) or the IdP
+                # returned an unusable response: fall through to a fresh
+                # interactive sign-in.
+                pass
+            else:
+                # Only accept a refresh that actually yields the token kind we
+                # need. Some IdPs don't re-issue the id_token on refresh; such
+                # a response is unusable, so fall through to the interactive
+                # flow rather than caching it and looping on every call.
+                if self._has_required_token(refreshed):
+                    self._store(refreshed)
+                    return refreshed
+
+        fresh = self._run_device_flow()
+        self._store(fresh)
+        return fresh
+
+    def _store(self, tokens: TokenSet) -> None:
+        self._tokens = tokens
+        self._cache.store(self.cache_key, tokens)
+
+    def _tokenset_from_response(self, body: Dict[str, Any]) -> TokenSet:
+        try:
+            expires_in = int(body.get('expires_in', _DEFAULT_EXPIRES_IN))
+        except (TypeError, ValueError):
+            expires_in = _DEFAULT_EXPIRES_IN
+        if expires_in <= 0:
+            # A non-positive lifetime would mark a just-issued token as already
+            # expired, causing refresh/re-prompt churn. Treat it as unknown.
+            expires_in = _DEFAULT_EXPIRES_IN
+        claims = (_decode_jwt_claims(body.get('id_token'))
+                  or _decode_jwt_claims(body.get('access_token')))
+        now = self._now()
+        return TokenSet(
+            access_token=body.get('access_token'),
+            id_token=body.get('id_token'),
+            refresh_token=body.get('refresh_token'),
+            expires_at=now + expires_in,
+            issued_at=now,
+            token_type=body.get('token_type', 'Bearer'),
+            scope=body.get('scope', self.config.scope),
+            sub=claims.get('sub'))
+
+    def _idp_post(self, url: str, form: Dict[str, Any]):
+        # IdP POSTs carry the device code / refresh token, so they are always
+        # required to be https (loopback http is fine for local dev); the
+        # user's `insecure` flag — which is about the QuestDB link — never
+        # downgrades them.
+        return post_form(url, form, ctx=self._ctx, insecure=False)
+
+    def _refresh(self, tokens: TokenSet) -> TokenSet:
+        status, body = self._idp_post(
+            self.config.token_endpoint,
+            {
+                'grant_type': REFRESH_GRANT,
+                'refresh_token': tokens.refresh_token,
+                'client_id': self.config.client_id,
+                'scope': self.config.scope,
+            })
+        if status == 200:
+            refreshed = self._tokenset_from_response(body)
+            # Many IdPs do not rotate the refresh token; keep the old one.
+            if not refreshed.refresh_token:
+                refreshed.refresh_token = tokens.refresh_token
+            return refreshed
+        raise OidcDeviceFlowError(
+            f"Token refresh failed: {body.get('error', 'unknown error')}",
+            error=body.get('error'),
+            error_description=body.get('error_description'))
+
+    # -- device flow (RFC 8628) ---------------------------------------------
+
+    def _run_device_flow(self) -> TokenSet:
+        if not self._is_interactive():
+            raise OidcInteractionRequired(
+                'Interactive sign-in is required, but no interactive terminal '
+                'or notebook was detected (e.g. papermill / cron / CI). Use a '
+                'QuestDB service-account REST token or the OAuth2 '
+                'client-credentials grant for non-interactive contexts.')
+
+        resp = self._request_device_code()
+        self._renderer.on_prompt(resp)
+        self._maybe_open_browser(resp)
+        tokens = self._poll_for_token(resp)
+        claims = (_decode_jwt_claims(tokens.id_token)
+                  or _decode_jwt_claims(tokens.access_token))
+        identity = _identity_from_claims(claims)
+        self._renderer.on_success(
+            identity, max(0.0, tokens.expires_at - self._now()))
+        return tokens
+
+    def _request_device_code(self) -> Dict[str, Any]:
+        form = {
+            'client_id': self.config.client_id,
+            'scope': self.config.scope,
+        }
+        if self.config.audience:
+            form['audience'] = self.config.audience
+        status, body = self._idp_post(
+            self.config.device_authorization_endpoint, form)
+        if status == 200 and body.get('device_code') and body.get('user_code'):
+            return body
+        error = body.get('error')
+        if status in (400, 404, 405) or error in (
+                'invalid_client', 'unauthorized_client',
+                'unsupported_grant_type'):
+            raise OidcDeviceFlowError(
+                'The IdP rejected the device-authorization request '
+                f'(HTTP {status}, error={error!r}). Ensure the OIDC client '
+                f'{self.config.client_id!r} has the device grant '
+                "('urn:ietf:params:oauth:grant-type:device_code') enabled and "
+                'is registered as a public client.',
+                error=error,
+                error_description=body.get('error_description'))
+        raise OidcDeviceFlowError(
+            f'Device authorization request failed (HTTP {status}): '
+            f'{body.get("error_description") or error or body}',
+            error=error,
+            error_description=body.get('error_description'))
+
+    def _poll_for_token(self, resp: Dict[str, Any]) -> TokenSet:
+        device_code = resp['device_code']
+        try:
+            interval = max(1, int(resp.get('interval', self._default_interval)))
+        except (TypeError, ValueError):
+            interval = self._default_interval
+        try:
+            expires_in = int(resp.get('expires_in', 600))
+        except (TypeError, ValueError):
+            expires_in = 600
+        deadline = self._monotonic() + expires_in
+
+        while True:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                self._renderer.on_failure(
+                    'Code expired — run the cell again to retry.')
+                raise OidcTimeoutError(
+                    'The device code expired before authorization completed. '
+                    'Run the sign-in again.',
+                    error='expired_token')
+            self._renderer.on_waiting(remaining)
+            self._sleep(interval)
+
+            status, body = self._idp_post(
+                self.config.token_endpoint,
+                {
+                    'grant_type': DEVICE_CODE_GRANT,
+                    'device_code': device_code,
+                    'client_id': self.config.client_id,
+                })
+
+            if status == 200 and body.get('access_token'):
+                return self._tokenset_from_response(body)
+
+            error = body.get('error')
+            if error == 'authorization_pending':
+                continue
+            if error == 'slow_down':
+                interval += 5
+                continue
+            if error == 'expired_token':
+                self._renderer.on_failure(
+                    'Code expired — run the cell again to retry.')
+                raise OidcTimeoutError(
+                    'The device code expired before authorization completed. '
+                    'Run the sign-in again.',
+                    error=error)
+            # access_denied or any other terminal error.
+            description = body.get('error_description') or error or 'unknown error'
+            self._renderer.on_failure(f'Sign-in failed: {description}')
+            raise OidcDeviceFlowError(
+                f'Device flow failed: {description}',
+                error=error,
+                error_description=body.get('error_description'))
+
+    # -- helpers ------------------------------------------------------------
+
+    def _is_interactive(self) -> bool:
+        if self._interactive is not None:
+            return self._interactive
+        return detect_interactive()
+
+    def _maybe_open_browser(self, resp: Dict[str, Any]) -> None:
+        # Never auto-open on a (possibly remote) notebook kernel; only do so
+        # for an explicitly opted-in local terminal session.
+        if not self.open_browser or in_ipython_kernel():
+            return
+        # Only open an http(s) URL — never a javascript:/data: scheme from a
+        # malicious or MITM'd device response.
+        target = _safe_link_url(
+            resp.get('verification_uri_complete')
+            or resp.get('verification_uri')
+            or resp.get('verification_url'))
+        if target:
+            try:
+                webbrowser.open(target)
+            except Exception:
+                pass
+
+
+def _validate_flow(flow: str) -> None:
+    if flow not in _VALID_FLOWS:
+        raise OidcConfigError(
+            f'Unknown flow {flow!r}; expected one of {_VALID_FLOWS}.')
+    if flow == 'loopback':
+        raise OidcConfigError(
+            "The 'loopback' (Authorization Code + PKCE) flow is not yet "
+            "implemented. Use flow='device' (works on local and remote "
+            'kernels alike).')
+
+
+def _normalize_url(url: str) -> str:
+    # Full URL with scheme/host lower-cased and the default port dropped, but
+    # the path kept (it distinguishes multi-tenant realms). Used for the cache
+    # key so trivial spelling differences don't cause a spurious re-prompt.
+    parts = urllib.parse.urlparse(url)
+    scheme = (parts.scheme or '').lower()
+    host = (parts.hostname or '').lower()
+    default_port = {'https': 443, 'http': 80}.get(scheme)
+    if parts.port and parts.port != default_port:
+        netloc = f'{host}:{parts.port}'
+    else:
+        netloc = host
+    query = f'?{parts.query}' if parts.query else ''
+    return f'{scheme}://{netloc}{parts.path}{query}'

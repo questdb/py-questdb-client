@@ -175,7 +175,7 @@ setup(
     name='questdb',
     version='4.1.0',
     platforms=['any'],
-    python_requires='>=3.8',
+    python_requires='>=3.10',
     install_requires=[],
     ext_modules = cythonize([ingress_extension()], annotate=True),
     cmdclass={'build_ext': questdb_build_ext},

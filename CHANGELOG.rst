@@ -5,6 +5,49 @@ Changelog
 
 =========
 
+Unreleased
+----------
+
+Features
+~~~~~~~~
+
+OIDC Authentication (:mod:`questdb.auth`)
+************************************************
+
+New :mod:`questdb.auth` module to sign in interactively to OIDC-secured
+QuestDB Enterprise from Python — including from **remote** kernels
+(JupyterHub, SageMaker, Colab, VS Code-remote) that have no local browser.
+
+It runs the OAuth 2.0 Device Authorization Grant (RFC 8628) client-side: you
+authorize in any browser (laptop or phone), and the token is presented to
+QuestDB over the auth paths it already supports (HTTP ``Bearer`` / PG-wire
+``_sso``). No server change is required.
+
+.. code-block:: python
+
+    from questdb.auth import OidcDeviceAuth, connect
+
+    # Just the token (use it with PG-wire, HTTP, or any client):
+    auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
+    token = auth.token()
+
+    # Or the integrated session (query to a DataFrame, feed adapters):
+    qdb = connect("https://questdb.example.com:9000")
+    df = qdb.sql("SELECT * FROM trades LIMIT 10")
+
+Highlights:
+
+* Auto-discovery of OIDC config from the QuestDB ``/settings`` endpoint, with a
+  fallback to the IdP ``.well-known`` document.
+* In-process token cache with silent refresh; optional on-disk cache.
+* Adapters for pandas (REST ``/exec``), SQLAlchemy, psycopg and the ingestion
+  ``Sender``.
+* ``token()`` / ``headers()`` require no dependencies beyond the standard
+  library; ``pandas`` / ``sqlalchemy`` / ``psycopg`` / ``qrcode`` / ``IPython``
+  are imported lazily.
+
+See the :ref:`OIDC authentication guide <oidc_auth>` for details.
+
 4.1.0 (2025-11-28)
 ------------------
 
