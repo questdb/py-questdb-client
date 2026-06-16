@@ -34,12 +34,12 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.4.1'
+QUESTDB_VERSION = '9.4.3'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
-FIRST_QWP_WS_RELEASE = (9, 4, 1)
+FIRST_QWP_WS_RELEASE = (9, 4, 3)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -119,7 +119,7 @@ class TestWithDatabase(unittest.TestCase):
     def _require_qwp_ws(self):
         if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
             self.skipTest(
-                'QWP/WebSocket integration tests require QuestDB 9.4.1+')
+                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
 
     def _require_qwp_fuzz(self):
         self._require_qwp_ws()
@@ -1920,6 +1920,14 @@ class TestEgressWithDatabase(unittest.TestCase):
     def tearDownClass(cls):
         TestWithDatabase.tearDownClass.__func__(cls)
 
+    def _require_qwp_ws(self):
+        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
+            self.skipTest(
+                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def setUp(self):
+        self._require_qwp_ws()
+
     def _conf(self):
         return (f'qwpws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};')
@@ -2480,6 +2488,14 @@ class TestEgressPool(unittest.TestCase):
     def tearDownClass(cls):
         TestWithDatabase.tearDownClass.__func__(cls)
 
+    def _require_qwp_ws(self):
+        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
+            self.skipTest(
+                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def setUp(self):
+        self._require_qwp_ws()
+
     def _conf(self, **extra):
         conf = (f'qwpws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};')
@@ -2818,7 +2834,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def _require_qwp_ws(self):
         if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
             self.skipTest(
-                'QWP/WebSocket integration tests require QuestDB 9.4.1+')
+                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def setUp(self):
+        self._require_qwp_ws()
 
     def _conf(self):
         return (f'qwpws::addr={self.qdb_plain.host}:'
