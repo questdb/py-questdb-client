@@ -2428,6 +2428,17 @@ cdef object _dataframe_columnar_plan_failures(
                 # at row level (one walk catches all rows). The planner
                 # has nothing more to check here.
                 pass
+            elif col.setup.source in (
+                    col_source_t.col_source_str_i8_cat,
+                    col_source_t.col_source_str_i16_cat,
+                    col_source_t.col_source_str_i32_cat):
+                if not _dataframe_columnar_has_utf8_dictionary(
+                        &col.setup.chunks.chunks[0]):
+                    failures.append(_dataframe_columnar_col_failure(
+                        df,
+                        col,
+                        'v1 requires Arrow UTF-8 or LargeUtf8 dictionary '
+                        'offsets and byte buffers for categorical columns.'))
             elif col.setup.source not in (
                     col_source_t.col_source_str_utf8_arrow,
                     col_source_t.col_source_str_lrg_utf8_arrow):
@@ -2435,7 +2446,8 @@ cdef object _dataframe_columnar_plan_failures(
                     df,
                     col,
                     'v1 only supports string[pyarrow] columns backed by '
-                    'Arrow UTF-8 or LargeUtf8 (or object-dtype str).'))
+                    'Arrow UTF-8 or LargeUtf8, pandas string Categorical, '
+                    'or object-dtype str.'))
             elif not _dataframe_columnar_has_utf8_values(
                     &col.setup.chunks.chunks[0]):
                 failures.append(_dataframe_columnar_col_failure(
@@ -3250,7 +3262,8 @@ cdef void_int _dataframe_columnar_call_arrow_append(
         column_sender_chunk* chunk,
         col_t* col,
         size_t row_offset,
-        size_t row_count) except -1:
+        size_t row_count,
+        bint force_not_symbol=False) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef column_sender_arrow_import* imported = col.setup.arrow_import
@@ -3259,6 +3272,7 @@ cdef void_int _dataframe_columnar_call_arrow_append(
             imported = column_sender_arrow_import_new(
                 &col.setup.chunks.chunks[0],
                 &col.setup.arrow_schema,
+                force_not_symbol,
                 &err)
         if imported != NULL:
             ok = column_sender_chunk_append_arrow_import(
@@ -3537,6 +3551,13 @@ cdef void_int _dataframe_columnar_append_field(
             _dataframe_columnar_append_pyobj_str(
                 chunk, col, prebuilt, row_offset, row_count)
             return 0  # err already raised inside on failure
+        if col.setup.source in (
+                col_source_t.col_source_str_i8_cat,
+                col_source_t.col_source_str_i16_cat,
+                col_source_t.col_source_str_i32_cat):
+            _dataframe_columnar_call_arrow_append(
+                chunk, col, row_offset, row_count, True)
+            return 0
         # Rust dispatches on the schema format string for utf8 ("u") and
         # large_utf8 ("U").
         _dataframe_columnar_call_arrow_append(
@@ -4519,18 +4540,16 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         listed.add(name)
         out.append((name.encode('utf-8'), kind_int, 0))
 
-    # An explicit symbols list must classify every dict-encoded
-    # (categorical) string column: an unlisted one is ambiguous on the
-    # columnar path, so reject rather than silently auto-symbolizing it.
+    # Match the row/numpy planner: an explicit symbols list marks only the
+    # listed columns as symbols; every other dict-encoded (categorical)
+    # column falls through to a plain VARCHAR field (arg=1, force
+    # NOT-SYMBOL) rather than being auto-symbolized.
     dict_names = _capsule_get_dict_string_column_names(sliceable)
     if dict_names is None:
         return None
     for name in dict_names:
         if name not in listed:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
-                f'Bad argument `symbols`: dict-encoded column {name!r} '
-                f'must be listed in `symbols` or use symbols="auto".')
+            out.append((name.encode('utf-8'), kind_int, 1))
     return out
 
 
@@ -4691,17 +4710,7 @@ cdef bint _dataframe_client_try_capsule_path(
     else:
         return False
 
-    symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
-    if symbol_overrides is None:
-        return False
-    merged_overrides = _merge_capsule_overrides(
-        symbol_overrides, validated_overrides)
-
     total_rows = _capsule_row_count(sliceable)
-
-    can_slice = (total_rows >= 0) and (
-        hasattr(sliceable, 'slice')
-        or _is_pandas_dataframe_object(sliceable))
 
     if not isinstance(table_name, str):
         raise TypeError(
@@ -4715,8 +4724,20 @@ cdef bint _dataframe_client_try_capsule_path(
             'at must be a column name str, ServerTimestamp, or None '
             'for Arrow-native DataFrame input.')
 
+    # An empty frame is a no-op: emit nothing and skip symbol-shape
+    # validation, which is moot with zero rows.
     if total_rows == 0:
         return True
+
+    symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
+    if symbol_overrides is None:
+        return False
+    merged_overrides = _merge_capsule_overrides(
+        symbol_overrides, validated_overrides)
+
+    can_slice = (total_rows >= 0) and (
+        hasattr(sliceable, 'slice')
+        or _is_pandas_dataframe_object(sliceable))
 
     b = qdb_pystr_buf_new()
     memset(&c_schema, 0, sizeof(ArrowSchema))

@@ -557,9 +557,9 @@ def _build_frame(rng):
             listed = list(cat_col_names)
             rng.shuffle(listed)
             symbols = listed[:-1]
-            # At least one categorical is unlisted; planner rejects it.
-            if n_rows > 0:
-                expected_supported = False
+            # An unlisted categorical is not rejected: like the row/numpy
+            # path, it falls through to a plain VARCHAR field, so the frame
+            # stays supported.
         else:
             # No second categorical to drop -> degenerate; equivalent to
             # listing all (or 'auto' when none exist).
