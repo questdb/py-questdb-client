@@ -6,45 +6,33 @@ Dependency
 ==========
 
 The Python QuestDB client does not have any additional run-time dependencies and
-will run on any version of Python >= 3.9 on most platforms and architectures.
+will run on any version of Python >= 3.10 on most platforms and architectures.
 
 From version 3.0.0, this library depends on ``numpy>=1.21.0``.
 
 Optional Dependencies
 ---------------------
 
-DataFrame ingest requires ``pandas`` (bundled in the ``dataframe`` extra).
+The ``dataframe`` extra bundles ``pandas`` and ``pyarrow``:
 
-The following extras pull in optional libraries on demand:
+* ``dataframe`` → ``pandas`` and ``pyarrow``
 
-* ``dataframe`` → ``pandas``
-* ``pyarrow`` → ``pyarrow`` (only needed when you ingest
-  ``pd.ArrowDtype`` / ``pd.Categorical`` / ``string`` dtype columns,
-  ``pa.Table`` / ``pa.RecordBatch`` sources, an ``__arrow_c_array__``
-  single-batch object, or pass ``schema_overrides=`` to a path that
-  needs metadata patching from Python). It is also required for
-  ``Client.query()`` egress.
-* ``polars`` → ``polars`` (Polars frames go through the Arrow
-  PyCapsule Interface end-to-end and **do not** need pyarrow,
-  including with ``schema_overrides=``).
+Install it to ingest a **pandas** DataFrame, or to use the
+``to_pandas`` / ``to_arrow`` / ``iter_*`` helpers on ``Client.query()``
+results. polars, pyarrow, duckdb and any other Arrow-native source need
+no extra — they go through the Arrow PyCapsule Interface; just install
+the source library as usual.
 
-Without these extras, you may still ingest data row-by-row through
-``Sender.row()`` and ``Buffer.row()``.
+Without it, you may still ingest data row-by-row through
+``Sender.row()`` and ``Buffer.row()``, and read query results through
+the ``__arrow_c_stream__`` PyCapsule protocol.
 
 PIP
 ---
 
-DataFrame ingest (pandas only)::
+DataFrame ingest (pandas + pyarrow)::
 
     python3 -m pip install -U questdb[dataframe]
-
-DataFrame ingest with pyarrow features::
-
-    python3 -m pip install -U questdb[dataframe,pyarrow]
-
-Polars ingest::
-
-    python3 -m pip install -U questdb[polars]
 
 Row-only::
 
@@ -56,8 +44,6 @@ Poetry
 Equivalents for poetry::
 
     poetry add questdb[dataframe]
-    poetry add questdb[dataframe,pyarrow]
-    poetry add questdb[polars]
     poetry add questdb
 
 

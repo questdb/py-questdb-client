@@ -25,12 +25,7 @@ except ImportError:
 import questdb.ingress as qi
 import pandas as pd
 import numpy as np
-try:
-    import pyarrow as pa
-except ImportError:
-    pa = None
-
-requires_pyarrow = unittest.skipIf(pa is None, 'pyarrow not available')
+import pyarrow as pa
 
 # Pandas 3.x defaults tz-aware timestamps to microsecond resolution.
 # Pin to nanoseconds where tests expect nanosecond precision.
@@ -516,7 +511,6 @@ class TestPandasBase:
             self.assertTrue(plan['supported'])
             self.assertEqual(plan['failures'], [])
 
-        @requires_pyarrow
         def test_columnar_plan_populates_plain_arrow_uint32_as_integer(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
@@ -537,7 +531,6 @@ class TestPandasBase:
             self.assertEqual(result['populated_rows_total'], 2)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
-        @requires_pyarrow
         def test_columnar_plan_accepts_arrow_wide_numeric_sources(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
@@ -587,7 +580,6 @@ class TestPandasBase:
             self.assertTrue(plan['supported'])
             self.assertEqual(plan['failures'], [])
 
-        @requires_pyarrow
         def test_debug_dataframe_columnar_plan_accepts_tz_aware_timestamps(self):
             # The columnar v1 planner was originally restricted to bare
             # numpy datetime64[ns/us] for both the designated `at` column
@@ -641,7 +633,6 @@ class TestPandasBase:
                 plan['supported'],
                 f'tz-aware field column failures={plan["failures"]!r}')
 
-        @requires_pyarrow
         def test_debug_dataframe_columnar_plan_rejects_unsupported_shape(self):
             df = pd.DataFrame({
                 'tbl': ['t1'],
@@ -662,7 +653,6 @@ class TestPandasBase:
             self.assertTrue(any('cannot contain NaT' in reason
                                 for reason in reasons))
 
-        @requires_pyarrow
         def test_debug_dataframe_columnar_plan_accepts_v1_mixed_fast_paths(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
@@ -716,7 +706,6 @@ class TestPandasBase:
                   'source_code': None,
                   'reason': 'v1 requires at least one non-timestamp data column.'},))
 
-        @requires_pyarrow
         def test_debug_dataframe_columnar_plan_preserves_large_string(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
@@ -744,7 +733,6 @@ class TestPandasBase:
             self.assertEqual(plan['failures'], [])
             self.assertEqual(plan['normalizations'], [])
 
-        @requires_pyarrow
         def test_debug_dataframe_columnar_plan_preserves_large_string_category(self):
             symbols = pd.Series(
                 pa.array(
@@ -846,7 +834,6 @@ class TestPandasBase:
             self.assertEqual(result['last_populated_rows'], 2)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
-        @requires_pyarrow
         def test_bench_dataframe_plan_reuses_arrow_import_across_three_chunks(self):
             labels = [
                 'alpha', None, 'beta', 'gamma',
@@ -953,7 +940,6 @@ class TestPandasBase:
                     at='ts',
                     symbols=False)
 
-        @requires_pyarrow
         def test_bench_dataframe_plan_and_populate_mixed_fast_paths(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
@@ -1254,7 +1240,6 @@ class TestPandasBase:
                     '.*exceeds the maximum supported scale of 76.*'):
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
 
-        @requires_pyarrow
         def test_decimal_arrow_columns(self):
             if self.version < 3:
                 arr = pd.array(
@@ -1300,7 +1285,6 @@ class TestPandasBase:
                     self.assertEqual(payload, expected_payload)
                     offset = end + len(suffix)
 
-        @requires_pyarrow
         def test_u8_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1320,7 +1304,6 @@ class TestPandasBase:
                 b'tbl1 b="e"\n' +
                 b'tbl1 a=255i,b="f"\n')
 
-        @requires_pyarrow
         def test_i8_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1342,7 +1325,6 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=127i,b="g"\n')
 
-        @requires_pyarrow
         def test_u16_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1362,7 +1344,6 @@ class TestPandasBase:
                 'tbl1 b="e"\n' +
                 'tbl1 a=65535i,b="f"\n').encode('utf-8'))
 
-        @requires_pyarrow
         def test_i16_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1384,7 +1365,6 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=32767i,b="g"\n')
 
-        @requires_pyarrow
         def test_u32_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1404,7 +1384,6 @@ class TestPandasBase:
                 b'tbl1 b="e"\n' +
                 b'tbl1 a=4294967295i,b="f"\n')
 
-        @requires_pyarrow
         def test_i32_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1426,7 +1405,6 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=2147483647i,b="g"\n')
 
-        @requires_pyarrow
         def test_u64_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1456,7 +1434,6 @@ class TestPandasBase:
                     '.* serialize .* column .a. .* 4 .*9223372036854775808.*int64.*'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
-        @requires_pyarrow
         def test_i64_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1478,7 +1455,6 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=9223372036854775807i,b="g"\n')
 
-        @requires_pyarrow
         def test_f32_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1504,7 +1480,6 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(3.4028234663852886e38, self.version == 1) + b',b="h"\n' +
                 b'tbl1 b="i"\n')
 
-        @requires_pyarrow
         def test_f64_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1545,7 +1520,6 @@ class TestPandasBase:
                 b'tbl1 a=t\n' +
                 b'tbl1 a=f\n')
 
-        @requires_pyarrow
         def test_bool_arrow_col(self):
             df = pd.DataFrame({'a': pd.Series([
                     True, False, False,
@@ -1667,7 +1641,6 @@ class TestPandasBase:
                 f'tbl1 a={e(1704067203000000)},b="d"\n'.encode())
             self.assertEqual(buf, exp)
 
-        @requires_pyarrow
         def test_datetime64_tz_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -1752,7 +1725,6 @@ class TestPandasBase:
                 [f'tbl1,b=sym1 a={e(-2208970800000000000)}\n'.encode(),
                  f'tbl1,b=sym1 a={e(-2208971040000000000)}\n'.encode()])
 
-        @requires_pyarrow
         def test_datetime64_tz_arrow_micros_col(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -1837,7 +1809,6 @@ class TestPandasBase:
                 f'tbl1 b=4i {e(1704067203000000)}\n'.encode())
             self.assertEqual(buf, exp)
 
-        @requires_pyarrow
         def test_datetime64_tz_arrow_at(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -1874,7 +1845,6 @@ class TestPandasBase:
                     qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
                 _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at='a')
 
-        @requires_pyarrow
         def test_datetime64_tz_arrow_micros_at(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -2082,7 +2052,6 @@ class TestPandasBase:
                 'tbl1 a="嚜꓂"\n' +
                 'tbl1 a="💩🦞"\n').encode("utf-8"))
 
-        @requires_pyarrow
         def test_str_arrow_table(self):
             df = pd.DataFrame({
                 '../bad col name/../it does not matter...': pd.Series([
@@ -2135,7 +2104,6 @@ class TestPandasBase:
                         '/': pd.Series(['tab..1'], dtype='string[pyarrow]')}),
                     table_name_col='/', at = qi.ServerTimestamp)
 
-        @requires_pyarrow
         def test_str_arrow_symbol(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -2163,7 +2131,6 @@ class TestPandasBase:
                 'tbl1,a=嚜꓂ b=8i\n' +
                 'tbl1,a=💩🦞 b=9i\n').encode('utf-8'))
 
-        @requires_pyarrow
         def test_str_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -2334,7 +2301,6 @@ class TestPandasBase:
             self._test_cat_symbol(30)
             self._test_cat_symbol(127)
 
-        @requires_pyarrow
         def test_cat_large_string_symbol(self):
             df = pd.DataFrame({
                 'a': pd.Series(
@@ -2434,7 +2400,6 @@ class TestPandasBase:
                     qi.IngressError, "Bad column 'a': .*not.*contiguous"):
                 _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
 
-        @requires_pyarrow
         def test_serializing_in_chunks(self):
             df = pd.DataFrame({
                 'a': pd.Series(np.arange(30), dtype='int64'),
@@ -2462,7 +2427,6 @@ class TestPandasBase:
                     sender.dataframe(df, table_name='test_df', at=qi.ServerTimestamp)
                     sender.flush()
 
-        @requires_pyarrow
         def test_arrow_chunked_array(self):
             # We build a table with chunked arrow arrays as columns.
             chunks_a = [
@@ -2504,7 +2468,6 @@ class TestPandasBase:
             pandarrow_b = pd.array(chunked_b, dtype='int32[pyarrow]')
             df = pd.DataFrame({'a': pandarrow_a, 'b': pandarrow_b})
 
-        @requires_pyarrow
         @unittest.skipIf(not fastparquet, 'fastparquet not installed')
         @with_tmp_dir
         def test_parquet_roundtrip(self, tmpdir):
@@ -2639,7 +2602,6 @@ class TestPandasBase:
                 b'tbl1 x=3i,ts1=1675439130000000t ' + fdtm(1675439130000000))
             self.assertEqual(exp, act)
                 
-        @requires_pyarrow
         def test_arrow_micros_col(self):
             df = pd.DataFrame({
                 'x': [1, 2, 3],
@@ -2680,7 +2642,6 @@ class TestPandasBase:
                 b'tbl1 x=3i,ts1=1704067202111111t\n')
             self.assertEqual(exp, act)
 
-        @requires_pyarrow
         def test_arrow_types(self):
             df = pd.DataFrame({
                 "ts": pd.Series(
@@ -2797,7 +2758,6 @@ class TestPandasBase:
             act = _dataframe(self.version, df, table_name='tbl1', at='ts')
             self.assertEqual(act, exp)
 
-        @requires_pyarrow
         def test_arrow_strings_as_symbols(self):
             df = pd.DataFrame({
                 "sym_large": pd.Series(

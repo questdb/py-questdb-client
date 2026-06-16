@@ -70,7 +70,7 @@ from test_client_dataframe_fuzz import (
 )
 from test_dataframe_leaks import TestCategoricalArrowLeak
 
-if pd is not None:
+if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV1
     from test_dataframe import TestPandasProtocolVersionV2
     from test_dataframe import TestPandasProtocolVersionV3
@@ -209,6 +209,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             client.dataframe([], table_name='tbl', at=qi.ServerTimestamp)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_client_dataframe_uses_pooled_qwp_websocket_connection(self):
         df = pd.DataFrame({
             'ts': pd.Series([
@@ -360,6 +361,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['qwp1_frames'], 4)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_real_benchmark_paths_use_qwp_websocket_ack_flow(self):
         from benchmark_pandas_columnar import (
             make_numeric_core,

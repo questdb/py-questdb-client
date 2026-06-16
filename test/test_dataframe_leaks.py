@@ -31,6 +31,7 @@ def _rss():
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
+@unittest.skipUnless(pa is not None, 'pyarrow not installed')
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
 class TestCategoricalArrowLeak(unittest.TestCase):
     """Guards the hand-built dictionary ``ArrowArray``/``ArrowSchema`` for
