@@ -56,9 +56,7 @@ Adds :meth:`Client.dataframe`, ingesting pandas / polars / pyarrow and
 any Arrow C Data Interface object over QWP/WebSocket. A
 ``schema_overrides`` keyword reclassifies columns as ``symbol``,
 ``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
-('geohash', 20)}``). On NumPy-backed pandas frames, ``ipv4`` / ``char``
-/ ``geohash`` overrides are applied by the legacy planner, so this path
-needs no pyarrow.
+('geohash', 20)}``).
 
 Errors
 ******

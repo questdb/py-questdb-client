@@ -29,8 +29,7 @@ email = "adam@questdb.com"
 [project.optional-dependencies]
 publish = ["twine", "wheel"]
 ci = ["cibuildwheel"]
-dataframe = ["pandas", "numpy"]
-pyarrow = ["pyarrow"]
+dataframe = ["pandas", "pyarrow", "numpy"]
 polars = ["polars"]
 
 [project.urls]

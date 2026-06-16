@@ -801,8 +801,7 @@ cdef extern from "questdb/ingress/column_sender.h":
     column_sender_arrow_import* column_sender_arrow_import_new(
         ArrowArray* array,
         const ArrowSchema* schema,
-        int32_t override_kind,
-        uint32_t override_arg,
+        cbool force_not_symbol,
         line_sender_error** err_out
         ) noexcept nogil
 
