@@ -49,6 +49,17 @@ QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
 PyCapsule protocol (``__arrow_c_stream__``) — the latter without
 requiring pyarrow.
 
+Columnar DataFrame Ingestion
+****************************
+
+Adds :meth:`Client.dataframe`, ingesting pandas / polars / pyarrow and
+any Arrow C Data Interface object over QWP/WebSocket. A
+``schema_overrides`` keyword reclassifies columns as ``symbol``,
+``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
+('geohash', 20)}``). On NumPy-backed pandas frames, ``ipv4`` / ``char``
+/ ``geohash`` overrides are applied by the legacy planner, so this path
+needs no pyarrow.
+
 Errors
 ******
 

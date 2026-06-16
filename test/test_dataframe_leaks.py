@@ -1,43 +1,112 @@
-import patch_path
-patch_path.patch()
+import sys
+sys.dont_write_bytecode = True
+import gc
+import unittest
 
-import pandas as pd
+import patch_path
+
 import questdb.ingress as qi
 
-import os, psutil
-process = psutil.Process(os.getpid())
+try:
+    import numpy as np
+    import pandas as pd
+except ImportError:
+    np = None
+    pd = None
 
-def get_rss():
-    return process.memory_info().rss 
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
+
+try:
+    import psutil
+    _PROCESS = psutil.Process()
+except ImportError:
+    psutil = None
 
 
-def serialize_and_cleanup():
-    # qi.Buffer(protocol_version=2).row(
-    #     'table_name',
-    #     symbols={'x': 'a', 'y': 'b'},
-    #     columns={'a': 1, 'b': 2, 'c': 3})
-    df = pd.DataFrame({
-        'a': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-        'b': [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
-        'c': [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]})
-    qi.Buffer(protocol_version=2).dataframe(df, table_name='test', at=qi.ServerTimestamp)
+def _rss():
+    return _PROCESS.memory_info().rss
 
 
-def main():
-    warmup_count = 0
-    for n in range(1000000):
-        if n % 1000 == 0:
-            print(f'[iter: {n:09}, RSS: {get_rss():010}]')
-        if n > warmup_count:
-            before = get_rss()
-        serialize_and_cleanup()
-        if n > warmup_count:
-            after = get_rss()
-            if after != before:
-                msg = f'RSS changed from {before} to {after} after {n} iters'
-                print(msg)
+@unittest.skipUnless(pd is not None, 'pandas not installed')
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestCategoricalArrowLeak(unittest.TestCase):
+    """Guards the hand-built dictionary ``ArrowArray``/``ArrowSchema`` for
+    pandas Categorical columns (``_dataframe_category_series_as_arrow``):
+    every malloc'd buffer must be freed by its ``release`` callback on both
+    the row path (``Buffer.dataframe`` -> ``col_t_release``) and the columnar
+    path (``Client.dataframe`` -> Rust import -> ``arrow_import_free``)."""
+
+    ROWS = 4096
+
+    def _cat(self, n_cats, code_dtype, null_step=0, large_string=False):
+        codes = np.random.randint(0, n_cats, self.ROWS).astype(code_dtype)
+        if null_step:
+            codes[::null_step] = -1
+        categories = [f'category_value_{i:05}' for i in range(n_cats)]
+        if large_string:
+            categories = pd.array(
+                categories, dtype=pd.ArrowDtype(pa.large_string()))
+        return pd.Series(pd.Categorical.from_codes(
+            codes, categories=pd.Index(categories)))
+
+    def _frames(self):
+        ts = pd.Series(
+            pd.to_datetime(np.arange(self.ROWS), unit='s'))
+        v = pd.Series(np.arange(self.ROWS, dtype=np.int64))
+        frames = [
+            pd.DataFrame({'ts': ts, 'sym': self._cat(50, np.int8), 'v': v}),
+            pd.DataFrame({'ts': ts, 'sym': self._cat(50, np.int8, null_step=7),
+                          'v': v}),
+            pd.DataFrame({'ts': ts, 'sym': self._cat(300, np.int16,
+                          null_step=11), 'v': v}),
+        ]
+        if pa is not None:
+            frames.append(pd.DataFrame({
+                'ts': ts, 'sym': self._cat(40, np.int8, large_string=True),
+                'v': v}))
+        return frames
+
+    def _assert_stable(self, work, warmup, measure):
+        for _ in range(warmup):
+            work()
+        gc.collect()
+        before = _rss()
+        for _ in range(measure):
+            work()
+        gc.collect()
+        growth = _rss() - before
+        self.assertLess(
+            growth, 8 * 1024 * 1024,
+            f'RSS grew by {growth} bytes over {measure} iterations; '
+            'a native buffer is likely leaked.')
+
+    def test_row_path_no_leak(self):
+        frames = self._frames()
+
+        def work():
+            for df in frames:
+                qi.Buffer.ilp(protocol_version=2).dataframe(
+                    df, table_name='t', at=qi.ServerTimestamp)
+
+        self._assert_stable(work, warmup=200, measure=4000)
+
+    def test_columnar_path_no_leak(self):
+        from qwp_ws_ack_server import QwpAckServer
+        frames = self._frames()
+        with QwpAckServer() as server:
+            conf = (f'qwpws::addr=127.0.0.1:{server.port};'
+                    'pool_size=1;pool_max=1;pool_reap=manual;')
+            with qi.Client.from_conf(conf) as client:
+                def work():
+                    for df in frames:
+                        client.dataframe(
+                            df, table_name='t', at='ts', symbols='auto')
+
+                self._assert_stable(work, warmup=50, measure=800)
 
 
 if __name__ == '__main__':
-    main()
-    
+    unittest.main()

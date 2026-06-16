@@ -3727,6 +3727,85 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got.column('v').type, pa.int16())
         self.assertEqual(got.column('v').to_pylist(), [0, 1, 255])
 
+    # ---------- manual-path schema_overrides (pure NumPy, no pyarrow) ----------
+
+    def _numpy_df(self, value_col, values):
+        """A pure NumPy-backed DataFrame (numpy datetime64 designated
+        timestamp + one numpy value column). Pure-numpy input forces
+        `Client.dataframe` onto the manual columnar planner, the path
+        that applies ipv4 / char / geohash schema_overrides."""
+        n = len(values)
+        base = np.datetime64('2025-01-01T00:00:00', 'ns')
+        ts = np.array(
+            [base + np.timedelta64(i, 's') for i in range(n)],
+            dtype='datetime64[ns]')
+        return pd.DataFrame({'ts': pd.Series(ts),
+                             value_col: pd.Series(values)})
+
+    def test_schema_overrides_ipv4_manual_round_trip(self):
+        """uint32 numpy column + ``schema_overrides={'v': 'ipv4'}`` lands in
+        an IPV4 column through the manual planner; the 32-bit value is
+        preserved (IPV4 egresses as uint32)."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v IPV4')
+        values = np.array([0x0A000001, 0xC0A8010A], dtype='uint32')
+        df = self._numpy_df('v', values)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(
+                df, table_name=table, at='ts',
+                schema_overrides={'v': 'ipv4'})
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.uint32())
+        self.assertEqual(
+            got.column('v').to_pylist(), [0x0A000001, 0xC0A8010A])
+
+    def test_schema_overrides_char_manual_round_trip(self):
+        """uint16 numpy column + ``schema_overrides={'v': 'char'}`` lands in
+        a CHAR column; CHAR egresses as the uint16 code unit."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v CHAR')
+        values = np.array([ord('A'), ord('Z'), ord('q')], dtype='uint16')
+        df = self._numpy_df('v', values)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(
+                df, table_name=table, at='ts',
+                schema_overrides={'v': 'char'})
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.uint16())
+        self.assertEqual(
+            got.column('v').to_pylist(), [ord('A'), ord('Z'), ord('q')])
+
+    def test_schema_overrides_geohash_manual_round_trip(self):
+        """int32 numpy column + ``schema_overrides={'v': ('geohash', 20)}``
+        lands in a GEOHASH(20b) column. 20 bits stores as INT, so egress is
+        int32 and the bit pattern round-trips for values that fit 20 bits."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v GEOHASH(20b)')
+        values = np.array([12345, 67890], dtype='int32')
+        df = self._numpy_df('v', values)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(
+                df, table_name=table, at='ts',
+                schema_overrides={'v': ('geohash', 20)})
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int32())
+        self.assertEqual(got.column('v').to_pylist(), [12345, 67890])
+
 
 if __name__ == '__main__':
     unittest.main()

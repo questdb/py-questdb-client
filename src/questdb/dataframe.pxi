@@ -581,6 +581,13 @@ cdef struct col_setup_t:
     meta_target_t meta_target
     col_target_t target
     bint large_string_cast_to_utf8
+    # schema_overrides reclassification for the manual columnar path. When
+    # `has_override` is set, the emit step reclassifies a numeric column as
+    # ipv4 / char / geohash via `override_kind` (a
+    # `column_sender_arrow_override_kind`) and `override_arg` (geohash bits).
+    bint has_override
+    int32_t override_kind
+    uint32_t override_arg
 
 
 cdef struct col_t:
@@ -1020,6 +1027,119 @@ cdef void_int _dataframe_resolve_symbols(
             col.setup.meta_target = meta_target_t.meta_target_symbol
 
 
+cdef set _IPV4_OVERRIDE_SOURCES = {
+    col_source_t.col_source_u32_numpy,
+    col_source_t.col_source_u32_arrow,
+}
+
+cdef set _CHAR_OVERRIDE_SOURCES = {
+    col_source_t.col_source_u16_numpy,
+    col_source_t.col_source_u16_arrow,
+}
+
+cdef set _GEOHASH_OVERRIDE_SOURCES = {
+    col_source_t.col_source_i8_numpy,
+    col_source_t.col_source_i8_arrow,
+    col_source_t.col_source_i16_numpy,
+    col_source_t.col_source_i16_arrow,
+    col_source_t.col_source_i32_numpy,
+    col_source_t.col_source_i32_arrow,
+    col_source_t.col_source_i64_numpy,
+    col_source_t.col_source_i64_arrow,
+}
+
+# Arrow-backed override sources defer to the Rust Arrow import override; the
+# rest are contiguous NumPy buffers reinterpreted through a dedicated dtype.
+cdef set _ARROW_OVERRIDE_SOURCES = {
+    col_source_t.col_source_u32_arrow,
+    col_source_t.col_source_u16_arrow,
+    col_source_t.col_source_i8_arrow,
+    col_source_t.col_source_i16_arrow,
+    col_source_t.col_source_i32_arrow,
+    col_source_t.col_source_i64_arrow,
+}
+
+
+cdef int _geohash_override_max_bits(col_source_t source) noexcept:
+    """The widest geohash a signed-int source can hold, matching the Rust
+    `validate_geohash_bits` caps (QuestDB tops out at 60 bits)."""
+    if source in (col_source_t.col_source_i8_numpy,
+                  col_source_t.col_source_i8_arrow):
+        return 8
+    if source in (col_source_t.col_source_i16_numpy,
+                  col_source_t.col_source_i16_arrow):
+        return 16
+    if source in (col_source_t.col_source_i32_numpy,
+                  col_source_t.col_source_i32_arrow):
+        return 32
+    return 60
+
+
+cdef void_int _dataframe_apply_schema_overrides(
+        object df,
+        col_t_arr* cols,
+        ssize_t table_name_col,
+        ssize_t at_col,
+        object validated_overrides) except -1:
+    """Apply ipv4 / char / geohash schema_overrides to numeric columns on the
+    manual columnar path; the emit step reclassifies them via the column-QWP
+    numpy / Arrow override. `symbol` overrides are routed through the capsule
+    path (see `_dataframe_client_try_capsule_path`) and ignored here."""
+    cdef size_t col_index = 0
+    cdef object name_bytes
+    cdef int kind_int
+    cdef int arg_int
+    cdef str name
+    cdef col_t* col
+    cdef col_source_t source
+    if validated_overrides is None:
+        return 0
+    for name_bytes, kind_int, arg_int in validated_overrides:
+        if kind_int == <int>column_sender_arrow_override_symbol:
+            continue
+        name = name_bytes.decode('utf-8')
+        _dataframe_get_loc(df, name, 'schema_overrides', &col_index)
+        if (table_name_col >= 0) and (col_index == <size_t>table_name_col):
+            raise ValueError(
+                f'Bad argument `schema_overrides`: cannot override the '
+                f'table_name column {name!r}.')
+        if (at_col >= 0) and (col_index == <size_t>at_col):
+            raise ValueError(
+                f'Bad argument `schema_overrides`: cannot override the '
+                f'designated timestamp column {name!r}.')
+        col = &cols.d[col_index]
+        source = col.setup.source
+        if kind_int == <int>column_sender_arrow_override_ipv4:
+            if source not in _IPV4_OVERRIDE_SOURCES:
+                raise ValueError(
+                    f'Bad argument `schema_overrides`: {name!r} ipv4 '
+                    f'requires a uint32 column.')
+        elif kind_int == <int>column_sender_arrow_override_char:
+            if source not in _CHAR_OVERRIDE_SOURCES:
+                raise ValueError(
+                    f'Bad argument `schema_overrides`: {name!r} char '
+                    f'requires a uint16 column.')
+        elif kind_int == <int>column_sender_arrow_override_geohash:
+            if source not in _GEOHASH_OVERRIDE_SOURCES:
+                raise ValueError(
+                    f'Bad argument `schema_overrides`: {name!r} geohash '
+                    f'requires a signed integer column.')
+            if arg_int > _geohash_override_max_bits(source):
+                raise ValueError(
+                    f'Bad argument `schema_overrides`: {name!r} geohash bits '
+                    f'{arg_int} exceed the '
+                    f'{_geohash_override_max_bits(source)}-bit capacity of '
+                    f'its column.')
+        else:
+            raise ValueError(
+                f'Bad argument `schema_overrides`: {name!r} has an '
+                f'unsupported override kind for the columnar path.')
+        col.setup.has_override = True
+        col.setup.override_kind = kind_int
+        col.setup.override_arg = <uint32_t>arg_int
+    return 0
+
+
 cdef void_int _dataframe_get_loc(
         object df, str col_name, str arg_name,
         size_t* col_index_out) except -1:
@@ -1249,35 +1369,247 @@ cdef void_int _dataframe_string_series_as_arrow(
         col)
 
 
+cdef void _dataframe_cat_dict_array_release(ArrowArray* arr) noexcept nogil:
+    if arr.buffers != NULL:
+        free(<void*>arr.buffers[1])
+        free(<void*>arr.buffers[2])
+        free(arr.buffers)
+        arr.buffers = NULL
+    arr.release = NULL
+
+
+cdef void _dataframe_cat_array_release(ArrowArray* arr) noexcept:
+    if arr.buffers != NULL:
+        free(<void*>arr.buffers[0])
+        free(<void*>arr.buffers[1])
+        free(arr.buffers)
+        arr.buffers = NULL
+    if arr.dictionary != NULL:
+        if arr.dictionary.release != NULL:
+            arr.dictionary.release(arr.dictionary)
+        free(arr.dictionary)
+        arr.dictionary = NULL
+    arr.release = NULL
+
+
+cdef void _dataframe_cat_dict_schema_release(ArrowSchema* schema) noexcept nogil:
+    schema.release = NULL
+
+
+cdef void _dataframe_cat_schema_release(ArrowSchema* schema) noexcept:
+    if schema.dictionary != NULL:
+        if schema.dictionary.release != NULL:
+            schema.dictionary.release(schema.dictionary)
+        free(schema.dictionary)
+        schema.dictionary = NULL
+    schema.release = NULL
+
+
 cdef void_int _dataframe_category_series_as_arrow(
         PandasCol pandas_col, col_t* col) except -1:
-    cdef const char* format
-    cdef list chunks = _dataframe_series_to_arrow_chunks(pandas_col)
+    cdef object series = pandas_col.series
+    cdef object cats = series.cat.categories
+    cdef object cat_dtype = cats.dtype
+    cdef object cat_list
+    cdef object cat
+    cdef object codes_np
+    cdef Py_ssize_t n_cats
+    cdef Py_ssize_t n_rows = 0
+    cdef Py_buffer codes_buf
+    cdef bint codes_buf_set = False
+    cdef int32_t* dict_offsets = NULL
+    cdef uint8_t* dict_data = NULL
+    cdef void* codes_out = NULL
+    cdef uint8_t* validity = NULL
+    cdef const void** parent_buffers = NULL
+    cdef const void** child_buffers = NULL
+    cdef ArrowArray* child_array = NULL
+    cdef ArrowSchema* child_schema = NULL
+    cdef ArrowArray* chunk
+    cdef ArrowSchema* schema
+    cdef int64_t total = 0
+    cdef int64_t null_count = 0
+    cdef Py_ssize_t clen = 0
+    cdef Py_ssize_t i
+    cdef const char* cbuf
+    cdef size_t itemsize
+    cdef size_t validity_bytes
+    cdef const char* index_format
+    cdef int8_t* codes8
+    cdef int16_t* codes16
+    cdef int32_t* codes32
+    cdef int8_t* out8
+    cdef int16_t* out16
+    cdef int32_t* out32
+    cdef int64_t code
 
-    _dataframe_export_arrow_chunks(chunks, col)
-
-    format = col.setup.arrow_schema.format
-    if strncmp(format, _ARROW_FMT_INT8, 1) == 0:
-        col.setup.source = col_source_t.col_source_str_i8_cat
-    elif strncmp(format, _ARROW_FMT_INT16, 1) == 0:
-        col.setup.source = col_source_t.col_source_str_i16_cat
-    elif strncmp(format, _ARROW_FMT_INT32, 1) == 0:
-        col.setup.source = col_source_t.col_source_str_i32_cat
-    else:
+    if not _PANDAS.api.types.is_string_dtype(cat_dtype):
         raise IngressError(
             IngressErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: ' +
-            'Unsupported arrow category index type. ' +
-            f'Got {(<bytes>format).decode("utf-8")!r}.')
+            f'Bad column {pandas_col.name!r}: Expected a category of strings, '
+            f'got a category of {cat_dtype}.')
 
-    format = col.setup.arrow_schema.dictionary.format
-    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0 and
-            strncmp(format, _ARROW_FMT_LRG_UTF8_STRING, 1) != 0):
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: ' +
-            'Expected a category of strings, ' +
-            f'got a category of {pandas_col.series.dtype.categories.dtype}.')
+    cat_list = list(cats)
+    n_cats = len(cat_list)
+    codes_np = series.cat.codes.to_numpy()
+
+    try:
+        dict_offsets = <int32_t*>malloc(<size_t>(n_cats + 1) * sizeof(int32_t))
+        if dict_offsets == NULL:
+            raise MemoryError()
+        dict_offsets[0] = 0
+        for i in range(n_cats):
+            cat = cat_list[i]
+            cbuf = PyUnicode_AsUTF8AndSize(<PyObject*>cat, &clen)
+            total += clen
+            if total > <int64_t>2147483647:
+                raise IngressError(
+                    IngressErrorCode.BadDataFrame,
+                    f'Bad column {pandas_col.name!r}: categorical dictionary '
+                    'exceeds the Arrow UTF-8 2 GiB offset limit.')
+            dict_offsets[i + 1] = <int32_t>total
+        dict_data = <uint8_t*>malloc(<size_t>total if total > 0 else 1)
+        if dict_data == NULL:
+            raise MemoryError()
+        for i in range(n_cats):
+            cat = cat_list[i]
+            cbuf = PyUnicode_AsUTF8AndSize(<PyObject*>cat, &clen)
+            if clen > 0:
+                memcpy(dict_data + dict_offsets[i], cbuf, <size_t>clen)
+
+        PyObject_GetBuffer(codes_np, &codes_buf, PyBUF_SIMPLE)
+        codes_buf_set = True
+        itemsize = <size_t>codes_buf.itemsize
+        n_rows = codes_buf.len // <Py_ssize_t>itemsize
+        if itemsize == 1:
+            index_format = _ARROW_FMT_INT8
+            col.setup.source = col_source_t.col_source_str_i8_cat
+        elif itemsize == 2:
+            index_format = _ARROW_FMT_INT16
+            col.setup.source = col_source_t.col_source_str_i16_cat
+        elif itemsize == 4:
+            index_format = _ARROW_FMT_INT32
+            col.setup.source = col_source_t.col_source_str_i32_cat
+        else:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                f'Bad column {pandas_col.name!r}: unsupported categorical '
+                f'index width {itemsize}.')
+
+        codes_out = malloc(itemsize * <size_t>n_rows if n_rows > 0 else 1)
+        if codes_out == NULL:
+            raise MemoryError()
+        validity_bytes = (<size_t>n_rows + 7) // 8
+        if validity_bytes > 0:
+            validity = <uint8_t*>calloc(validity_bytes, 1)
+            if validity == NULL:
+                raise MemoryError()
+
+        if itemsize == 1:
+            codes8 = <int8_t*>codes_buf.buf
+            out8 = <int8_t*>codes_out
+            for i in range(n_rows):
+                code = codes8[i]
+                if code < 0:
+                    out8[i] = 0
+                    null_count += 1
+                else:
+                    out8[i] = <int8_t>code
+                    validity[i >> 3] |= <uint8_t>(1 << (i & 7))
+        elif itemsize == 2:
+            codes16 = <int16_t*>codes_buf.buf
+            out16 = <int16_t*>codes_out
+            for i in range(n_rows):
+                code = codes16[i]
+                if code < 0:
+                    out16[i] = 0
+                    null_count += 1
+                else:
+                    out16[i] = <int16_t>code
+                    validity[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            codes32 = <int32_t*>codes_buf.buf
+            out32 = <int32_t*>codes_out
+            for i in range(n_rows):
+                code = codes32[i]
+                if code < 0:
+                    out32[i] = 0
+                    null_count += 1
+                else:
+                    out32[i] = <int32_t>code
+                    validity[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+        PyBuffer_Release(&codes_buf)
+        codes_buf_set = False
+
+        if null_count == 0 and validity != NULL:
+            free(validity)
+            validity = NULL
+
+        child_buffers = <const void**>calloc(3, sizeof(const void*))
+        if child_buffers == NULL:
+            raise MemoryError()
+        parent_buffers = <const void**>calloc(2, sizeof(const void*))
+        if parent_buffers == NULL:
+            raise MemoryError()
+        child_array = <ArrowArray*>calloc(1, sizeof(ArrowArray))
+        if child_array == NULL:
+            raise MemoryError()
+        child_schema = <ArrowSchema*>calloc(1, sizeof(ArrowSchema))
+        if child_schema == NULL:
+            raise MemoryError()
+
+        _dataframe_alloc_chunks(1, col)
+        chunk = &col.setup.chunks.chunks[0]
+        schema = &col.setup.arrow_schema
+
+        child_buffers[1] = <const void*>dict_offsets
+        child_buffers[2] = <const void*>dict_data
+        child_array.length = n_cats
+        child_array.n_buffers = 3
+        child_array.buffers = child_buffers
+        child_array.release = _dataframe_cat_dict_array_release
+
+        parent_buffers[0] = <const void*>validity
+        parent_buffers[1] = <const void*>codes_out
+        chunk.length = n_rows
+        chunk.null_count = null_count
+        chunk.n_buffers = 2
+        chunk.buffers = parent_buffers
+        chunk.dictionary = child_array
+        chunk.release = _dataframe_cat_array_release
+
+        child_schema.format = _ARROW_FMT_UTF8_STRING
+        child_schema.flags = ARROW_FLAG_NULLABLE
+        child_schema.release = _dataframe_cat_dict_schema_release
+
+        schema.format = index_format
+        schema.flags = ARROW_FLAG_NULLABLE
+        schema.dictionary = child_schema
+        schema.release = _dataframe_cat_schema_release
+
+        dict_offsets = NULL
+        dict_data = NULL
+        codes_out = NULL
+        validity = NULL
+        child_buffers = NULL
+        parent_buffers = NULL
+        child_array = NULL
+        child_schema = NULL
+    except:
+        if codes_buf_set:
+            PyBuffer_Release(&codes_buf)
+        free(dict_offsets)
+        free(dict_data)
+        free(codes_out)
+        free(validity)
+        free(child_buffers)
+        free(parent_buffers)
+        free(child_array)
+        free(child_schema)
+        raise
+
+    return 0
 
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
     cdef bint is_decimal_col = False
@@ -1666,7 +1998,8 @@ cdef void_int _dataframe_resolve_args(
         int64_t* at_value_out,
         col_t_arr* cols,
         bint* any_cols_need_gil_out,
-        tuple field_targets) except -1:
+        tuple field_targets,
+        object validated_overrides=None) except -1:
     cdef ssize_t name_col
     cdef ssize_t at_col
 
@@ -1687,6 +2020,8 @@ cdef void_int _dataframe_resolve_args(
     _dataframe_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
     _dataframe_resolve_cols_target_name_and_dc(
         b, pandas_cols, cols, field_targets)
+    _dataframe_apply_schema_overrides(
+        df, cols, name_col, at_col, validated_overrides)
     qsort(cols.d, col_count, sizeof(col_t), _dataframe_compare_cols)
 
 
@@ -1698,7 +2033,8 @@ cdef void_int _dataframe_plan_build(
         object symbols,
         object at,
         dataframe_plan_t* plan,
-        tuple field_targets) except -1:
+        tuple field_targets,
+        object validated_overrides=None) except -1:
     _dataframe_may_import_deps()
     _dataframe_check_is_dataframe(df)
     plan.row_count = len(df)
@@ -1721,7 +2057,8 @@ cdef void_int _dataframe_plan_build(
         &plan.at_value,
         &plan.cols,
         &plan.any_cols_need_gil,
-        field_targets)
+        field_targets,
+        validated_overrides)
 
     # Headers and table names stored in `b` are borrowed by the plan.
     # Serialization rewinds to this point for every row without dropping

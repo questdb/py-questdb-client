@@ -68,6 +68,7 @@ from test_client_dataframe_fuzz import (
     TestClientDataframeFuzz,
     TestClientDataframeRoundTrip,
 )
+from test_dataframe_leaks import TestCategoricalArrowLeak
 
 if pd is not None:
     from test_dataframe import TestPandasProtocolVersionV1

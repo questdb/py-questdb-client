@@ -1300,6 +1300,7 @@ class TestPandasBase:
                     self.assertEqual(payload, expected_payload)
                     offset = end + len(suffix)
 
+        @requires_pyarrow
         def test_u8_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1319,6 +1320,7 @@ class TestPandasBase:
                 b'tbl1 b="e"\n' +
                 b'tbl1 a=255i,b="f"\n')
 
+        @requires_pyarrow
         def test_i8_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1340,6 +1342,7 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=127i,b="g"\n')
 
+        @requires_pyarrow
         def test_u16_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1359,6 +1362,7 @@ class TestPandasBase:
                 'tbl1 b="e"\n' +
                 'tbl1 a=65535i,b="f"\n').encode('utf-8'))
 
+        @requires_pyarrow
         def test_i16_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1380,6 +1384,7 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=32767i,b="g"\n')
 
+        @requires_pyarrow
         def test_u32_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1399,6 +1404,7 @@ class TestPandasBase:
                 b'tbl1 b="e"\n' +
                 b'tbl1 a=4294967295i,b="f"\n')
 
+        @requires_pyarrow
         def test_i32_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1420,6 +1426,7 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=2147483647i,b="g"\n')
 
+        @requires_pyarrow
         def test_u64_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1449,6 +1456,7 @@ class TestPandasBase:
                     '.* serialize .* column .a. .* 4 .*9223372036854775808.*int64.*'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
+        @requires_pyarrow
         def test_i64_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1470,6 +1478,7 @@ class TestPandasBase:
                 b'tbl1 b="f"\n' +
                 b'tbl1 a=9223372036854775807i,b="g"\n')
 
+        @requires_pyarrow
         def test_f32_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1495,6 +1504,7 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(3.4028234663852886e38, self.version == 1) + b',b="h"\n' +
                 b'tbl1 b="i"\n')
 
+        @requires_pyarrow
         def test_f64_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.Series([
@@ -1535,6 +1545,7 @@ class TestPandasBase:
                 b'tbl1 a=t\n' +
                 b'tbl1 a=f\n')
 
+        @requires_pyarrow
         def test_bool_arrow_col(self):
             df = pd.DataFrame({'a': pd.Series([
                     True, False, False,
@@ -1656,6 +1667,7 @@ class TestPandasBase:
                 f'tbl1 a={e(1704067203000000)},b="d"\n'.encode())
             self.assertEqual(buf, exp)
 
+        @requires_pyarrow
         def test_datetime64_tz_arrow_col(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -1740,6 +1752,7 @@ class TestPandasBase:
                 [f'tbl1,b=sym1 a={e(-2208970800000000000)}\n'.encode(),
                  f'tbl1,b=sym1 a={e(-2208971040000000000)}\n'.encode()])
 
+        @requires_pyarrow
         def test_datetime64_tz_arrow_micros_col(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -1824,6 +1837,7 @@ class TestPandasBase:
                 f'tbl1 b=4i {e(1704067203000000)}\n'.encode())
             self.assertEqual(buf, exp)
 
+        @requires_pyarrow
         def test_datetime64_tz_arrow_at(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -1860,6 +1874,7 @@ class TestPandasBase:
                     qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
                 _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at='a')
 
+        @requires_pyarrow
         def test_datetime64_tz_arrow_micros_at(self):
             df = pd.DataFrame({
                 'a': pd.array([
@@ -2419,6 +2434,7 @@ class TestPandasBase:
                     qi.IngressError, "Bad column 'a': .*not.*contiguous"):
                 _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
 
+        @requires_pyarrow
         def test_serializing_in_chunks(self):
             df = pd.DataFrame({
                 'a': pd.Series(np.arange(30), dtype='int64'),

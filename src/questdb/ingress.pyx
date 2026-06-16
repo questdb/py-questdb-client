@@ -53,8 +53,8 @@ __all__ = [
 ]
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
-from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
-    INT64_MAX, INT64_MIN
+from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t, uint32_t, \
+    uintptr_t, INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
 from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan
@@ -3263,7 +3263,8 @@ cdef void_int _dataframe_columnar_call_arrow_append(
         col_t* col,
         size_t row_offset,
         size_t row_count,
-        bint force_not_symbol=False) except -1:
+        int32_t override_kind=-1,
+        uint32_t override_arg=0) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef column_sender_arrow_import* imported = col.setup.arrow_import
@@ -3272,7 +3273,8 @@ cdef void_int _dataframe_columnar_call_arrow_append(
             imported = column_sender_arrow_import_new(
                 &col.setup.chunks.chunks[0],
                 &col.setup.arrow_schema,
-                force_not_symbol,
+                override_kind,
+                override_arg,
                 &err)
         if imported != NULL:
             ok = column_sender_chunk_append_arrow_import(
@@ -3284,6 +3286,71 @@ cdef void_int _dataframe_columnar_call_arrow_append(
                 row_count,
                 &err)
     col.setup.arrow_import = imported
+    if not ok:
+        raise c_err_to_py(err)
+    return 0
+
+
+cdef void_int _dataframe_columnar_append_override(
+        column_sender_chunk* chunk,
+        col_t* col,
+        const void* data,
+        const column_sender_validity* validity_ptr,
+        size_t row_offset,
+        size_t row_count) except -1:
+    """Emit a `schema_overrides`-reclassified numeric column. Arrow-backed
+    sources defer to the Rust Arrow import override; contiguous NumPy buffers
+    are reinterpreted through a dedicated ipv4 / char / geohash dtype."""
+    cdef int32_t kind = col.setup.override_kind
+    cdef col_source_t source = col.setup.source
+    cdef line_sender_error* err = NULL
+    cdef bint ok = False
+    cdef column_sender_numpy_dtype dtype
+    cdef size_t element_size
+    cdef column_sender_numpy_extras extras
+    cdef const column_sender_numpy_extras* extras_ptr = NULL
+
+    if source in _ARROW_OVERRIDE_SOURCES:
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count, kind, col.setup.override_arg)
+        return 0
+
+    if kind == <int32_t>column_sender_arrow_override_ipv4:
+        dtype = column_sender_numpy_dtype.column_sender_numpy_u32_ipv4
+        element_size = 4
+    elif kind == <int32_t>column_sender_arrow_override_char:
+        dtype = column_sender_numpy_dtype.column_sender_numpy_u16_char
+        element_size = 2
+    elif kind == <int32_t>column_sender_arrow_override_geohash:
+        if source == col_source_t.col_source_i8_numpy:
+            dtype = column_sender_numpy_dtype.column_sender_numpy_geohash_i8
+            element_size = 1
+        elif source == col_source_t.col_source_i16_numpy:
+            dtype = column_sender_numpy_dtype.column_sender_numpy_geohash_i16
+            element_size = 2
+        elif source == col_source_t.col_source_i32_numpy:
+            dtype = column_sender_numpy_dtype.column_sender_numpy_geohash_i32
+            element_size = 4
+        else:
+            dtype = column_sender_numpy_dtype.column_sender_numpy_geohash_i64
+            element_size = 8
+        memset(&extras, 0, sizeof(column_sender_numpy_extras))
+        extras.geohash_bits = <uint8_t>col.setup.override_arg
+        extras_ptr = &extras
+    else:
+        raise RuntimeError('Unsupported columnar override kind.')
+
+    with nogil:
+        ok = column_sender_chunk_append_numpy_column(
+            chunk,
+            col.name.buf,
+            col.name.len,
+            dtype,
+            (<const uint8_t*>data) + row_offset * element_size,
+            row_count,
+            validity_ptr,
+            extras_ptr,
+            &err)
     if not ok:
         raise c_err_to_py(err)
     return 0
@@ -3311,6 +3378,11 @@ cdef void_int _dataframe_columnar_append_field(
 
     cdef column_sender_numpy_dtype numpy_dtype
     cdef size_t element_size
+
+    if col.setup.has_override:
+        _dataframe_columnar_append_override(
+            chunk, col, data, validity_ptr, row_offset, row_count)
+        return 0
 
     if col.setup.target == col_target_t.col_target_column_bool:
         if col.setup.source == col_source_t.col_source_bool_pyobj:
@@ -3556,7 +3628,8 @@ cdef void_int _dataframe_columnar_append_field(
                 col_source_t.col_source_str_i16_cat,
                 col_source_t.col_source_str_i32_cat):
             _dataframe_columnar_call_arrow_append(
-                chunk, col, row_offset, row_count, True)
+                chunk, col, row_offset, row_count,
+                <int32_t>column_sender_arrow_override_symbol, 1)
             return 0
         # Rust dispatches on the schema format string for utf8 ("u") and
         # large_utf8 ("U").
@@ -4612,6 +4685,20 @@ cdef bint _pandas_dataframe_requires_manual_planner(object df) except -1:
     return False
 
 
+cdef bint _pandas_has_arrow_backed_column(object df) except -1:
+    cdef object dtype
+    cdef object storage
+    _dataframe_may_import_deps()
+    for dtype in df.dtypes:
+        if isinstance(dtype, _PANDAS.ArrowDtype):
+            return True
+        if isinstance(dtype, _PANDAS.StringDtype):
+            storage = getattr(dtype, 'storage', None)
+            if storage == 'pyarrow':
+                return True
+    return False
+
+
 cdef bint _pandas_dataframe_is_timestamp_only_at(
         object df,
         object at) except -1:
@@ -4645,6 +4732,17 @@ cdef object _capsule_slice_rows(
     return None
 
 
+cdef bint _validated_overrides_has_symbol(object validated_overrides):
+    """True if any validated schema override is a `symbol` reclassification."""
+    cdef object item
+    if validated_overrides is None:
+        return False
+    for item in validated_overrides:
+        if item[1] == <int>column_sender_arrow_override_symbol:
+            return True
+    return False
+
+
 cdef bint _dataframe_client_try_capsule_path(
         questdb_db* db,
         object df,
@@ -4653,7 +4751,7 @@ cdef bint _dataframe_client_try_capsule_path(
         object symbols,
         object at,
         size_t max_rows_per_batch,
-        object schema_overrides) except -1:
+        object validated_overrides) except -1:
     cdef qdb_pystr_buf* b = NULL
     cdef qwpws_conn* conn = NULL
     cdef line_sender_error* err = NULL
@@ -4666,7 +4764,6 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef Py_ssize_t total_rows = 0
     cdef Py_ssize_t offset = 0
     cdef Py_ssize_t chunk_rows
-    cdef object validated_overrides
     cdef object symbol_overrides
     cdef object merged_overrides
     cdef bint can_slice = False
@@ -4684,12 +4781,18 @@ cdef bint _dataframe_client_try_capsule_path(
 
     if _pandas_dataframe_requires_manual_planner(df):
         return False
+    # Pure NumPy-backed pandas (no Arrow columns) takes the manual planner,
+    # which needs no pyarrow. ipv4 / char / geohash overrides are applied
+    # there too; a `symbol` override still routes through the capsule path
+    # (the manual columnar path has no object-string SYMBOL emitter).
+    if (_is_pandas_dataframe_object(df)
+            and not _pandas_has_arrow_backed_column(df)
+            and not _validated_overrides_has_symbol(validated_overrides)):
+        return False
     if _pandas_dataframe_is_timestamp_only_at(df, at):
         return False
     if table_name_col is not None:
         return False
-
-    validated_overrides = _validate_schema_overrides(schema_overrides)
 
     # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
     # peak memory. `LazyFrame.collect_batches()` would stream natively
@@ -4964,7 +5067,9 @@ cdef class Client:
 
         - **pandas** ``pandas.DataFrame``. NumPy-backed columns route
           through the legacy planner; pyarrow-backed columns route
-          through the Arrow C Stream capsule path below.
+          through the Arrow C Stream capsule path below. ``ipv4`` /
+          ``char`` / ``geohash`` ``schema_overrides`` on NumPy-backed
+          columns are applied by the legacy planner and need no pyarrow.
         - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
           ``LazyFrame`` is materialised via
           ``.collect(engine='streaming')`` (eager ``.collect()`` on
@@ -5026,6 +5131,7 @@ cdef class Client:
         cdef size_t rows_per_chunk
         cdef size_t row_offset
         cdef size_t chunk_rows
+        cdef object validated_overrides
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
@@ -5037,6 +5143,7 @@ cdef class Client:
                     'Client.dataframe requires `at` to name the designated '
                     'timestamp column (by name or index); scalar timestamps '
                     'are not supported on the columnar path.')
+            validated_overrides = _validate_schema_overrides(schema_overrides)
             if _dataframe_client_try_capsule_path(
                     db,
                     df,
@@ -5045,7 +5152,7 @@ cdef class Client:
                     symbols,
                     at,
                     max_rows_per_batch,
-                    schema_overrides):
+                    validated_overrides):
                 return self
 
             _dataframe_plan_build(
@@ -5056,7 +5163,8 @@ cdef class Client:
                 symbols,
                 at,
                 &plan,
-                _FIELD_TARGETS_QWP)
+                _FIELD_TARGETS_QWP,
+                validated_overrides)
             if (plan.col_count == 0) or (plan.row_count == 0):
                 return self
 
