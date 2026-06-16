@@ -782,8 +782,9 @@ class QueryResult:
         fail on its next pump with
         ``IngressErrorCode.InvalidApiCall``.
         """
-        if self._cursor_handle is not None:
-            self._cursor_handle._free()
+        cdef _CursorHandle handle = self._cursor_handle
+        if handle is not None:
+            handle._free()
         self._cursor_handle = None
         self._consumed = True
 
