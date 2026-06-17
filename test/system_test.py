@@ -74,24 +74,34 @@ class TestWithDatabase(unittest.TestCase):
         # avoids compiling QuestDB -- and its native Rust qdbr crate -- from
         # source just to exercise the client against the tip of master.
         docker_image = os.environ.get('QDB_DOCKER_IMAGE')
-        if docker_image:
-            cls.qdb_plain = DockerQuestDbFixture(
-                docker_image, auth=False, wrap_tls=True, http=True)
-            cls.qdb_plain.start()
+        try:
+            if docker_image:
+                cls.qdb_plain = DockerQuestDbFixture(
+                    docker_image, auth=False, wrap_tls=True, http=True)
+                cls.qdb_plain.start()
 
-            cls.qdb_auth = DockerQuestDbFixture(
-                docker_image, auth=True, wrap_tls=True)
-            cls.qdb_auth.start()
-        else:
-            may_install_questdb()
+                cls.qdb_auth = DockerQuestDbFixture(
+                    docker_image, auth=True, wrap_tls=True)
+                cls.qdb_auth.start()
+            else:
+                may_install_questdb()
 
-            cls.qdb_plain = QuestDbFixture(
-                QUESTDB_PLAIN_INSTALL_PATH, auth=False, wrap_tls=True, http=True)
-            cls.qdb_plain.start()
+                cls.qdb_plain = QuestDbFixture(
+                    QUESTDB_PLAIN_INSTALL_PATH, auth=False, wrap_tls=True, http=True)
+                cls.qdb_plain.start()
 
-            cls.qdb_auth = QuestDbFixture(
-                QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
-            cls.qdb_auth.start()
+                cls.qdb_auth = QuestDbFixture(
+                    QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
+                cls.qdb_auth.start()
+        except BaseException:
+            # tearDownClass is not called when setUpClass raises, so stop any
+            # fixture that already started before re-raising, rather than
+            # leaking it until the atexit handler runs.
+            if cls.qdb_auth:
+                cls.qdb_auth.stop()
+            if cls.qdb_plain:
+                cls.qdb_plain.stop()
+            raise
 
     @classmethod
     def tearDownClass(cls):
