@@ -14,7 +14,8 @@ import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from fixture import \
-    QuestDbFixture, install_questdb, install_questdb_from_repo, CA_PATH, AUTH
+    QuestDbFixture, install_questdb, install_questdb_from_repo, \
+    list_questdb_releases, CA_PATH, AUTH
 from docker_questdb import DockerQuestDbFixture
 
 
@@ -30,7 +31,6 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.2.0'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
@@ -47,12 +47,14 @@ def may_install_questdb():
         repo = pathlib.Path(os.environ['QDB_REPO_PATH'])
         install_path = install_questdb_from_repo(repo)
     else:
-        url = ('https://github.com/questdb/questdb/releases/download/' +
-            QUESTDB_VERSION +
-            '/questdb-' +
-            QUESTDB_VERSION +
-            '-no-jre-bin.tar.gz')
-        install_path = install_questdb(QUESTDB_VERSION, url)
+        # Test against the latest published QuestDB release rather than a
+        # pinned version. list_questdb_releases() resolves it from the GitHub
+        # releases API (bounded by its urlopen timeout).
+        latest = next(iter(list_questdb_releases(max_results=1)), None)
+        if latest is None:
+            raise RuntimeError('Could not resolve the latest QuestDB release.')
+        vers, url = latest
+        install_path = install_questdb(vers, url)
 
     QUESTDB_PLAIN_INSTALL_PATH = PROJ_ROOT / 'build' / 'questdb' / 'plain'
     shutil.copytree(
