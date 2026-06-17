@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import textwrap
 import atexit
+import http.client
 import urllib.request
 import urllib.error
 
@@ -102,18 +103,24 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
             run_args, text=True).strip()
         atexit.register(self.stop)
 
-        self.http_server_port = self._host_port(9000)
-        self.line_tcp_port = self._host_port(9009)
-        self._await_http_up()
+        # Tear the container (and TLS proxy) down immediately if any post-launch
+        # step fails, rather than leaking it until the atexit handler runs.
+        try:
+            self.http_server_port = self._host_port(9000)
+            self.line_tcp_port = self._host_port(9009)
+            self._await_http_up()
 
-        # Read the actual version from the running container, e.g. a
-        # `9.4.3-SNAPSHOT` nightly. Drives the test suite's feature-gating.
-        self.version = self.query_version()
+            # Read the actual version from the running container, e.g. a
+            # `9.4.3-SNAPSHOT` nightly. Drives the test suite's feature-gating.
+            self.version = self.query_version()
 
-        if self.wrap_tls:
-            self._tls_proxy = TlsProxyFixture(self.line_tcp_port)
-            self._tls_proxy.start()
-            self.tls_line_tcp_port = self._tls_proxy.listen_port
+            if self.wrap_tls:
+                self._tls_proxy = TlsProxyFixture(self.line_tcp_port)
+                self._tls_proxy.start()
+                self.tls_line_tcp_port = self._tls_proxy.listen_port
+        except BaseException:
+            self.stop()
+            raise
 
     def stop(self):
         if self._tls_proxy:
@@ -178,12 +185,14 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
             try:
                 resp = urllib.request.urlopen(req, timeout=1)
                 return resp.status == 204
-            except Exception:
+            except (OSError, http.client.HTTPException):
                 # Docker's port proxy accepts the connection before QuestDB
                 # binds its HTTP listener and then resets it, so the early
-                # polls see RemoteDisconnected/ConnectionReset as well as the
-                # plain connection-refused/timeout. Keep retrying until the
-                # container is either serving or has exited (checked above).
+                # polls see RemoteDisconnected/ConnectionReset (OSError
+                # subclasses) and occasionally a partial HTTP response, as
+                # well as plain connection-refused/timeout. urllib.error.URLError
+                # and socket.timeout are OSError subclasses too. Keep retrying
+                # until the container is serving or has exited (checked above).
                 return False
 
         try:
