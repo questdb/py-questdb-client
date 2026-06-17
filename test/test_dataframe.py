@@ -1899,12 +1899,17 @@ class TestPandasBase:
             # fastparquet doesn't roundtrip with pyarrow parquet properly.
             # It decays categories to object and UInt8 to float64.
             # We need to set up special case expected results for that.
+            # pandas 3.0 reads a string column back from parquet (via pyarrow)
+            # as the new default StringDtype rather than object ('O'); earlier
+            # pandas returns object. Derive the expected string dtype from
+            # pandas itself so the fastparquet-fallback roundtrip holds on both.
+            default_str_dtype = pd.Series(['x']).dtype
             fallback_exp_dtypes = [
-                np.dtype('O'),
+                default_str_dtype,
                 np.dtype('int16'),
                 np.dtype('float64'),
                 np.dtype('float64')]
-            fallback_df = df.astype({'s': 'object', 'b': 'float64'})
+            fallback_df = df.astype({'s': default_str_dtype, 'b': 'float64'})
 
             df_eq(df, pa2pa_df, exp_dtypes)
             if fp_wrote:
