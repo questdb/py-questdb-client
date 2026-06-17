@@ -69,12 +69,14 @@ stages:
             condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
+            timeoutInMinutes: 25
             env:
               JAVA_HOME: $(JAVA_HOME_17_X64)
           # QDB_DOCKER_IMAGE makes the integration fixture run QuestDB from the
           # Docker image rather than a locally-built jar (no host JDK needed).
           - script: python3 proj.py test 1
             displayName: "Test vs master (nightly Docker image)"
+            timeoutInMinutes: 25
             env:
               QDB_DOCKER_IMAGE: questdb/questdb:nightly
             condition: eq(variables.vsQuestDbMaster, true)

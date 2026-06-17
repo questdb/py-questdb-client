@@ -37,6 +37,12 @@ from fixture import QuestDbFixtureBase, TlsProxyFixture, AUTH_TXT, retry
 _CONTAINER_ROOT = '/var/lib/questdb'
 _AUTH_DB_NAME = 'auth.txt'
 
+# Bound every docker CLI call so a wedged daemon or registry can't hang the
+# run. The polling waits are bounded separately (retry timeout_sec below, plus
+# a urlopen timeout on every HTTP probe).
+_DOCKER_CLI_TIMEOUT = 30      # quick inspect/port/logs/rm and detached run
+_DOCKER_PULL_TIMEOUT = 600    # image pull can be hundreds of MB
+
 # Server config injected via env vars. QuestDB maps `QDB_FOO_BAR` to the config
 # key `foo.bar`. These mirror the tuning the local `QuestDbFixture` writes into
 # server.conf so committed rows become visible to the tests quickly.
@@ -73,9 +79,13 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
         if not self._container_id:
             sys.stderr.write('No QuestDB container to read logs from.\n')
             return
-        logs = subprocess.run(
-            ['docker', 'logs', self._container_id],
-            capture_output=True, text=True)
+        try:
+            logs = subprocess.run(
+                ['docker', 'logs', self._container_id],
+                capture_output=True, text=True, timeout=_DOCKER_CLI_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            sys.stderr.write('Timed out reading container logs.\n')
+            return
         sys.stderr.write(textwrap.indent(logs.stdout + logs.stderr, '    '))
         sys.stderr.write('\n\n')
 
@@ -100,7 +110,7 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
             f'Starting QuestDB container from {self._image!r} '
             f'(auth: {self.auth}, http: {self.http})\n')
         self._container_id = subprocess.check_output(
-            run_args, text=True).strip()
+            run_args, text=True, timeout=_DOCKER_CLI_TIMEOUT).strip()
         atexit.register(self.stop)
 
         # Tear the container (and TLS proxy) down immediately if any post-launch
@@ -127,8 +137,13 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
             self._tls_proxy.stop()
             self._tls_proxy = None
         if self._container_id:
-            subprocess.run(['docker', 'rm', '-f', self._container_id],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                subprocess.run(
+                    ['docker', 'rm', '-f', self._container_id],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=_DOCKER_CLI_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass
             self._container_id = None
         if self._auth_file:
             try:
@@ -147,10 +162,12 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
     def _ensure_image(self):
         present = subprocess.run(
             ['docker', 'image', 'inspect', self._image],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=_DOCKER_CLI_TIMEOUT)
         if present.returncode != 0:
             sys.stderr.write(f'Pulling QuestDB image {self._image!r}...\n')
-            subprocess.check_call(['docker', 'pull', self._image])
+            subprocess.check_call(['docker', 'pull', self._image],
+                                  timeout=_DOCKER_PULL_TIMEOUT)
 
     def _write_auth_db(self):
         fd, path = tempfile.mkstemp(prefix='qdb_auth_', suffix='.txt')
@@ -164,7 +181,7 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
     def _host_port(self, container_port):
         out = subprocess.check_output(
             ['docker', 'port', self._container_id, f'{container_port}/tcp'],
-            text=True).strip().splitlines()
+            text=True, timeout=_DOCKER_CLI_TIMEOUT).strip().splitlines()
         # e.g. '127.0.0.1:54293' -> 54293
         return int(out[0].rsplit(':', 1)[1])
 
@@ -172,7 +189,7 @@ class DockerQuestDbFixture(QuestDbFixtureBase):
         res = subprocess.run(
             ['docker', 'inspect', '-f', '{{.State.Running}}',
              self._container_id],
-            capture_output=True, text=True)
+            capture_output=True, text=True, timeout=_DOCKER_CLI_TIMEOUT)
         return res.returncode == 0 and res.stdout.strip() == 'true'
 
     def _await_http_up(self):
