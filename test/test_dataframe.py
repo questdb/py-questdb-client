@@ -923,6 +923,30 @@ class TestPandasBase:
             self.assertEqual(result['populated_rows_total'], 10)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
+        def test_bench_dataframe_plan_and_populate_binary_pyobj(self):
+            # Regression: a pandas `bytes`/object column forces the manual
+            # columnar planner, which previously rejected the binary target
+            # even though the build/populate path fully supports it.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=4, freq='s'),
+                    dtype='datetime64[ns]'),
+                'blob': pd.Series(
+                    [b'hello', b'', b'\x00\x01\x02', None],
+                    dtype='object'),
+                'seq': pd.Series(range(4), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=16384)
+
+            self.assertEqual(result['populated_rows_total'], 4)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_bench_dataframe_plan_and_populate_rejects_unsupported_shape(self):
             # Step 3 made bool/int32/etc. supported. Pick a shape that
             # remains rejected: NaT in the designated timestamp.

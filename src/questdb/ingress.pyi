@@ -966,7 +966,9 @@ class QueryResult:
         dtype_backend: Optional[str] = None,
         types_mapper: Optional[Callable[[Any], Any]] = None,
     ) -> pd.DataFrame:
-        """Read the full result into a ``pandas.DataFrame``. Requires pyarrow."""
+        """Read the full result into a ``pandas.DataFrame``. With no arguments
+        the result is materialised via numpy (pyarrow-free); passing
+        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
 
     def to_polars(self) -> Any:
         """Read the full result into a ``polars.DataFrame``. Requires polars
@@ -975,8 +977,15 @@ class QueryResult:
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""
 
-    def iter_pandas(self, **to_pandas_kwargs: Any) -> Iterator[pd.DataFrame]:
-        """Iterate result batches as ``pandas.DataFrame``."""
+    def iter_pandas(
+        self,
+        *,
+        dtype_backend: Optional[str] = None,
+        types_mapper: Optional[Callable[[Any], Any]] = None,
+    ) -> Iterator[pd.DataFrame]:
+        """Iterate result batches as ``pandas.DataFrame``. With no arguments
+        the batches are materialised via numpy (pyarrow-free); passing
+        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
 
     def cancel(self) -> None:
         """Ask the server to stop streaming. Idempotent."""

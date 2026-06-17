@@ -450,6 +450,9 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
     cdef line_reader_arrow_batch_result result
     cdef const char* err_msg = NULL
     cdef size_t err_len = 0
+    cdef line_reader_error_code code
+    cdef object py_msg
+    cdef bytes full
     if prod.exhausted:
         return 0
     if prod.cursor_handle is None:
@@ -485,11 +488,22 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
             prod.cursor_handle._reader_ref._must_close = False
         return 0
     if err != NULL:
+        code = line_reader_error_get_code(err)
         err_msg = line_reader_error_msg(err, &err_len)
-        if err_msg != NULL:
-            _qs_set_error(prod, err_msg, err_len)
-        else:
-            _qs_set_error(prod, b'arrow batch fetch failed', 24)
+        try:
+            if err_msg != NULL:
+                py_msg = PyUnicode_FromStringAndSize(err_msg, <Py_ssize_t>err_len)
+            else:
+                py_msg = 'arrow batch fetch failed'
+            full = (
+                '[' + _reader_err_code_to_py(code).name + '] ' + py_msg
+            ).encode('utf-8')
+            _qs_set_error(prod, full, <size_t>len(full))
+        except:
+            if err_msg != NULL:
+                _qs_set_error(prod, err_msg, err_len)
+            else:
+                _qs_set_error(prod, b'arrow batch fetch failed', 24)
         line_reader_error_free(err)
     else:
         _qs_set_error(
@@ -823,6 +837,11 @@ cdef object _numpy_varlen_chunk(
             continue
         start = offsets[r]
         end = offsets[r + 1]
+        if end < start or end > cd.var_data_len:
+            raise IngressError(
+                IngressErrorCode.ServerFlushError,
+                'corrupt varlen offsets in column kind 0x{:02X}'.format(
+                    <int>kind))
         if end > start:
             if is_binary:
                 out[r] = PyBytes_FromStringAndSize(
@@ -873,6 +892,10 @@ cdef list _symbol_categories_from_dict(const line_reader_symbol_dict* sd):
     cdef list cats = []
     for i in range(sd.entry_count):
         e = &sd.entries[i]
+        if <uint64_t>e.offset + <uint64_t>e.length > <uint64_t>sd.heap_len:
+            raise IngressError(
+                IngressErrorCode.ServerFlushError,
+                'corrupt symbol dictionary heap offsets')
         cats.append(
             PyUnicode_FromStringAndSize(
                 <const char*>(sd.heap + e.offset), <Py_ssize_t>e.length))
@@ -887,32 +910,46 @@ cdef object _numpy_geohash_chunk(
     cdef line_reader_column_data cd
     cdef line_reader_error* err = NULL
     cdef object dtype
+    cdef size_t stride
+    cdef size_t target
     cdef Py_ssize_t nbytes
     cdef unsigned char* src
     _reader_check(
         line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
         'line_reader_batch_column_data')
-    if cd.value_stride == 1:
+    stride = cd.value_stride
+    if stride == 1:
         dtype = np.dtype(np.int8)
-    elif cd.value_stride == 2:
+        target = 1
+    elif stride == 2:
         dtype = np.dtype(np.int16)
-    elif cd.value_stride == 4:
+        target = 2
+    elif stride == 3 or stride == 4:
         dtype = np.dtype(np.int32)
-    elif cd.value_stride == 8:
+        target = 4
+    elif stride >= 5 and stride <= 8:
         dtype = np.dtype(np.int64)
+        target = 8
     else:
         raise IngressError(
             IngressErrorCode.ServerFlushError,
-            'unexpected geohash byte width {}'.format(cd.value_stride))
+            'unexpected geohash byte width {}'.format(stride))
     if row_count == 0:
         return np.empty(0, dtype=dtype)
     if cd.values == NULL:
         raise IngressError(
             IngressErrorCode.ServerFlushError,
             'geohash column has {} rows but no values buffer'.format(row_count))
-    nbytes = <Py_ssize_t>(row_count * cd.value_stride)
+    nbytes = <Py_ssize_t>(row_count * stride)
     src = <unsigned char*>cd.values
-    return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
+    if stride == target:
+        return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
+    raw = np.frombuffer(
+        (<unsigned char[:nbytes]>src), dtype=np.uint8).reshape(
+            <Py_ssize_t>row_count, <Py_ssize_t>stride)
+    wide = np.zeros((<Py_ssize_t>row_count, <Py_ssize_t>target), dtype=np.uint8)
+    wide[:, :stride] = raw
+    return wide.view(dtype).reshape(<Py_ssize_t>row_count)
 
 
 cdef object _numpy_uuid_chunk(
@@ -924,7 +961,7 @@ cdef object _numpy_uuid_chunk(
     cdef line_reader_column_data cd
     cdef line_reader_error* err = NULL
     cdef const uint8_t* validity
-    cdef const uint64_t* halves
+    cdef const uint8_t* values
     cdef size_t r
     cdef uint64_t lo
     cdef uint64_t hi
@@ -939,13 +976,13 @@ cdef object _numpy_uuid_chunk(
             IngressErrorCode.ServerFlushError,
             'uuid column has {} rows but no values buffer'.format(row_count))
     validity = cd.validity
-    halves = <const uint64_t*>cd.values
+    values = <const uint8_t*>cd.values
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             out[r] = None
             continue
-        lo = halves[2 * r]
-        hi = halves[2 * r + 1]
+        memcpy(&lo, values + r * 16, 8)
+        memcpy(&hi, values + r * 16 + 8, 8)
         out[r] = _uuid.UUID(int=((<object>hi) << 64) | (<object>lo))
     return out
 

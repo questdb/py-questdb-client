@@ -2436,6 +2436,10 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(df['lg'].dtype, np.int64)
             self.assertEqual(str(df['sym'].dtype), 'category')
 
+            self._exec(
+                f'CREATE TABLE {dst} '
+                '(ts TIMESTAMP, lg LONG, db DOUBLE, bl BOOLEAN, '
+                'vc VARCHAR, sym SYMBOL) TIMESTAMP(ts) PARTITION BY DAY WAL')
             with qi.Client.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=dst, at='ts')
             self.qdb_plain.retry_check_table(dst, min_rows=3)
@@ -2489,7 +2493,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertTrue(pd.api.types.is_float_dtype(df['db'].dtype))
             self.assertTrue(pd.isna(df['db'].iloc[1]))
             self.assertEqual(df['vc'].iloc[0], 'x')
-            self.assertIsNone(df['vc'].iloc[1])
+            self.assertTrue(pd.isna(df['vc'].iloc[1]))
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2518,6 +2522,9 @@ class TestEgressWithDatabase(unittest.TestCase):
                 df = client.query(
                     f'SELECT ts, lg FROM {src} ORDER BY ts').to_pandas()
             self.assertEqual(str(df['lg'].dtype), 'Int64')
+            self._exec(
+                f'CREATE TABLE {dst} (ts TIMESTAMP, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
             with qi.Client.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=dst, at='ts')
             self.qdb_plain.retry_check_table(dst, min_rows=3)
@@ -2569,7 +2576,7 @@ class TestEgressWithDatabase(unittest.TestCase):
 
             with qi.Client.from_conf(self._conf()) as client:
                 back = client.query(
-                    f'SELECT {cols} FROM {dst} ORDER BY ts').to_pandas()
+                    f'SELECT ip, gh, c FROM {dst}').to_pandas()
             bmeta = back.attrs['questdb']['columns']
             self.assertEqual(bmeta['ip']['kind'], 'ipv4')
             self.assertEqual(bmeta['c']['kind'], 'char')
@@ -2643,7 +2650,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(default['db'].iloc[0], 3.5)
             self.assertTrue(pd.isna(default['db'].iloc[1]))
             self.assertEqual(default['vc'].iloc[0], 'hello')
-            self.assertIsNone(default['vc'].iloc[1])
+            self.assertTrue(pd.isna(default['vc'].iloc[1]))
 
             # 3. pyarrow-backed to_pandas — pd.NA preserved.
             with qi.Client.from_conf(self._conf()) as client:

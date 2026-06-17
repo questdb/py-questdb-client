@@ -2536,7 +2536,8 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
                 col_target_t.col_target_column_long256,
-                col_target_t.col_target_column_ipv4):
+                col_target_t.col_target_column_ipv4,
+                col_target_t.col_target_column_binary):
             # Column-QWP-only targets reached via `_FIELD_TARGETS_QWP`.
             # Each currently reachable target's source-set in
             # `_TARGET_TO_SOURCES` is a singleton, so the source is
@@ -3638,6 +3639,10 @@ cdef void_int _dataframe_columnar_append_at(
         if prebuilt == NULL:
             raise RuntimeError(
                 'PyObject datetime designated TS missing pre-built buffer.')
+        if prebuilt.has_nulls:
+            raise IngressError(
+                IngressErrorCode.BadDataFrame,
+                'Designated timestamp column cannot contain nulls.')
         data = <const int64_t*>prebuilt.data
         with nogil:
             ok = column_sender_chunk_designated_timestamp_micros(
@@ -4033,6 +4038,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef PyThreadState* gs = NULL
     cdef bytes conf_bytes
     cdef bint any_flushed = False
+    cdef bint flush_attempted = False
     cdef size_t deferred_since_sync = 0
     cdef line_sender_table_name c_table_name
     cdef line_sender_column_name c_ts_column
@@ -4094,7 +4100,8 @@ def _bench_dataframe_flush_arrow_batch(
             for iteration in range(iterations):
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
-                    &c_schema, NULL, 0, &any_flushed, &deferred_since_sync)
+                    &c_schema, NULL, 0, &any_flushed, &flush_attempted,
+                    &deferred_since_sync)
             _dataframe_columnar_sync(conn)
             completed = iterations
         finally:
@@ -4263,6 +4270,7 @@ cdef void_int _capsule_consume_stream(
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
         bint* any_flushed,
+        bint* flush_attempted,
         size_t* deferred_since_sync) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
     # call (this function populates it via get_schema), reused as-is on
@@ -4300,6 +4308,7 @@ cdef void_int _capsule_consume_stream(
         if batch.release == NULL:
             break
         try:
+            flush_attempted[0] = True
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)
                 deferred_since_sync[0] = 0
@@ -4379,7 +4388,7 @@ cdef object _capsule_get_column_names(object sliceable):
     return None
 
 
-cdef bint _capsule_polars_dtype_is_string_like(object dtype):
+cdef bint _capsule_polars_dtype_is_string_like(object dtype) except -1:
     """polars: Utf8 / String / Categorical / Enum count as string-like."""
     if _POLARS is None:
         return False
@@ -4393,7 +4402,7 @@ cdef bint _capsule_polars_dtype_is_string_like(object dtype):
     return False
 
 
-cdef bint _capsule_pyarrow_type_is_string_like(object field_type):
+cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     """pyarrow: utf8 / large_utf8 / utf8_view, plus Dictionary whose
     value type is one of those."""
     if _PYARROW is None:
@@ -4779,6 +4788,7 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef PyThreadState* gs = NULL
     cdef object sliceable = None
     cdef bint any_flushed = False
+    cdef bint flush_attempted = False
     cdef size_t deferred_since_sync = 0
     cdef bint sync_attempted = False
     cdef bint force_drop_conn = False
@@ -4891,7 +4901,7 @@ cdef bint _dataframe_client_try_capsule_path(
                 _capsule_consume_stream_with_hint(
                     conn, sliceable, c_table_name, c_ts_column_ptr,
                     &c_schema, c_overrides, c_overrides_len,
-                    &any_flushed, &deferred_since_sync,
+                    &any_flushed, &flush_attempted, &deferred_since_sync,
                     max_rows_per_batch, False)
             else:
                 offset = 0
@@ -4904,14 +4914,14 @@ cdef bint _dataframe_client_try_capsule_path(
                     _capsule_consume_stream_with_hint(
                         conn, row_slice, c_table_name, c_ts_column_ptr,
                         &c_schema, c_overrides, c_overrides_len,
-                        &any_flushed, &deferred_since_sync,
+                        &any_flushed, &flush_attempted, &deferred_since_sync,
                         max_rows_per_batch, True)
                     offset += chunk_rows
             sync_attempted = True
             _dataframe_columnar_sync(conn)
         except:
             force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                conn, any_flushed, any_flushed, sync_attempted)
+                conn, any_flushed, flush_attempted, sync_attempted)
             raise
 
         return True
@@ -4939,6 +4949,7 @@ cdef void_int _capsule_consume_stream_with_hint(
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
         bint* any_flushed,
+        bint* flush_attempted,
         size_t* deferred_since_sync,
         size_t max_rows_per_batch,
         bint can_slice) except -1:
@@ -4946,7 +4957,8 @@ cdef void_int _capsule_consume_stream_with_hint(
     try:
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr, c_schema,
-            c_overrides, c_overrides_len, any_flushed, deferred_since_sync)
+            c_overrides, c_overrides_len, any_flushed, flush_attempted,
+            deferred_since_sync)
     except IngressError as exc:
         if _is_batch_too_large_error(exc):
             if can_slice:

@@ -101,6 +101,8 @@ def main(args):
 
     try_pip_install('fastparquet>=2023.10.1')
     try_pip_install('pyarrow')
+    try_pip_install('polars')
+    try_pip_install('psutil')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or

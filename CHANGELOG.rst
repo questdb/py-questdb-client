@@ -95,6 +95,28 @@ cannot be expressed on the QWP columnar path) and the
 structured :class:`QwpWsError` view on a server-side QWP/WebSocket
 rejection.
 
+Build & dependencies
+~~~~~~~~~~~~~~~~~~~~~~
+
+- The minimum supported Python is raised from 3.8 to **3.10**; Python 3.8
+  and 3.9 are no longer supported.
+- ``numpy>=1.21.0`` is now a hard runtime dependency (previously it was
+  pulled in only via the ``dataframe`` extra).
+- **pyarrow is now optional.** It is imported lazily, only when actually
+  needed (``pd.ArrowDtype`` columns, pyarrow sources, ``schema_overrides``,
+  and the ``to_arrow`` / ``iter_arrow`` / ``dtype_backend`` helpers). The
+  ``to_polars`` / ``__arrow_c_stream__`` egress paths and the default
+  ``to_pandas`` / ``iter_pandas`` work without pyarrow.
+- The ``dataframe`` extra now pins ``pandas>=1.3.5`` and
+  ``pyarrow>=10.0.1``.
+
+Deprecations
+~~~~~~~~~~~~
+
+- Direct ``Buffer(...)`` construction is deprecated and emits a
+  ``DeprecationWarning``. Use ``Buffer.ilp()``, ``Buffer.qwp()`` or
+  ``Sender.new_buffer()`` instead.
+
 4.1.0 (2025-11-28)
 ------------------
 

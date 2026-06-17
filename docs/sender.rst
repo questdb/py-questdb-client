@@ -938,8 +938,10 @@ as Arrow record batches::
             df = result.to_pandas()
 
 A :class:`QueryResult` can be materialised with ``to_arrow`` / ``to_pandas`` or
-streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas`` (all require
-pyarrow). It also implements the Arrow C stream PyCapsule protocol
+streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
+``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
+``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
+are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
 (``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
 ``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
 Each result is consumed once; call :func:`QueryResult.cancel` to ask the server

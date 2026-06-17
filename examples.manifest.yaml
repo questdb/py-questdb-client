@@ -77,3 +77,31 @@
     python3 -m pip install -U questdb
     ```
   conf: http::addr=localhost:9000;
+- name: qwpws-polars
+  lang: python
+  path: examples/polars_basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U 'questdb[dataframe]' polars
+    ```
+  conf: qwpws::addr=localhost:9000;
+- name: qwpws-pyarrow
+  lang: python
+  path: examples/pyarrow_basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U 'questdb[dataframe]'
+    ```
+  conf: qwpws::addr=localhost:9000;
