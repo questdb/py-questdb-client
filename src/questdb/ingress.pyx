@@ -3839,6 +3839,9 @@ cdef bint _dataframe_columnar_force_drop_after_error(
     # Exceptions during a dataframe publish can leave in-flight deferred
     # frames on the connection. If rows were flushed and the closing sync was
     # not attempted yet, one defensive sync can make the connection reusable.
+    # Otherwise the connection only needs dropping when the sender latched it
+    # terminal: a validation/capacity failure writes no bytes and leaves the
+    # pooled connection reusable.
     if conn == NULL:
         return False
     if not flush_attempted:
@@ -3849,7 +3852,7 @@ cdef bint _dataframe_columnar_force_drop_after_error(
             return False
         except Exception:
             pass
-    return True
+    return qwpws_conn_must_close(conn)
 
 
 cdef bint _dataframe_columnar_is_deferred_capacity_error(
