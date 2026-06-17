@@ -4982,8 +4982,10 @@ cdef class Client:
           (tz-aware accepted on Arrow-backed columns in the Rust Arrow route).
           QuestDB ``TIMESTAMP`` columns cannot contain nulls/NaT or values
           before the Unix epoch.
-        - **Decimal**: ``decimal.Decimal`` objects, ``pa.decimal{32,64,
-          128,256}``.
+        - **Decimal**: Arrow-backed ``pa.decimal{32,64,128,256}`` columns
+          (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18). Plain
+          object-dtype columns of ``decimal.Decimal`` are not accepted on the
+          columnar path; back them with an Arrow decimal type instead.
         - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
           extension type. Bytes are forwarded verbatim as **QuestDB's
           UUID wire layout** ("bytes 0..8 lo half LE, bytes 8..16 hi

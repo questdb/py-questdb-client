@@ -1164,6 +1164,34 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(float('NAN'), self.version == 1) + b'\n' +
                 b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == 1) + b'\n')
 
+        def test_datetime_pyobj_column_matches_numpy(self):
+            ts = dt.datetime(2021, 1, 1, 12, 0, 0, 123456)
+            obj_df = pd.DataFrame({'ts': pd.Series([ts], dtype=object)})
+            np_df = pd.DataFrame(
+                {'ts': pd.Series([ts]).astype('datetime64[us]')})
+            obj_buf = _dataframe(
+                self.version, obj_df, table_name='tbl', at=qi.ServerTimestamp)
+            np_buf = _dataframe(
+                self.version, np_df, table_name='tbl', at=qi.ServerTimestamp)
+            self.assertNotEqual(obj_buf, b'')
+            self.assertEqual(obj_buf, np_buf)
+
+        def test_datetime_pyobj_column_with_null_matches_numpy(self):
+            ts = dt.datetime(2021, 1, 1, 12, 0, 0)
+            obj_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b']),
+                'ts': pd.Series([ts, None], dtype=object)})
+            np_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b']),
+                'ts': pd.Series([ts, pd.NaT]).astype('datetime64[us]')})
+            self.assertEqual(
+                _dataframe(
+                    self.version, obj_df, table_name='tbl',
+                    at=qi.ServerTimestamp),
+                _dataframe(
+                    self.version, np_df, table_name='tbl',
+                    at=qi.ServerTimestamp))
+
         def test_decimal_pyobj_column(self):
             decimals = [
                 Decimal('123.45'),
