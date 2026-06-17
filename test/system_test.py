@@ -15,6 +15,7 @@ PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from fixture import \
     QuestDbFixture, install_questdb, install_questdb_from_repo, CA_PATH, AUTH
+from docker_questdb import DockerQuestDbFixture
 
 
 try:
@@ -65,18 +66,32 @@ def may_install_questdb():
 class TestWithDatabase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        may_install_questdb()
-
         cls.qdb_plain = None
         cls.qdb_auth = None
 
-        cls.qdb_plain = QuestDbFixture(
-            QUESTDB_PLAIN_INSTALL_PATH, auth=False, wrap_tls=True, http=True)
-        cls.qdb_plain.start()
+        # When QDB_DOCKER_IMAGE is set (the `vs master` CI leg), run QuestDB
+        # from a published Docker image instead of a locally-built jar. This
+        # avoids compiling QuestDB -- and its native Rust qdbr crate -- from
+        # source just to exercise the client against the tip of master.
+        docker_image = os.environ.get('QDB_DOCKER_IMAGE')
+        if docker_image:
+            cls.qdb_plain = DockerQuestDbFixture(
+                docker_image, auth=False, wrap_tls=True, http=True)
+            cls.qdb_plain.start()
 
-        cls.qdb_auth = QuestDbFixture(
-            QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
-        cls.qdb_auth.start()
+            cls.qdb_auth = DockerQuestDbFixture(
+                docker_image, auth=True, wrap_tls=True)
+            cls.qdb_auth.start()
+        else:
+            may_install_questdb()
+
+            cls.qdb_plain = QuestDbFixture(
+                QUESTDB_PLAIN_INSTALL_PATH, auth=False, wrap_tls=True, http=True)
+            cls.qdb_plain.start()
+
+            cls.qdb_auth = QuestDbFixture(
+                QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
+            cls.qdb_auth.start()
 
     @classmethod
     def tearDownClass(cls):

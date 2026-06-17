@@ -59,26 +59,24 @@ stages:
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
-          - script: |
-              git clone --depth 1 https://github.com/questdb/questdb.git
-            displayName: git clone questdb master
-            condition: eq(variables.vsQuestDbMaster, true)
-          - task: Maven@3
-            displayName: "Compile QuestDB master"
-            inputs:
-              mavenPOMFile: "questdb/pom.xml"
-              jdkVersionOption: "1.17"
-              options: "-DskipTests -Pbuild-web-console"
+          # Pull the nightly image (built from QuestDB master by QuestDB's own
+          # release pipeline) instead of cloning and compiling QuestDB from
+          # source. Compiling master now also builds QuestDB's native Rust qdbr
+          # crate (pinned nightly toolchain) and requires JDK 25; the published
+          # image already ships all of that, so the `vs master` leg just runs it.
+          - script: docker pull questdb/questdb:nightly
+            displayName: "Pull QuestDB nightly image"
             condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
               JAVA_HOME: $(JAVA_HOME_17_X64)
+          # QDB_DOCKER_IMAGE makes the integration fixture run QuestDB from the
+          # Docker image rather than a locally-built jar (no host JDK needed).
           - script: python3 proj.py test 1
-            displayName: "Test vs master"
+            displayName: "Test vs master (nightly Docker image)"
             env:
-              JAVA_HOME: $(JAVA_HOME_17_X64)
-              QDB_REPO_PATH: "./questdb"
+              QDB_DOCKER_IMAGE: questdb/questdb:nightly
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:
