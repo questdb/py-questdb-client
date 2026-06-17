@@ -529,7 +529,6 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_websocket_error_handler_callback_fires(self):
         self._require_qwp_ws()
-        import time as _time
         table_name = uuid.uuid4().hex
         sender_id = 'py-reject-cb-' + uuid.uuid4().hex[:8]
         self.qdb_plain.http_sql_query(
@@ -564,10 +563,7 @@ class TestWithDatabase(unittest.TestCase):
                     at=qi.TimestampMicros(1_700_000_000_002_000))
                 final_fsn = sender.flush_and_get_fsn()
                 self.assertTrue(sender.await_acked_fsn(final_fsn, 30000))
-                deadline = _time.monotonic() + 10
-                while not captured and _time.monotonic() < deadline:
-                    sender.drive_once()
-                    _time.sleep(0.05)
+                sender.close_drain()
                 self.assertTrue(
                     captured, 'qwp_ws_error_handler was never invoked')
                 diagnostic = captured[0]
@@ -576,7 +572,6 @@ class TestWithDatabase(unittest.TestCase):
                     qi.QwpWsErrorCategory.SchemaMismatch)
                 self.assertEqual(diagnostic.from_fsn, rejected_fsn)
                 self.assertEqual(diagnostic.to_fsn, rejected_fsn)
-                sender.close_drain()
             finally:
                 sender.close(False)
 
