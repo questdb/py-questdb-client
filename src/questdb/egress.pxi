@@ -85,11 +85,14 @@ cdef class _ReaderHandle:
         self._reader = reader
 
     cdef void _close(self) noexcept:
+        cdef PyThreadState* gs = NULL
         if self._reader == NULL:
             return
         if self._must_close:
             line_reader_mark_must_close(self._reader)
+        _ensure_doesnt_have_gil(&gs)
         line_reader_close(self._reader)
+        _ensure_has_gil(&gs)
         self._reader = NULL
 
     def __dealloc__(self):
@@ -112,9 +115,12 @@ cdef class _CursorHandle:
         self._reader_ref = reader_ref
 
     cdef void _free(self) noexcept:
+        cdef PyThreadState* gs = NULL
         with self._lock:
             if self._cursor != NULL:
+                _ensure_doesnt_have_gil(&gs)
                 line_reader_cursor_free(self._cursor)
+                _ensure_has_gil(&gs)
                 self._cursor = NULL
 
     def __dealloc__(self):
@@ -436,7 +442,7 @@ cdef void _qs_set_error(_QueryStreamProducer prod, const char* msg, size_t msg_l
     prod.last_error[msg_len] = 0
 
 
-cdef int _qs_pull(_QueryStreamProducer prod) noexcept:
+cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
     cdef line_reader_cursor* cursor
     cdef ArrowArray local_array
     cdef ArrowSchema local_schema
@@ -446,16 +452,21 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept:
     cdef size_t err_len = 0
     if prod.exhausted:
         return 0
-    if prod.cursor_handle is None or prod.cursor_handle._cursor == NULL:
+    if prod.cursor_handle is None:
         _qs_set_error(prod, b'cursor is closed', 16)
         prod.exhausted = True
         return -1
-    cursor = prod.cursor_handle._cursor
     memset(&local_array, 0, sizeof(ArrowArray))
     memset(&local_schema, 0, sizeof(ArrowSchema))
-    with nogil:
-        result = line_reader_cursor_next_arrow_batch(
-            cursor, &local_array, &local_schema, &err)
+    with prod.cursor_handle._lock:
+        cursor = prod.cursor_handle._cursor
+        if cursor == NULL:
+            _qs_set_error(prod, b'cursor is closed', 16)
+            prod.exhausted = True
+            return -1
+        with nogil:
+            result = line_reader_cursor_next_arrow_batch(
+                cursor, &local_array, &local_schema, &err)
     if result == line_reader_arrow_batch_ok:
         if not prod.has_cached_schema:
             memcpy(&prod.cached_schema, &local_schema, sizeof(ArrowSchema))
@@ -652,6 +663,781 @@ cdef object _table_signed_dict_indices(object table):
     return table.cast(pa.schema(fields, metadata=schema.metadata))
 
 
+cdef dict _KIND_NAMES = {
+    <int>line_reader_column_kind_boolean: 'boolean',
+    <int>line_reader_column_kind_byte: 'byte',
+    <int>line_reader_column_kind_short: 'short',
+    <int>line_reader_column_kind_int: 'int',
+    <int>line_reader_column_kind_long: 'long',
+    <int>line_reader_column_kind_float: 'float',
+    <int>line_reader_column_kind_double: 'double',
+    <int>line_reader_column_kind_char: 'char',
+    <int>line_reader_column_kind_ipv4: 'ipv4',
+    <int>line_reader_column_kind_timestamp: 'timestamp',
+    <int>line_reader_column_kind_timestamp_nanos: 'timestamp_ns',
+    <int>line_reader_column_kind_date: 'date',
+    <int>line_reader_column_kind_uuid: 'uuid',
+    <int>line_reader_column_kind_long256: 'long256',
+    <int>line_reader_column_kind_geohash: 'geohash',
+    <int>line_reader_column_kind_varchar: 'varchar',
+    <int>line_reader_column_kind_binary: 'binary',
+    <int>line_reader_column_kind_symbol: 'symbol',
+    <int>line_reader_column_kind_double_array: 'double_array',
+    <int>line_reader_column_kind_long_array: 'long_array',
+    <int>line_reader_column_kind_decimal64: 'decimal',
+    <int>line_reader_column_kind_decimal128: 'decimal',
+    <int>line_reader_column_kind_decimal256: 'decimal',
+}
+
+
+cdef object _UUID_MODULE = None
+cdef object _DECIMAL_TYPE = None
+
+
+cdef object _uuid_module():
+    global _UUID_MODULE
+    if _UUID_MODULE is None:
+        import uuid
+        _UUID_MODULE = uuid
+    return _UUID_MODULE
+
+
+cdef object _decimal_type():
+    global _DECIMAL_TYPE
+    if _DECIMAL_TYPE is None:
+        from decimal import Decimal
+        _DECIMAL_TYPE = Decimal
+    return _DECIMAL_TYPE
+
+
+cdef int _reader_check(bint ok, line_reader_error* err, str what) except -1:
+    if ok:
+        return 0
+    if err != NULL:
+        raise _reader_err_to_py(err)
+    raise IngressError(
+        IngressErrorCode.ServerFlushError,
+        what + ' returned false without err_out')
+
+
+cdef object _numpy_dtype_for_kind(line_reader_column_kind kind, object np):
+    if kind == line_reader_column_kind_boolean:
+        return np.dtype(np.bool_)
+    if kind == line_reader_column_kind_byte:
+        return np.dtype(np.int8)
+    if kind == line_reader_column_kind_short:
+        return np.dtype(np.int16)
+    if kind == line_reader_column_kind_int:
+        return np.dtype(np.int32)
+    if kind == line_reader_column_kind_long:
+        return np.dtype(np.int64)
+    if kind == line_reader_column_kind_float:
+        return np.dtype(np.float32)
+    if kind == line_reader_column_kind_double:
+        return np.dtype(np.float64)
+    if kind == line_reader_column_kind_char:
+        return np.dtype(np.uint16)
+    if kind == line_reader_column_kind_ipv4:
+        return np.dtype(np.uint32)
+    if kind == line_reader_column_kind_timestamp:
+        return np.dtype('datetime64[us]')
+    if kind == line_reader_column_kind_timestamp_nanos:
+        return np.dtype('datetime64[ns]')
+    if kind == line_reader_column_kind_date:
+        return np.dtype('datetime64[ms]')
+    return None
+
+
+cdef object _numpy_fixed_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        line_reader_column_kind kind,
+        size_t row_count,
+        object np):
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef object dtype = _numpy_dtype_for_kind(kind, np)
+    cdef size_t itemsize
+    cdef Py_ssize_t nbytes
+    cdef unsigned char* src
+    if dtype is None:
+        raise IngressError(
+            IngressErrorCode.InvalidApiCall,
+            'numpy egress does not support column kind 0x{:02X} yet'.format(
+                <int>kind))
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    itemsize = dtype.itemsize
+    if cd.value_stride != itemsize:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'column kind 0x{:02X} wire stride {} != numpy itemsize {}'.format(
+                <int>kind, cd.value_stride, itemsize))
+    if row_count == 0:
+        return np.empty(0, dtype=dtype)
+    if cd.values == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'column kind 0x{:02X} has {} rows but no values buffer'.format(
+                <int>kind, row_count))
+    nbytes = <Py_ssize_t>(row_count * cd.value_stride)
+    src = <unsigned char*>cd.values
+    if kind == line_reader_column_kind_boolean:
+        return np.frombuffer((<unsigned char[:nbytes]>src), dtype=np.uint8) != 0
+    return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
+
+
+cdef object _numpy_varlen_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        line_reader_column_kind kind,
+        size_t row_count,
+        object np):
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef const uint32_t* offsets
+    cdef const uint8_t* data
+    cdef const uint8_t* validity
+    cdef size_t r
+    cdef uint32_t start
+    cdef uint32_t end
+    cdef bint is_binary = kind == line_reader_column_kind_binary
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    out = np.empty(row_count, dtype=object)
+    if row_count == 0:
+        return out
+    if cd.var_offsets == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'column kind 0x{:02X} has {} rows but no offset table'.format(
+                <int>kind, row_count))
+    offsets = cd.var_offsets
+    data = cd.var_data
+    validity = cd.validity
+    for r in range(row_count):
+        if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
+            out[r] = None
+            continue
+        start = offsets[r]
+        end = offsets[r + 1]
+        if end > start:
+            if is_binary:
+                out[r] = PyBytes_FromStringAndSize(
+                    <const char*>(data + start), <Py_ssize_t>(end - start))
+            else:
+                out[r] = PyUnicode_FromStringAndSize(
+                    <const char*>(data + start), <Py_ssize_t>(end - start))
+        else:
+            out[r] = b'' if is_binary else u''
+    return out
+
+
+cdef object _numpy_symbol_codes_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        size_t row_count,
+        object np):
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef const uint32_t* codes
+    cdef const uint8_t* validity
+    cdef size_t r
+    cdef int64_t[::1] mv
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    out = np.empty(row_count, dtype=np.int64)
+    if row_count == 0:
+        return out
+    if cd.symbol_codes == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'symbol column has {} rows but no codes buffer'.format(row_count))
+    codes = cd.symbol_codes
+    validity = cd.validity
+    mv = out
+    for r in range(row_count):
+        if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
+            mv[r] = -1
+        else:
+            mv[r] = <int64_t>codes[r]
+    return out
+
+
+cdef list _symbol_categories_from_dict(const line_reader_symbol_dict* sd):
+    cdef size_t i
+    cdef const line_reader_symbol_entry* e
+    cdef list cats = []
+    for i in range(sd.entry_count):
+        e = &sd.entries[i]
+        cats.append(
+            PyUnicode_FromStringAndSize(
+                <const char*>(sd.heap + e.offset), <Py_ssize_t>e.length))
+    return cats
+
+
+cdef object _numpy_geohash_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        size_t row_count,
+        object np):
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef object dtype
+    cdef Py_ssize_t nbytes
+    cdef unsigned char* src
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    if cd.value_stride == 1:
+        dtype = np.dtype(np.int8)
+    elif cd.value_stride == 2:
+        dtype = np.dtype(np.int16)
+    elif cd.value_stride == 4:
+        dtype = np.dtype(np.int32)
+    elif cd.value_stride == 8:
+        dtype = np.dtype(np.int64)
+    else:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'unexpected geohash byte width {}'.format(cd.value_stride))
+    if row_count == 0:
+        return np.empty(0, dtype=dtype)
+    if cd.values == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'geohash column has {} rows but no values buffer'.format(row_count))
+    nbytes = <Py_ssize_t>(row_count * cd.value_stride)
+    src = <unsigned char*>cd.values
+    return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
+
+
+cdef object _numpy_uuid_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        size_t row_count,
+        object np):
+    cdef object _uuid = _uuid_module()
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef const uint8_t* validity
+    cdef const uint64_t* halves
+    cdef size_t r
+    cdef uint64_t lo
+    cdef uint64_t hi
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    out = np.empty(row_count, dtype=object)
+    if row_count == 0:
+        return out
+    if cd.values == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'uuid column has {} rows but no values buffer'.format(row_count))
+    validity = cd.validity
+    halves = <const uint64_t*>cd.values
+    for r in range(row_count):
+        if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
+            out[r] = None
+            continue
+        lo = halves[2 * r]
+        hi = halves[2 * r + 1]
+        out[r] = _uuid.UUID(int=((<object>hi) << 64) | (<object>lo))
+    return out
+
+
+cdef object _numpy_long256_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        size_t row_count,
+        object np):
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef const uint8_t* validity
+    cdef const uint8_t* values
+    cdef size_t r
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    out = np.empty(row_count, dtype=object)
+    if row_count == 0:
+        return out
+    if cd.values == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'long256 column has {} rows but no values buffer'.format(row_count))
+    validity = cd.validity
+    values = <const uint8_t*>cd.values
+    for r in range(row_count):
+        if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
+            out[r] = None
+            continue
+        out[r] = int.from_bytes(
+            PyBytes_FromStringAndSize(<const char*>(values + r * 32), 32),
+            'little', signed=False)
+    return out
+
+
+cdef object _numpy_decimal_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        size_t row_count,
+        object np):
+    cdef object Decimal = _decimal_type()
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef const uint8_t* validity
+    cdef const uint8_t* values
+    cdef size_t r
+    cdef size_t width
+    cdef int scale
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    out = np.empty(row_count, dtype=object)
+    if row_count == 0:
+        return out
+    if cd.values == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'decimal column has {} rows but no values buffer'.format(row_count))
+    validity = cd.validity
+    values = <const uint8_t*>cd.values
+    width = cd.value_stride
+    scale = cd.decimal_scale
+    for r in range(row_count):
+        if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
+            out[r] = None
+            continue
+        unscaled = int.from_bytes(
+            PyBytes_FromStringAndSize(
+                <const char*>(values + r * width), <Py_ssize_t>width),
+            'little', signed=True)
+        digits = tuple(int(c) for c in str(abs(unscaled)))
+        out[r] = Decimal((1 if unscaled < 0 else 0, digits, -scale))
+    return out
+
+
+cdef object _numpy_array_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        line_reader_column_kind kind,
+        size_t row_count,
+        object np):
+    cdef line_reader_array_data ad
+    cdef line_reader_error* err = NULL
+    cdef const uint8_t* validity
+    cdef const uint8_t* data
+    cdef const uint32_t* data_offsets
+    cdef const uint32_t* shapes
+    cdef const uint32_t* shape_offsets
+    cdef size_t r
+    cdef size_t k
+    cdef uint32_t dstart
+    cdef uint32_t dend
+    cdef uint32_t sstart
+    cdef uint32_t send
+    cdef Py_ssize_t blen
+    if kind != line_reader_column_kind_double_array:
+        raise IngressError(
+            IngressErrorCode.InvalidApiCall,
+            'numpy egress supports only double arrays (kind 0x{:02X})'.format(
+                <int>kind))
+    _reader_check(
+        line_reader_batch_array_column_data(batch, col_idx, &ad, &err), err,
+        'line_reader_batch_array_column_data')
+    out = np.empty(row_count, dtype=object)
+    if row_count == 0:
+        return out
+    if ad.data_offsets == NULL or ad.shape_offsets == NULL:
+        raise IngressError(
+            IngressErrorCode.ServerFlushError,
+            'array column has {} rows but no offset tables'.format(row_count))
+    validity = ad.validity
+    data = ad.data
+    data_offsets = ad.data_offsets
+    shapes = ad.shapes
+    shape_offsets = ad.shape_offsets
+    for r in range(row_count):
+        if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
+            out[r] = None
+            continue
+        dstart = data_offsets[r]
+        dend = data_offsets[r + 1]
+        blen = <Py_ssize_t>(dend - dstart)
+        if blen > 0:
+            flat = np.frombuffer(
+                (<unsigned char[:blen]>(<unsigned char*>(data + dstart))),
+                dtype=np.float64).copy()
+        else:
+            flat = np.empty(0, dtype=np.float64)
+        sstart = shape_offsets[r]
+        send = shape_offsets[r + 1]
+        if send > sstart:
+            out[r] = flat.reshape(
+                tuple(shapes[sstart + k] for k in range(send - sstart)))
+        else:
+            out[r] = flat
+    return out
+
+
+cdef object _numpy_column_chunk(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        line_reader_column_kind kind,
+        size_t row_count,
+        object np):
+    if kind == line_reader_column_kind_symbol:
+        return _numpy_symbol_codes_chunk(batch, col_idx, row_count, np)
+    if (kind == line_reader_column_kind_varchar
+            or kind == line_reader_column_kind_binary):
+        return _numpy_varlen_chunk(batch, col_idx, kind, row_count, np)
+    if kind == line_reader_column_kind_geohash:
+        return _numpy_geohash_chunk(batch, col_idx, row_count, np)
+    if kind == line_reader_column_kind_uuid:
+        return _numpy_uuid_chunk(batch, col_idx, row_count, np)
+    if kind == line_reader_column_kind_long256:
+        return _numpy_long256_chunk(batch, col_idx, row_count, np)
+    if (kind == line_reader_column_kind_decimal64
+            or kind == line_reader_column_kind_decimal128
+            or kind == line_reader_column_kind_decimal256):
+        return _numpy_decimal_chunk(batch, col_idx, row_count, np)
+    if (kind == line_reader_column_kind_double_array
+            or kind == line_reader_column_kind_long_array):
+        return _numpy_array_chunk(batch, col_idx, kind, row_count, np)
+    return _numpy_fixed_chunk(batch, col_idx, kind, row_count, np)
+
+
+cdef bint _is_hybrid_int(line_reader_column_kind kind):
+    return (kind == line_reader_column_kind_int
+            or kind == line_reader_column_kind_long
+            or kind == line_reader_column_kind_ipv4
+            or kind == line_reader_column_kind_geohash)
+
+
+cdef object _numpy_validity_mask(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        size_t row_count,
+        object np):
+    cdef line_reader_column_data cd
+    cdef line_reader_error* err = NULL
+    cdef Py_ssize_t vbytes
+    cdef unsigned char* vsrc
+    _reader_check(
+        line_reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        'line_reader_batch_column_data')
+    if row_count == 0 or cd.validity == NULL:
+        return None
+    vbytes = <Py_ssize_t>((row_count + 7) // 8)
+    vsrc = <unsigned char*>cd.validity
+    return np.unpackbits(
+        np.frombuffer((<unsigned char[:vbytes]>vsrc), dtype=np.uint8),
+        count=<Py_ssize_t>row_count, bitorder='little').astype(bool)
+
+
+cdef object _build_nullable_array(
+        values, mask, line_reader_column_kind kind, object pd):
+    if (kind == line_reader_column_kind_float
+            or kind == line_reader_column_kind_double):
+        return pd.arrays.FloatingArray(values, mask)
+    if kind == line_reader_column_kind_boolean:
+        return pd.arrays.BooleanArray(values, mask)
+    return pd.arrays.IntegerArray(values, mask)
+
+
+cdef object _combine_hybrid_mask(list value_chunks, list mask_chunks, object np):
+    cdef size_t n = <size_t>len(mask_chunks)
+    cdef size_t i
+    cdef bint any_null = False
+    for i in range(n):
+        if mask_chunks[i] is not None:
+            any_null = True
+            break
+    if not any_null:
+        return None
+    parts = []
+    for i in range(n):
+        if mask_chunks[i] is None:
+            parts.append(np.zeros(len(value_chunks[i]), dtype=bool))
+        else:
+            parts.append(mask_chunks[i])
+    if len(parts) == 1:
+        return parts[0]
+    return np.concatenate(parts)
+
+
+cdef tuple _numpy_extract_meta(const line_reader_batch* batch):
+    cdef size_t n_cols = line_reader_batch_column_count(batch)
+    cdef size_t col_idx
+    cdef line_reader_column_kind kind = line_reader_column_kind_unknown
+    cdef const char* name_buf = NULL
+    cdef size_t name_len = 0
+    cdef line_reader_error* err = NULL
+    cdef line_reader_column_data cd_meta
+    cdef bint has_symbol = False
+    col_names = []
+    col_kinds = []
+    col_scales = []
+    col_precision = []
+    for col_idx in range(n_cols):
+        _reader_check(
+            line_reader_batch_column_name(
+                batch, col_idx, &name_buf, &name_len, &err),
+            err, 'line_reader_batch_column_name')
+        col_names.append(
+            PyUnicode_FromStringAndSize(name_buf, <Py_ssize_t>name_len))
+        _reader_check(
+            line_reader_batch_column_kind(batch, col_idx, &kind, &err),
+            err, 'line_reader_batch_column_kind')
+        col_kinds.append(<int>kind)
+        col_scales.append(None)
+        col_precision.append(None)
+        if kind == line_reader_column_kind_symbol:
+            has_symbol = True
+        elif (kind == line_reader_column_kind_geohash
+                or kind == line_reader_column_kind_decimal64
+                or kind == line_reader_column_kind_decimal128
+                or kind == line_reader_column_kind_decimal256):
+            if line_reader_batch_column_data(batch, col_idx, &cd_meta, &err):
+                if kind == line_reader_column_kind_geohash:
+                    col_precision[col_idx] = cd_meta.geohash_precision_bits
+                else:
+                    col_scales[col_idx] = cd_meta.decimal_scale
+            elif err != NULL:
+                line_reader_error_free(err)
+                err = NULL
+    return (col_names, col_kinds, col_scales, col_precision, has_symbol)
+
+
+cdef object _numpy_assemble_frame(
+        list col_names, list col_kinds, list col_scales,
+        list col_precision, list col_chunks, list symbol_categories,
+        object np, object pd, list col_masks):
+    cdef size_t n_cols = <size_t>len(col_names)
+    cdef size_t col_idx
+    cdef line_reader_column_kind kind
+    arrays = []
+    for col_idx in range(n_cols):
+        kind = <line_reader_column_kind><int>col_kinds[col_idx]
+        chunks = col_chunks[col_idx]
+        if len(chunks) == 1:
+            arr = chunks[0]
+        else:
+            arr = np.concatenate(chunks)
+        if kind == line_reader_column_kind_symbol:
+            arr = pd.Categorical.from_codes(arr, categories=symbol_categories)
+        elif _is_hybrid_int(kind):
+            mask = _combine_hybrid_mask(chunks, col_masks[col_idx], np)
+            if mask is not None:
+                arr = _build_nullable_array(arr, mask, kind, pd)
+        arrays.append(arr)
+    frame = pd.DataFrame(dict(enumerate(arrays)), copy=False)
+    frame.columns = col_names
+    columns_meta = {}
+    for col_idx in range(n_cols):
+        entry = {'kind': _KIND_NAMES.get(col_kinds[col_idx], 'unknown')}
+        if col_scales[col_idx] is not None:
+            entry['scale'] = col_scales[col_idx]
+        if col_precision[col_idx] is not None:
+            entry['precision_bits'] = col_precision[col_idx]
+        columns_meta[col_names[col_idx]] = entry
+    frame.attrs['questdb'] = {'version': 1, 'columns': columns_meta}
+    return frame
+
+
+cdef tuple _numpy_batch_columns(
+        const line_reader_batch* batch, list col_kinds,
+        size_t n_cols, size_t row_count, object np):
+    cdef size_t col_idx
+    cdef line_reader_column_kind kind
+    chunks = []
+    masks = []
+    for col_idx in range(n_cols):
+        kind = <line_reader_column_kind><int>col_kinds[col_idx]
+        chunks.append(_numpy_column_chunk(batch, col_idx, kind, row_count, np))
+        if _is_hybrid_int(kind):
+            masks.append(_numpy_validity_mask(batch, col_idx, row_count, np))
+        else:
+            masks.append(None)
+    return (chunks, masks)
+
+
+cdef object _numpy_frame_from_cursor(_CursorHandle handle):
+    import numpy as np
+    import pandas as pd
+    cdef line_reader_cursor* cursor
+    cdef line_reader_error* err = NULL
+    cdef const line_reader_batch* batch
+    cdef line_reader_symbol_dict sd
+    cdef size_t n_cols = 0
+    cdef size_t row_count = 0
+    cdef size_t col_idx
+    cdef size_t prev_dict_n = 0
+    cdef bint first = True
+    cdef bint has_symbol = False
+
+    if handle is None or handle._cursor == NULL:
+        raise IngressError(IngressErrorCode.InvalidApiCall, 'cursor is closed')
+    cursor = handle._cursor
+
+    col_names = []
+    col_kinds = []
+    col_scales = []
+    col_precision = []
+    col_chunks = []
+    col_masks = []
+    symbol_categories = []
+
+    try:
+        while True:
+            with nogil:
+                batch = line_reader_cursor_next_batch(cursor, &err)
+            if batch == NULL:
+                if err != NULL:
+                    raise _reader_err_to_py(err)
+                break
+            row_count = line_reader_batch_row_count(batch)
+            if first:
+                (col_names, col_kinds, col_scales, col_precision,
+                 has_symbol) = _numpy_extract_meta(batch)
+                n_cols = <size_t>len(col_names)
+                col_chunks = [[] for _ in range(n_cols)]
+                col_masks = [[] for _ in range(n_cols)]
+                first = False
+            if has_symbol:
+                _reader_check(
+                    line_reader_batch_symbol_dict(batch, &sd, &err), err,
+                    'line_reader_batch_symbol_dict')
+                if sd.entry_count > prev_dict_n:
+                    symbol_categories = _symbol_categories_from_dict(&sd)
+                    prev_dict_n = sd.entry_count
+            batch_chunks, batch_masks = _numpy_batch_columns(
+                batch, col_kinds, n_cols, row_count, np)
+            for col_idx in range(n_cols):
+                col_chunks[col_idx].append(batch_chunks[col_idx])
+                col_masks[col_idx].append(batch_masks[col_idx])
+    except:
+        handle._free()
+        raise
+
+    _mark_reader_drained(handle)
+    handle._free()
+
+    if first:
+        return pd.DataFrame()
+    return _numpy_assemble_frame(
+        col_names, col_kinds, col_scales, col_precision,
+        col_chunks, symbol_categories, np, pd, col_masks)
+
+
+cdef class _NumpyBatchIter:
+    cdef _CursorHandle handle
+    cdef object np
+    cdef object pd
+    cdef list col_names
+    cdef list col_kinds
+    cdef list col_scales
+    cdef list col_precision
+    cdef bint first
+    cdef bint has_symbol
+    cdef bint done
+    cdef size_t prev_dict_n
+    cdef list symbol_categories
+
+    def __cinit__(self, _CursorHandle handle):
+        import numpy as np
+        import pandas as pd
+        self.handle = handle
+        self.np = np
+        self.pd = pd
+        self.col_names = []
+        self.col_kinds = []
+        self.col_scales = []
+        self.col_precision = []
+        self.first = True
+        self.has_symbol = False
+        self.done = False
+        self.prev_dict_n = 0
+        self.symbol_categories = []
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        cdef line_reader_cursor* cursor
+        cdef line_reader_error* err = NULL
+        cdef const line_reader_batch* batch
+        cdef line_reader_symbol_dict sd
+        cdef size_t row_count
+        cdef size_t n_cols
+        if self.done or self.handle is None or self.handle._cursor == NULL:
+            raise StopIteration
+        cursor = self.handle._cursor
+        with nogil:
+            batch = line_reader_cursor_next_batch(cursor, &err)
+        if batch == NULL:
+            if err != NULL:
+                self.done = True
+                self.handle._free()
+                raise _reader_err_to_py(err)
+            self.done = True
+            _mark_reader_drained(self.handle)
+            self.handle._free()
+            raise StopIteration
+        try:
+            row_count = line_reader_batch_row_count(batch)
+            if self.first:
+                (self.col_names, self.col_kinds, self.col_scales,
+                 self.col_precision, self.has_symbol) = \
+                    _numpy_extract_meta(batch)
+                self.first = False
+            n_cols = <size_t>len(self.col_names)
+            if self.has_symbol:
+                _reader_check(
+                    line_reader_batch_symbol_dict(batch, &sd, &err), err,
+                    'line_reader_batch_symbol_dict')
+                if sd.entry_count > self.prev_dict_n:
+                    self.symbol_categories = _symbol_categories_from_dict(&sd)
+                    self.prev_dict_n = sd.entry_count
+            batch_chunks, batch_masks = _numpy_batch_columns(
+                batch, self.col_kinds, n_cols, row_count, self.np)
+            col_chunks = [[c] for c in batch_chunks]
+            col_masks = [[m] for m in batch_masks]
+            return _numpy_assemble_frame(
+                self.col_names, self.col_kinds, self.col_scales,
+                self.col_precision, col_chunks, self.symbol_categories,
+                self.np, self.pd, col_masks)
+        except:
+            self.done = True
+            self.handle._free()
+            raise
+
+    def __dealloc__(self):
+        if not self.done and self.handle is not None:
+            self.handle._free()
+
+
+cdef object _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper):
+    kwargs = {}
+    if types_mapper is not None:
+        kwargs['types_mapper'] = types_mapper
+    elif dtype_backend == 'pyarrow':
+        import pandas as pd
+        kwargs['types_mapper'] = pd.ArrowDtype
+    elif dtype_backend == 'numpy_nullable':
+        kwargs['types_mapper'] = _numpy_nullable_mapping()
+    elif dtype_backend is not None:
+        raise ValueError(
+            f'dtype_backend={dtype_backend!r} is invalid, '
+            'only "pyarrow" and "numpy_nullable" are allowed')
+    return kwargs
+
+
 def _debug_egress_pool_stats(client):
     """Return ``(in_use, idle)`` from the client's reader pool.
 
@@ -744,34 +1530,29 @@ class QueryResult:
     def to_pandas(self, *, dtype_backend=None, types_mapper=None):
         """Read the full result into a ``pandas.DataFrame``.
 
-        ``dtype_backend`` / ``types_mapper`` follow the pandas core
-        convention (matching ``pd.read_sql`` / ``pd.read_parquet``).
-        Mutually exclusive; passing both raises ``ValueError``.
+        The default is a native (no pyarrow), DuckDB-style hybrid built
+        straight from the QWP column buffers: a nullable integer column
+        with nulls becomes a pandas nullable ``Int*`` (``pd.NA``); without
+        nulls it stays plain numpy. ``double``/``float`` stay numpy with
+        ``NaN``; ``SYMBOL`` → ``Categorical``; ``TIMESTAMP`` →
+        ``datetime64`` (``NaT``); strings/decimal/uuid/binary → ``object``.
+        Analysis-safe (aggregations skip ``pd.NA``/``NaN``), and feeds back
+        into :meth:`Client.dataframe` for a type round-trip — the column
+        kinds are carried in ``df.attrs['questdb']``.
 
-        ``dtype_backend="pyarrow"`` wraps every column in
-        ``pd.ArrowDtype``. ``dtype_backend="numpy_nullable"`` maps
-        primitives to pandas nullable extension dtypes
-        (``Int64Dtype`` / ``Float64Dtype`` / ``BooleanDtype`` /
-        ``StringDtype``); other types fall back to pyarrow's defaults.
+        ``dtype_backend="pyarrow"`` / ``"numpy_nullable"`` / ``types_mapper``
+        select the pyarrow-backed path instead (``pd.ArrowDtype``, pandas
+        nullable extension dtypes, or a custom mapper) — matching the
+        ``pd.read_sql`` / ``pd.read_parquet`` convention.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
                 'pass at most one of dtype_backend, types_mapper')
+        if dtype_backend is None and types_mapper is None:
+            return self._to_pandas_numpy()
         table = _table_signed_dict_indices(self.to_arrow())
-        kwargs = {}
-        if types_mapper is not None:
-            kwargs['types_mapper'] = types_mapper
-        if dtype_backend is not None:
-            if dtype_backend == 'pyarrow':
-                import pandas as pd
-                kwargs['types_mapper'] = pd.ArrowDtype
-            elif dtype_backend == 'numpy_nullable':
-                kwargs['types_mapper'] = _numpy_nullable_mapping()
-            else:
-                raise ValueError(
-                    f'dtype_backend={dtype_backend!r} is invalid, '
-                    'only "numpy_nullable" and "pyarrow" are allowed')
-        return table.to_pandas(**kwargs)
+        return table.to_pandas(
+            **_resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper))
 
     def to_polars(self):
         """Read the full result into a ``polars.DataFrame``. Requires polars.
@@ -787,6 +1568,9 @@ class QueryResult:
                 'Install with `pip install polars`.') from ie
         return pl.from_arrow(self)
 
+    def _to_pandas_numpy(self):
+        return _numpy_frame_from_cursor(self._take_cursor_handle())
+
     def iter_arrow(self):
         """Iterate result batches as ``pyarrow.RecordBatch``.
 
@@ -798,15 +1582,27 @@ class QueryResult:
         for batch in reader:
             yield batch
 
-    def iter_pandas(self, **to_pandas_kwargs):
+    def iter_pandas(self, *, dtype_backend=None, types_mapper=None):
         """Iterate result batches as ``pandas.DataFrame``.
 
-        Keyword arguments are forwarded to pyarrow's ``to_pandas``.
+        Mirrors :meth:`to_pandas`: with no arguments each batch is
+        materialised straight into numpy (no pyarrow, sentinel-preserving,
+        ``df.attrs['questdb']`` per batch). ``dtype_backend`` /
+        ``types_mapper`` select the pyarrow-backed path instead.
         """
+        if dtype_backend is not None and types_mapper is not None:
+            raise ValueError(
+                'pass at most one of dtype_backend, types_mapper')
+        if dtype_backend is None and types_mapper is None:
+            return _NumpyBatchIter(self._take_cursor_handle())
+        return self._iter_pandas_arrow(dtype_backend, types_mapper)
+
+    def _iter_pandas_arrow(self, dtype_backend, types_mapper):
         import pyarrow as pa
+        kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
         for batch in self.iter_arrow():
             table = _table_signed_dict_indices(pa.Table.from_batches([batch]))
-            yield table.to_pandas(**to_pandas_kwargs)
+            yield table.to_pandas(**kwargs)
 
     def cancel(self):
         """Ask the server to stop streaming. Idempotent.

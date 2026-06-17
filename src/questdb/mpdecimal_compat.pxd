@@ -4,14 +4,11 @@ from cpython.object cimport PyObject
 from .rpyutils cimport *
 
 # Mirror the subset of libmpdec types that CPython embeds in Decimal objects.
-# Matches the typedef in `mpdecimal_compat.h` for 64-bit platforms; clang
-# distinguishes `unsigned long` (size_t on LP64) from `unsigned long long`
-# (uint64_t) even when they share size, so use the exact stdint type to
-# avoid -Wincompatible-pointer-types when assigning from `decimal_digits`.
-ctypedef uint64_t mpd_uint_t
-ctypedef int64_t mpd_ssize_t
-
+# Widths are platform-dependent, so the header's conditional typedefs win.
 cdef extern from "mpdecimal_compat.h":
+    ctypedef uint64_t mpd_uint_t
+    ctypedef int64_t mpd_ssize_t
+
     ctypedef struct mpd_t:
         uint8_t flags
         mpd_ssize_t exp

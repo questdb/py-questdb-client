@@ -2400,6 +2400,188 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_numpy_egress_round_trip(self):
+        """The native (default) ``to_pandas()`` output feeds straight back
+        into ``Client.dataframe`` and reproduces the same values for the
+        types that round-trip through the numpy path
+        (long/double/bool/varchar/symbol/timestamp). Also checks the
+        ``df.attrs['questdb']`` round-trip metadata is attached.
+        """
+        import numpy as np
+        src = 't_rt_src_' + uuid.uuid4().hex[:8]
+        dst = 't_rt_dst_' + uuid.uuid4().hex[:8]
+        cols = 'ts, lg, db, bl, vc, sym'
+        try:
+            self._exec(
+                f'CREATE TABLE {src} '
+                '(ts TIMESTAMP, lg LONG, db DOUBLE, bl BOOLEAN, '
+                'vc VARCHAR, sym SYMBOL) TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', 1, 1.5, true, 'aa', 's1'), "
+                f"('2024-01-01T00:00:01Z', 2, 2.5, false, 'bb', 's2'), "
+                f"('2024-01-01T00:00:02Z', 3, 3.5, true, 'cc', 's1')")
+            self.qdb_plain.retry_check_table(src, min_rows=3)
+
+            with qi.Client.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT {cols} FROM {src} ORDER BY ts').to_pandas()
+
+            meta = df.attrs['questdb']['columns']
+            self.assertEqual(meta['lg']['kind'], 'long')
+            self.assertEqual(meta['db']['kind'], 'double')
+            self.assertEqual(meta['sym']['kind'], 'symbol')
+            self.assertEqual(meta['vc']['kind'], 'varchar')
+            self.assertEqual(meta['ts']['kind'], 'timestamp')
+            self.assertEqual(df['lg'].dtype, np.int64)
+            self.assertEqual(str(df['sym'].dtype), 'category')
+
+            with qi.Client.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=3)
+
+            with qi.Client.from_conf(self._conf()) as client:
+                back = client.query(
+                    f'SELECT {cols} FROM {dst} ORDER BY ts').to_pandas()
+            self.assertEqual(list(back['lg']), [1, 2, 3])
+            self.assertEqual(list(back['db']), [1.5, 2.5, 3.5])
+            self.assertEqual([bool(x) for x in back['bl']], [True, False, True])
+            self.assertEqual(list(back['vc']), ['aa', 'bb', 'cc'])
+            self.assertEqual(list(back['sym']), ['s1', 's2', 's1'])
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
+
+    def test_numpy_egress_hybrid_nulls(self):
+        """Default (hybrid) null handling: a nullable LONG with nulls
+        becomes pandas ``Int64`` (``pd.NA``, analysis-safe); a LONG without
+        nulls stays plain ``int64``; DOUBLE null -> ``float64`` NaN; VARCHAR
+        null -> ``object`` None.
+        """
+        import pandas as pd
+        import numpy as np
+        table_name = 't_egress_hybrid_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG, lg2 LONG, db DOUBLE, vc VARCHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {table_name} VALUES "
+                f"('2024-01-01T00:00:00Z', 7, 10, 1.5, 'x'), "
+                f"('2024-01-01T00:00:01Z', NULL, 20, NULL, NULL)")
+            self.qdb_plain.retry_check_table(table_name, min_rows=2)
+            with qi.Client.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT lg, lg2, db, vc FROM {table_name} ORDER BY ts'
+                ).to_pandas()
+            # nullable LONG with a null -> Int64 (pd.NA)
+            self.assertEqual(str(df['lg'].dtype), 'Int64')
+            self.assertEqual(df['lg'].iloc[0], 7)
+            self.assertTrue(df['lg'].iloc[1] is pd.NA)
+            # LONG with no nulls -> plain int64
+            self.assertEqual(df['lg2'].dtype, np.int64)
+            self.assertEqual(list(df['lg2']), [10, 20])
+            # DOUBLE null -> float64 NaN; VARCHAR null -> object None
+            self.assertTrue(pd.api.types.is_float_dtype(df['db'].dtype))
+            self.assertTrue(pd.isna(df['db'].iloc[1]))
+            self.assertEqual(df['vc'].iloc[0], 'x')
+            self.assertIsNone(df['vc'].iloc[1])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_numpy_egress_nullable_round_trip(self):
+        """A nullable LONG round-trips through the default hybrid output:
+        query -> to_pandas (Int64 with pd.NA) -> Client.dataframe (normalised
+        to object + validity) -> query reproduces the value and the null.
+        """
+        import pandas as pd
+        src = 't_rtn_src_' + uuid.uuid4().hex[:8]
+        dst = 't_rtn_dst_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {src} (ts TIMESTAMP, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', 7), "
+                f"('2024-01-01T00:00:01Z', NULL), "
+                f"('2024-01-01T00:00:02Z', 9)")
+            self.qdb_plain.retry_check_table(src, min_rows=3)
+            with qi.Client.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT ts, lg FROM {src} ORDER BY ts').to_pandas()
+            self.assertEqual(str(df['lg'].dtype), 'Int64')
+            with qi.Client.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=3)
+            with qi.Client.from_conf(self._conf()) as client:
+                back = client.query(
+                    f'SELECT lg FROM {dst} ORDER BY ts').to_pandas()
+            self.assertEqual(back['lg'].iloc[0], 7)
+            self.assertTrue(back['lg'].iloc[1] is pd.NA)
+            self.assertEqual(back['lg'].iloc[2], 9)
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
+
+    def test_numpy_egress_round_trip_overrides(self):
+        """ipv4 / char / geohash round-trip through the native numpy path
+        driven by df.attrs metadata (no pyarrow). The destination column
+        types are verified by re-querying and checking the egress metadata
+        reports the same kinds.
+        """
+        src = 't_rto_src_' + uuid.uuid4().hex[:8]
+        dst = 't_rto_dst_' + uuid.uuid4().hex[:8]
+        cols = 'ts, ip, gh, c'
+        try:
+            self._exec(
+                f'CREATE TABLE {src} '
+                '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), c CHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', '1.2.3.4', #u33d, 'A'), "
+                f"('2024-01-01T00:00:01Z', '255.0.0.1', #u33e, 'B')")
+            self.qdb_plain.retry_check_table(src, min_rows=2)
+
+            with qi.Client.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT {cols} FROM {src} ORDER BY ts').to_pandas()
+            meta = df.attrs['questdb']['columns']
+            self.assertEqual(meta['ip']['kind'], 'ipv4')
+            self.assertEqual(meta['c']['kind'], 'char')
+            self.assertEqual(meta['gh']['kind'], 'geohash')
+            self.assertEqual(meta['gh']['precision_bits'], 20)
+
+            with qi.Client.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=2)
+
+            with qi.Client.from_conf(self._conf()) as client:
+                back = client.query(
+                    f'SELECT {cols} FROM {dst} ORDER BY ts').to_pandas()
+            bmeta = back.attrs['questdb']['columns']
+            self.assertEqual(bmeta['ip']['kind'], 'ipv4')
+            self.assertEqual(bmeta['c']['kind'], 'char')
+            self.assertEqual(bmeta['gh']['kind'], 'geohash')
+            self.assertEqual(bmeta['gh']['precision_bits'], 20)
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
+
     def test_null_round_trip_per_dtype_backend(self):
         """Pin the null contract across the three dtype_backend variants.
 
@@ -2409,9 +2591,8 @@ class TestEgressWithDatabase(unittest.TestCase):
         test inserts SQL NULL values and verifies what each mapper
         surfaces:
 
-          - default (numpy primitives): integer nulls are lossy
-            (widened to float64 NaN); float NaN stays NaN; varchar
-            comes back as the new pandas ``str`` dtype with NaN.
+          - default (native hybrid): a nullable LONG with nulls becomes
+            pandas Int64 (pd.NA); DOUBLE null is NaN; VARCHAR null is None.
           - dtype_backend="pyarrow": ArrowDtype preserves null as pd.NA.
           - dtype_backend="numpy_nullable": Int64Dtype/Float64Dtype/
             StringDtype preserve null as pd.NA.
@@ -2450,17 +2631,19 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(table.column('db').null_count, 1)
             self.assertEqual(table.column('vc').null_count, 1)
 
-            # 2. default to_pandas — integer nulls widen to float64.
+            # 2. default to_pandas — native hybrid: a nullable LONG with
+            #    nulls becomes Int64 (pd.NA); DOUBLE null is NaN; VARCHAR
+            #    null is None.
             with qi.Client.from_conf(self._conf()) as client:
                 default = client.query(sql).to_pandas()
-            # numpy int64 cannot represent null; pandas widens to float64.
-            self.assertTrue(
-                pd.api.types.is_float_dtype(default['lg'].dtype)
-                or pd.api.types.is_object_dtype(default['lg'].dtype),
-                f'expected float or object for lossy int+null; '
-                f'got {default["lg"].dtype!r}')
+            self.assertEqual(str(default['lg'].dtype), 'Int64')
             self.assertEqual(default['lg'].iloc[0], 42)
-            self.assertTrue(pd.isna(default['lg'].iloc[1]))
+            self.assertTrue(default['lg'].iloc[1] is pd.NA)
+            self.assertTrue(pd.api.types.is_float_dtype(default['db'].dtype))
+            self.assertEqual(default['db'].iloc[0], 3.5)
+            self.assertTrue(pd.isna(default['db'].iloc[1]))
+            self.assertEqual(default['vc'].iloc[0], 'hello')
+            self.assertIsNone(default['vc'].iloc[1])
 
             # 3. pyarrow-backed to_pandas — pd.NA preserved.
             with qi.Client.from_conf(self._conf()) as client:

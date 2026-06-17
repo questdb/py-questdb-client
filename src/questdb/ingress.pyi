@@ -1130,10 +1130,6 @@ class Sender:
         """The initial capacity of the sender's internal buffer."""
 
     @property
-    def max_name_len(self) -> int:
-        """Maximum length of a table or column name."""
-
-    @property
     def auto_flush(self) -> bool:
         """
         Auto-flushing is enabled.
@@ -1173,7 +1169,7 @@ class Sender:
         """
 
     @property
-    def max_name_len(self):
+    def max_name_len(self) -> int:
         """
         Returns the sender's maximum-configured maximum name length for table
         names and column names.

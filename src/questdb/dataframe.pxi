@@ -581,6 +581,9 @@ cdef struct col_setup_t:
     meta_target_t meta_target
     col_target_t target
     bint large_string_cast_to_utf8
+    bint has_override
+    column_sender_numpy_dtype override_dtype
+    uint8_t override_geohash_bits
 
 
 cdef struct col_t:

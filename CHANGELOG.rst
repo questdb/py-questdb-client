@@ -53,8 +53,18 @@ QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
 C stream PyCapsule protocol (``__arrow_c_stream__``) — the latter two
 (``to_polars`` / ``__arrow_c_stream__``) without requiring pyarrow.
 SYMBOL columns are dictionary-encoded on the wire and map to pandas
-``Categorical`` (``to_pandas`` / ``iter_pandas``). :class:`Client` is a
-context manager and exposes :meth:`Client.close` and
+``Categorical`` (``to_pandas`` / ``iter_pandas``).
+
+``to_pandas`` / ``iter_pandas`` default to a native (no-pyarrow) build
+straight from the QWP column buffers: a nullable integer column becomes a
+pandas nullable ``Int*`` when it contains nulls and plain numpy otherwise,
+``double`` stays numpy with ``NaN``, ``TIMESTAMP`` → ``datetime64``, and
+the QuestDB column kinds are recorded in ``df.attrs['questdb']`` for a type
+round-trip through :meth:`Client.dataframe`. Pass
+``dtype_backend="pyarrow"`` / ``"numpy_nullable"`` (or ``types_mapper=``)
+to select the pyarrow-backed conversion instead.
+
+:class:`Client` is a context manager and exposes :meth:`Client.close` and
 :meth:`Client.reap_idle` for pooled-connection lifecycle management.
 
 Columnar DataFrame Ingestion
@@ -65,6 +75,14 @@ any Arrow C Data Interface object over QWP/WebSocket. A
 ``schema_overrides`` keyword reclassifies columns as ``symbol``,
 ``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
 ('geohash', 20)}``).
+
+The designated-timestamp argument ``at`` is the timestamp column itself,
+given by name (``str``) or position (``int``); unlike
+:meth:`Sender.dataframe` / :meth:`Buffer.dataframe` it does not accept a
+scalar ``datetime`` / ``TimestampNanos`` / ``ServerTimestamp``. A frame
+produced by :meth:`QueryResult.to_pandas` round-trips back to the same
+QuestDB column types automatically: the kinds recorded in
+``df.attrs['questdb']`` and pandas nullable extension dtypes are honoured.
 
 Errors
 ******

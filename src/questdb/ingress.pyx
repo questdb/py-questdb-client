@@ -2180,6 +2180,28 @@ cdef bint _dataframe_columnar_i64_has_negative(
     return False
 
 
+cdef int _dataframe_columnar_ts_field_scan(
+        ArrowArray* arr,
+        const int64_t* data,
+        size_t row_count) noexcept nogil:
+    # 0: ok, 1: NaT in a non-null row, 2: pre-epoch value in a non-null row.
+    # Null rows (cleared validity bit) carry an undefined physical value and
+    # are skipped; the column is sent with its validity bitmap.
+    cdef size_t row_index
+    cdef const uint8_t* validity = NULL
+    if arr.null_count != 0:
+        validity = <const uint8_t*>arr.buffers[0]
+    for row_index in range(row_count):
+        if validity != NULL and not (
+                validity[row_index >> 3] & (<uint8_t>1 << (row_index & 7))):
+            continue
+        if data[row_index] == _NAT:
+            return 1
+        if data[row_index] < 0:
+            return 2
+    return 0
+
+
 cdef const column_sender_validity* _dataframe_columnar_validity(
         ArrowArray* arr,
         size_t row_offset,
@@ -2323,6 +2345,7 @@ cdef object _dataframe_columnar_plan_failures(
     cdef size_t field_count = 0
     cdef col_t* col
     cdef const int64_t* ts_data
+    cdef int ts_scan
 
     if (plan.col_count == 0) or (plan.row_count == 0):
         return failures
@@ -2410,13 +2433,14 @@ cdef object _dataframe_columnar_plan_failures(
                     'timestamp field columns.'))
             else:
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
-                if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
+                ts_scan = _dataframe_columnar_ts_field_scan(
+                    &col.setup.chunks.chunks[0], ts_data, plan.row_count)
+                if ts_scan == 1:
                     failures.append(_dataframe_columnar_col_failure(
                         df,
                         col,
                         'v1 timestamp field columns cannot contain NaT.'))
-                elif _dataframe_columnar_i64_has_negative(
-                        ts_data, plan.row_count):
+                elif ts_scan == 2:
                     failures.append(_dataframe_columnar_col_failure(
                         df,
                         col,
@@ -3319,6 +3343,8 @@ cdef void_int _dataframe_columnar_append_field(
 
     cdef column_sender_numpy_dtype numpy_dtype
     cdef size_t element_size
+    cdef column_sender_numpy_extras extras
+    cdef const column_sender_numpy_extras* extras_ptr
 
     if col.setup.target == col_target_t.col_target_column_bool:
         if col.setup.source == col_source_t.col_source_bool_pyobj:
@@ -3412,6 +3438,20 @@ cdef void_int _dataframe_columnar_append_field(
                 element_size = 8
             else:
                 raise RuntimeError('Unsupported columnar int source.')
+            extras_ptr = NULL
+            if col.setup.has_override:
+                numpy_dtype = col.setup.override_dtype
+                if (numpy_dtype
+                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i8
+                        or numpy_dtype
+                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i16
+                        or numpy_dtype
+                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i32
+                        or numpy_dtype
+                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i64):
+                    memset(&extras, 0, sizeof(column_sender_numpy_extras))
+                    extras.geohash_bits = col.setup.override_geohash_bits
+                    extras_ptr = &extras
             with nogil:
                 ok = column_sender_chunk_append_numpy_column(
                     chunk,
@@ -3421,7 +3461,7 @@ cdef void_int _dataframe_columnar_append_field(
                     (<const uint8_t*>data) + row_offset * element_size,
                     row_count,
                     validity_ptr,
-                    NULL,
+                    extras_ptr,
                     &err)
     elif col.setup.target == col_target_t.col_target_column_f64:
         if col.setup.source in (
@@ -3634,6 +3674,82 @@ cdef void_int _dataframe_columnar_append_at(
 
     if not ok:
         raise c_err_to_py(err)
+
+
+cdef int _geohash_override_dtype(col_source_t source) noexcept:
+    if source == col_source_t.col_source_i8_numpy:
+        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i8
+    if source == col_source_t.col_source_i16_numpy:
+        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i16
+    if source == col_source_t.col_source_i32_numpy:
+        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i32
+    if source == col_source_t.col_source_i64_numpy:
+        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i64
+    return -1
+
+
+cdef object _dataframe_normalize_nullable(object df):
+    if not _is_pandas_dataframe_object(df):
+        return df
+    _dataframe_may_import_deps()
+    cdef object masked_base = _pandas_masked_dtype()
+    convert = []
+    for name, dtype in zip(df.columns, df.dtypes):
+        if (isinstance(dtype, masked_base)
+                or isinstance(dtype, _PANDAS.StringDtype)):
+            convert.append(name)
+    if not convert:
+        return df
+    out = df.copy(deep=False)
+    for name in convert:
+        out[name] = df[name].astype(object)
+    out.attrs = dict(df.attrs)
+    return out
+
+
+cdef void_int _dataframe_apply_roundtrip_overrides(
+        object df, dataframe_plan_t* plan) except -1:
+    cdef size_t col_index
+    cdef col_t* col
+    cdef int gh
+    for col_index in range(plan.col_count):
+        plan.cols.d[col_index].setup.has_override = False
+    attrs = getattr(df, 'attrs', None)
+    if not attrs:
+        return 0
+    qmeta = attrs.get('questdb')
+    if not qmeta:
+        return 0
+    cols_meta = qmeta.get('columns')
+    if not cols_meta:
+        return 0
+    df_cols = list(df.columns)
+    for col_index in range(plan.col_count):
+        col = &plan.cols.d[col_index]
+        if col.setup.orig_index >= <size_t>len(df_cols):
+            continue
+        meta = cols_meta.get(df_cols[col.setup.orig_index])
+        if not meta:
+            continue
+        kind = meta.get('kind')
+        if (kind == 'ipv4'
+                and col.setup.source == col_source_t.col_source_u32_numpy):
+            col.setup.has_override = True
+            col.setup.override_dtype = \
+                column_sender_numpy_dtype.column_sender_numpy_u32_ipv4
+        elif (kind == 'char'
+                and col.setup.source == col_source_t.col_source_u16_numpy):
+            col.setup.has_override = True
+            col.setup.override_dtype = \
+                column_sender_numpy_dtype.column_sender_numpy_u16_char
+        elif kind == 'geohash':
+            gh = _geohash_override_dtype(col.setup.source)
+            bits = meta.get('precision_bits') or 0
+            if gh != -1 and 1 <= bits <= 60:
+                col.setup.has_override = True
+                col.setup.override_dtype = <column_sender_numpy_dtype>gh
+                col.setup.override_geohash_bits = <uint8_t>bits
+    return 0
 
 
 cdef void_int _dataframe_columnar_populate_chunk(
@@ -4576,15 +4692,35 @@ cdef bint _is_pandas_dataframe_object(object obj):
     return False
 
 
+cdef object _MASKED_DTYPE = None
+cdef bint _MASKED_DTYPE_READY = False
+
+
+cdef object _pandas_masked_dtype():
+    global _MASKED_DTYPE, _MASKED_DTYPE_READY
+    if not _MASKED_DTYPE_READY:
+        try:
+            from pandas.core.arrays.masked import BaseMaskedDtype
+            _MASKED_DTYPE = BaseMaskedDtype
+        except Exception:
+            _MASKED_DTYPE = ()
+        _MASKED_DTYPE_READY = True
+    return _MASKED_DTYPE
+
+
 cdef bint _pandas_dataframe_requires_manual_planner(object df) except -1:
     cdef object dtype
     cdef object storage
+    cdef object masked_base
     if not _is_pandas_dataframe_object(df):
         return False
     _dataframe_may_import_deps()
+    masked_base = _pandas_masked_dtype()
     try:
         for dtype in df.dtypes:
             if isinstance(dtype, _NUMPY_OBJECT):
+                return True
+            if isinstance(dtype, masked_base):
                 return True
             if isinstance(dtype, _PANDAS.StringDtype):
                 storage = getattr(dtype, 'storage', None)
@@ -4941,7 +5077,7 @@ cdef class Client:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
+            at: Union[int, str],
             max_rows_per_batch: int = 16384,
             schema_overrides: Optional[Dict[str, object]] = None):
         """
@@ -5037,6 +5173,7 @@ cdef class Client:
                     schema_overrides):
                 return self
 
+            df = _dataframe_normalize_nullable(df)
             _dataframe_plan_build(
                 b,
                 df,
@@ -5049,6 +5186,7 @@ cdef class Client:
             if (plan.col_count == 0) or (plan.row_count == 0):
                 return self
 
+            _dataframe_apply_roundtrip_overrides(df, &plan)
             _dataframe_columnar_validate_plan(df, &plan)
             _dataframe_columnar_prebuild_pyobj(df, &plan)
             rows_per_chunk = _dataframe_columnar_rows_per_chunk(
@@ -5114,14 +5252,11 @@ cdef class Client:
         Execute a SQL query and return a :class:`QueryResult`.
 
         Egress goes through the QuestDB Wire Protocol (QWP/WebSocket)
-        ``/read/v1`` endpoint. The reader connection is opened per-call,
-        independent of the ingress pool; it is closed when the returned
-        :class:`QueryResult` is consumed.
-
-        The reader conf-string is derived from the client's ingress
-        conf-string by swapping the service prefix
-        (``qwpws::`` → ``ws::``, ``qwpwss::`` → ``wss::``). Auth / TLS
-        knobs apply to both directions.
+        ``/read/v1`` endpoint. The reader is borrowed from the same
+        connection pool that hosts the ingress writers and is returned to
+        the pool when the returned :class:`QueryResult` is consumed or
+        closed (a poisoned connection is dropped instead). Auth / TLS
+        settings apply to both directions.
 
         :param sql: SQL text to execute. Forwarded verbatim to QuestDB.
 
@@ -5203,9 +5338,14 @@ cdef class Client:
         self.close()
 
     def __dealloc__(self):
+        cdef questdb_db* db
+        cdef PyThreadState* gs = NULL
         if self._db != NULL:
-            questdb_db_close(self._db)
+            db = self._db
             self._db = NULL
+            _ensure_doesnt_have_gil(&gs)
+            questdb_db_close(db)
+            _ensure_has_gil(&gs)
 
 
 cdef class Sender:

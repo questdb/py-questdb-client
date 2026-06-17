@@ -204,7 +204,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         ) noexcept nogil
 
     line_sender_buffer* line_sender_buffer_clone(
-        const line_sender_buffer* buffer
+        const line_sender_buffer* buffer,
+        line_sender_error** err_out
         ) noexcept nogil
 
     bint line_sender_buffer_reserve(
@@ -527,7 +528,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         ) noexcept nogil
 
     line_sender_opts* line_sender_opts_clone(
-        const line_sender_opts* opts
+        line_sender_opts* opts
         ) noexcept nogil
 
     void line_sender_opts_free(
@@ -879,7 +880,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         column_sender_chunk* chunk,
         const char* name,
         size_t name_len,
-        column_sender_numpy_dtype dtype,
+        uint32_t dtype,
         const uint8_t* data,
         size_t row_count,
         const column_sender_validity* validity,
@@ -895,7 +896,7 @@ cdef extern from "questdb/ingress/column_sender.h":
 
     bint column_sender_sync(
         qwpws_conn* conn,
-        column_sender_ack_level ack_level,
+        uint32_t ack_level,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -915,7 +916,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         qwpws_conn* conn,
         line_sender_table_name table,
         ArrowArray* array,
-        ArrowSchema* schema,
+        const ArrowSchema* schema,
         const column_sender_arrow_override* overrides,
         size_t overrides_len,
         line_sender_error** err_out
@@ -925,7 +926,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         qwpws_conn* conn,
         line_sender_table_name table,
         ArrowArray* array,
-        ArrowSchema* schema,
+        const ArrowSchema* schema,
         line_sender_column_name ts_column,
         const column_sender_arrow_override* overrides,
         size_t overrides_len,
@@ -1032,6 +1033,126 @@ cdef extern from "questdb/egress/line_reader.h":
         line_reader_cursor* cursor,
         ArrowArray* out_array,
         ArrowSchema* out_schema,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    cdef enum line_reader_column_kind:
+        line_reader_column_kind_boolean = 0x01
+        line_reader_column_kind_byte = 0x02
+        line_reader_column_kind_short = 0x03
+        line_reader_column_kind_int = 0x04
+        line_reader_column_kind_long = 0x05
+        line_reader_column_kind_float = 0x06
+        line_reader_column_kind_double = 0x07
+        line_reader_column_kind_symbol = 0x09
+        line_reader_column_kind_timestamp = 0x0A
+        line_reader_column_kind_date = 0x0B
+        line_reader_column_kind_uuid = 0x0C
+        line_reader_column_kind_long256 = 0x0D
+        line_reader_column_kind_geohash = 0x0E
+        line_reader_column_kind_varchar = 0x0F
+        line_reader_column_kind_timestamp_nanos = 0x10
+        line_reader_column_kind_double_array = 0x11
+        line_reader_column_kind_long_array = 0x12
+        line_reader_column_kind_decimal64 = 0x13
+        line_reader_column_kind_decimal128 = 0x14
+        line_reader_column_kind_decimal256 = 0x15
+        line_reader_column_kind_char = 0x16
+        line_reader_column_kind_binary = 0x17
+        line_reader_column_kind_ipv4 = 0x18
+        line_reader_column_kind_unknown = 0xFF
+
+    cdef struct line_reader_batch:
+        pass
+
+    cdef struct line_reader_column_data:
+        line_reader_column_kind kind
+        size_t row_count
+        const uint8_t* validity
+        const void* values
+        size_t value_stride
+        const uint32_t* var_offsets
+        const uint8_t* var_data
+        size_t var_data_len
+        const uint32_t* symbol_codes
+        int8_t decimal_scale
+        uint8_t geohash_precision_bits
+
+    cdef struct line_reader_array_data:
+        line_reader_column_kind kind
+        size_t row_count
+        const uint8_t* validity
+        const uint8_t* data
+        size_t data_len
+        const uint32_t* data_offsets
+        const uint32_t* shapes
+        size_t shapes_len
+        const uint32_t* shape_offsets
+
+    cdef struct line_reader_symbol_entry:
+        uint32_t offset
+        uint32_t length
+
+    cdef struct line_reader_symbol_dict:
+        size_t entry_count
+        const uint8_t* heap
+        size_t heap_len
+        const line_reader_symbol_entry* entries
+
+    const line_reader_batch* line_reader_cursor_next_batch(
+        line_reader_cursor* cursor,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    size_t line_reader_batch_row_count(
+        const line_reader_batch* batch
+        ) noexcept nogil
+
+    size_t line_reader_batch_column_count(
+        const line_reader_batch* batch
+        ) noexcept nogil
+
+    bint line_reader_batch_column_kind(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        line_reader_column_kind* out_kind,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    bint line_reader_batch_column_name(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        const char** out_buf,
+        size_t* out_len,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    bint line_reader_batch_column_data(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        line_reader_column_data* out,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    bint line_reader_batch_array_column_data(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        line_reader_array_data* out,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    bint line_reader_batch_symbol_dict(
+        const line_reader_batch* batch,
+        line_reader_symbol_dict* out,
+        line_reader_error** err_out
+        ) noexcept nogil
+
+    bint line_reader_batch_symbol(
+        const line_reader_batch* batch,
+        size_t col_idx,
+        uint32_t code,
+        const char** out_buf,
+        size_t* out_len,
         line_reader_error** err_out
         ) noexcept nogil
 

@@ -314,7 +314,8 @@ The following parameters control the HTTP request behavior.
   Default: 10000 (10 seconds).
 
 * ``retry_max_backoff_millis`` - ``int >= 10``: Maximum per-attempt backoff in
-  milliseconds for the HTTP retry loop.
+  milliseconds for the HTTP retry loop. As a ``Sender`` / ``from_conf`` /
+  ``from_env`` keyword argument this is named ``retry_max_backoff``.
 
   Default: 1000 (1 second).
 
