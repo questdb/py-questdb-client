@@ -71,7 +71,11 @@ stages:
             displayName: "Test vs released"
             timeoutInMinutes: 25
             env:
-              JAVA_HOME: $(JAVA_HOME_17_X64)
+              # The latest QuestDB release requires a JDK 25 runtime (the
+              # -no-jre tarball uses the host JDK). JDK 25 is pre-installed on
+              # the Microsoft-hosted ubuntu/macOS/windows images as
+              # JAVA_HOME_25_X64.
+              JAVA_HOME: $(JAVA_HOME_25_X64)
           # QDB_DOCKER_IMAGE makes the integration fixture run QuestDB from the
           # Docker image rather than a locally-built jar (no host JDK needed).
           - script: python3 proj.py test 1

@@ -14,7 +14,8 @@ import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from fixture import \
-    QuestDbFixture, install_questdb, install_questdb_from_repo, CA_PATH, AUTH
+    QuestDbFixture, install_questdb, install_questdb_from_repo, \
+    list_questdb_releases, CA_PATH, AUTH
 from docker_questdb import DockerQuestDbFixture
 
 
@@ -30,7 +31,6 @@ except ImportError:
 import questdb.ingress as qi
 
 
-QUESTDB_VERSION = '9.2.0'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
@@ -47,17 +47,17 @@ def may_install_questdb():
         repo = pathlib.Path(os.environ['QDB_REPO_PATH'])
         install_path = install_questdb_from_repo(repo)
     else:
-        # Pin the released-server version. "Latest" is intentionally NOT used
-        # here: recent QuestDB releases require a JDK 25 runtime, but this leg
-        # launches the -no-jre tarball with the agent's JDK 17, so a newer
-        # release dies at boot ("Error reading module ... questdb.jar"). Bump
-        # this in lockstep with the JDK the leg runs on.
-        url = ('https://github.com/questdb/questdb/releases/download/' +
-            QUESTDB_VERSION +
-            '/questdb-' +
-            QUESTDB_VERSION +
-            '-no-jre-bin.tar.gz')
-        install_path = install_questdb(QUESTDB_VERSION, url)
+        # Test against the latest published QuestDB release. Recent releases
+        # require a JDK 25 runtime, so the CI step that calls this points
+        # JAVA_HOME at the agent's pre-installed JDK 25. The fixture reads the
+        # server's real version from `select build` at startup, so the
+        # version-gated tests keep working. list_questdb_releases() resolves
+        # the latest release from the GitHub API (its urlopen is timed out).
+        latest = next(iter(list_questdb_releases(max_results=1)), None)
+        if latest is None:
+            raise RuntimeError('Could not resolve the latest QuestDB release.')
+        vers, url = latest
+        install_path = install_questdb(vers, url)
 
     QUESTDB_PLAIN_INSTALL_PATH = PROJ_ROOT / 'build' / 'questdb' / 'plain'
     shutil.copytree(
