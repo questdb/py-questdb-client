@@ -2283,6 +2283,70 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_symbol_column_to_pandas(self):
+        """SYMBOL egresses as dictionary(uint32, utf8); pandas rejects
+        unsigned dictionary indices, so to_pandas / iter_pandas must
+        recast the index to int32. Covers the three dtype_backend
+        variants plus the streaming iter_pandas path.
+        """
+        import pandas as pd
+        import pyarrow as pa
+        table_name = 't_egress_symbol_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, sym SYMBOL, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {table_name} VALUES "
+                f"('2024-01-01T00:00:00Z', 'aa', 1), "
+                f"('2024-01-01T00:00:01Z', 'bb', 2), "
+                f"('2024-01-01T00:00:02Z', 'aa', 3)")
+            self.qdb_plain.retry_check_table(table_name, min_rows=3)
+
+            sql = f'SELECT sym, lg FROM {table_name} ORDER BY ts'
+
+            # Wire format: SYMBOL arrives as a dictionary with an
+            # unsigned index — the input that breaks pandas conversion.
+            with qi.Client.from_conf(self._conf()) as client:
+                table = client.query(sql).to_arrow()
+            sym_type = table.schema.field('sym').type
+            self.assertTrue(
+                pa.types.is_dictionary(sym_type),
+                f'expected dictionary type for SYMBOL; got {sym_type}')
+            self.assertTrue(
+                pa.types.is_unsigned_integer(sym_type.index_type),
+                f'expected unsigned dict index; got {sym_type.index_type}')
+
+            # default to_pandas: must not raise; SYMBOL -> Categorical.
+            with qi.Client.from_conf(self._conf()) as client:
+                default = client.query(sql).to_pandas()
+            self.assertEqual(str(default['sym'].dtype), 'category')
+            self.assertEqual(list(default['sym']), ['aa', 'bb', 'aa'])
+            self.assertEqual(list(default['lg']), [1, 2, 3])
+
+            # pyarrow + numpy_nullable backends: also must not raise.
+            with qi.Client.from_conf(self._conf()) as client:
+                arrow_backed = client.query(sql).to_pandas(
+                    dtype_backend='pyarrow')
+            self.assertEqual(list(arrow_backed['sym']), ['aa', 'bb', 'aa'])
+            with qi.Client.from_conf(self._conf()) as client:
+                nullable = client.query(sql).to_pandas(
+                    dtype_backend='numpy_nullable')
+            self.assertEqual(list(nullable['sym']), ['aa', 'bb', 'aa'])
+
+            # streaming iter_pandas exercises the same per-batch recast.
+            with qi.Client.from_conf(self._conf()) as client:
+                syms = []
+                for chunk in client.query(sql).iter_pandas():
+                    syms.extend(chunk['sym'].tolist())
+            self.assertEqual(syms, ['aa', 'bb', 'aa'])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_null_round_trip_per_dtype_backend(self):
         """Pin the null contract across the three dtype_backend variants.
 

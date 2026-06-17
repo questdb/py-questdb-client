@@ -1303,11 +1303,13 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
         arrowtype = arrowtype.storage_type
 
+    cdef object t_dec32 = getattr(_PYARROW.lib, 'Type_DECIMAL32', None)
+    cdef object t_dec64 = getattr(_PYARROW.lib, 'Type_DECIMAL64', None)
     _dataframe_series_as_arrow(pandas_col, col)
-    if arrowtype.id == _PYARROW.lib.Type_DECIMAL32:
+    if t_dec32 is not None and arrowtype.id == t_dec32:
         col.setup.source = col_source_t.col_source_decimal32_arrow
         is_decimal_col = True
-    elif arrowtype.id == _PYARROW.lib.Type_DECIMAL64:
+    elif t_dec64 is not None and arrowtype.id == t_dec64:
         col.setup.source = col_source_t.col_source_decimal64_arrow
         is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_DECIMAL128:
@@ -2646,6 +2648,44 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64us_numpy(
             raise c_err_to_py(err)
 
 
+cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col) except -1:
+    cdef line_sender_error* err = NULL
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+    cdef object dt
+    cdef object delta
+    cdef int64_t micros
+    if _dataframe_is_null_pyobj(cell):
+        return 0
+    if not isinstance(<object>cell, cp_datetime):
+        raise ValueError(
+            'Expected an object of type datetime, got an object of type ' +
+            _fqn(type(<object>cell)) + '.')
+    dt = <object>cell
+    if dt.tzinfo is None:
+        micros = (
+            _days_from_civil(
+                PyDateTime_GET_YEAR(dt),
+                PyDateTime_GET_MONTH(dt),
+                PyDateTime_GET_DAY(dt)) * 86_400_000_000
+            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * 3_600_000_000
+            + <int64_t>PyDateTime_DATE_GET_MINUTE(dt) * 60_000_000
+            + <int64_t>PyDateTime_DATE_GET_SECOND(dt) * 1_000_000
+            + <int64_t>PyDateTime_DATE_GET_MICROSECOND(dt))
+    else:
+        delta = dt - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        micros = <int64_t>(
+            delta.days * 86_400_000_000
+            + delta.seconds * 1_000_000
+            + delta.microseconds)
+    if not line_sender_buffer_column_ts_micros(ls_buf, col.name, micros, &err):
+        raise c_err_to_py(err)
+    return 0
+
+
 cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
@@ -3005,6 +3045,8 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64us_numpy:
         _dataframe_serialize_cell_column_ts__dt64us_numpy(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__datetime_pyobj:
+        _dataframe_serialize_cell_column_ts__datetime_pyobj(ls_buf, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_arr_f64__arr_f64_numpyobj:
         _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal_pyobj:

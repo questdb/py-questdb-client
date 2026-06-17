@@ -53,7 +53,11 @@ cdef inline int decimal_pyobj_to_binary(
 
     if mpd.exp >= 0:
         # Decimal ILP does not support negative scales; adjust the unscaled value instead.
-        exp = mpd.exp
+        if mpd.exp > 76:
+            raise ingress_error_cls(
+                bad_dataframe_code,
+                f'Decimal exponent {mpd.exp} exceeds the maximum supported value of 76')
+        exp = <uint32_t>mpd.exp
         scale[0] = 0
     else:
         exp = 0

@@ -907,7 +907,7 @@ class Client:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
+        at: Union[int, str],
         max_rows_per_batch: int = 16384,
         schema_overrides: Optional[Dict[str, object]] = None,
     ) -> Client:
@@ -967,6 +967,10 @@ class QueryResult:
         types_mapper: Optional[Callable[[Any], Any]] = None,
     ) -> pd.DataFrame:
         """Read the full result into a ``pandas.DataFrame``. Requires pyarrow."""
+
+    def to_polars(self) -> Any:
+        """Read the full result into a ``polars.DataFrame``. Requires polars
+        (pyarrow-free)."""
 
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""
@@ -1218,7 +1222,7 @@ class Sender:
         *,
         symbols: Optional[Dict[str, str]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray, Decimal]]
         ] = None,
         at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:

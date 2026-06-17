@@ -103,9 +103,7 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
 
 import sys
 import datetime
-import ipaddress
 import os
-import uuid
 import threading
 import collections
 import time
@@ -128,6 +126,8 @@ cdef uint64_t _dataframe_columnar_flush_ns = 0
 cdef uint64_t _dataframe_columnar_sync_calls = 0
 cdef uint64_t _dataframe_columnar_sync_ns = 0
 cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
+
+cdef size_t _QWP_MAX_DEFERRED_ARROW_FRAMES = 100
 
 
 # This value is automatically updated by the `bump2version` tool.
@@ -2483,6 +2483,14 @@ cdef object _dataframe_columnar_plan_failures(
                     'v1 only supports NumPy datetime64[ns/us] or '
                     'tz-aware datetime64/timestamp[pyarrow] '
                     'designated timestamp columns.'))
+            elif (col.setup.source in (
+                        col_source_t.col_source_dt64ns_tz_arrow,
+                        col_source_t.col_source_dt64us_tz_arrow)
+                    and col.setup.chunks.chunks[0].null_count != 0):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 designated timestamp columns cannot contain nulls.'))
             else:
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
                 if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
@@ -3788,16 +3796,13 @@ cdef void_int _dataframe_arrow_flush_batch(
         ArrowSchema* schema,
         line_sender_column_name* ts_column,
         const column_sender_arrow_override* overrides,
-        size_t overrides_len,
-        bint retry_after_sync) except -1:
+        size_t overrides_len) except -1:
     cdef line_sender_error* err = NULL
-    cdef line_sender_error_code err_code
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
     cdef uint64_t start_ns = 0
     global _dataframe_columnar_flush_calls
     global _dataframe_columnar_flush_ns
-    global _dataframe_columnar_flush_retry_syncs
 
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
@@ -3814,36 +3819,9 @@ cdef void_int _dataframe_arrow_flush_batch(
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
         _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
-    if ok:
-        return 0
-
-    err_code = line_sender_error_get_code(err)
-    if (retry_after_sync and err_code == line_sender_error_invalid_api_call and
-            _dataframe_columnar_is_deferred_capacity_error(err)):
-        if _dataframe_columnar_count_io_stats:
-            _dataframe_columnar_flush_retry_syncs += 1
-        line_sender_error_free(err)
-        err = NULL
-        _dataframe_columnar_sync(conn)
-        if _dataframe_columnar_count_io_stats:
-            start_ns = time.perf_counter_ns()
-        _ensure_doesnt_have_gil(&gs)
-        if ts_column != NULL:
-            ok = column_sender_flush_arrow_batch_at_column(
-                conn, table, array, schema, ts_column[0],
-                overrides, overrides_len, &err)
-        else:
-            ok = column_sender_flush_arrow_batch(
-                conn, table, array, schema,
-                overrides, overrides_len, &err)
-        _ensure_has_gil(&gs)
-        if _dataframe_columnar_count_io_stats:
-            _dataframe_columnar_flush_calls += 1
-            _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
-        if ok:
-            return 0
-
-    raise c_err_to_py(err)
+    if not ok:
+        raise c_err_to_py(err)
+    return 0
 
 
 def _debug_dataframe_columnar_io_stats(
@@ -3939,6 +3917,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef PyThreadState* gs = NULL
     cdef bytes conf_bytes
     cdef bint any_flushed = False
+    cdef size_t deferred_since_sync = 0
     cdef line_sender_table_name c_table_name
     cdef line_sender_column_name c_ts_column
     cdef line_sender_column_name* c_ts_column_ptr = NULL
@@ -3999,7 +3978,7 @@ def _bench_dataframe_flush_arrow_batch(
             for iteration in range(iterations):
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
-                    &c_schema, NULL, 0, &any_flushed)
+                    &c_schema, NULL, 0, &any_flushed, &deferred_since_sync)
             _dataframe_columnar_sync(conn)
             completed = iterations
         finally:
@@ -4167,7 +4146,8 @@ cdef void_int _capsule_consume_stream(
         ArrowSchema* c_schema,
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
-        bint* any_flushed) except -1:
+        bint* any_flushed,
+        size_t* deferred_since_sync) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
     # call (this function populates it via get_schema), reused as-is on
     # subsequent calls (Arrow C Data Interface guarantees slices of the
@@ -4204,11 +4184,14 @@ cdef void_int _capsule_consume_stream(
         if batch.release == NULL:
             break
         try:
+            if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
+                _dataframe_columnar_sync(conn)
+                deferred_since_sync[0] = 0
             _dataframe_arrow_flush_batch(
                 conn, c_table_name, &batch, c_schema, c_ts_column_ptr,
-                c_overrides, c_overrides_len,
-                any_flushed[0])
+                c_overrides, c_overrides_len)
             any_flushed[0] = True
+            deferred_since_sync[0] += 1
         finally:
             if batch.release != NULL:
                 batch.release(&batch)
@@ -4660,6 +4643,7 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef PyThreadState* gs = NULL
     cdef object sliceable = None
     cdef bint any_flushed = False
+    cdef size_t deferred_since_sync = 0
     cdef bint sync_attempted = False
     cdef bint force_drop_conn = False
     cdef object row_slice = None
@@ -4771,7 +4755,8 @@ cdef bint _dataframe_client_try_capsule_path(
                 _capsule_consume_stream_with_hint(
                     conn, sliceable, c_table_name, c_ts_column_ptr,
                     &c_schema, c_overrides, c_overrides_len,
-                    &any_flushed, max_rows_per_batch, False)
+                    &any_flushed, &deferred_since_sync,
+                    max_rows_per_batch, False)
             else:
                 offset = 0
                 while offset < total_rows:
@@ -4783,7 +4768,8 @@ cdef bint _dataframe_client_try_capsule_path(
                     _capsule_consume_stream_with_hint(
                         conn, row_slice, c_table_name, c_ts_column_ptr,
                         &c_schema, c_overrides, c_overrides_len,
-                        &any_flushed, max_rows_per_batch, True)
+                        &any_flushed, &deferred_since_sync,
+                        max_rows_per_batch, True)
                     offset += chunk_rows
             sync_attempted = True
             _dataframe_columnar_sync(conn)
@@ -4817,13 +4803,14 @@ cdef void_int _capsule_consume_stream_with_hint(
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
         bint* any_flushed,
+        size_t* deferred_since_sync,
         size_t max_rows_per_batch,
         bint can_slice) except -1:
     cdef str hint
     try:
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr, c_schema,
-            c_overrides, c_overrides_len, any_flushed)
+            c_overrides, c_overrides_len, any_flushed, deferred_since_sync)
     except IngressError as exc:
         if _is_batch_too_large_error(exc):
             if can_slice:
@@ -6086,7 +6073,7 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray]]]=None,
+                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray, Decimal]]]=None,
             at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.

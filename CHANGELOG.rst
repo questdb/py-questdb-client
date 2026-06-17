@@ -31,6 +31,10 @@ ILP transports.
 
 Additional configuration keys ``tls_roots_password``,
 ``retry_max_backoff_millis`` and ``qwp_ws_progress`` are also accepted.
+Every new key is equally available as a ``Sender`` / ``Sender.from_conf`` /
+``Sender.from_env`` keyword argument (``max_datagram_size``,
+``multicast_ttl``, ``tls_roots_password``, ``retry_max_backoff``,
+``qwp_ws_progress`` and ``qwp_ws_error_handler``).
 
 Buffer Factories
 ****************
@@ -45,9 +49,13 @@ Query Egress
 Adds :class:`Client` with :meth:`Client.query`, returning a
 :class:`QueryResult` that streams rows as Arrow record batches over the
 QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
-``to_pandas``, ``iter_arrow``, ``iter_pandas`` or the Arrow C stream
-PyCapsule protocol (``__arrow_c_stream__``) — the latter without
-requiring pyarrow.
+``to_pandas``, ``to_polars``, ``iter_arrow``, ``iter_pandas`` or the Arrow
+C stream PyCapsule protocol (``__arrow_c_stream__``) — the latter two
+(``to_polars`` / ``__arrow_c_stream__``) without requiring pyarrow.
+SYMBOL columns are dictionary-encoded on the wire and map to pandas
+``Categorical`` (``to_pandas`` / ``iter_pandas``). :class:`Client` is a
+context manager and exposes :meth:`Client.close` and
+:meth:`Client.reap_idle` for pooled-connection lifecycle management.
 
 Columnar DataFrame Ingestion
 ****************************
@@ -65,6 +73,9 @@ Adds :class:`UnsupportedDataFrameShapeError` (raised when a DataFrame
 cannot be expressed on the QWP columnar path) and the
 :class:`IngressErrorCode` members ``ServerRejection``,
 ``ArrowUnsupportedColumnKind``, ``ArrowIngest`` and ``Cancelled``.
+:class:`IngressError` gains a ``qwp_ws_error`` property exposing the
+structured :class:`QwpWsError` view on a server-side QWP/WebSocket
+rejection.
 
 4.1.0 (2025-11-28)
 ------------------

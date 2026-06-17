@@ -100,19 +100,22 @@ cdef class _CursorHandle:
     """Owns a ``line_reader_cursor*`` + back-ref to its reader. Freed on dealloc."""
     cdef line_reader_cursor* _cursor
     cdef _ReaderHandle _reader_ref
+    cdef object _lock
 
     def __cinit__(self):
         self._cursor = NULL
         self._reader_ref = None
+        self._lock = threading.Lock()
 
     cdef _attach(self, line_reader_cursor* cursor, _ReaderHandle reader_ref):
         self._cursor = cursor
         self._reader_ref = reader_ref
 
     cdef void _free(self) noexcept:
-        if self._cursor != NULL:
-            line_reader_cursor_free(self._cursor)
-            self._cursor = NULL
+        with self._lock:
+            if self._cursor != NULL:
+                line_reader_cursor_free(self._cursor)
+                self._cursor = NULL
 
     def __dealloc__(self):
         self._free()
@@ -130,23 +133,31 @@ cdef object _fetch_one_batch(_CursorHandle handle, object pa_module):
     cdef ArrowSchema schema
     cdef line_reader_error* err = NULL
     cdef line_reader_arrow_batch_result result
-    cdef line_reader_cursor* cursor = handle._cursor
+    cdef line_reader_cursor* cursor
 
-    if cursor == NULL:
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
-            'cursor is closed')
-
-    with nogil:
-        result = line_reader_cursor_next_arrow_batch(
-            cursor, &array, &schema, &err)
+    with handle._lock:
+        cursor = handle._cursor
+        if cursor == NULL:
+            raise IngressError(
+                IngressErrorCode.InvalidApiCall,
+                'cursor is closed')
+        with nogil:
+            result = line_reader_cursor_next_arrow_batch(
+                cursor, &array, &schema, &err)
 
     if result == line_reader_arrow_batch_ok:
         # Hand ownership of the array + schema buffers to pyarrow.
         # _import_from_c moves the structs and nulls their release
         # callbacks; pyarrow's RecordBatch owns the buffers from here.
-        return pa_module.RecordBatch._import_from_c(
-            <uintptr_t>&array, <uintptr_t>&schema)
+        try:
+            return pa_module.RecordBatch._import_from_c(
+                <uintptr_t>&array, <uintptr_t>&schema)
+        except:
+            if array.release != NULL:
+                array.release(&array)
+            if schema.release != NULL:
+                schema.release(&schema)
+            raise
 
     if result == line_reader_arrow_batch_end:
         return None
@@ -273,10 +284,16 @@ cdef size_t _arrow_metadata_byte_len(const char* md) noexcept:
     cdef int32_t i
     memcpy(&n, md, sizeof(int32_t))
     pos = sizeof(int32_t)
+    if n <= 0:
+        return pos
     for i in range(n):
         memcpy(&klen, md + pos, sizeof(int32_t))
+        if klen < 0:
+            return pos
         pos += sizeof(int32_t) + <size_t>klen
         memcpy(&vlen, md + pos, sizeof(int32_t))
+        if vlen < 0:
+            return pos
         pos += sizeof(int32_t) + <size_t>vlen
     return pos
 
@@ -446,6 +463,8 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept:
         else:
             if local_schema.release != NULL:
                 local_schema.release(&local_schema)
+        if prod.has_cached_array and prod.cached_array.release != NULL:
+            prod.cached_array.release(&prod.cached_array)
         memcpy(&prod.cached_array, &local_array, sizeof(ArrowArray))
         prod.has_cached_array = True
         return 0
@@ -609,6 +628,30 @@ cdef object _numpy_nullable_mapping():
     return _NUMPY_NULLABLE_CACHE
 
 
+cdef object _table_signed_dict_indices(object table):
+    """Recast dictionary columns whose index type is unsigned to int32.
+
+    QuestDB SYMBOL egresses as ``dictionary(uint32, utf8)`` and pandas
+    rejects unsigned dictionary indices; symbol cardinality fits int32.
+    Returns the table unchanged when no column needs it.
+    """
+    import pyarrow as pa
+    schema = table.schema
+    cdef list fields = []
+    cdef bint changed = False
+    for field in schema:
+        ty = field.type
+        if (pa.types.is_dictionary(ty)
+                and pa.types.is_unsigned_integer(ty.index_type)):
+            field = field.with_type(
+                pa.dictionary(pa.int32(), ty.value_type, ty.ordered))
+            changed = True
+        fields.append(field)
+    if not changed:
+        return table
+    return table.cast(pa.schema(fields, metadata=schema.metadata))
+
+
 def _debug_egress_pool_stats(client):
     """Return ``(in_use, idle)`` from the client's reader pool.
 
@@ -714,7 +757,7 @@ class QueryResult:
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
                 'pass at most one of dtype_backend, types_mapper')
-        table = self.to_arrow()
+        table = _table_signed_dict_indices(self.to_arrow())
         kwargs = {}
         if types_mapper is not None:
             kwargs['types_mapper'] = types_mapper
@@ -730,6 +773,20 @@ class QueryResult:
                     'only "numpy_nullable" and "pyarrow" are allowed')
         return table.to_pandas(**kwargs)
 
+    def to_polars(self):
+        """Read the full result into a ``polars.DataFrame``. Requires polars.
+
+        Consumes the ``__arrow_c_stream__`` capsule directly, so it needs no
+        pyarrow.
+        """
+        try:
+            import polars as pl
+        except ImportError as ie:
+            raise ImportError(
+                '`polars` is required for `to_polars()`. '
+                'Install with `pip install polars`.') from ie
+        return pl.from_arrow(self)
+
     def iter_arrow(self):
         """Iterate result batches as ``pyarrow.RecordBatch``.
 
@@ -744,10 +801,12 @@ class QueryResult:
     def iter_pandas(self, **to_pandas_kwargs):
         """Iterate result batches as ``pandas.DataFrame``.
 
-        Keyword arguments are forwarded to ``pa.RecordBatch.to_pandas``.
+        Keyword arguments are forwarded to pyarrow's ``to_pandas``.
         """
+        import pyarrow as pa
         for batch in self.iter_arrow():
-            yield batch.to_pandas(**to_pandas_kwargs)
+            table = _table_signed_dict_indices(pa.Table.from_batches([batch]))
+            yield table.to_pandas(**to_pandas_kwargs)
 
     def cancel(self):
         """Ask the server to stop streaming. Idempotent.
@@ -761,10 +820,15 @@ class QueryResult:
         cdef _CursorHandle handle = self._cursor_handle
         cdef line_reader_error* err = NULL
         cdef bint ok
-        if handle is None or handle._cursor == NULL:
+        cdef line_reader_cursor* cursor
+        if handle is None:
             return
-        with nogil:
-            ok = line_reader_cursor_cancel(handle._cursor, &err)
+        with handle._lock:
+            cursor = handle._cursor
+            if cursor == NULL:
+                return
+            with nogil:
+                ok = line_reader_cursor_cancel(cursor, &err)
         if not ok:
             if err != NULL:
                 raise _reader_err_to_py(err)
@@ -783,10 +847,10 @@ class QueryResult:
         ``IngressErrorCode.InvalidApiCall``.
         """
         cdef _CursorHandle handle = self._cursor_handle
-        if handle is not None:
-            handle._free()
         self._cursor_handle = None
         self._consumed = True
+        if handle is not None:
+            handle._free()
 
     def __enter__(self):
         return self

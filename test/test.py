@@ -68,6 +68,10 @@ from test_client_dataframe_fuzz import (
     TestClientDataframeFuzz,
     TestClientDataframeRoundTrip,
 )
+from test_client_polars_fuzz import (
+    TestClientPolarsDataframeFuzz,
+    TestClientPolarsDataframeRoundTrip,
+)
 from test_dataframe_leaks import TestCategoricalArrowLeak
 
 if pd is not None and pyarrow is not None:
