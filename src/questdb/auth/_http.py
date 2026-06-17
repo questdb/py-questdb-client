@@ -91,6 +91,23 @@ class HttpResponse:
         return 200 <= self.status < 300
 
 
+def safe_urlparse(url: str) -> tuple:
+    """
+    ``urllib.parse.urlparse(url)`` paired with its port, but with a typed error.
+
+    ``ParseResult.port`` raises a bare ``ValueError`` for a non-integer port
+    (e.g. ``https://idp:notaport``); re-raise it as :class:`OidcConfigError` so
+    a malformed endpoint URL stays within the package's error contract instead
+    of escaping as a raw ``ValueError``. Returns ``(parts, port)``.
+    """
+    parts = urllib.parse.urlparse(url)
+    try:
+        return parts, parts.port
+    except ValueError as e:
+        raise OidcConfigError(
+            f'Malformed endpoint URL {url!r}: invalid port.') from e
+
+
 def _is_loopback(host: Optional[str]) -> bool:
     # Traffic to a loopback address never leaves the host, so plaintext http
     # carries no network interception risk and is always permitted.

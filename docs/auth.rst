@@ -103,9 +103,8 @@ order:
    ``acl.oidc.device.authorization.endpoint``.
 2. If the device-authorization endpoint is not advertised, the helper falls
    back to the IdP discovery document
-   (``{issuer}/.well-known/openid-configuration``). The issuer is taken from an
-   explicit ``issuer=`` / ``discovery_url=`` argument, or derived from the token
-   endpoint's origin.
+   (``{issuer}/.well-known/openid-configuration``). This path **requires** an
+   explicit ``issuer=`` (or ``discovery_url=``) argument.
 
 Anything you pass explicitly overrides discovery. You can also skip discovery
 entirely:
@@ -150,10 +149,11 @@ Cache backends (``cache=`` argument):
 
 * ``"memory"`` *(default)* — process-global, nothing written to disk.
   Re-running cells is silent; a kernel restart re-prompts once.
-* ``"file"`` — ``~/.questdb/oidc-cache.json`` (mode ``600``). Survives kernel
-  restarts and is shared across kernels on the same host. **Security
-  trade-off:** the refresh token is stored at rest.
 * ``None`` — never persist; prompt every time.
+
+Tokens are deliberately never written to disk: a kernel restart re-prompts
+(an interactive sign-in is cheap relative to the risk of a refresh token
+sitting in a plaintext file at rest).
 
 Non-interactive contexts
 -------------------------
@@ -214,9 +214,12 @@ Security notes
   QuestDB ``/settings``. The helper requires both endpoints to share a single
   origin and rejects the configuration otherwise. Because ``/settings`` is
   authoritative-by-QuestDB, a compromised server could in principle point them
-  elsewhere; pass ``issuer=`` (or ``discovery_url=``) to **pin** the IdP so the
-  endpoints are verified to belong to it and credentials can't be redirected to
-  another host.
+  elsewhere; pass ``issuer=`` to **pin** the IdP so the endpoints are verified
+  to belong to it and credentials can't be redirected to another host. When the
+  server does not advertise the device-authorization endpoint (so it must be
+  discovered from the IdP), ``issuer=`` (or ``discovery_url=``) is **required**
+  for exactly this reason — the helper refuses to guess the discovery origin
+  from the server-supplied token endpoint.
 * Adapters avoid logging the token / PG DSN. Avoid logging them yourself.
 * Standard proxy / CA settings (``HTTPS_PROXY``, ``REQUESTS_CA_BUNDLE``,
   ``SSL_CERT_FILE``) are honoured; you can also pass ``ca_bundle=``.

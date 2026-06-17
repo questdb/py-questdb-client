@@ -31,7 +31,6 @@ import binascii
 import json
 import threading
 import time
-import urllib.parse
 import webbrowser
 from typing import Any, Dict, Optional
 
@@ -45,7 +44,7 @@ from ._errors import (
     OidcNetworkError,
     OidcTimeoutError,
 )
-from ._http import build_ssl_context, post_form
+from ._http import build_ssl_context, post_form, safe_urlparse
 from ._render import (
     Renderer,
     _safe_link_url,
@@ -344,6 +343,24 @@ class OidcDeviceAuth:
             return bool(tokens.id_token)
         return bool(tokens.access_token)
 
+    def _missing_required_token_error(self) -> OidcDeviceFlowError:
+        """
+        Build the terminal error for a *completed* grant whose token response
+        omits the kind :meth:`_select` needs (the ``id_token`` in groups mode,
+        else the ``access_token``). Mirrors :meth:`_select`'s diagnostics, but
+        is an :class:`OidcDeviceFlowError` — a flow failure — so the device-flow
+        poll can raise it without first caching an unusable response.
+        """
+        if self.config.groups_in_token:
+            return OidcDeviceFlowError(
+                'Device authorization completed but the IdP returned no '
+                'id_token, which this server requires (it expects groups '
+                'encoded in the token). Ensure the "openid" scope is requested '
+                f'(current scope: {self.config.scope!r}).')
+        return OidcDeviceFlowError(
+            'Device authorization completed but the IdP returned no '
+            'access_token.')
+
     def _obtain_tokens(self) -> TokenSet:
         # Fast path: return a valid cached token without taking the lock, so a
         # caller with a usable token never blocks behind another thread's
@@ -538,8 +555,24 @@ class OidcDeviceAuth:
                     'client_id': self.config.client_id,
                 })
 
-            if status == 200 and body.get('access_token'):
-                return self._tokenset_from_response(body)
+            if status == 200:
+                # A 200 is the RFC 6749 §5.1 token response: the grant
+                # completed. Accept it only if it actually carries the kind
+                # _select will hand to QuestDB (the id_token in groups mode,
+                # else the access_token), using the same predicate as the cache
+                # gate and the post-refresh check so the three can't disagree.
+                tokens = self._tokenset_from_response(body)
+                if self._has_required_token(tokens):
+                    return tokens
+                # The grant completed but the required kind is absent: a stable
+                # misconfiguration, not a transient poll state. Raise a clear
+                # terminal error here instead of caching an unusable token and
+                # silently re-running the whole interactive flow on every later
+                # token() call.
+                self._renderer.on_failure(
+                    'Sign-in failed: the identity provider did not return the '
+                    'token this server requires.')
+                raise self._missing_required_token_error()
 
             error = body.get('error')
             if error == 'authorization_pending':
@@ -602,12 +635,12 @@ def _normalize_url(url: str) -> str:
     # Full URL with scheme/host lower-cased and the default port dropped, but
     # the path kept (it distinguishes multi-tenant realms). Used for the cache
     # key so trivial spelling differences don't cause a spurious re-prompt.
-    parts = urllib.parse.urlparse(url)
+    parts, port = safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
     host = (parts.hostname or '').lower()
     default_port = {'https': 443, 'http': 80}.get(scheme)
-    if parts.port and parts.port != default_port:
-        netloc = f'{host}:{parts.port}'
+    if port and port != default_port:
+        netloc = f'{host}:{port}'
     else:
         netloc = host
     query = f'?{parts.query}' if parts.query else ''

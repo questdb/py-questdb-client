@@ -37,12 +37,11 @@ Resolution order, mirroring the design doc:
 from __future__ import annotations
 
 import ssl
-import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from ._errors import OidcConfigError
-from ._http import get_json
+from ._http import get_json, safe_urlparse
 
 # QuestDB /settings keys (see EntPropServerConfiguration.exportConfiguration()).
 _K_ENABLED = 'acl.oidc.enabled'
@@ -116,22 +115,15 @@ def fetch_settings(
     return settings_config(data)
 
 
-def _origin(url: str) -> Optional[str]:
-    parts = urllib.parse.urlparse(url)
-    if parts.scheme and parts.netloc:
-        return f'{parts.scheme}://{parts.netloc}'
-    return None
-
-
 _DEFAULT_PORTS = {'https': 443, 'http': 80}
 
 
 def _normalized_origin(url: str) -> tuple:
     """(scheme, host, port) with default ports filled in, for comparison."""
-    parts = urllib.parse.urlparse(url)
+    parts, explicit_port = safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
     host = (parts.hostname or '').lower()
-    port = parts.port or _DEFAULT_PORTS.get(scheme)
+    port = explicit_port or _DEFAULT_PORTS.get(scheme)
     return (scheme, host, port)
 
 
@@ -213,7 +205,6 @@ def discover_device_endpoint_from_idp(
         *,
         issuer: Optional[str],
         discovery_url: Optional[str],
-        token_endpoint: Optional[str],
         ctx: Optional[ssl.SSLContext] = None,
         insecure: bool = False,
         timeout: float = 30) -> Dict[str, Any]:
@@ -221,20 +212,18 @@ def discover_device_endpoint_from_idp(
     Fetch the IdP ``.well-known/openid-configuration`` and return it.
 
     The discovery URL is taken from ``discovery_url``, else built from
-    ``issuer``, else (best effort) from the origin of ``token_endpoint``.
+    ``issuer``. One of the two is required: the discovery origin is **never**
+    derived from a QuestDB-advertised endpoint, because that would let a
+    tampered ``/settings`` choose where the device code and refresh token are
+    sent (the resolved issuer and endpoints would then all share the attacker's
+    origin and pass the co-location / issuer-pin checks trivially).
     """
-    url = discovery_url
-    if not url and issuer:
-        url = well_known_url(issuer)
-    if not url and token_endpoint:
-        origin = _origin(token_endpoint)
-        if origin:
-            url = well_known_url(origin)
+    url = discovery_url or (well_known_url(issuer) if issuer else None)
     if not url:
         raise OidcConfigError(
-            'Cannot discover the IdP device-authorization endpoint: no '
-            'issuer / discovery_url given and none could be derived. Pass '
-            'issuer=... or device_authorization_endpoint=... explicitly.')
+            'Cannot discover the IdP device-authorization endpoint: no issuer '
+            'or discovery_url was given. Pass issuer=... (or '
+            'device_authorization_endpoint=... to skip discovery).')
     return get_json(url, ctx=ctx, insecure=insecure, timeout=timeout)
 
 
@@ -296,10 +285,30 @@ def resolve_config(
     # endpoint (and/or the token endpoint). This contacts the IdP, so it is
     # held to https/loopback (insecure=False) regardless of the QuestDB flag.
     if not device_authorization_endpoint or not token_endpoint:
+        # Require a caller-supplied trust anchor before contacting the IdP for
+        # discovery. Without issuer= / discovery_url=, the discovery target
+        # would have to be guessed from the token endpoint that /settings
+        # supplied; a tampered or MITM'd /settings (reachable in cleartext when
+        # QuestDB is http:// with insecure=True) could then steer discovery —
+        # and so the device-code and refresh-token POSTs — to an attacker
+        # origin, with the co-location and issuer-pin checks passing trivially
+        # because every value shares that one origin. issuer= is out-of-band,
+        # so the server cannot forge it.
+        if not issuer and not discovery_url:
+            raise OidcConfigError(
+                'QuestDB did not advertise the OIDC device-authorization '
+                'endpoint (and/or the token endpoint), so it must be '
+                'discovered from the identity provider, but the IdP is not '
+                'pinned. Pass issuer="https://your-idp" (its origin) so a '
+                'tampered or intercepted /settings response cannot redirect '
+                'the device-code and refresh-token requests to an attacker. '
+                'Alternatively pass the endpoint(s) explicitly '
+                '(device_authorization_endpoint=..., token_endpoint=...) to '
+                'skip discovery, or discovery_url=... to pin the discovery '
+                'document.')
         doc = discover_device_endpoint_from_idp(
             issuer=issuer, discovery_url=discovery_url,
-            token_endpoint=token_endpoint, ctx=ctx, insecure=False,
-            timeout=timeout)
+            ctx=ctx, insecure=False, timeout=timeout)
         device_authorization_endpoint = (
             device_authorization_endpoint
             or doc.get('device_authorization_endpoint'))

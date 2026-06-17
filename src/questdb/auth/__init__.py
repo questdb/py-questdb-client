@@ -60,7 +60,7 @@ lazily, only when used.
 
 from ._device import OidcDeviceAuth
 from ._discovery import OidcConfig
-from ._cache import TokenCache, TokenSet, FileCache, MemoryCache, NullCache
+from ._cache import TokenCache, TokenSet, MemoryCache, NullCache
 from ._errors import (
     OidcError,
     OidcConfigError,
@@ -80,7 +80,6 @@ __all__ = [
     'TokenCache',
     'TokenSet',
     'MemoryCache',
-    'FileCache',
     'NullCache',
     'OidcError',
     'OidcConfigError',

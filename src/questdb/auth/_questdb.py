@@ -30,7 +30,7 @@ import urllib.parse
 from typing import Any, Dict, Optional
 
 from ._device import OidcDeviceAuth
-from ._errors import OidcAuthError, OidcError
+from ._errors import OidcAuthError, OidcConfigError, OidcError
 from ._http import request
 
 _DEFAULT_PG_PORT = 8812
@@ -159,12 +159,51 @@ class QuestDB:
                 pass
             raise OidcError(
                 f'QuestDB query failed (HTTP {resp.status}): {detail}')
-        return _exec_json_to_df(resp.json(), pandas)
+        try:
+            data = resp.json()
+        except (ValueError, UnicodeDecodeError):
+            # A 2xx body that isn't JSON (e.g. an HTML error/login page from a
+            # reverse proxy or captive portal) must surface as a clean
+            # OidcError, not a raw JSONDecodeError. Mirrors the error path and
+            # post_form().
+            raise OidcError(
+                'QuestDB returned a non-JSON success response from /exec: '
+                f'{resp.text()[:300]}')
+        if not isinstance(data, dict):
+            # Valid JSON but not an object (e.g. a bare list) would make
+            # _exec_json_to_df fail with AttributeError on .get(); reject it.
+            raise OidcError(
+                'QuestDB /exec returned JSON that is not an object '
+                f'(got {type(data).__name__}); cannot build a DataFrame.')
+        return _exec_json_to_df(data, pandas)
 
     # -- connection adapters ------------------------------------------------
 
-    def _host(self) -> Optional[str]:
-        return self._parts.hostname
+    def _require_host(self, host: Optional[str] = None) -> str:
+        """
+        Resolve the PG-wire / ILP host: an explicit ``host`` override, else the
+        host from the QuestDB URL. Raises when neither yields one (e.g. a URL
+        with no authority such as ``"localhost"`` or ``"questdb:9000"``) instead
+        of passing a bare ``None`` down to the driver.
+
+        The returned host is *unbracketed* — psycopg and SQLAlchemy take the
+        address and port as separate arguments. :meth:`_ilp_addr` adds the
+        brackets an IPv6 literal needs in the ILP ``addr=host:port`` form.
+        """
+        resolved = host or self._parts.hostname
+        if not resolved:
+            raise OidcConfigError(
+                f'The QuestDB URL {self.url!r} has no host. Use a URL with an '
+                'explicit host (e.g. "https://questdb.example.com:9000"), or '
+                'pass host=... to the adapter.')
+        return resolved
+
+    @staticmethod
+    def _ilp_addr(host: str, port: int) -> str:
+        # Bracket an IPv6 literal so the ILP conf parser reads host:port
+        # unambiguously; hostnames and IPv4 addresses never contain ':'.
+        bracketed = f'[{host}]' if ':' in host else host
+        return f'{bracketed}:{port}'
 
     def sqlalchemy_engine(
             self,
@@ -200,7 +239,7 @@ class QuestDB:
         url = URL.create(
             drivername=drivername,
             username='_sso',
-            host=host or self._host(),
+            host=self._require_host(host),
             port=pg_port,
             database=database)
         engine = create_engine(url, **engine_kwargs)
@@ -229,7 +268,7 @@ class QuestDB:
         """
         mod = _pg_module()
         return mod.connect(
-            host=host or self._host(),
+            host=self._require_host(host),
             port=pg_port,
             dbname=database,
             user='_sso',
@@ -256,7 +295,8 @@ class QuestDB:
         scheme = 'https' if self._parts.scheme == 'https' else 'http'
         resolved_port = port or self._parts.port or (
             443 if scheme == 'https' else 9000)
-        conf = f'{scheme}::addr={self._host()}:{resolved_port};'
+        conf = (f'{scheme}::addr='
+                f'{self._ilp_addr(self._require_host(), resolved_port)};')
         return Sender.from_conf(conf, token=self.auth.token(), **sender_kwargs)
 
 
@@ -288,8 +328,7 @@ def connect(
     :param flow: ``"auto"`` (default), ``"device"`` or ``"loopback"``. Today
         ``"auto"`` always resolves to the device flow (works on local and
         remote kernels); ``"loopback"`` is reserved for a future release.
-    :param cache: Token cache backend: ``"memory"`` (default), ``"file"`` or
-        ``None``.
+    :param cache: Token cache backend: ``"memory"`` (default) or ``None``.
     :param insecure: Allow plaintext ``http://`` URLs (development only).
     :param eager: If ``True`` (default), sign in immediately; otherwise defer
         until the first call that needs a token.

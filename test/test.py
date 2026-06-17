@@ -39,7 +39,6 @@ from test_auth import (
     TestDeviceFlow,
     TestNonInteractive,
     TestRefresh,
-    TestFileCache,
     TestDiscovery,
     TestRestAdapter,
     TestAdapters,

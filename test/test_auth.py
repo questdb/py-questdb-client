@@ -40,7 +40,6 @@ import importlib.util
 import json
 import os
 import sys
-import tempfile
 import threading
 import types
 import unittest
@@ -64,19 +63,13 @@ from questdb.auth import (  # noqa: E402
     OidcNetworkError,
     TokenSet,
 )
-from questdb.auth._cache import FileCache, MemoryCache, _MEMORY_STORE  # noqa: E402
+from questdb.auth._cache import MemoryCache, _MEMORY_STORE  # noqa: E402
 from questdb.auth._render import Renderer  # noqa: E402
 
 try:
     import pandas as pd
 except ImportError:
     pd = None
-
-try:
-    import fcntl as _fcntl  # noqa: F401
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False
 
 _HAS_PG_DRIVER = (
     importlib.util.find_spec('psycopg') is not None
@@ -148,6 +141,7 @@ class MockState:
         self.expected_bearer = None        # for /exec auth check
         self.exec_response = None
         self.exec_status = 200
+        self.exec_raw = None               # (status, content_type, bytes) override
         # Recording.
         self.device_requests = 0
         self.token_requests = []
@@ -192,6 +186,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(401, {'error': 'unauthorized'})
                 return
             self.state.exec_requests.append(self.path)
+            if self.state.exec_raw is not None:
+                status, ctype, raw = self.state.exec_raw
+                self.send_response(status)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             self._send_json(self.state.exec_status, self.state.exec_response or {
                 'columns': [
                     {'name': 'ts', 'type': 'TIMESTAMP'},
@@ -366,13 +368,28 @@ class TestDeviceFlow(AuthTestBase):
         self.make_auth().token()
         self.assertEqual(self.state.device_requests, 1)
 
-    def test_missing_id_token_raises_config_error(self):
+    def test_groups_mode_missing_id_token_fails_without_caching(self):
+        # groups_in_token=True but the completed grant carries only an
+        # access_token: the poll must reject it as a terminal flow error and
+        # NOT cache it (otherwise every later token() re-runs the whole
+        # interactive flow). See M1.
         self.state.token_script = [(200, {
             'access_token': ACCESS_TOKEN, 'token_type': 'Bearer',
             'expires_in': 3600})]  # no id_token
         auth = self.make_auth(groups_in_token=True)
-        with self.assertRaises(OidcConfigError):
+        with self.assertRaises(OidcDeviceFlowError):
             auth.token()
+        self.assertIsNone(auth._tokens)  # nothing was cached
+
+    def test_groups_mode_accepts_id_token_without_access_token(self):
+        # A completed grant that returns only an id_token (no access_token) is
+        # usable in groups mode and must be returned, not discarded as it was
+        # when success gated on access_token. See M1.
+        self.state.token_script = [(200, {
+            'id_token': ID_TOKEN, 'token_type': 'Bearer',
+            'expires_in': 3600})]  # no access_token
+        auth = self.make_auth(groups_in_token=True)
+        self.assertEqual(auth.token(), ID_TOKEN)
 
     def test_200_without_access_token_is_not_success(self):
         # A 200 with no access_token must not be treated as a token.
@@ -551,68 +568,6 @@ class TestRefresh(AuthTestBase):
         self.assertEqual(auth._tokens.refresh_token, 'REFRESH-1')
 
 
-class TestFileCache(AuthTestBase):
-    def test_file_cache_works_without_os_lock(self):
-        # Exercise the no-fcntl/no-msvcrt fallback: with the lock primitives
-        # no-op'd, the atomic temp-file replace must still keep every entry.
-        import questdb.auth._cache as cache_mod
-        tmp = tempfile.mkdtemp()
-        path = os.path.join(tmp, 'cache.json')
-        with mock.patch.object(cache_mod, '_lock_fd', lambda fd: None), \
-                mock.patch.object(cache_mod, '_unlock_fd', lambda fd: None):
-            cache = FileCache(path)
-            cache.store('k1', TokenSet(access_token='a1', expires_at=1.0))
-            cache.store('k2', TokenSet(access_token='a2', expires_at=1.0))
-            self.assertEqual(cache.load('k1').access_token, 'a1')
-            self.assertEqual(cache.load('k2').access_token, 'a2')
-
-    def test_file_cache_survives_new_instance(self):
-        tmp = tempfile.mkdtemp()
-        path = os.path.join(tmp, 'cache.json')
-        cache1 = FileCache(path)
-        self.make_auth(cache=cache1).token()
-        self.assertEqual(self.state.device_requests, 1)
-        # New process simulation: fresh memory, load from file.
-        _MEMORY_STORE.clear()
-        cache2 = FileCache(path)
-        token = self.make_auth(cache=cache2).token()
-        self.assertEqual(token, ID_TOKEN)
-        self.assertEqual(self.state.device_requests, 1)  # no re-prompt
-        # File is mode 600 where supported.
-        if os.name == 'posix':
-            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
-
-    @unittest.skipUnless(
-        _HAS_FCNTL, 'cross-process file lock requires fcntl (POSIX)')
-    def test_concurrent_writes_preserve_all_entries(self):
-        # 20 writers (distinct instances, same file, distinct keys) racing:
-        # the sidecar lock + atomic unique-temp replace must keep every entry
-        # and never corrupt the file or leave a temp behind.
-        tmp = tempfile.mkdtemp()
-        path = os.path.join(tmp, 'cache.json')
-
-        def writer(i):
-            FileCache(path).store(
-                f'key-{i}',
-                TokenSet(access_token=f'a{i}', id_token=f'id{i}',
-                         refresh_token=f'r{i}', expires_at=1.0))
-
-        threads = [threading.Thread(target=writer, args=(i,))
-                   for i in range(20)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(10)
-
-        final = FileCache(path)
-        for i in range(20):
-            ts = final.load(f'key-{i}')
-            self.assertIsNotNone(ts, f'lost entry key-{i}')
-            self.assertEqual(ts.access_token, f'a{i}')
-        leftovers = [n for n in os.listdir(tmp) if n.endswith('.tmp')]
-        self.assertEqual(leftovers, [], f'temp files left behind: {leftovers}')
-
-
 class TestDiscovery(AuthTestBase):
     def test_from_questdb_reads_settings(self):
         self.state.settings = {'config': {
@@ -633,7 +588,8 @@ class TestDiscovery(AuthTestBase):
         self.assertEqual(auth.token(), ID_TOKEN)
 
     def test_well_known_fallback_for_device_endpoint(self):
-        # Settings advertise OIDC + token endpoint but NOT the device endpoint.
+        # Settings advertise OIDC + token endpoint but NOT the device endpoint;
+        # issuer= is pinned, so the IdP .well-known fallback is allowed.
         self.state.settings = {'config': {
             'acl.oidc.enabled': True,
             'acl.oidc.client.id': 'questdb',
@@ -646,8 +602,47 @@ class TestDiscovery(AuthTestBase):
             'token_endpoint': self.base + '/token',
             'device_authorization_endpoint': self.base + '/device',
         }
-        auth = OidcDeviceAuth.from_questdb(self.base, insecure=True,
-                                           renderer=Renderer())
+        auth = OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                           insecure=True, renderer=Renderer())
+        self.assertEqual(auth.config.device_authorization_endpoint,
+                         self.base + '/device')
+
+    def test_device_fallback_without_issuer_is_rejected(self):
+        # M4: QuestDB advertises the token endpoint but not the device
+        # endpoint, and no issuer is pinned. Discovery would otherwise be
+        # steered by the (possibly tampered) /settings response, so refuse and
+        # demand an out-of-band issuer pin — even though a usable .well-known
+        # is reachable here, it must NOT be fetched.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': self.base + '/token',
+        }}
+        self.state.well_known = {
+            'issuer': self.base,
+            'token_endpoint': self.base + '/token',
+            'device_authorization_endpoint': self.base + '/device',
+        }
+        with self.assertRaises(OidcConfigError) as cm:
+            OidcDeviceAuth.from_questdb(self.base, insecure=True)
+        self.assertIn('issuer', str(cm.exception))
+
+    def test_device_fallback_with_discovery_url_is_accepted(self):
+        # discovery_url= is an out-of-band pin too, accepted in lieu of issuer=.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': self.base + '/token',
+        }}
+        self.state.well_known = {
+            'issuer': self.base,
+            'token_endpoint': self.base + '/token',
+            'device_authorization_endpoint': self.base + '/device',
+        }
+        auth = OidcDeviceAuth.from_questdb(
+            self.base,
+            discovery_url=self.base + '/.well-known/openid-configuration',
+            insecure=True, renderer=Renderer())
         self.assertEqual(auth.config.device_authorization_endpoint,
                          self.base + '/device')
 
@@ -657,6 +652,9 @@ class TestDiscovery(AuthTestBase):
             OidcDeviceAuth.from_questdb(self.base, insecure=True)
 
     def test_missing_device_endpoint_raises(self):
+        # issuer= is pinned (so the fallback is allowed), but the IdP's
+        # discovery doc carries no device_authorization_endpoint: that is the
+        # error under test, not the missing-issuer guard above.
         self.state.settings = {'config': {
             'acl.oidc.enabled': True,
             'acl.oidc.client.id': 'questdb',
@@ -664,6 +662,21 @@ class TestDiscovery(AuthTestBase):
         }}
         self.state.well_known = {'issuer': self.base,
                                  'token_endpoint': self.base + '/token'}
+        with self.assertRaises(OidcConfigError):
+            OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                        insecure=True)
+
+    def test_malformed_endpoint_port_raises_config_error(self):
+        # /settings advertising a non-integer port in an endpoint must raise
+        # OidcConfigError (the typed contract), not a bare ValueError that
+        # callers catching OidcError would miss. See M6.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': 'https://idp:notaport/token',
+            'acl.oidc.device.authorization.endpoint':
+                'https://idp:notaport/device',
+        }}
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth.from_questdb(self.base, insecure=True)
 
@@ -779,6 +792,24 @@ class TestRestAdapter(AuthTestBase):
             'dataset': [[1]]}
         with self.assertRaises(OidcError):
             qdb.sql('SELECT a, b FROM t')
+
+    def test_sql_non_json_2xx_raises_oidc_error(self):
+        # A 2xx body that isn't JSON (e.g. an HTML page from a reverse proxy)
+        # must raise a clean OidcError, not a raw JSONDecodeError. See M3.
+        qdb = self._connected()
+        self.state.exec_raw = (200, 'text/html', b'<html>proxy</html>')
+        with self.assertRaises(OidcError) as cm:
+            qdb.sql('SELECT 1')
+        self.assertNotIsInstance(cm.exception, OidcAuthError)
+
+    def test_sql_non_dict_json_raises_oidc_error(self):
+        # A valid-JSON-but-not-an-object 2xx body (e.g. a bare list) must raise
+        # OidcError, not AttributeError from .get(). See M3.
+        qdb = self._connected()
+        self.state.exec_response = ['not', 'an', 'object']
+        with self.assertRaises(OidcError) as cm:
+            qdb.sql('SELECT 1')
+        self.assertNotIsInstance(cm.exception, OidcAuthError)
 
 
 class TestConcurrency(AuthTestBase):
@@ -962,6 +993,61 @@ class TestAdapters(unittest.TestCase):
             self.assertEqual(cparams['password'], 'TKN')
         self.assertEqual(auth.calls - before, 2)
 
+    def test_sender_brackets_ipv6_addr(self):
+        # An IPv6 literal must be bracketed in the ILP addr=host:port conf,
+        # else "::1:9000" is ambiguous to the conf parser. See M5.
+        qdb = self._qdb('https://[::1]:9000')
+        captured = {}
+        fake = types.ModuleType('questdb.ingress')
+
+        class Sender:
+            @staticmethod
+            def from_conf(conf, *, token=None, **kw):
+                captured['conf'] = conf
+                return 'S'
+
+        fake.Sender = Sender
+        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
+            qdb.sender()
+        self.assertEqual(captured['conf'], 'https::addr=[::1]:9000;')
+
+    def test_psycopg_uses_bare_ipv6_host(self):
+        # psycopg takes host and port separately, so the IPv6 host is passed
+        # WITHOUT brackets (unlike the ILP addr= form). See M5.
+        qdb = self._qdb('http://[::1]:9000')
+        captured = {}
+        fake = types.ModuleType('psycopg')
+
+        def connect(**kw):
+            captured.update(kw)
+            return 'CONN'
+
+        fake.connect = connect
+        with mock.patch.dict(sys.modules, {'psycopg': fake}):
+            qdb.psycopg()
+        self.assertEqual(captured['host'], '::1')
+
+    def test_require_host_rejects_hostless_url(self):
+        # A URL with no extractable host must raise, not pass None to a driver;
+        # an explicit host= override still resolves. See M5.
+        for bad in ('localhost', 'questdb:9000'):
+            with self.subTest(url=bad):
+                with self.assertRaises(OidcConfigError):
+                    QuestDB(bad, _FakeAuth(), insecure=True)._require_host()
+        self.assertEqual(
+            QuestDB('localhost', _FakeAuth())._require_host('h.example'),
+            'h.example')
+
+    def test_sender_hostless_url_raises(self):
+        # The guard propagates through an adapter (not just the helper):
+        # sender() on a host-less URL raises OidcConfigError. See M5.
+        qdb = self._qdb('questdb:9000')
+        fake = types.ModuleType('questdb.ingress')
+        fake.Sender = object()  # import must succeed so we reach the guard
+        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
+            with self.assertRaises(OidcConfigError):
+                qdb.sender()
+
     def test_sql_missing_pandas_raises(self):
         qdb = self._qdb()
         with mock.patch.dict(sys.modules, {'pandas': None}):
@@ -1034,6 +1120,13 @@ class TestEndpointValidation(unittest.TestCase):
             self._validate('https://idp/token', 'https://idp/device',
                            issuer='https://other-issuer.example')
 
+    def test_malformed_port_raises_config_error(self):
+        # A non-integer port must surface as OidcConfigError, not urllib's bare
+        # ValueError (which callers catching OidcError would miss). See M6.
+        with self.assertRaises(OidcConfigError):
+            self._validate('https://idp:notaport/token',
+                           'https://idp:notaport/device')
+
     def test_explicit_constructor_enforces_co_location(self):
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth(
@@ -1053,6 +1146,13 @@ class TestCacheKey(unittest.TestCase):
             renderer=Renderer())
         opts.update(kw)
         return OidcDeviceAuth(**opts)
+
+    def test_normalize_url_malformed_port_raises_config_error(self):
+        # cache_key normalization shares the same typed-port guard: a malformed
+        # port raises OidcConfigError, not a bare ValueError. See M6.
+        from questdb.auth._device import _normalize_url
+        with self.assertRaises(OidcConfigError):
+            _normalize_url('https://idp:notaport/token')
 
     def test_realm_path_distinguishes_key(self):
         # Multi-tenant IdP: same host, different realm path -> distinct keys

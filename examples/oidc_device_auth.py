@@ -13,7 +13,6 @@ loop), so it is not part of the automated example suite.
 import sys
 
 from questdb.auth import connect, OidcDeviceAuth, OidcError
-from questdb.ingress import TimestampNanos
 
 
 QUESTDB_URL = 'https://questdb.example.com:9000'
@@ -32,6 +31,11 @@ def integrated(url: str = QUESTDB_URL):
     # Feed the same auto-refreshed token into your existing tooling:
     #   engine = qdb.sqlalchemy_engine()   # PG-wire, token as _sso password
     #   with qdb.psycopg() as conn: ...    # raw psycopg
+    #
+    # questdb.ingress is the compiled extension; import it lazily (only the
+    # ingestion path needs it) so this module also loads for the pure-Python
+    # bring_your_own_client() path, which needs no extension.
+    from questdb.ingress import TimestampNanos
     with qdb.sender() as sender:           # ingestion (ILP over HTTP)
         sender.row(
             'trades',
