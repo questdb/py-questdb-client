@@ -74,7 +74,7 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV1
     from test_dataframe import TestPandasProtocolVersionV2
     from test_dataframe import TestPandasProtocolVersionV3
-else:
+elif pd is None:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
             buf = qi.Buffer(protocol_version=2)
