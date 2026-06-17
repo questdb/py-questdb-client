@@ -109,5 +109,71 @@ class TestCategoricalArrowLeak(unittest.TestCase):
                 self._assert_stable(work, warmup=50, measure=800)
 
 
+@unittest.skipUnless(pd is not None, 'pandas not installed')
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestPyobjColumnarLeak(unittest.TestCase):
+    """Guards the calloc'd ``pyobj_built_t`` builders
+    (``_dataframe_columnar_build_{str,int,float,bool}_pyobj``) reached by
+    ``Client.dataframe`` for object-dtype columns: every native buffer
+    (data, validity bitmap, str byte arena) must be freed on the success
+    and all-valid (bitmap-dropped) paths, and the pooled connection must be
+    returned on every call."""
+
+    ROWS = 2048
+
+    def _frames(self):
+        n = self.ROWS
+        ts = pd.Series(pd.to_datetime(np.arange(n), unit='s'))
+
+        def col(values, null_step):
+            return pd.Series(
+                [None if (null_step and i % null_step == 0) else v
+                 for i, v in enumerate(values)],
+                dtype=object)
+
+        strs = [f'value_{i:06}' for i in range(n)]
+        ints = list(range(n))
+        floats = [i * 0.5 for i in range(n)]
+        bools = pd.Series([bool(i & 1) for i in range(n)], dtype=object)
+        frames = []
+        for null_step in (0, 7):
+            frames.append(pd.DataFrame({
+                'ts': ts,
+                's': col(strs, null_step),
+                'i': col(ints, null_step),
+                'f': col(floats, null_step),
+                'b': bools,
+            }))
+        return frames
+
+    def _assert_stable(self, work, warmup, measure):
+        for _ in range(warmup):
+            work()
+        gc.collect()
+        before = _rss()
+        for _ in range(measure):
+            work()
+        gc.collect()
+        growth = _rss() - before
+        self.assertLess(
+            growth, 8 * 1024 * 1024,
+            f'RSS grew by {growth} bytes over {measure} iterations; '
+            'a native buffer is likely leaked.')
+
+    def test_pyobj_columnar_path_no_leak(self):
+        from qwp_ws_ack_server import QwpAckServer
+        frames = self._frames()
+        with QwpAckServer() as server:
+            conf = (f'qwpws::addr=127.0.0.1:{server.port};'
+                    'pool_size=1;pool_max=1;pool_reap=manual;')
+            with qi.Client.from_conf(conf) as client:
+                def work():
+                    for df in frames:
+                        client.dataframe(
+                            df, table_name='t', at='ts', symbols=False)
+
+                self._assert_stable(work, warmup=50, measure=800)
+
+
 if __name__ == '__main__':
     unittest.main()

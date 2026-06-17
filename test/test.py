@@ -72,7 +72,7 @@ from test_client_polars_fuzz import (
     TestClientPolarsDataframeFuzz,
     TestClientPolarsDataframeRoundTrip,
 )
-from test_dataframe_leaks import TestCategoricalArrowLeak
+from test_dataframe_leaks import TestCategoricalArrowLeak, TestPyobjColumnarLeak
 
 if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV1
@@ -277,6 +277,42 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 0)
         self.assertEqual(stats['qwp1_frames'], 0)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_client_dataframe_capsule_proactive_sync(self):
+        n = 140
+        table = pyarrow.table({
+            'v': pyarrow.array(list(range(n)), type=pyarrow.int64()),
+            'ts': pyarrow.array(
+                [i * 1_000_000 for i in range(n)],
+                type=pyarrow.timestamp('us')),
+        })
+
+        with QwpAckServer() as server:
+            conf = (
+                f'qwpws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
+            try:
+                client = qi.Client.from_conf(conf)
+                try:
+                    client.dataframe(
+                        table, table_name='trades', at='ts',
+                        max_rows_per_batch=1)
+                finally:
+                    client.close()
+                stats = qi._debug_dataframe_columnar_io_stats()
+            finally:
+                qi._debug_dataframe_columnar_io_stats(enabled=False, reset=True)
+
+            snap = server.snapshot()
+
+        self.assertEqual(snap['errors'], [])
+        self.assertGreaterEqual(stats['flush_calls'], n)
+        self.assertGreaterEqual(stats['sync_calls'], 2)
+        self.assertGreaterEqual(snap['binary_frames'], n)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_client_close_waits_for_active_dataframe(self):

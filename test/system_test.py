@@ -527,6 +527,64 @@ class TestWithDatabase(unittest.TestCase):
             f"select id, px from '{table_name}' order by id")
         self.assertEqual(resp['dataset'], [[0, 10.5], [2, 20.5]])
 
+    def test_qwp_websocket_error_handler_callback_fires(self):
+        self._require_qwp_ws()
+        import time as _time
+        table_name = uuid.uuid4().hex
+        sender_id = 'py-reject-cb-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE "{table_name}" '
+            '(id LONG, px DOUBLE, bad LONG, timestamp TIMESTAMP) '
+            'TIMESTAMP(timestamp) PARTITION BY DAY WAL')
+
+        captured = []
+        with tempfile.TemporaryDirectory(prefix='py-qwp-ws-reject-cb-') as sf_dir:
+            sender = qi.Sender.from_conf(
+                self._mk_qwpws_conf(
+                    sender_id,
+                    sf_dir,
+                    reconnect_max_duration_millis=30000,
+                    close_flush_timeout_millis=30000),
+                qwp_ws_error_handler=captured.append)
+            try:
+                sender.establish()
+                sender.row(
+                    table_name,
+                    columns={'id': 0, 'px': 10.5},
+                    at=qi.TimestampMicros(1_700_000_000_000_000))
+                sender.flush_and_get_fsn()
+                sender.row(
+                    table_name,
+                    columns={'id': 1, 'bad': 'not-a-long'},
+                    at=qi.TimestampMicros(1_700_000_000_001_000))
+                rejected_fsn = sender.flush_and_get_fsn()
+                sender.row(
+                    table_name,
+                    columns={'id': 2, 'px': 20.5},
+                    at=qi.TimestampMicros(1_700_000_000_002_000))
+                final_fsn = sender.flush_and_get_fsn()
+                self.assertTrue(sender.await_acked_fsn(final_fsn, 30000))
+                deadline = _time.monotonic() + 10
+                while not captured and _time.monotonic() < deadline:
+                    sender.drive_once()
+                    _time.sleep(0.05)
+                self.assertTrue(
+                    captured, 'qwp_ws_error_handler was never invoked')
+                diagnostic = captured[0]
+                self.assertEqual(
+                    diagnostic.category,
+                    qi.QwpWsErrorCategory.SchemaMismatch)
+                self.assertEqual(diagnostic.from_fsn, rejected_fsn)
+                self.assertEqual(diagnostic.to_fsn, rejected_fsn)
+                sender.close_drain()
+            finally:
+                sender.close(False)
+
+        self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        resp = self.qdb_plain.http_sql_query(
+            f"select id, px from '{table_name}' order by id")
+        self.assertEqual(resp['dataset'], [[0, 10.5], [2, 20.5]])
+
     def test_qwp_websocket_schema_fuzz(self):
         self._require_qwp_fuzz()
         seed = self._qwp_fuzz_seed()
