@@ -39,7 +39,8 @@ Highlights:
 
 * Auto-discovery of OIDC config from the QuestDB ``/settings`` endpoint, with a
   fallback to the IdP ``.well-known`` document.
-* In-process token cache with silent refresh; optional on-disk cache.
+* In-process token cache with silent refresh (tokens are never written to
+  disk).
 * Adapters for pandas (REST ``/exec``), SQLAlchemy, psycopg and the ingestion
   ``Sender``.
 * ``token()`` / ``headers()`` require no dependencies beyond the standard
@@ -47,6 +48,11 @@ Highlights:
   are imported lazily.
 
 See the :ref:`OIDC authentication guide <oidc_auth>` for details.
+
+Python Version Support
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Raised the minimum supported Python version to 3.10.
 
 4.1.0 (2025-11-28)
 ------------------

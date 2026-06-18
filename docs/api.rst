@@ -90,6 +90,26 @@ See the :ref:`oidc_auth` guide for an overview.
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.auth.TokenCache
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.TokenSet
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.MemoryCache
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.NullCache
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoexception:: questdb.auth.OidcError
    :show-inheritance:
 

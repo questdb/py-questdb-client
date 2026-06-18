@@ -71,6 +71,8 @@ paths.
     engine = qdb.sqlalchemy_engine()                    # PG-wire, token as _sso
     with qdb.psycopg() as conn:                         # raw psycopg
         ...
+
+    from questdb.ingress import TimestampNanos          # the compiled extension
     with qdb.sender() as sender:                        # ingestion (ILP/HTTP)
         sender.row("trades", columns={"price": 101.5},
                    at=TimestampNanos.now())
