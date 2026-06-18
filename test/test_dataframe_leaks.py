@@ -1,5 +1,6 @@
 import sys
 sys.dont_write_bytecode = True
+import ctypes
 import gc
 import unittest
 
@@ -26,7 +27,19 @@ except ImportError:
     psutil = None
 
 
+def _malloc_trim():
+    # Return glibc per-thread arena free space to the OS so RSS reflects live
+    # memory; a real leak survives the trim.
+    if not sys.platform.startswith('linux'):
+        return
+    try:
+        ctypes.CDLL('libc.so.6', use_errno=False).malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 def _rss():
+    _malloc_trim()
     return _PROCESS.memory_info().rss
 
 

@@ -4378,6 +4378,57 @@ cdef object _validate_schema_overrides(object schema_overrides):
     return out
 
 
+cdef object _roundtrip_overrides_from_attrs(object df):
+    """Derive capsule overrides from a frame's ``df.attrs['questdb']``
+    round-trip metadata (ipv4 / char / geohash), in the same
+    ``(name_bytes, kind_int, arg_int)`` shape as ``_validate_schema_overrides``.
+    Returns None when the frame carries no such metadata."""
+    cdef object attrs = getattr(df, 'attrs', None)
+    if not attrs:
+        return None
+    cdef object qmeta = attrs.get('questdb')
+    if not qmeta:
+        return None
+    cdef object cols_meta = qmeta.get('columns')
+    if not cols_meta:
+        return None
+    cdef list out = []
+    cdef object name, meta, kind, bits
+    for name, meta in cols_meta.items():
+        if not isinstance(name, str) or not isinstance(meta, dict):
+            continue
+        kind = meta.get('kind')
+        if kind == 'ipv4':
+            out.append((name.encode('utf-8'),
+                        <int>column_sender_arrow_override_ipv4, 0))
+        elif kind == 'char':
+            out.append((name.encode('utf-8'),
+                        <int>column_sender_arrow_override_char, 0))
+        elif kind == 'geohash':
+            bits = meta.get('precision_bits') or 0
+            if isinstance(bits, int) and 1 <= bits <= 60:
+                out.append((name.encode('utf-8'),
+                            <int>column_sender_arrow_override_geohash, bits))
+    return out if out else None
+
+
+cdef object _combine_override_lists(object base, object higher):
+    """Combine two override lists; ``higher`` wins on name collision."""
+    cdef set names
+    cdef list merged
+    cdef object entry
+    if not base:
+        return higher
+    if not higher:
+        return base
+    names = {entry[0] for entry in higher}
+    merged = list(higher)
+    for entry in base:
+        if entry[0] not in names:
+            merged.append(entry)
+    return merged
+
+
 cdef object _capsule_get_column_names(object sliceable):
     """Return list of str column names from polars / pyarrow input,
     or None if the input doesn't expose a uniform name list."""
@@ -4822,7 +4873,9 @@ cdef bint _dataframe_client_try_capsule_path(
     if table_name_col is not None:
         return False
 
-    validated_overrides = _validate_schema_overrides(schema_overrides)
+    validated_overrides = _combine_override_lists(
+        _roundtrip_overrides_from_attrs(df),
+        _validate_schema_overrides(schema_overrides))
 
     # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
     # peak memory. `LazyFrame.collect_batches()` would stream natively
