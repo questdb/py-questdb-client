@@ -24,7 +24,8 @@ QWP/WebSocket from Polars
 -------------------------
 
 The following example ingests a Polars ``DataFrame`` over QWP/WebSocket via
-:meth:`Client.dataframe`, including a ``schema_overrides`` variant.
+:meth:`Client.dataframe`, runs a query into Polars, and includes a
+``schema_overrides`` variant.
 
 .. literalinclude:: ../examples/polars_basic.py
    :language: python
@@ -35,7 +36,7 @@ QWP/WebSocket from PyArrow
 --------------------------
 
 The following example ingests a PyArrow table over QWP/WebSocket via
-:meth:`Client.dataframe`.
+:meth:`Client.dataframe` and runs a query into PyArrow.
 
 .. literalinclude:: ../examples/pyarrow_basic.py
    :language: python
@@ -99,7 +100,7 @@ Pandas Basics
 -------------
 
 The following example shows how to insert data from a Pandas DataFrame to the
-``'trades'`` table.
+``'trades'`` table and run a generated query into Pandas.
 
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python
@@ -111,7 +112,8 @@ For details on all options, see the
 ``pd.Categorical`` and multiple tables
 --------------------------------------
 
-The next example shows some more advanced features inserting data from Pandas.
+The next example shows some more advanced features inserting data from Pandas
+and running a generated query into Pandas.
 
 * The data is sent to multiple tables.
 
@@ -134,7 +136,8 @@ For details on all options, see the
 Loading Pandas from a Parquet File
 ----------------------------------
 
-The following example shows how to load a Pandas DataFrame from a Parquet file.
+The following example shows how to load a Pandas DataFrame from a Parquet file
+and run a generated query into Pandas.
 
 The example also relies on the dataframe's index name to determine the table
 name.

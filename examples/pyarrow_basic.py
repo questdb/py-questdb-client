@@ -1,10 +1,11 @@
-"""PyArrow Table / RecordBatch ingest example.
+"""PyArrow Table / RecordBatch ingest and query example.
 
 `Client.dataframe()` accepts any object exposing the Arrow PyCapsule
 Interface (`__arrow_c_stream__`) — pyarrow Table, RecordBatch, DuckDB
 relations, cudf, etc. — and routes through
 `column_sender_flush_arrow_batch` one-shot. No per-column Cython
-dispatch, no chunk lifecycle.
+dispatch, no chunk lifecycle. `Client.query()` can materialise query
+results as a pyarrow `Table` with `QueryResult.to_arrow()`.
 """
 
 from questdb.ingress import Client, IngressError
@@ -32,7 +33,18 @@ def example(host: str = 'localhost', port: int = 9000):
     try:
         conf = f'qwpws::addr={host}:{port};'
         with Client.from_conf(conf) as client:
+            # Ingress: publish a PyArrow Table into QuestDB.
             client.dataframe(table, table_name='trades', at='ts')
+
+            # Egress: query QuestDB and materialise the result as PyArrow.
+            with client.query(
+                    "SELECT x AS trade_id, "
+                    "x * 10.0 AS price, "
+                    "timestamp_sequence("
+                    "'2025-01-01T12:00:00.000000Z', 1000000) AS ts "
+                    "FROM long_sequence(3)") as result:
+                queried = result.to_arrow()
+            print(queried)
     except IngressError as e:
         sys.stderr.write(f'Got error: {e}\n')
 

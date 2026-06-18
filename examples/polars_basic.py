@@ -1,9 +1,9 @@
-"""Polars DataFrame ingest example.
+"""Polars DataFrame ingest and query example.
 
-`Client.dataframe()` accepts polars `DataFrame` and `LazyFrame`
-directly, riding the Arrow PyCapsule Interface (`__arrow_c_stream__`)
-straight into `column_sender_flush_arrow_batch`. No pyarrow dependency
-unless `schema_overrides` is used.
+`Client.dataframe()` accepts polars `DataFrame` and `LazyFrame` directly,
+riding the Arrow PyCapsule Interface (`__arrow_c_stream__`) straight into
+`column_sender_flush_arrow_batch`. `Client.query()` can materialise query
+results as a polars `DataFrame` with `QueryResult.to_polars()`.
 """
 
 from questdb.ingress import Client, IngressError
@@ -29,6 +29,7 @@ def example(host: str = 'localhost', port: int = 9000):
     try:
         conf = f'qwpws::addr={host}:{port};'
         with Client.from_conf(conf) as client:
+            # Ingress: publish a Polars DataFrame into QuestDB.
             client.dataframe(df, table_name='trades', at='ts')
 
             client.dataframe(
@@ -36,6 +37,16 @@ def example(host: str = 'localhost', port: int = 9000):
                 table_name='trades_chunked',
                 at='ts',
                 max_rows_per_batch=2)
+
+            # Egress: query QuestDB and materialise the result as Polars.
+            with client.query(
+                    "SELECT x AS trade_id, "
+                    "x * 10.0 AS price, "
+                    "timestamp_sequence("
+                    "'2025-01-01T12:00:00.000000Z', 1000000) AS ts "
+                    "FROM long_sequence(3)") as result:
+                queried = result.to_polars()
+            print(queried)
     except IngressError as e:
         sys.stderr.write(f'Got error: {e}\n')
 

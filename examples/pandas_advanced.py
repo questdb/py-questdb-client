@@ -1,4 +1,4 @@
-from questdb.ingress import Sender, IngressError
+from questdb.ingress import Client, Sender, IngressError
 
 import sys
 import pandas as pd
@@ -19,11 +19,21 @@ def example(host: str = 'localhost', port: int = 9000):
                 pd.Timestamp('2022-08-06 07:35:23.189062')]})
     try:
         with Sender.from_conf(f"http::addr={host}:{port};") as sender:
+            # Ingress: publish a Pandas DataFrame into QuestDB.
             sender.dataframe(
                 df,
                 table_name_col='metric',  # Table name from 'metric' column.
                 symbols='auto',  # Category columns as SYMBOL. (Default)
                 at=-1)  # Last column contains the designated timestamps.
+
+        with Client.from_conf(f"qwpws::addr={host}:{port};") as client:
+            # Egress: query QuestDB and materialise the result as Pandas.
+            with client.query(
+                    "SELECT x AS sample_id, "
+                    "x / 10.0 AS value "
+                    "FROM long_sequence(3)") as result:
+                queried = result.to_pandas()
+            print(queried)
 
     except IngressError as e:
         sys.stderr.write(f'Got error: {e}\n')

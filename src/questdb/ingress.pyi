@@ -975,7 +975,7 @@ class QueryResult:
 
     def to_polars(self) -> Any:
         """Read the full result into a ``polars.DataFrame``. Requires polars
-        (pyarrow-free)."""
+        and pyarrow."""
 
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""

@@ -1747,7 +1747,8 @@ class QueryResult:
             **_resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper))
 
     def to_polars(self):
-        """Read the full result into a ``polars.DataFrame``. Requires polars.
+        """Read the full result into a ``polars.DataFrame``. Requires polars
+        and pyarrow.
 
         Materialise-whole: a mid-query failover replays the result
         transparently. This accumulates batches in-library (via pyarrow)
@@ -1762,7 +1763,12 @@ class QueryResult:
             raise ImportError(
                 '`polars` is required for `to_polars()`. '
                 'Install with `pip install polars`.') from ie
-        import pyarrow as pa
+        try:
+            import pyarrow as pa
+        except ImportError as ie:
+            raise ImportError(
+                '`pyarrow` is required for `to_polars()`. '
+                'Install with `pip install pyarrow`.') from ie
         handle = self._take_cursor_handle()
         schema, batches = _fetch_all_record_batches(handle, pa)
         if schema is None:

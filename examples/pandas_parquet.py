@@ -1,4 +1,4 @@
-from questdb.ingress import Sender
+from questdb.ingress import Client, Sender
 import pandas as pd
 
 
@@ -35,8 +35,18 @@ def example(host: str = 'localhost', port: int = 9000):
 
     df = pd.read_parquet(filename)
     with Sender.from_conf(f"http::addr={host}:{port};") as sender:
+        # Ingress: publish a Pandas DataFrame into QuestDB.
         # Note: Table name is looked up from the dataframe's index name.
         sender.dataframe(df, at='ts')
+
+    with Client.from_conf(f"qwpws::addr={host}:{port};") as client:
+        # Egress: query QuestDB and materialise the result as Pandas.
+        with client.query(
+                "SELECT x AS charger_id, "
+                "x * 25 AS speed_kwh "
+                "FROM long_sequence(3)") as result:
+            queried = result.to_pandas()
+        print(queried)
 
 
 if __name__ == '__main__':
