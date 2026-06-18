@@ -4334,7 +4334,7 @@ class TestEgressFailover(unittest.TestCase):
         expected = list(range(n))
 
         with qi.Client.from_conf(
-                self._conf(reconnect_max_duration_millis='60000')) as client:
+                self._conf(failover_max_duration_ms='60000')) as client:
             result = client.query(f'SELECT v FROM {table} ORDER BY ts')
             # Bounce before the (single-use) materialisation drains the
             # stream: a mid-query failover re-executes and the reset
@@ -4351,7 +4351,7 @@ class TestEgressFailover(unittest.TestCase):
         table = self._seed(n)
         expected = list(range(n))
         with qi.Client.from_conf(
-                self._conf(reconnect_max_duration_millis='60000')) as client:
+                self._conf(failover_max_duration_ms='60000')) as client:
             result = client.query(f'SELECT v FROM {table} ORDER BY ts')
             self.qdb_plain.stop()
             self.qdb_plain.start()
@@ -4367,7 +4367,7 @@ class TestEgressFailover(unittest.TestCase):
         table = self._seed(n)
         expected = list(range(n))
         with qi.Client.from_conf(
-                self._conf(reconnect_max_duration_millis='60000')) as client:
+                self._conf(failover_max_duration_ms='60000')) as client:
             result = client.query(f'SELECT v FROM {table} ORDER BY ts')
             self.qdb_plain.stop()
             self.qdb_plain.start()
@@ -4379,11 +4379,16 @@ class TestEgressFailover(unittest.TestCase):
         failover after the first batch is delivered surfaces a clean,
         catchable ``FailoverWouldDuplicate`` rather than silently
         re-reading."""
-        n = 200000
-        table = self._seed(n)
+        # Use a generated result large enough that the server is still
+        # producing after the first small batch. A pre-seeded table can
+        # finish and buffer before the graceful fixture bounce breaks the
+        # WebSocket, making the test depend on timing.
+        n = 100000000
         with qi.Client.from_conf(
-                self._conf(reconnect_max_duration_millis='60000')) as client:
-            it = client.query(f'SELECT v FROM {table} ORDER BY ts').iter_arrow()
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            it = client.query(
+                f'SELECT x - 1 AS v FROM long_sequence({n})').iter_arrow()
             first = next(it)
             self.assertGreater(first.num_rows, 0)
             # First batch delivered; bounce so the next pull fails over.
@@ -4398,12 +4403,12 @@ class TestEgressFailover(unittest.TestCase):
 
     def test_iter_pandas_surfaces_failover_would_duplicate(self):
         """Same contract for the numpy streaming ``iter_pandas``."""
-        n = 200000
-        table = self._seed(n)
+        n = 100000000
         with qi.Client.from_conf(
-                self._conf(reconnect_max_duration_millis='60000')) as client:
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
             it = client.query(
-                f'SELECT v FROM {table} ORDER BY ts').iter_pandas()
+                f'SELECT x - 1 AS v FROM long_sequence({n})').iter_pandas()
             first = next(it)
             self.assertGreater(len(first), 0)
             self.qdb_plain.stop()
