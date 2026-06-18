@@ -516,13 +516,45 @@ class TestPandasPlannerRouting(unittest.TestCase):
             'region': pd.array(
                 pa.array(['us-east', 'us-west'], type=pa.string()),
                 dtype=pd.ArrowDtype(pa.string())),
-            'v': pd.Series([1, 2], dtype='int64'),
+            'v': pd.Series(
+                pa.array([1, 2], type=pa.int64()),
+                dtype=pd.ArrowDtype(pa.int64())),
         })
         with QwpAckServer() as server:
             client = qi.Client.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='arrow_pandas_symbols',
+                    at='ts', symbols=['region'])
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_mixed_arrow_numpy_symbol_override_uses_manual(self):
+        # A numpy column routes the whole frame to the manual planner; the
+        # Arrow string column overridden to SYMBOL is ingested via the
+        # arrow-import symbol path (force_symbol).
+        import pandas as pd
+        ts_type = pa.timestamp('us', tz='UTC')
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                pa.array([1704067200000000, 1704067201000000],
+                         type=ts_type),
+                dtype=pd.ArrowDtype(ts_type)),
+            'region': pd.array(
+                pa.array(['us-east', 'us-west'], type=pa.string()),
+                dtype=pd.ArrowDtype(pa.string())),
+            'v': pd.Series([1, 2], dtype='int64'),
+        })
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='mixed_arrow_symbols',
                     at='ts', symbols=['region'])
             finally:
                 client.close()

@@ -636,7 +636,7 @@ class TestPandasBase:
         def test_debug_dataframe_columnar_plan_rejects_unsupported_shape(self):
             df = pd.DataFrame({
                 'tbl': ['t1'],
-                'sym': pd.Series(['a'], dtype='string[pyarrow]'),
+                'sym': pd.Series(['a'], dtype='object'),
                 'value': pd.Series([1], dtype='int64'),
                 'ts': pd.Series([pd.NaT], dtype='datetime64[ns]'),
             })
@@ -648,7 +648,7 @@ class TestPandasBase:
             self.assertFalse(plan['supported'])
             self.assertTrue(any('fixed table_name' in reason
                                 for reason in reasons))
-            self.assertTrue(any('Categorical symbol' in reason
+            self.assertTrue(any('Categorical or string[pyarrow]' in reason
                                 for reason in reasons))
             self.assertTrue(any('cannot contain NaT' in reason
                                 for reason in reasons))

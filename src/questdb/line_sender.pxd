@@ -799,10 +799,15 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    cdef enum column_sender_symbol_mode:
+        column_sender_symbol_mode_auto = 0
+        column_sender_symbol_mode_symbol = 1
+        column_sender_symbol_mode_not_symbol = 2
+
     column_sender_arrow_import* column_sender_arrow_import_new(
         ArrowArray* array,
         const ArrowSchema* schema,
-        cbool force_not_symbol,
+        column_sender_symbol_mode symbol_mode,
         line_sender_error** err_out
         ) noexcept nogil
 

@@ -2479,22 +2479,33 @@ cdef object _dataframe_columnar_plan_failures(
                     col,
                     'v1 requires Arrow UTF-8 or LargeUtf8 offsets and byte buffers.'))
         elif col.setup.target == col_target_t.col_target_symbol:
-            if col.setup.source not in (
+            if col.setup.source in (
                     col_source_t.col_source_str_i8_cat,
                     col_source_t.col_source_str_i16_cat,
                     col_source_t.col_source_str_i32_cat):
+                if not _dataframe_columnar_has_utf8_dictionary(
+                        &col.setup.chunks.chunks[0]):
+                    failures.append(_dataframe_columnar_col_failure(
+                        df,
+                        col,
+                        'v1 requires Arrow UTF-8 or LargeUtf8 dictionary '
+                        'offsets and byte buffers for categorical symbols.'))
+            elif col.setup.source in (
+                    col_source_t.col_source_str_utf8_arrow,
+                    col_source_t.col_source_str_lrg_utf8_arrow):
+                if not _dataframe_columnar_has_utf8_values(
+                        &col.setup.chunks.chunks[0]):
+                    failures.append(_dataframe_columnar_col_failure(
+                        df,
+                        col,
+                        'v1 requires Arrow UTF-8 or LargeUtf8 offsets and '
+                        'byte buffers.'))
+            else:
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports pandas string Categorical symbol '
-                    'columns.'))
-            elif not _dataframe_columnar_has_utf8_dictionary(
-                    &col.setup.chunks.chunks[0]):
-                failures.append(_dataframe_columnar_col_failure(
-                    df,
-                    col,
-                    'v1 requires Arrow UTF-8 or LargeUtf8 dictionary offsets '
-                    'and byte buffers for categorical symbols.'))
+                    'v1 only supports pandas string Categorical or '
+                    'string[pyarrow] symbol columns.'))
         elif col.setup.target == col_target_t.col_target_at:
             if col.setup.source not in (
                     col_source_t.col_source_dt64ns_numpy,
@@ -3296,7 +3307,8 @@ cdef void_int _dataframe_columnar_call_arrow_append(
         col_t* col,
         size_t row_offset,
         size_t row_count,
-        bint force_not_symbol=False) except -1:
+        column_sender_symbol_mode symbol_mode
+            =column_sender_symbol_mode_auto) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef column_sender_arrow_import* imported = col.setup.arrow_import
@@ -3305,7 +3317,7 @@ cdef void_int _dataframe_columnar_call_arrow_append(
             imported = column_sender_arrow_import_new(
                 &col.setup.chunks.chunks[0],
                 &col.setup.arrow_schema,
-                force_not_symbol,
+                symbol_mode,
                 &err)
         if imported != NULL:
             ok = column_sender_chunk_append_arrow_import(
@@ -3605,18 +3617,16 @@ cdef void_int _dataframe_columnar_append_field(
                 col_source_t.col_source_str_i16_cat,
                 col_source_t.col_source_str_i32_cat):
             _dataframe_columnar_call_arrow_append(
-                chunk, col, row_offset, row_count, True)
+                chunk, col, row_offset, row_count,
+                column_sender_symbol_mode_not_symbol)
             return 0
-        # Rust dispatches on the schema format string for utf8 ("u") and
-        # large_utf8 ("U").
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
         return 0
     elif col.setup.target == col_target_t.col_target_symbol:
-        # Rust reads the dictionary from arr.dictionary and dispatches on
-        # the outer schema's index format (c / s / i).
         _dataframe_columnar_call_arrow_append(
-            chunk, col, row_offset, row_count)
+            chunk, col, row_offset, row_count,
+            column_sender_symbol_mode_symbol)
         return 0
     else:
         raise RuntimeError('Unsupported columnar field target.')
@@ -4378,57 +4388,6 @@ cdef object _validate_schema_overrides(object schema_overrides):
     return out
 
 
-cdef object _roundtrip_overrides_from_attrs(object df):
-    """Derive capsule overrides from a frame's ``df.attrs['questdb']``
-    round-trip metadata (ipv4 / char / geohash), in the same
-    ``(name_bytes, kind_int, arg_int)`` shape as ``_validate_schema_overrides``.
-    Returns None when the frame carries no such metadata."""
-    cdef object attrs = getattr(df, 'attrs', None)
-    if not attrs:
-        return None
-    cdef object qmeta = attrs.get('questdb')
-    if not qmeta:
-        return None
-    cdef object cols_meta = qmeta.get('columns')
-    if not cols_meta:
-        return None
-    cdef list out = []
-    cdef object name, meta, kind, bits
-    for name, meta in cols_meta.items():
-        if not isinstance(name, str) or not isinstance(meta, dict):
-            continue
-        kind = meta.get('kind')
-        if kind == 'ipv4':
-            out.append((name.encode('utf-8'),
-                        <int>column_sender_arrow_override_ipv4, 0))
-        elif kind == 'char':
-            out.append((name.encode('utf-8'),
-                        <int>column_sender_arrow_override_char, 0))
-        elif kind == 'geohash':
-            bits = meta.get('precision_bits') or 0
-            if isinstance(bits, int) and 1 <= bits <= 60:
-                out.append((name.encode('utf-8'),
-                            <int>column_sender_arrow_override_geohash, bits))
-    return out if out else None
-
-
-cdef object _combine_override_lists(object base, object higher):
-    """Combine two override lists; ``higher`` wins on name collision."""
-    cdef set names
-    cdef list merged
-    cdef object entry
-    if not base:
-        return higher
-    if not higher:
-        return base
-    names = {entry[0] for entry in higher}
-    merged = list(higher)
-    for entry in base:
-        if entry[0] not in names:
-            merged.append(entry)
-    return merged
-
-
 cdef object _capsule_get_column_names(object sliceable):
     """Return list of str column names from polars / pyarrow input,
     or None if the input doesn't expose a uniform name list."""
@@ -4772,23 +4731,24 @@ cdef object _pandas_masked_dtype():
 
 
 cdef bint _pandas_dataframe_requires_manual_planner(object df) except -1:
+    # A fully Arrow-backed frame takes the zero-copy capsule path; any
+    # numpy / object / masked / categorical column routes the whole frame to
+    # the manual planner (which ingests those directly and the Arrow-backed
+    # columns via the arrow-import path).
     cdef object dtype
-    cdef object storage
-    cdef object masked_base
+    cdef object arrow_dtype
     if not _is_pandas_dataframe_object(df):
         return False
     _dataframe_may_import_deps()
-    masked_base = _pandas_masked_dtype()
+    arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
     try:
         for dtype in df.dtypes:
-            if isinstance(dtype, _NUMPY_OBJECT):
-                return True
-            if isinstance(dtype, masked_base):
-                return True
+            if arrow_dtype is not None and isinstance(dtype, arrow_dtype):
+                continue
             if isinstance(dtype, _PANDAS.StringDtype):
-                storage = getattr(dtype, 'storage', None)
-                if storage != 'pyarrow':
-                    return True
+                if getattr(dtype, 'storage', None) == 'pyarrow':
+                    continue
+            return True
     except Exception:
         return True
     return False
@@ -4873,9 +4833,7 @@ cdef bint _dataframe_client_try_capsule_path(
     if table_name_col is not None:
         return False
 
-    validated_overrides = _combine_override_lists(
-        _roundtrip_overrides_from_attrs(df),
-        _validate_schema_overrides(schema_overrides))
+    validated_overrides = _validate_schema_overrides(schema_overrides)
 
     # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
     # peak memory. `LazyFrame.collect_batches()` would stream natively
