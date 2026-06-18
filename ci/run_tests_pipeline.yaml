@@ -28,7 +28,13 @@ stages:
               pythonVersion: "3.12"
               vsQuestDbMaster: true
             mac:
-              imageName: "macos-latest"
+              # Apple Silicon (arm64) image. The x64 "macos-latest" image runs
+              # x86_64 under Rosetta on Apple-Silicon hardware, where the rust
+              # sender's HTTP keep-alive connection teardown stalls ~30s per
+              # mock-server test (the leg took ~1h). Running native arm64 is
+              # fast. NOTE: arm64 macOS is a limited-preview image on Azure
+              # DevOps; if the org isn't enrolled this leg won't get an agent.
+              imageName: "macOS-15-arm64"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
             windows-msvc-2022:
@@ -67,14 +73,21 @@ stages:
           - script: docker pull questdb/questdb:nightly
             displayName: "Pull QuestDB nightly image"
             condition: eq(variables.vsQuestDbMaster, true)
+          # JDK 25 is exposed as JAVA_HOME_25_arm64 on arm64 images and
+          # JAVA_HOME_25_X64 on x64 images; pick whichever the agent has.
+          - bash: |
+              if [ -n "${JAVA_HOME_25_arm64:-}" ]; then
+                echo "##vso[task.setvariable variable=JDK25_HOME]$JAVA_HOME_25_arm64"
+              else
+                echo "##vso[task.setvariable variable=JDK25_HOME]$JAVA_HOME_25_X64"
+              fi
+            displayName: "Resolve JDK 25 home"
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
               # The latest QuestDB release requires a JDK 25 runtime (the
-              # -no-jre tarball uses the host JDK). JDK 25 is pre-installed on
-              # the Microsoft-hosted ubuntu/macOS/windows images as
-              # JAVA_HOME_25_X64.
-              JAVA_HOME: $(JAVA_HOME_25_X64)
+              # -no-jre tarball uses the host JDK), pre-installed on the agents.
+              JAVA_HOME: $(JDK25_HOME)
           # QDB_DOCKER_IMAGE makes the integration fixture run QuestDB from the
           # Docker image rather than a locally-built jar (no host JDK needed).
           - script: python3 proj.py test 1
