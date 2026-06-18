@@ -51,7 +51,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_invalid_decimal,
         line_sender_error_server_rejection,
         line_sender_error_arrow_unsupported_column_kind,
-        line_sender_error_arrow_ingest
+        line_sender_error_arrow_ingest,
+        line_sender_error_failover_retry
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,
@@ -1043,6 +1044,61 @@ cdef extern from "questdb/egress/line_reader.h":
         line_reader* reader,
         line_sender_utf8 sql,
         line_reader_error** err_out
+        ) noexcept nogil
+
+    cdef struct line_reader_failover_event:
+        pass
+
+    ctypedef void (*line_reader_failover_callback)(
+        const line_reader_failover_event* event,
+        void* user_data) noexcept nogil
+
+    void line_reader_failover_event_failed_host(
+        const line_reader_failover_event* event,
+        const char** out_buf,
+        size_t* out_len
+        ) noexcept nogil
+
+    uint16_t line_reader_failover_event_failed_port(
+        const line_reader_failover_event* event
+        ) noexcept nogil
+
+    void line_reader_failover_event_new_host(
+        const line_reader_failover_event* event,
+        const char** out_buf,
+        size_t* out_len
+        ) noexcept nogil
+
+    uint16_t line_reader_failover_event_new_port(
+        const line_reader_failover_event* event
+        ) noexcept nogil
+
+    int64_t line_reader_failover_event_new_request_id(
+        const line_reader_failover_event* event
+        ) noexcept nogil
+
+    uint32_t line_reader_failover_event_attempts(
+        const line_reader_failover_event* event
+        ) noexcept nogil
+
+    uint64_t line_reader_failover_event_elapsed_ns(
+        const line_reader_failover_event* event
+        ) noexcept nogil
+
+    line_reader_error_code line_reader_failover_event_trigger_code(
+        const line_reader_failover_event* event
+        ) noexcept nogil
+
+    void line_reader_failover_event_trigger_msg(
+        const line_reader_failover_event* event,
+        const char** out_buf,
+        size_t* out_len
+        ) noexcept nogil
+
+    void line_reader_query_on_failover_reset(
+        line_reader_query* query,
+        line_reader_failover_callback callback,
+        void* user_data
         ) noexcept nogil
 
     void line_reader_cursor_free(

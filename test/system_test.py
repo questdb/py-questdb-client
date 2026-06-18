@@ -4090,5 +4090,331 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got.column('v').to_pylist(), [0, 1, 255])
 
 
+class TestColumnIngressFailover(unittest.TestCase):
+    """Within-call failover for ``Client.dataframe`` (the column path).
+
+    Connect-time / between-operation failover is automatic in Rust (the
+    next pool borrow auto-selects the live primary); these tests pin the
+    two cases the Python wrapper is responsible for: a dead+live endpoint
+    list (the borrow must skip the dead endpoint and land on the live
+    primary) and a mid-stream server bounce (the transient
+    ``FailoverRetry`` re-sends the whole df). Both routes — pandas/numpy
+    and the Arrow capsule (polars / pyarrow) — are covered.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    def _require_qwp_ws(self):
+        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
+            self.skipTest(
+                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def setUp(self):
+        self._require_qwp_ws()
+
+    @staticmethod
+    def _unused_tcp_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('127.0.0.1', 0))
+            return sock.getsockname()[1]
+
+    def _conf(self, endpoints=None, **extra):
+        if endpoints is None:
+            endpoints = [
+                (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+        addr = ','.join(f'{h}:{p}' for h, p in endpoints)
+        conf = f'qwpws::addr={addr};'
+        for k, v in extra.items():
+            conf += f'{k}={v};'
+        return conf
+
+    def _table(self, prefix='t_fo_'):
+        name = prefix + uuid.uuid4().hex[:8]
+        self.addCleanup(lambda: self._drop_quietly(name))
+        return name
+
+    def _drop_quietly(self, table):
+        try:
+            self.qdb_plain.http_sql_query(f'DROP TABLE IF EXISTS {table}')
+        except Exception:
+            pass
+
+    def _create_table(self, table):
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} (ts TIMESTAMP, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL '
+            'DEDUP UPSERT KEYS(ts, v)')
+
+    def _pandas_df(self, n):
+        ts = [1700000000_000000 + i * 1_000_000 for i in range(n)]
+        return pd.DataFrame({
+            'ts': pd.to_datetime(ts, unit='us'),
+            'v': np.arange(n, dtype=np.int64),
+        })
+
+    def _arrow_df(self, n):
+        import pyarrow as pa
+        ts = pa.array(
+            [1700000000_000000 + i * 1_000_000 for i in range(n)],
+            type=pa.timestamp('us', tz='UTC'))
+        return pd.DataFrame({
+            'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
+            'v': pd.array(
+                pa.array(list(range(n)), type=pa.int64()),
+                dtype=pd.ArrowDtype(pa.int64())),
+        })
+
+    def _read_back_v(self, table):
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        return got.column('v').to_pylist()
+
+    def test_dead_then_live_endpoint_numpy_route(self):
+        """A dead first endpoint + the live primary: the pool borrow
+        rotates past the dead endpoint, the whole df lands. NumPy
+        (pandas) route."""
+        table = self._table()
+        self._create_table(table)
+        endpoints = [
+            (self.qdb_plain.host, self._unused_tcp_port()),
+            (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+        conf = self._conf(
+            endpoints=endpoints,
+            reconnect_max_duration_millis='30000')
+        df = self._pandas_df(2000)
+        with qi.Client.from_conf(conf) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=2000)
+        self.assertEqual(self._read_back_v(table), list(range(2000)))
+
+    def test_dead_then_live_endpoint_arrow_route(self):
+        """Same, via the Arrow capsule (pyarrow-backed) route."""
+        table = self._table()
+        self._create_table(table)
+        endpoints = [
+            (self.qdb_plain.host, self._unused_tcp_port()),
+            (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+        conf = self._conf(
+            endpoints=endpoints,
+            reconnect_max_duration_millis='30000')
+        df = self._arrow_df(2000)
+        with qi.Client.from_conf(conf) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=2000)
+        self.assertEqual(self._read_back_v(table), list(range(2000)))
+
+    def test_polars_dataframe_round_trip(self):
+        """``pl.DataFrame`` (the Arrow capsule route) lands every row;
+        pins that the polars source feeds the same whole-df path."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        table = self._table()
+        self._create_table(table)
+        df = pl.DataFrame({
+            'ts': [
+                datetime.datetime(2023, 11, 14, 22, 13, 20,
+                                  tzinfo=datetime.timezone.utc)
+                + datetime.timedelta(seconds=i)
+                for i in range(1500)],
+            'v': list(range(1500)),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=1500)
+        self.assertEqual(self._read_back_v(table), list(range(1500)))
+
+    def test_mid_stream_bounce_resends_whole_df_numpy(self):
+        """Bounce the server mid-call: the transient ``FailoverRetry``
+        re-sends the whole df on a fresh conn. DEDUP collapses any
+        duplicate prefix; the final row set is exact (no loss / no dup).
+        NumPy route."""
+        table = self._table()
+        self._create_table(table)
+        df = self._pandas_df(20000)
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            # Warm the pool so a live conn is idle, then bounce: the next
+            # borrow hands back that now-stale conn, the flush hits a dead
+            # socket -> FailoverRetry -> whole-df re-send on a reconnected
+            # primary. DEDUP collapses any duplicate prefix.
+            client.dataframe(self._pandas_df(2), table_name=table, at='ts')
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=20000)
+        self.assertEqual(self._read_back_v(table), list(range(20000)))
+
+    def test_mid_stream_bounce_resends_whole_df_arrow(self):
+        """Same bounce, Arrow capsule route."""
+        table = self._table()
+        self._create_table(table)
+        df = self._arrow_df(20000)
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            client.dataframe(self._arrow_df(2), table_name=table, at='ts')
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=20000)
+        self.assertEqual(self._read_back_v(table), list(range(20000)))
+
+
+class TestEgressFailover(unittest.TestCase):
+    """Egress read failover: materialise-whole = transparent (the reset
+    callback discards the partial accumulation and replays from
+    batch-0); streaming = explicit ``FailoverWouldDuplicate``."""
+
+    @classmethod
+    def setUpClass(cls):
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    def _require_qwp_ws(self):
+        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
+            self.skipTest(
+                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def setUp(self):
+        self._require_qwp_ws()
+
+    def _conf(self, **extra):
+        conf = (f'qwpws::addr={self.qdb_plain.host}:'
+                f'{self.qdb_plain.http_server_port};')
+        for k, v in extra.items():
+            conf += f'{k}={v};'
+        return conf
+
+    def _exec(self, sql):
+        return self.qdb_plain.http_sql_query(sql)
+
+    def _drop_quietly(self, table):
+        try:
+            self._exec(f'DROP TABLE IF EXISTS {table}')
+        except Exception:
+            pass
+
+    def _seed(self, n_rows):
+        """A multi-batch result: enough rows that QuestDB streams more
+        than one record batch, so a mid-stream bounce lands after the
+        first batch is delivered."""
+        table = 't_egress_fo_' + uuid.uuid4().hex[:8]
+        self.addCleanup(lambda: self._drop_quietly(table))
+        self._exec(
+            f'CREATE TABLE {table} (ts TIMESTAMP, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        base = '2024-01-01T00:00:00.000000Z'
+        # Bulk-insert via a generator series keeps the SQL compact.
+        # long_sequence(n) yields x = 1..n; v = x - 1 gives 0..n-1.
+        self._exec(
+            f"INSERT INTO {table} "
+            f"SELECT timestamp_sequence('{base}', 1000) AS ts, x - 1 AS v "
+            f"FROM long_sequence({n_rows})")
+        self.qdb_plain.retry_check_table(table, min_rows=n_rows)
+        return table
+
+    def test_materialise_whole_transparent_across_bounce(self):
+        """``to_arrow`` / ``to_pandas`` / ``to_polars`` complete with the
+        full, in-order result even when the server bounces mid-stream:
+        the installed reset callback discards the partial accumulation
+        and the query replays from batch-0."""
+        n = 200000
+        table = self._seed(n)
+        expected = list(range(n))
+
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
+            # Bounce before the (single-use) materialisation drains the
+            # stream: a mid-query failover re-executes and the reset
+            # discards anything already buffered.
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            table_out = result.to_arrow()
+        self.assertEqual(table_out.column('v').to_pylist(), expected)
+
+    def test_to_pandas_numpy_transparent_across_bounce(self):
+        """Default ``to_pandas`` (the numpy accumulator we own) is
+        likewise transparent across a bounce."""
+        n = 200000
+        table = self._seed(n)
+        expected = list(range(n))
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            df = result.to_pandas()
+        self.assertEqual(df['v'].tolist(), expected)
+
+    def test_to_polars_transparent_across_bounce(self):
+        try:
+            import polars  # noqa: F401
+        except ImportError:
+            self.skipTest('polars not installed')
+        n = 200000
+        table = self._seed(n)
+        expected = list(range(n))
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            df = result.to_polars()
+        self.assertEqual(df['v'].to_list(), expected)
+
+    def test_iter_arrow_surfaces_failover_would_duplicate(self):
+        """Streaming ``iter_arrow`` installs no reset: a mid-stream
+        failover after the first batch is delivered surfaces a clean,
+        catchable ``FailoverWouldDuplicate`` rather than silently
+        re-reading."""
+        n = 200000
+        table = self._seed(n)
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            it = client.query(f'SELECT v FROM {table} ORDER BY ts').iter_arrow()
+            first = next(it)
+            self.assertGreater(first.num_rows, 0)
+            # First batch delivered; bounce so the next pull fails over.
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            with self.assertRaises(qi.IngressError) as cm:
+                for _ in it:
+                    pass
+            self.assertEqual(
+                cm.exception.code,
+                qi.IngressErrorCode.FailoverWouldDuplicate)
+
+    def test_iter_pandas_surfaces_failover_would_duplicate(self):
+        """Same contract for the numpy streaming ``iter_pandas``."""
+        n = 200000
+        table = self._seed(n)
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            it = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').iter_pandas()
+            first = next(it)
+            self.assertGreater(len(first), 0)
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            with self.assertRaises(qi.IngressError) as cm:
+                for _ in it:
+                    pass
+            self.assertEqual(
+                cm.exception.code,
+                qi.IngressErrorCode.FailoverWouldDuplicate)
+
+
 if __name__ == '__main__':
     unittest.main()

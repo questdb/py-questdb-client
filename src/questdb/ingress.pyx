@@ -53,8 +53,8 @@ __all__ = [
 ]
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
-from libc.stdint cimport uint8_t, uint64_t, int64_t, uint32_t, uintptr_t, \
-    INT64_MAX, INT64_MIN
+from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t, uint32_t, \
+    uintptr_t, INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
 from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan
@@ -129,6 +129,17 @@ cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
 
 cdef size_t _QWP_MAX_DEFERRED_ARROW_FRAMES = 100
 
+# Re-send the whole df on a transient `FailoverRetry`, bounded by this
+# many attempts.
+cdef size_t _DATAFRAME_FAILOVER_MAX_ATTEMPTS = 5
+
+
+cdef void _dataframe_failover_backoff(size_t attempt):
+    cdef double delay = 0.05 * (2.0 ** <double>(attempt - 1))
+    if delay > 1.0:
+        delay = 1.0
+    time.sleep(delay)
+
 
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
@@ -175,8 +186,11 @@ class IngressErrorCode(Enum):
     DecimalError = line_sender_error_invalid_decimal
     ArrowUnsupportedColumnKind = line_sender_error_arrow_unsupported_column_kind
     ArrowIngest = line_sender_error_arrow_ingest
-    BadDataFrame = <int>line_sender_error_arrow_ingest + 1
-    Cancelled = <int>line_sender_error_arrow_ingest + 2
+    FailoverRetry = line_sender_error_failover_retry
+    BadDataFrame = <int>line_sender_error_failover_retry + 1
+    Cancelled = <int>line_sender_error_failover_retry + 2
+    # Egress-only (line_reader_error_code 21); not a line_sender_error_code.
+    FailoverWouldDuplicate = <int>line_sender_error_failover_retry + 3
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -263,6 +277,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ArrowUnsupportedColumnKind
     elif code == line_sender_error_arrow_ingest:
         return IngressErrorCode.ArrowIngest
+    elif code == line_sender_error_failover_retry:
+        return IngressErrorCode.FailoverRetry
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -2223,12 +2239,17 @@ cdef bint _dataframe_columnar_has_validity(
 
 
 cdef bint _dataframe_columnar_has_utf8_values(
-        ArrowArray* arr) noexcept nogil:
-    return (
-        arr.n_buffers >= 3 and
-        arr.buffers != NULL and
-        arr.buffers[1] != NULL and
-        (arr.length == 0 or arr.buffers[2] != NULL))
+        ArrowArray* arr, bint large_offsets) noexcept nogil:
+    if not (arr.n_buffers >= 3 and
+            arr.buffers != NULL and
+            arr.buffers[1] != NULL):
+        return False
+    if arr.length == 0 or arr.buffers[2] != NULL:
+        return True
+    # NULL byte buffer is valid only with zero data bytes (all-null/empty).
+    if large_offsets:
+        return (<const int64_t*>arr.buffers[1])[arr.offset + arr.length] == 0
+    return (<const int32_t*>arr.buffers[1])[arr.offset + arr.length] == 0
 
 
 cdef bint _dataframe_columnar_has_utf8_dictionary(
@@ -2473,7 +2494,9 @@ cdef object _dataframe_columnar_plan_failures(
                     'Arrow UTF-8 or LargeUtf8, pandas string Categorical, '
                     'or object-dtype str.'))
             elif not _dataframe_columnar_has_utf8_values(
-                    &col.setup.chunks.chunks[0]):
+                    &col.setup.chunks.chunks[0],
+                    col.setup.source ==
+                        col_source_t.col_source_str_lrg_utf8_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
@@ -2494,7 +2517,9 @@ cdef object _dataframe_columnar_plan_failures(
                     col_source_t.col_source_str_utf8_arrow,
                     col_source_t.col_source_str_lrg_utf8_arrow):
                 if not _dataframe_columnar_has_utf8_values(
-                        &col.setup.chunks.chunks[0]):
+                        &col.setup.chunks.chunks[0],
+                        col.setup.source ==
+                            col_source_t.col_source_str_lrg_utf8_arrow):
                     failures.append(_dataframe_columnar_col_failure(
                         df,
                         col,
@@ -3847,7 +3872,8 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_uuid,
                 col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
-                col_target_t.col_target_column_binary):
+                col_target_t.col_target_column_binary,
+                col_target_t.col_target_column_arrow):
             if plan.pyobj_built != NULL:
                 prebuilt = plan.pyobj_built[col_index]
             else:
@@ -5212,19 +5238,9 @@ cdef class Client:
         """
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
-        cdef column_sender_chunk* chunk = NULL
-        cdef qwpws_conn* conn = NULL
-        cdef line_sender_error* err = NULL
-        cdef PyThreadState* gs = NULL
         cdef questdb_db* db = NULL
         cdef bint db_use = False
-        cdef bint flushed = False
-        cdef bint sync_attempted = False
-        cdef bint force_drop_conn = False
-        cdef bint flush_attempted = False
-        cdef size_t rows_per_chunk
-        cdef size_t row_offset
-        cdef size_t chunk_rows
+        cdef size_t attempt = 0
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
@@ -5236,17 +5252,58 @@ cdef class Client:
                     'Client.dataframe requires `at` to name the designated '
                     'timestamp column (by name or index); scalar timestamps '
                     'are not supported on the columnar path.')
-            if _dataframe_client_try_capsule_path(
-                    db,
-                    df,
-                    table_name,
-                    table_name_col,
-                    symbols,
-                    at,
-                    max_rows_per_batch,
-                    schema_overrides):
-                return self
+            while True:
+                attempt += 1
+                # Reclaim string storage from a prior attempt's released plan.
+                qdb_pystr_buf_clear(b)
+                try:
+                    if _dataframe_client_try_capsule_path(
+                            db,
+                            df,
+                            table_name,
+                            table_name_col,
+                            symbols,
+                            at,
+                            max_rows_per_batch,
+                            schema_overrides):
+                        return self
+                    return self._dataframe_numpy_publish(
+                        db, b, &plan, df, table_name, table_name_col,
+                        symbols, at, max_rows_per_batch)
+                except IngressError as exc:
+                    if (exc.code is IngressErrorCode.FailoverRetry
+                            and attempt <= _DATAFRAME_FAILOVER_MAX_ATTEMPTS):
+                        _dataframe_failover_backoff(attempt)
+                        continue
+                    raise
+        finally:
+            qdb_pystr_buf_free(b)
+            if db_use:
+                self._end_db_use()
 
+    cdef object _dataframe_numpy_publish(
+            self,
+            questdb_db* db,
+            qdb_pystr_buf* b,
+            dataframe_plan_t* plan,
+            object df,
+            object table_name,
+            object table_name_col,
+            object symbols,
+            object at,
+            size_t max_rows_per_batch):
+        cdef column_sender_chunk* chunk = NULL
+        cdef qwpws_conn* conn = NULL
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef bint flushed = False
+        cdef bint sync_attempted = False
+        cdef bint force_drop_conn = False
+        cdef bint flush_attempted = False
+        cdef size_t rows_per_chunk
+        cdef size_t row_offset
+        cdef size_t chunk_rows
+        try:
             df = _dataframe_normalize_nullable(df)
             df = _dataframe_normalize_at_timestamp(df, at)
             _dataframe_plan_build(
@@ -5256,16 +5313,16 @@ cdef class Client:
                 table_name_col,
                 symbols,
                 at,
-                &plan,
+                plan,
                 _FIELD_TARGETS_QWP)
             if (plan.col_count == 0) or (plan.row_count == 0):
                 return self
 
-            _dataframe_apply_roundtrip_overrides(df, &plan)
-            _dataframe_columnar_validate_plan(df, &plan)
-            _dataframe_columnar_prebuild_pyobj(df, &plan)
+            _dataframe_apply_roundtrip_overrides(df, plan)
+            _dataframe_columnar_validate_plan(df, plan)
+            _dataframe_columnar_prebuild_pyobj(df, plan)
             rows_per_chunk = _dataframe_columnar_rows_per_chunk(
-                &plan, max_rows_per_batch)
+                plan, max_rows_per_batch)
 
             _ensure_doesnt_have_gil(&gs)
             conn = questdb_db_borrow_conn(db, &err)
@@ -5288,7 +5345,7 @@ cdef class Client:
                     if chunk_rows > plan.row_count - row_offset:
                         chunk_rows = plan.row_count - row_offset
                     _dataframe_columnar_populate_chunk(
-                        &plan,
+                        plan,
                         chunk,
                         row_offset,
                         chunk_rows)
@@ -5317,10 +5374,10 @@ cdef class Client:
                     questdb_db_return_conn(db, conn)
             if chunk != NULL:
                 column_sender_chunk_free(chunk)
-            dataframe_plan_release(&plan)
-            qdb_pystr_buf_free(b)
-            if db_use:
-                self._end_db_use()
+            # The plan is rebuilt on each failover attempt; release this
+            # attempt's plan so a re-send starts from a blank plan.
+            dataframe_plan_release(plan)
+            plan[0] = dataframe_plan_blank()
 
     def query(self, str sql) -> QueryResult:
         """

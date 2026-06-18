@@ -24,6 +24,8 @@ cdef inline object _reader_err_code_to_py(line_reader_error_code code):
         return IngressErrorCode.InvalidUtf8
     if code == line_reader_error_cancelled:
         return IngressErrorCode.Cancelled
+    if code == line_reader_error_failover_would_duplicate:
+        return IngressErrorCode.FailoverWouldDuplicate
     # Map every other reader-specific code (handshake, role mismatch,
     # protocol, invalid bind, schema drift, no schema, server-side
     # errors, etc.) to ServerFlushError as a broad bucket. Refine
@@ -100,15 +102,28 @@ cdef class _ReaderHandle:
 
 
 cdef class _CursorHandle:
-    """Owns a ``line_reader_cursor*`` + back-ref to its reader. Freed on dealloc."""
+    """Owns a ``line_reader_cursor*`` + back-ref to its reader. Freed on dealloc.
+
+    ``_reset_seq`` counts mid-query failover resets. The
+    ``_failover_reset_trampoline`` installed on the materialise-whole
+    query path bumps it (a plain C-field write, no GIL, no FFI, no
+    exception — honouring the reader's reentrancy contract) when the
+    cursor re-executes the query on a new endpoint. The accumulating
+    reader (``_numpy_frame_from_cursor`` etc.) compares it against the
+    sequence it observed at start-of-stream and, when it advanced,
+    discards every batch buffered so far so the replay-from-batch-0
+    yields a correct whole result.
+    """
     cdef line_reader_cursor* _cursor
     cdef _ReaderHandle _reader_ref
     cdef object _lock
+    cdef int _reset_seq
 
     def __cinit__(self):
         self._cursor = NULL
         self._reader_ref = None
         self._lock = threading.Lock()
+        self._reset_seq = 0
 
     cdef _attach(self, line_reader_cursor* cursor, _ReaderHandle reader_ref):
         self._cursor = cursor
@@ -177,6 +192,44 @@ cdef object _fetch_one_batch(_CursorHandle handle, object pa_module):
     raise _reader_err_to_py(err)
 
 
+cdef tuple _fetch_all_record_batches(_CursorHandle handle, object pa_module):
+    """Drain the cursor into a list of ``pyarrow.RecordBatch`` we own.
+
+    The materialise-whole entry points install the failover-reset
+    trampoline, which bumps ``handle._reset_seq`` when a mid-query
+    failover re-executes the query on a new endpoint. Because we own the
+    accumulator here, on a reset we discard every batch buffered so far
+    and restart from the replayed batch-0 — yielding a correct,
+    duplicate-free whole result. Returns ``(schema_or_None, batches)``;
+    the cursor is freed and the reader marked drained on clean
+    end-of-stream.
+    """
+    cdef int seen_seq = handle._reset_seq
+    cdef object schema = None
+    cdef list batches = []
+    cdef object batch
+    try:
+        while True:
+            batch = _fetch_one_batch(handle, pa_module)
+            if handle._reset_seq != seen_seq:
+                # Mid-query failover replayed from batch-0: drop the
+                # pre-failover accumulation and re-pin the schema.
+                seen_seq = handle._reset_seq
+                batches = []
+                schema = None
+            if batch is None:
+                break
+            if schema is None:
+                schema = batch.schema
+            batches.append(batch)
+    except:
+        handle._free()
+        raise
+    _mark_reader_drained(handle)
+    handle._free()
+    return (schema, batches)
+
+
 cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
     """Construct a pyarrow.RecordBatchReader over the cursor.
 
@@ -188,6 +241,7 @@ cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
     """
     import pyarrow as pa
 
+    cdef int seen_seq = cursor_handle._reset_seq
     first = _fetch_one_batch(cursor_handle, pa)
     if first is None:
         # Empty result: cursor already reached terminal cleanly.
@@ -204,6 +258,15 @@ cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
             yield first
             while True:
                 nxt = _fetch_one_batch(cursor_handle, pa)
+                if cursor_handle._reset_seq != seen_seq:
+                    # Mid-query failover after batches were already
+                    # yielded: the replayed batch-0 would duplicate what
+                    # the consumer holds. Streaming can't discard it, so
+                    # surface a clean, catchable error.
+                    raise IngressError(
+                        IngressErrorCode.FailoverWouldDuplicate,
+                        'mid-query failover would duplicate already-'
+                        'delivered batches; re-issue the query')
                 if nxt is None:
                     # Reached terminal cleanly; reader is reusable.
                     _mark_reader_drained(cursor_handle)
@@ -252,12 +315,38 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
     return handle
 
 
+cdef void _failover_reset_trampoline(
+        const line_reader_failover_event* event,
+        void* user_data) noexcept nogil:
+    # Fires synchronously inside line_reader_cursor_next_batch while the
+    # reader re-executes on a new endpoint, before the replayed batch-0
+    # arrives. Honour the C reentrancy contract: no reentrant FFI on the
+    # reader/query/cursor, no exception escapes, non-blocking. user_data is
+    # a raw int* at the cursor's _reset_seq counter; bumping it is a plain
+    # pointer write (no GIL, no Python object touched), which the
+    # materialise-whole accumulator polls to discard its pre-failover batches.
+    if user_data == NULL:
+        return
+    (<int*>user_data)[0] += 1
+
+
 cdef _CursorHandle _execute_query(_ReaderHandle reader_handle, str sql):
-    """Execute a SQL query and return a _CursorHandle."""
+    """Execute a SQL query and return a _CursorHandle.
+
+    The query is prepared with an ``on_failover_reset`` trampoline that
+    bumps the cursor's ``_reset_seq`` on a mid-query failover. The
+    materialise-whole entry points poll it to discard their partial
+    accumulation and replay-from-batch-0 transparently; the streaming
+    entry points poll it to surface a clean ``FailoverWouldDuplicate``
+    (the already-yielded batches can't be discarded). Installing the
+    callback also clears the C-side silent-duplicate guard, so a
+    post-delivery failover re-executes rather than aborting outright.
+    """
     cdef bytes sql_bytes = sql.encode('utf-8')
     cdef line_sender_error* utf8_err = NULL
     cdef line_sender_utf8 sql_utf8
     cdef line_reader_error* err = NULL
+    cdef line_reader_query* query
     cdef line_reader_cursor* cursor
 
     if not line_sender_utf8_init(
@@ -267,17 +356,34 @@ cdef _CursorHandle _execute_query(_ReaderHandle reader_handle, str sql):
             &utf8_err):
         raise c_err_to_py(utf8_err)
 
-    with nogil:
-        cursor = line_reader_execute(reader_handle._reader, sql_utf8, &err)
+    cdef _CursorHandle handle = _CursorHandle()
 
-    if cursor == NULL:
+    with nogil:
+        query = line_reader_prepare(reader_handle._reader, sql_utf8, &err)
+
+    if query == NULL:
         if err == NULL:
             raise IngressError(
                 IngressErrorCode.ServerFlushError,
-                'line_reader_execute returned NULL without setting err')
+                'line_reader_prepare returned NULL without setting err')
         raise _reader_err_to_py(err)
 
-    cdef _CursorHandle handle = _CursorHandle()
+    line_reader_query_on_failover_reset(
+        query, _failover_reset_trampoline, <void*>&handle._reset_seq)
+
+    with nogil:
+        cursor = line_reader_query_execute(&query, &err)
+
+    if cursor == NULL:
+        # _query_execute consumes the query (nulls *query_inout); the
+        # defensive free is a no-op on the consumed handle.
+        line_reader_query_free(query)
+        if err == NULL:
+            raise IngressError(
+                IngressErrorCode.ServerFlushError,
+                'line_reader_query_execute returned NULL without setting err')
+        raise _reader_err_to_py(err)
+
     handle._attach(cursor, reader_handle)
     return handle
 
@@ -404,6 +510,7 @@ cdef class _QueryStreamProducer:
     cdef bint has_cached_array
     cdef bint exhausted
     cdef char* last_error
+    cdef int seen_seq
 
     def __cinit__(self):
         self.cursor_handle = None
@@ -411,6 +518,7 @@ cdef class _QueryStreamProducer:
         self.has_cached_array = False
         self.exhausted = False
         self.last_error = NULL
+        self.seen_seq = 0
         memset(&self.cached_schema, 0, sizeof(ArrowSchema))
         memset(&self.cached_array, 0, sizeof(ArrowArray))
 
@@ -471,6 +579,22 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
             result = line_reader_cursor_next_arrow_batch(
                 cursor, &local_array, &local_schema, &err)
     if result == line_reader_arrow_batch_ok:
+        if prod.cursor_handle._reset_seq != prod.seen_seq:
+            # Mid-query failover replayed from batch-0 after batches were
+            # already handed to the consumer; this one would duplicate
+            # them. Streaming can't discard it — surface a clean error
+            # (tagged like other capsule errors) and stop.
+            if local_array.release != NULL:
+                local_array.release(&local_array)
+            if local_schema.release != NULL:
+                local_schema.release(&local_schema)
+            full = (
+                '[' + IngressErrorCode.FailoverWouldDuplicate.name + '] '
+                'mid-query failover would duplicate already-delivered '
+                'batches; re-issue the query').encode('utf-8')
+            _qs_set_error(prod, full, <size_t>len(full))
+            prod.exhausted = True
+            return -1
         if not prod.has_cached_schema:
             memcpy(&prod.cached_schema, &local_schema, sizeof(ArrowSchema))
             prod.has_cached_schema = True
@@ -600,6 +724,7 @@ cdef object _make_query_stream_capsule(_CursorHandle handle):
     cdef ArrowArrayStream* stream
     prod = _QueryStreamProducer()
     prod.cursor_handle = handle
+    prod.seen_seq = handle._reset_seq
     stream = <ArrowArrayStream*>calloc(1, sizeof(ArrowArrayStream))
     if stream == NULL:
         raise MemoryError()
@@ -1317,10 +1442,12 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     cdef size_t prev_dict_n = 0
     cdef bint first = True
     cdef bint has_symbol = False
+    cdef int seen_seq
 
     if handle is None or handle._cursor == NULL:
         raise IngressError(IngressErrorCode.InvalidApiCall, 'cursor is closed')
     cursor = handle._cursor
+    seen_seq = handle._reset_seq
 
     col_names = []
     col_kinds = []
@@ -1334,6 +1461,16 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
         while True:
             with nogil:
                 batch = line_reader_cursor_next_batch(cursor, &err)
+            if handle._reset_seq != seen_seq:
+                # Mid-query failover replayed from batch-0: discard the
+                # pre-failover accumulation and re-derive the schema.
+                seen_seq = handle._reset_seq
+                first = True
+                prev_dict_n = 0
+                has_symbol = False
+                col_chunks = []
+                col_masks = []
+                symbol_categories = []
             if batch == NULL:
                 if err != NULL:
                     raise _reader_err_to_py(err)
@@ -1385,6 +1522,7 @@ cdef class _NumpyBatchIter:
     cdef bint done
     cdef size_t prev_dict_n
     cdef list symbol_categories
+    cdef int seen_seq
 
     def __cinit__(self, _CursorHandle handle):
         import numpy as np
@@ -1401,6 +1539,7 @@ cdef class _NumpyBatchIter:
         self.done = False
         self.prev_dict_n = 0
         self.symbol_categories = []
+        self.seen_seq = handle._reset_seq if handle is not None else 0
 
     def __iter__(self):
         return self
@@ -1417,6 +1556,16 @@ cdef class _NumpyBatchIter:
         cursor = self.handle._cursor
         with nogil:
             batch = line_reader_cursor_next_batch(cursor, &err)
+        if self.handle._reset_seq != self.seen_seq:
+            # Mid-query failover after batches were already yielded: the
+            # replayed batch-0 would duplicate them. Streaming can't
+            # discard it, so surface a clean, catchable error.
+            self.done = True
+            self.handle._free()
+            raise IngressError(
+                IngressErrorCode.FailoverWouldDuplicate,
+                'mid-query failover would duplicate already-delivered '
+                'batches; re-issue the query')
         if batch == NULL:
             if err != NULL:
                 self.done = True
@@ -1526,14 +1675,6 @@ class QueryResult:
         self._cursor_handle = cursor_handle
         self._consumed = False
 
-    def _take_reader(self):
-        if self._consumed:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
-                'QueryResult already consumed')
-        self._consumed = True
-        return _build_record_batch_reader(self._cursor_handle)
-
     def _take_cursor_handle(self):
         if self._consumed:
             raise IngressError(
@@ -1553,16 +1694,28 @@ class QueryResult:
             raise NotImplementedError(
                 'requested_schema is not supported; consume the stream '
                 'and project on the consumer side.')
+        # Streaming: hand batches out incrementally. A post-delivery
+        # failover bumps the cursor's _reset_seq; the capsule producer
+        # surfaces FailoverWouldDuplicate rather than feeding the
+        # replayed batch-0 as a duplicate (see _qs_pull).
         return _make_query_stream_capsule(self._take_cursor_handle())
 
     def to_arrow(self):
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
 
-        Pyarrow-free alternative: ``polars.from_arrow(result)`` /
-        ``duckdb.from_arrow(result)`` / ``pa.table(result)`` consume
-        the ``__arrow_c_stream__`` capsule directly.
+        Materialise-whole: a mid-query failover replays the result
+        transparently — the partial accumulation we hold is discarded
+        from batch-0. The pyarrow-free streaming path
+        (``__arrow_c_stream__`` consumed by ``polars.from_arrow(result)``
+        / ``pa.table(result)``) instead surfaces ``FailoverWouldDuplicate``
+        on a post-delivery failover.
         """
-        return self._take_reader().read_all()
+        import pyarrow as pa
+        handle = self._take_cursor_handle()
+        schema, batches = _fetch_all_record_batches(handle, pa)
+        if schema is None:
+            return pa.table({})
+        return pa.Table.from_batches(batches, schema)
 
     def to_pandas(self, *, dtype_backend=None, types_mapper=None):
         """Read the full result into a ``pandas.DataFrame``.
@@ -1594,8 +1747,12 @@ class QueryResult:
     def to_polars(self):
         """Read the full result into a ``polars.DataFrame``. Requires polars.
 
-        Consumes the ``__arrow_c_stream__`` capsule directly, so it needs no
-        pyarrow.
+        Materialise-whole: a mid-query failover replays the result
+        transparently. This accumulates batches in-library (via pyarrow)
+        so the partial result can be discarded on failover; for the
+        pyarrow-free streaming path consume ``__arrow_c_stream__``
+        directly (``polars.from_arrow(result)``), which surfaces
+        ``FailoverWouldDuplicate`` on a post-delivery failover.
         """
         try:
             import polars as pl
@@ -1603,7 +1760,12 @@ class QueryResult:
             raise ImportError(
                 '`polars` is required for `to_polars()`. '
                 'Install with `pip install polars`.') from ie
-        return pl.from_arrow(self)
+        import pyarrow as pa
+        handle = self._take_cursor_handle()
+        schema, batches = _fetch_all_record_batches(handle, pa)
+        if schema is None:
+            return pl.from_arrow(pa.table({}))
+        return pl.from_arrow(pa.Table.from_batches(batches, schema))
 
     def _to_pandas_numpy(self):
         return _numpy_frame_from_cursor(self._take_cursor_handle())
@@ -1611,11 +1773,14 @@ class QueryResult:
     def iter_arrow(self):
         """Iterate result batches as ``pyarrow.RecordBatch``.
 
+        Streaming: a mid-query failover after the first batch has been
+        yielded surfaces ``IngressErrorCode.FailoverWouldDuplicate`` (the
+        already-yielded batches cannot be discarded); re-issue the query.
         If the iterator is abandoned partway, cleanup runs at the next
         garbage-collection cycle; call :meth:`close` (or use the context-
         manager) for deterministic release.
         """
-        reader = self._take_reader()
+        reader = _build_record_batch_reader(self._take_cursor_handle())
         for batch in reader:
             yield batch
 

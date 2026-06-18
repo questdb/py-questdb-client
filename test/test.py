@@ -166,6 +166,14 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertGreater(
             qi.IngressErrorCode.Cancelled.value,
             qi.IngressErrorCode.ArrowIngest.value)
+        # FailoverRetry mirrors the FFI ingress code (17); the synthetic
+        # Python-only codes sit above it and stay distinct.
+        self.assertGreater(
+            qi.IngressErrorCode.FailoverRetry.value,
+            qi.IngressErrorCode.ArrowIngest.value)
+        self.assertGreater(
+            qi.IngressErrorCode.FailoverWouldDuplicate.value,
+            qi.IngressErrorCode.FailoverRetry.value)
 
     def test_unsupported_dataframe_shape_error_carries_failures(self):
         err = qi.UnsupportedDataFrameShapeError(
