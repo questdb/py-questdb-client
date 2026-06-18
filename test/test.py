@@ -40,6 +40,7 @@ from test_auth import (
     TestNonInteractive,
     TestRefresh,
     TestDiscovery,
+    TestInsecureSettingsGuard,
     TestRestAdapter,
     TestAdapters,
     TestConcurrency,

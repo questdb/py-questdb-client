@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from ._errors import OidcConfigError
-from ._http import get_json, safe_urlparse
+from ._http import get_json, safe_urlparse, _is_loopback
 
 # QuestDB /settings keys (see EntPropServerConfiguration.exportConfiguration()).
 _K_ENABLED = 'acl.oidc.enabled'
@@ -130,6 +130,19 @@ def _normalized_origin(url: str) -> tuple:
 def _origin_str(url: str) -> str:
     scheme, host, port = _normalized_origin(url)
     return f'{scheme}://{host}:{port}' if port else f'{scheme}://{host}'
+
+
+def _settings_channel_is_plaintext(questdb_url: str) -> bool:
+    """
+    True if QuestDB ``/settings`` was fetched over plaintext http to a
+    non-loopback host — a channel a network MITM can tamper (only reachable
+    with ``insecure=True``; ``_require_secure`` rejects it otherwise). IdP
+    endpoints advertised by such an unauthenticated ``/settings`` response must
+    not be trusted to route credentials without an out-of-band pin.
+    """
+    parts, _ = safe_urlparse(questdb_url)
+    return (parts.scheme or '').lower() == 'http' and not _is_loopback(
+        parts.hostname)
 
 
 def validate_endpoint_origins(
@@ -272,6 +285,12 @@ def resolve_config(
     if audience is None:
         audience = cfg.get(_K_AUDIENCE) or None
 
+    # Track which credential endpoints the caller supplied directly. Those are
+    # trusted; endpoints learned from /settings are only as trustworthy as the
+    # channel that delivered them (see the insecure-channel guard below).
+    explicit_token_endpoint = token_endpoint is not None
+    explicit_device_endpoint = device_authorization_endpoint is not None
+
     token_endpoint = (
         token_endpoint or _resolve_endpoint(cfg.get(_K_TOKEN_ENDPOINT), cfg))
     authorization_endpoint = (
@@ -280,6 +299,34 @@ def resolve_config(
     device_authorization_endpoint = (
         device_authorization_endpoint
         or _resolve_endpoint(cfg.get(_K_DEVICE_ENDPOINT), cfg))
+
+    # When QuestDB itself was reached over plaintext http to a non-loopback host
+    # (only possible with insecure=True), its /settings response can be tampered
+    # in transit. Any IdP credential endpoint it advertises would then route the
+    # device code and long-lived refresh token to an attacker origin. The
+    # missing-endpoint discovery path below already demands an out-of-band pin,
+    # but when a tampered /settings advertises BOTH endpoints at one attacker
+    # origin that path is skipped, the co-location check passes trivially (they
+    # share that origin) and the issuer-pin check is vacuous (no issuer) — so
+    # nothing else catches it. Require the same out-of-band pin (issuer= /
+    # discovery_url=) before trusting /settings-supplied endpoints over such a
+    # channel. Endpoints the caller passed explicitly, and endpoints from an
+    # authenticated (https / loopback) /settings, are unaffected.
+    settings_supplied_credentials = (
+        (token_endpoint and not explicit_token_endpoint)
+        or (device_authorization_endpoint and not explicit_device_endpoint))
+    if (questdb_url and settings_supplied_credentials
+            and not issuer and not discovery_url
+            and _settings_channel_is_plaintext(questdb_url)):
+        raise OidcConfigError(
+            'QuestDB was reached over plaintext http (insecure=True), so its '
+            '/settings response — and the OIDC endpoints it advertises — can be '
+            'tampered in transit and used to redirect the device-code and '
+            'refresh-token requests to an attacker. Pin the identity provider '
+            'out-of-band with issuer="https://your-idp" (or discovery_url=...), '
+            'pass the endpoints explicitly (token_endpoint=..., '
+            'device_authorization_endpoint=...), or connect to QuestDB over '
+            'https so /settings is authenticated.')
 
     # Fall back to IdP discovery when QuestDB doesn't advertise the device
     # endpoint (and/or the token endpoint). This contacts the IdP, so it is

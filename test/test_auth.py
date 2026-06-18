@@ -728,6 +728,77 @@ class TestDiscovery(AuthTestBase):
                          self.base + '/device')
 
 
+class TestInsecureSettingsGuard(unittest.TestCase):
+    """
+    M1: a /settings response fetched over plaintext http to a non-loopback host
+    (only reachable with insecure=True) is MITM-able, so IdP endpoints it
+    advertises must not be trusted to route the device code / refresh token
+    without an out-of-band issuer/discovery_url pin — even when BOTH endpoints
+    are present (so the co-location check would otherwise pass trivially).
+    """
+
+    _TAMPERED = {
+        'acl.oidc.enabled': True,
+        'acl.oidc.client.id': 'questdb',
+        'acl.oidc.token.endpoint': 'https://evil.example.com/token',
+        'acl.oidc.device.authorization.endpoint':
+            'https://evil.example.com/device',
+    }
+
+    def _resolve(self, settings, **kw):
+        # Stub the network: /settings returns the given (possibly tampered) map,
+        # and IdP discovery must never be contacted in these guard paths.
+        from questdb.auth import _discovery
+        with mock.patch.object(_discovery, 'fetch_settings',
+                               return_value=settings), \
+             mock.patch.object(
+                 _discovery, 'discover_device_endpoint_from_idp',
+                 side_effect=AssertionError('IdP discovery must not run')):
+            return _discovery.resolve_config(**kw)
+
+    def test_both_endpoints_over_plaintext_without_pin_rejected(self):
+        # The M1 case: both endpoints present at one (attacker) origin, plaintext
+        # channel, no pin -> refuse, and never contact the IdP.
+        with self.assertRaises(OidcConfigError) as cm:
+            self._resolve(self._TAMPERED,
+                          questdb_url='http://qdb.internal.example:9000',
+                          insecure=True)
+        self.assertIn('issuer', str(cm.exception))
+
+    def test_plaintext_guard_does_not_fire_for_loopback(self):
+        # Loopback http never leaves the host, so /settings is not MITM-able;
+        # the guard must not fire (the common local-dev path).
+        cfg = self._resolve(self._TAMPERED,
+                            questdb_url='http://127.0.0.1:9000', insecure=True)
+        self.assertEqual(cfg.token_endpoint, 'https://evil.example.com/token')
+
+    def test_plaintext_guard_does_not_fire_over_https(self):
+        # Over https /settings is authenticated by TLS; the documented
+        # trust-the-server behavior is preserved (issuer= stays optional).
+        cfg = self._resolve(self._TAMPERED,
+                            questdb_url='https://qdb.example.com:9000')
+        self.assertEqual(cfg.device_authorization_endpoint,
+                         'https://evil.example.com/device')
+
+    def test_explicit_endpoints_over_plaintext_are_trusted(self):
+        # Endpoints the caller passed explicitly are not /settings-supplied, so
+        # the guard must not force a pin even over a plaintext channel.
+        cfg = self._resolve(
+            {'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb'},
+            questdb_url='http://qdb.internal.example:9000', insecure=True,
+            token_endpoint='https://idp.example.com/token',
+            device_authorization_endpoint='https://idp.example.com/device')
+        self.assertEqual(cfg.token_endpoint, 'https://idp.example.com/token')
+
+    def test_pin_satisfies_guard_over_plaintext(self):
+        # With an out-of-band issuer pin the guard is satisfied (the actual
+        # origin validation then happens in OidcDeviceAuth.__init__).
+        cfg = self._resolve(self._TAMPERED,
+                            questdb_url='http://qdb.internal.example:9000',
+                            insecure=True, issuer='https://evil.example.com')
+        self.assertEqual(cfg.token_endpoint, 'https://evil.example.com/token')
+
+
 @unittest.skipIf(pd is None, 'pandas not installed')
 class TestRestAdapter(AuthTestBase):
     def _connected(self):
