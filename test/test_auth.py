@@ -502,11 +502,38 @@ class TestDeviceFlow(AuthTestBase):
 
     def test_memory_cache_returns_independent_copy(self):
         cache = MemoryCache()
-        cache.store('k', TokenSet(access_token='a', refresh_token='r',
-                                  expires_at=1.0))
-        loaded = cache.load('k')
-        loaded.refresh_token = 'MUTATED'
-        self.assertEqual(cache.load('k').refresh_token, 'r')
+        stored = TokenSet(access_token='a', refresh_token='r', expires_at=1.0)
+        cache.store('k', stored)
+        # Each load is a distinct copy — never the object handed to store(), nor
+        # shared between loads — so a cached entry can't be aliased and reused.
+        first = cache.load('k')
+        second = cache.load('k')
+        self.assertIsNot(first, stored)
+        self.assertIsNot(first, second)
+        self.assertEqual(first.refresh_token, 'r')
+
+    def test_tokenset_is_frozen(self):
+        # TokenSet is immutable: the lock-free fast path reads a published
+        # TokenSet without a lock, which is only safe if its fields never change
+        # after construction. Mutating one must raise, not silently succeed.
+        import dataclasses
+        t = TokenSet(access_token='a', refresh_token='r', expires_at=1.0)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            t.refresh_token = 'MUTATED'
+        # Deriving a modified copy is the supported idiom.
+        t2 = dataclasses.replace(t, refresh_token='r2')
+        self.assertEqual(t.refresh_token, 'r')
+        self.assertEqual(t2.refresh_token, 'r2')
+
+    def test_tokenset_repr_redacts_secrets(self):
+        # The access/id/refresh tokens must never appear in repr() — a TokenSet
+        # landing in a log line or traceback would otherwise leak credentials.
+        r = repr(TokenSet(access_token='SECRET-A', id_token='SECRET-I',
+                          refresh_token='SECRET-R', scope='openid'))
+        self.assertNotIn('SECRET-A', r)
+        self.assertNotIn('SECRET-I', r)
+        self.assertNotIn('SECRET-R', r)
+        self.assertIn('openid', r)  # non-secret metadata still shown
 
 
 class TestNonInteractive(AuthTestBase):

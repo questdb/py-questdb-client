@@ -27,7 +27,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Dict, Optional, Union
 
 from ._errors import OidcConfigError
@@ -36,13 +36,22 @@ from ._errors import OidcConfigError
 DEFAULT_SKEW_SECONDS = 30
 
 
-@dataclass
+@dataclass(frozen=True)
 class TokenSet:
-    """A set of tokens obtained from the IdP, plus their expiry."""
+    """
+    A set of tokens obtained from the IdP, plus their expiry.
 
-    access_token: Optional[str] = None
-    id_token: Optional[str] = None
-    refresh_token: Optional[str] = None
+    Immutable (``frozen``): the lock-free fast path in
+    :class:`~questdb.auth._device.OidcDeviceAuth` reads a published ``TokenSet``
+    without holding a lock, which is only safe because its fields never change
+    after construction. Derive a modified copy with :func:`dataclasses.replace`
+    rather than mutating in place. The three secret fields are kept out of
+    ``repr`` so a token can't leak into a log line or traceback.
+    """
+
+    access_token: Optional[str] = field(default=None, repr=False)
+    id_token: Optional[str] = field(default=None, repr=False)
+    refresh_token: Optional[str] = field(default=None, repr=False)
     expires_at: float = 0.0  # epoch seconds; 0 == unknown
     token_type: str = 'Bearer'
     scope: Optional[str] = None

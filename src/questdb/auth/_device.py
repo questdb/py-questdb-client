@@ -32,6 +32,7 @@ import json
 import threading
 import time
 import webbrowser
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 from ._cache import TokenSet, make_cache
@@ -474,8 +475,10 @@ class OidcDeviceAuth:
         if status == 200:
             refreshed = self._tokenset_from_response(body)
             # Many IdPs do not rotate the refresh token; keep the old one.
+            # TokenSet is frozen, so derive a copy rather than mutating.
             if not refreshed.refresh_token:
-                refreshed.refresh_token = tokens.refresh_token
+                refreshed = replace(
+                    refreshed, refresh_token=tokens.refresh_token)
             return refreshed
         raise OidcDeviceFlowError(
             f"Token refresh failed: {body.get('error', 'unknown error')}",
