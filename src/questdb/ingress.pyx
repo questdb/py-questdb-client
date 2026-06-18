@@ -129,17 +129,6 @@ cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
 
 cdef size_t _QWP_MAX_DEFERRED_ARROW_FRAMES = 100
 
-# Re-send the whole df on a transient `FailoverRetry`, bounded by this
-# many attempts.
-cdef size_t _DATAFRAME_FAILOVER_MAX_ATTEMPTS = 5
-
-
-cdef void _dataframe_failover_backoff(size_t attempt):
-    cdef double delay = 0.05 * (2.0 ** <double>(attempt - 1))
-    if delay > 1.0:
-        delay = 1.0
-    time.sleep(delay)
-
 
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
@@ -4863,6 +4852,7 @@ cdef object _capsule_slice_rows(
 
 cdef bint _dataframe_client_try_capsule_path(
         questdb_db* db,
+        uint64_t budget_ms,
         object df,
         object table_name,
         object table_name_col,
@@ -4979,7 +4969,10 @@ cdef bint _dataframe_client_try_capsule_path(
                 c_overrides[i].arg = <uint32_t>arg_int
 
         _ensure_doesnt_have_gil(&gs)
-        conn = questdb_db_borrow_conn(db, &err)
+        if budget_ms == 0:
+            conn = questdb_db_borrow_conn(db, &err)
+        else:
+            conn = questdb_db_borrow_conn_with_retry(db, budget_ms, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -5240,7 +5233,9 @@ cdef class Client:
         cdef dataframe_plan_t plan = dataframe_plan_blank()
         cdef questdb_db* db = NULL
         cdef bint db_use = False
-        cdef size_t attempt = 0
+        cdef uint64_t budget_ms = 0
+        cdef double deadline = 0.0
+        cdef double remaining = 0.0
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
@@ -5252,13 +5247,17 @@ cdef class Client:
                     'Client.dataframe requires `at` to name the designated '
                     'timestamp column (by name or index); scalar timestamps '
                     'are not supported on the columnar path.')
+            # Overall failover deadline, matching the row sender's
+            # `reconnect_max_duration` budget.
+            deadline = time.monotonic() + \
+                questdb_db_reconnect_max_duration_ms(db) / 1000.0
             while True:
-                attempt += 1
                 # Reclaim string storage from a prior attempt's released plan.
                 qdb_pystr_buf_clear(b)
                 try:
                     if _dataframe_client_try_capsule_path(
                             db,
+                            budget_ms,
                             df,
                             table_name,
                             table_name_col,
@@ -5268,14 +5267,22 @@ cdef class Client:
                             schema_overrides):
                         return self
                     return self._dataframe_numpy_publish(
-                        db, b, &plan, df, table_name, table_name_col,
-                        symbols, at, max_rows_per_batch)
+                        db, budget_ms, b, &plan, df, table_name,
+                        table_name_col, symbols, at, max_rows_per_batch)
                 except IngressError as exc:
-                    if (exc.code is IngressErrorCode.FailoverRetry
-                            and attempt <= _DATAFRAME_FAILOVER_MAX_ATTEMPTS):
-                        _dataframe_failover_backoff(attempt)
-                        continue
-                    raise
+                    # FailoverRetry = transient flush/sync; SocketError = a
+                    # re-borrow that has not reached a live primary yet.
+                    if exc.code not in (
+                            IngressErrorCode.FailoverRetry,
+                            IngressErrorCode.SocketError):
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        raise
+                    # The next attempt re-borrows with the row API's reconnect
+                    # backoff (`borrow_conn_with_retry`), bounded by the
+                    # remaining budget; no extra client-side sleep.
+                    budget_ms = <uint64_t>(remaining * 1000.0)
         finally:
             qdb_pystr_buf_free(b)
             if db_use:
@@ -5284,6 +5291,7 @@ cdef class Client:
     cdef object _dataframe_numpy_publish(
             self,
             questdb_db* db,
+            uint64_t budget_ms,
             qdb_pystr_buf* b,
             dataframe_plan_t* plan,
             object df,
@@ -5325,7 +5333,10 @@ cdef class Client:
                 plan, max_rows_per_batch)
 
             _ensure_doesnt_have_gil(&gs)
-            conn = questdb_db_borrow_conn(db, &err)
+            if budget_ms == 0:
+                conn = questdb_db_borrow_conn(db, &err)
+            else:
+                conn = questdb_db_borrow_conn_with_retry(db, budget_ms, &err)
             _ensure_has_gil(&gs)
             if conn == NULL:
                 raise c_err_to_py(err)

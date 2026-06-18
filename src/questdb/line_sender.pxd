@@ -714,6 +714,16 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    qwpws_conn* questdb_db_borrow_conn_with_retry(
+        questdb_db* db,
+        uint64_t budget_ms,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    uint64_t questdb_db_reconnect_max_duration_ms(
+        const questdb_db* db
+        ) noexcept nogil
+
     void questdb_db_return_conn(
         questdb_db* db,
         qwpws_conn* conn
