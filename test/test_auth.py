@@ -342,6 +342,54 @@ class TestDeviceFlow(AuthTestBase):
         with self.assertRaises(OidcTimeoutError):
             auth.token()
 
+    def test_nonpositive_expires_in_still_polls(self):
+        # A non-positive expires_in in the device-auth response must be treated
+        # as unknown, not as "already expired" — otherwise the flow times out
+        # before its first poll even though the user can still authorize. M2.
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'X',
+            'verification_uri': 'https://idp/device',
+            'expires_in': 0, 'interval': 5,
+        }
+        self.state.token_script = [(200, None)]  # success on the first poll
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(len(self.state.token_requests), 1)  # it actually polled
+
+    def test_oversized_interval_is_clamped(self):
+        # A hostile/huge interval must not pin the polling thread (which holds
+        # the acquisition lock) in one enormous sleep; the per-poll sleep is
+        # capped at _MAX_POLL_INTERVAL. M2.
+        from questdb.auth._device import _MAX_POLL_INTERVAL
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'X',
+            'verification_uri': 'https://idp/device',
+            'expires_in': 600, 'interval': 10 ** 9,
+        }
+        self.state.token_script = [(200, None)]
+        auth = self.make_auth()
+        auth.token()
+        self.assertTrue(self._clock.sleeps)
+        self.assertLessEqual(max(self._clock.sleeps), _MAX_POLL_INTERVAL)
+
+    def test_oversized_expires_in_is_capped(self):
+        # A hostile expires_in must not keep the poll loop (and the lock) alive
+        # indefinitely; the lifetime is capped so a never-authorized flow still
+        # terminates promptly rather than looping millions of times. M2.
+        from questdb.auth._device import (
+            _MAX_DEVICE_CODE_LIFETIME, _MAX_POLL_INTERVAL)
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'X',
+            'verification_uri': 'https://idp/device',
+            'expires_in': 10 ** 9, 'interval': 10 ** 9,  # interval clamps too
+        }
+        self.state.token_script = [(400, {'error': 'authorization_pending'})]
+        auth = self.make_auth()
+        with self.assertRaises(OidcTimeoutError):
+            auth.token()
+        max_polls = _MAX_DEVICE_CODE_LIFETIME // _MAX_POLL_INTERVAL + 1
+        self.assertLessEqual(len(self.state.token_requests), max_polls)
+
     def test_access_denied_is_surfaced(self):
         self.state.token_script = [
             (400, {'error': 'access_denied',

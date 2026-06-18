@@ -61,6 +61,15 @@ _VALID_FLOWS = ('auto', 'device', 'loopback')
 # A non-positive expires_in is non-conformant; treat it as "unknown".
 _DEFAULT_EXPIRES_IN = 3600
 
+# Bounds for the device-authorization response's timing fields (RFC 8628). The
+# device code is short-lived, so the IdP-supplied values are clamped: a hostile
+# or buggy response must not be able to time the flow out before its first poll,
+# nor pin the polling thread — which holds the acquisition lock — in one
+# enormous sleep, nor keep the loop (and the lock) alive indefinitely.
+_DEFAULT_DEVICE_CODE_LIFETIME = 600   # expires_in fallback (absent/invalid/<=0)
+_MAX_DEVICE_CODE_LIFETIME = 1800      # cap on how long we keep polling
+_MAX_POLL_INTERVAL = 60               # cap on the poll interval (incl. slow_down)
+
 
 class _SystemClock:
     """Real time source; the default for :class:`OidcDeviceAuth`."""
@@ -526,13 +535,24 @@ class OidcDeviceAuth:
     def _poll_for_token(self, resp: Dict[str, Any]) -> TokenSet:
         device_code = resp['device_code']
         try:
-            interval = max(1, int(resp.get('interval', self._default_interval)))
+            interval = int(resp.get('interval', self._default_interval))
         except (TypeError, ValueError):
             interval = self._default_interval
+        # At least 1s (RFC 8628 floor), and capped so a hostile/huge value can't
+        # pin the polling thread (which holds the acquisition lock) in one
+        # enormous sleep.
+        interval = min(_MAX_POLL_INTERVAL, max(1, interval))
         try:
-            expires_in = int(resp.get('expires_in', 600))
+            expires_in = int(resp.get('expires_in', _DEFAULT_DEVICE_CODE_LIFETIME))
         except (TypeError, ValueError):
-            expires_in = 600
+            expires_in = _DEFAULT_DEVICE_CODE_LIFETIME
+        # A non-positive lifetime would time the flow out before the first poll
+        # (the user has already been shown the code); treat it as unknown. Cap
+        # the upper end so a hostile expires_in can't keep the loop — and the
+        # lock — alive indefinitely.
+        if expires_in <= 0:
+            expires_in = _DEFAULT_DEVICE_CODE_LIFETIME
+        expires_in = min(expires_in, _MAX_DEVICE_CODE_LIFETIME)
         deadline = self._monotonic() + expires_in
 
         while True:
@@ -545,7 +565,9 @@ class OidcDeviceAuth:
                     'Run the sign-in again.',
                     error='expired_token')
             self._renderer.on_waiting(remaining)
-            self._sleep(interval)
+            # Never sleep past the deadline (remaining > 0 here): a clamped
+            # interval still shouldn't overshoot a short-lived code.
+            self._sleep(min(interval, remaining))
 
             status, body = self._idp_post(
                 self.config.token_endpoint,
@@ -578,7 +600,7 @@ class OidcDeviceAuth:
             if error == 'authorization_pending':
                 continue
             if error == 'slow_down':
-                interval += 5
+                interval = min(_MAX_POLL_INTERVAL, interval + 5)
                 continue
             if error == 'expired_token':
                 self._renderer.on_failure(
