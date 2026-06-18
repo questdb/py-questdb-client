@@ -69,7 +69,6 @@ stages:
             condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
-            timeoutInMinutes: 40
             env:
               # The latest QuestDB release requires a JDK 25 runtime (the
               # -no-jre tarball uses the host JDK). JDK 25 is pre-installed on
@@ -80,7 +79,6 @@ stages:
           # Docker image rather than a locally-built jar (no host JDK needed).
           - script: python3 proj.py test 1
             displayName: "Test vs master (nightly Docker image)"
-            timeoutInMinutes: 40
             env:
               QDB_DOCKER_IMAGE: questdb/questdb:nightly
             condition: eq(variables.vsQuestDbMaster, true)

@@ -161,7 +161,12 @@ class HttpServer:
                             self.wfile.write(response_data)
                         else:
                             self.send_error(404, "Endpoint not found")
-                    self.close_connection = False
+                    # Close the connection after each response instead of
+                    # keeping it alive. A kept-alive connection lingers in the
+                    # sender's pool and, on the loaded x64 macOS CI agents,
+                    # stalls ~35s per test when the sender tears it down at
+                    # test end. Closing here keeps the pool empty.
+                    self.close_connection = True
                 except BrokenPipeError:
                     pass
 
@@ -186,7 +191,12 @@ class HttpServer:
                     self.end_headers()
                     if body:
                         self.wfile.write(body)
-                    self.close_connection = False
+                    # Close the connection after each response instead of
+                    # keeping it alive. A kept-alive connection lingers in the
+                    # sender's pool and, on the loaded x64 macOS CI agents,
+                    # stalls ~35s per test when the sender tears it down at
+                    # test end. Closing here keeps the pool empty.
+                    self.close_connection = True
                 except BrokenPipeError:
                     pass
 
