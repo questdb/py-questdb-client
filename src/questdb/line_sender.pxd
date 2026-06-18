@@ -52,7 +52,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_server_rejection,
         line_sender_error_arrow_unsupported_column_kind,
         line_sender_error_arrow_ingest,
-        line_sender_error_failover_retry
+        line_sender_error_failover_retry,
+        line_sender_error_role_mismatch
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,

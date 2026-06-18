@@ -160,6 +160,20 @@ class TestQwpWebSocketApi(unittest.TestCase):
         code_values = [code.value for code in qi.IngressErrorCode]
 
         self.assertEqual(len(code_values), len(set(code_values)))
+        # Iterating the enum skips aliases, so the check above passes even
+        # when two members share a value (the duplicate silently becomes an
+        # alias of the first). ``__members__`` includes aliases; an equal
+        # count proves no member collided onto another's value -- e.g. a new
+        # FFI code landing on a synthetic ``failover_retry + N`` sentinel.
+        self.assertEqual(
+            len(qi.IngressErrorCode.__members__),
+            len(list(qi.IngressErrorCode)),
+            'IngressErrorCode has aliased members (value collision)')
+        # RoleMismatch mirrors its FFI code; the synthetic Python-only codes
+        # sit strictly above it.
+        self.assertGreater(
+            qi.IngressErrorCode.BadDataFrame.value,
+            qi.IngressErrorCode.RoleMismatch.value)
         self.assertGreater(
             qi.IngressErrorCode.BadDataFrame.value,
             qi.IngressErrorCode.ArrowIngest.value)

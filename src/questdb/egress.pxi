@@ -26,10 +26,12 @@ cdef inline object _reader_err_code_to_py(line_reader_error_code code):
         return IngressErrorCode.Cancelled
     if code == line_reader_error_failover_would_duplicate:
         return IngressErrorCode.FailoverWouldDuplicate
-    # Map every other reader-specific code (handshake, role mismatch,
-    # protocol, invalid bind, schema drift, no schema, server-side
-    # errors, etc.) to ServerFlushError as a broad bucket. Refine
-    # later as users surface concrete distinctions.
+    if code == line_reader_error_role_mismatch:
+        return IngressErrorCode.RoleMismatch
+    # Map every other reader-specific code (handshake, protocol, invalid
+    # bind, schema drift, no schema, server-side errors, etc.) to
+    # ServerFlushError as a broad bucket. Refine later as users surface
+    # concrete distinctions.
     return IngressErrorCode.ServerFlushError
 
 

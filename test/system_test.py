@@ -9,6 +9,7 @@ import random
 import shutil
 import socket
 import tempfile
+import threading
 import unittest
 import uuid
 import pathlib
@@ -4289,9 +4290,18 @@ class TestEgressFailover(unittest.TestCase):
     def setUp(self):
         self._require_qwp_ws()
 
-    def _conf(self, **extra):
-        conf = (f'qwpws::addr={self.qdb_plain.host}:'
-                f'{self.qdb_plain.http_server_port};')
+    @staticmethod
+    def _unused_tcp_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('127.0.0.1', 0))
+            return sock.getsockname()[1]
+
+    def _conf(self, endpoints=None, **extra):
+        if endpoints is None:
+            endpoints = [
+                (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+        addr = ','.join(f'{host}:{port}' for host, port in endpoints)
+        conf = f'qwpws::addr={addr};'
         for k, v in extra.items():
             conf += f'{k}={v};'
         return conf
@@ -4374,6 +4384,47 @@ class TestEgressFailover(unittest.TestCase):
             df = result.to_polars()
         self.assertEqual(df['v'].to_list(), expected)
 
+    def test_to_polars_dead_then_live_endpoint(self):
+        """Polars materialisation uses the same reader failover walk as
+        the other egress adapters: a dead first endpoint is skipped and
+        the live standalone server satisfies ``target=primary``."""
+        try:
+            import polars  # noqa: F401
+        except ImportError:
+            self.skipTest('polars not installed')
+        n = 2048
+        table = self._seed(n)
+        endpoints = [
+            (self.qdb_plain.host, self._unused_tcp_port()),
+            (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+        with qi.Client.from_conf(
+                self._conf(endpoints=endpoints,
+                           target='primary',
+                           failover_max_duration_ms='60000')) as client:
+            df = client.query(f'SELECT v FROM {table} ORDER BY ts').to_polars()
+        self.assertEqual(df['v'].to_list(), list(range(n)))
+
+    def test_polars_from_arrow_dead_then_live_endpoint(self):
+        """The pyarrow-free Polars capsule path also borrows through the
+        same multi-endpoint reader pool before Polars starts consuming
+        the Arrow stream."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        n = 2048
+        table = self._seed(n)
+        endpoints = [
+            (self.qdb_plain.host, self._unused_tcp_port()),
+            (self.qdb_plain.host, self.qdb_plain.http_server_port)]
+        with qi.Client.from_conf(
+                self._conf(endpoints=endpoints,
+                           target='primary',
+                           failover_max_duration_ms='60000')) as client:
+            with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
+                df = pl.from_arrow(result)
+        self.assertEqual(df['v'].to_list(), list(range(n)))
+
     def test_iter_arrow_surfaces_failover_would_duplicate(self):
         """Streaming ``iter_arrow`` installs no reset: a mid-stream
         failover after the first batch is delivered surfaces a clean,
@@ -4419,6 +4470,148 @@ class TestEgressFailover(unittest.TestCase):
             self.assertEqual(
                 cm.exception.code,
                 qi.IngressErrorCode.FailoverWouldDuplicate)
+
+
+class _FakeStatusServer:
+    """Port of ``QwpQueryClientMultiHostFailoverTest.FakeStatusServer``: a
+    raw loopback socket that answers every probe with a fixed HTTP status
+    (and optional ``X-QuestDB-Role`` header) and counts how many times it
+    was connected to. A real QuestDB always advertises a single role, so
+    role-negotiation failover can only be exercised against an in-process
+    fake that can pretend to be a REPLICA / return 401."""
+
+    def __init__(self, status_code, role_header=None):
+        self.status_code = status_code
+        self.role_header = role_header
+        self.connections = 0
+        self._lock = threading.Lock()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(('127.0.0.1', 0))
+        self._sock.listen(50)
+        self._running = True
+
+    @property
+    def port(self):
+        return self._sock.getsockname()[1]
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while self._running:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            threading.Thread(
+                target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn):
+        with conn:
+            # Increment before responding: the client cannot observe the
+            # HTTP status (and thus rotate / surface its error) until the
+            # response has been written, so a count read after the connect
+            # walk returns is guaranteed to have seen this probe.
+            with self._lock:
+                self.connections += 1
+            try:
+                conn.recv(8192)
+                reason = {401: 'Unauthorized',
+                          421: 'Misdirected Request'}.get(
+                    self.status_code, 'Status')
+                lines = [f'HTTP/1.1 {self.status_code} {reason}']
+                if self.role_header:
+                    lines.append(self.role_header)
+                lines.append('Content-Length: 0')
+                lines.append('Connection: close')
+                conn.sendall(
+                    ('\r\n'.join(lines) + '\r\n\r\n').encode('ascii'))
+            except OSError:
+                pass
+
+    def close(self):
+        self._running = False
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+class TestEgressFailoverRoleNegotiation(unittest.TestCase):
+    """Reader connect-time role/auth failover, ported from Java's
+    ``QwpQueryClientMultiHostFailoverTest``. The pool is opened eagerly by
+    ``Client.from_conf`` (``questdb_db_connect``), so the connect walk -- and
+    any role/auth error -- surfaces there rather than at ``query()`` (Java's
+    explicit ``connect()``). These run against in-process fakes only and need
+    no QuestDB instance."""
+
+    def _server(self, status_code, role_header=None):
+        srv = _FakeStatusServer(status_code, role_header)
+        self.addCleanup(srv.close)
+        srv.start()
+        return srv
+
+    @staticmethod
+    def _conf(servers, **extra):
+        addr = ','.join(f'127.0.0.1:{s.port}' for s in servers)
+        conf = f'qwpws::addr={addr};'
+        for key, value in extra.items():
+            conf += f'{key}={value};'
+        return conf
+
+    def test_replica_then_401_fails_fast_with_auth(self):
+        """``[REPLICA(421), auth(401)]``: the 421 rotates past the replica,
+        the 401 on the second endpoint short-circuits the walk with an auth
+        error (not a generic socket/role error). Both endpoints are probed."""
+        replica = self._server(421, 'X-QuestDB-Role: REPLICA')
+        auth = self._server(401)
+        conf = self._conf(
+            [replica, auth],
+            auth_timeout_ms=2000, failover='off', target='any')
+        with self.assertRaises(qi.IngressError) as cm:
+            qi.Client.from_conf(conf)
+        self.assertEqual(cm.exception.code, qi.IngressErrorCode.AuthError)
+        self.assertIn('401', str(cm.exception))
+        self.assertGreaterEqual(replica.connections, 1)
+        self.assertGreaterEqual(auth.connections, 1)
+
+    def test_all_replica_fails_with_role_mismatch(self):
+        """Every endpoint role-rejects: the surfaced error is a distinct
+        ``RoleMismatch`` (naming the unsuitable role), *not* ``AuthError``
+        and *not* the generic ``SocketError`` used for "all unreachable".
+        This is the typed distinction Java draws with
+        ``QwpRoleMismatchException`` -- an operator can tell "no primary
+        elected yet" from "bad credentials" and from "everything is down".
+        Both replicas are probed."""
+        r1 = self._server(421, 'X-QuestDB-Role: REPLICA')
+        r2 = self._server(421, 'X-QuestDB-Role: REPLICA')
+        conf = self._conf(
+            [r1, r2],
+            auth_timeout_ms=2000, failover='off', target='any')
+        with self.assertRaises(qi.IngressError) as cm:
+            qi.Client.from_conf(conf)
+        self.assertEqual(cm.exception.code, qi.IngressErrorCode.RoleMismatch)
+        self.assertIn('REPLICA', str(cm.exception))
+        self.assertGreaterEqual(r1.connections, 1)
+        self.assertGreaterEqual(r2.connections, 1)
+
+    def test_connect_does_not_double_walk_on_first_failure(self):
+        """With ``failover=off`` the initial connect walks the address list
+        exactly once: each role-rejecting endpoint is probed a single time
+        before the walk fails terminally -- no re-walking the list."""
+        r1 = self._server(421, 'X-QuestDB-Role: REPLICA')
+        r2 = self._server(421, 'X-QuestDB-Role: REPLICA')
+        r3 = self._server(421, 'X-QuestDB-Role: REPLICA')
+        conf = self._conf(
+            [r1, r2, r3],
+            auth_timeout_ms=2000, failover='off', target='any')
+        with self.assertRaises(qi.IngressError) as cm:
+            qi.Client.from_conf(conf)
+        self.assertEqual(cm.exception.code, qi.IngressErrorCode.RoleMismatch)
+        self.assertEqual(r1.connections, 1)
+        self.assertEqual(r2.connections, 1)
+        self.assertEqual(r3.connections, 1)
 
 
 if __name__ == '__main__':

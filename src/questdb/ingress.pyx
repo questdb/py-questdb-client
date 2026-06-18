@@ -169,6 +169,7 @@ class IngressErrorCode(Enum):
     HttpNotSupported = line_sender_error_http_not_supported
     ServerFlushError = line_sender_error_server_flush_error
     ServerRejection = line_sender_error_server_rejection
+    RoleMismatch = line_sender_error_role_mismatch
     ConfigError = line_sender_error_config_error
     ArrayError = line_sender_error_array_error
     ProtocolVersionError = line_sender_error_protocol_version_error
@@ -176,10 +177,15 @@ class IngressErrorCode(Enum):
     ArrowUnsupportedColumnKind = line_sender_error_arrow_unsupported_column_kind
     ArrowIngest = line_sender_error_arrow_ingest
     FailoverRetry = line_sender_error_failover_retry
-    BadDataFrame = <int>line_sender_error_failover_retry + 1
-    Cancelled = <int>line_sender_error_failover_retry + 2
+    # Python-only sentinels with no backing line_sender_error_code. They sit
+    # in a reserved high band, permanently disjoint from the small contiguous
+    # FFI code space, so no appended line_sender_error_* variant can ever
+    # collide with (and silently alias) them. Compared by identity; their
+    # numeric value is never sent over FFI.
+    BadDataFrame = 0x10000
+    Cancelled = 0x10001
     # Egress-only (line_reader_error_code 21); not a line_sender_error_code.
-    FailoverWouldDuplicate = <int>line_sender_error_failover_retry + 3
+    FailoverWouldDuplicate = 0x10002
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -254,6 +260,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return IngressErrorCode.ServerFlushError
     elif code == line_sender_error_server_rejection:
         return IngressErrorCode.ServerRejection
+    elif code == line_sender_error_role_mismatch:
+        return IngressErrorCode.RoleMismatch
     elif code == line_sender_error_config_error:
         return IngressErrorCode.ConfigError
     elif code == line_sender_error_array_error:
