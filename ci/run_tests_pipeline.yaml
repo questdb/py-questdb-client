@@ -91,6 +91,18 @@ stages:
             env:
               JAVA_HOME: $(JAVA_HOME_25_X64)
               QDB_REPO_PATH: "./questdb"
+              # QuestDB master runs as the io.questdb JPMS module and needs these
+              # JDK 25 access flags (mirrors questdb.sh). The test fixture launches
+              # questdb.jar directly rather than via questdb.sh, so feed them to the
+              # java launcher through JDK_JAVA_OPTIONS.
+              JDK_JAVA_OPTIONS: >-
+                --sun-misc-unsafe-memory-access=allow
+                --enable-native-access=io.questdb
+                --add-opens=java.base/java.lang=io.questdb
+                --add-opens=java.base/java.lang.reflect=io.questdb
+                --add-opens=java.base/java.nio=io.questdb
+                --add-opens=java.base/java.time.zone=io.questdb
+                --add-exports=java.base/jdk.internal.vm=io.questdb
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:
