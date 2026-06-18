@@ -662,6 +662,34 @@ class TestDiscovery(AuthTestBase):
                          self.base + '/device')
         self.assertEqual(auth.token(), ID_TOKEN)
 
+    def test_user_writable_preferences_cannot_override_config(self):
+        # A user-writable "preferences" sibling in /settings must never override
+        # the trusted "config" object during discovery: end-to-end, the resolved
+        # credential endpoints come from "config", not the attacker's prefs.
+        self.state.settings = {
+            'config': {
+                'acl.oidc.enabled': True,
+                'acl.oidc.client.id': 'questdb',
+                'acl.oidc.scope': 'openid groups',
+                'acl.oidc.groups.encoded.in.token': True,
+                'acl.oidc.token.endpoint': self.base + '/token',
+                'acl.oidc.device.authorization.endpoint': self.base + '/device',
+            },
+            'preferences.version': 1,
+            'preferences': {
+                'acl.oidc.token.endpoint': 'https://evil.example.com/token',
+                'acl.oidc.device.authorization.endpoint':
+                    'https://evil.example.com/device',
+            },
+        }
+        auth = OidcDeviceAuth.from_questdb(
+            self.base, insecure=True, interactive=True, renderer=Renderer(),
+            _clock=FakeClock())
+        self.assertEqual(auth.config.token_endpoint, self.base + '/token')
+        self.assertEqual(auth.config.device_authorization_endpoint,
+                         self.base + '/device')
+        self.assertEqual(auth.token(), ID_TOKEN)
+
     def test_well_known_fallback_for_device_endpoint(self):
         # Settings advertise OIDC + token endpoint but NOT the device endpoint;
         # issuer= is pinned, so the IdP .well-known fallback is allowed.
@@ -1264,6 +1292,40 @@ class TestConfigHelpers(unittest.TestCase):
         from questdb.auth._discovery import settings_config
         self.assertEqual(settings_config({'config': {'a': 1}}), {'a': 1})
         self.assertEqual(settings_config({'a': 1}), {'a': 1})  # flat fallback
+
+    def test_settings_config_ignores_user_writable_preferences(self):
+        # QuestDB /settings nests server-authoritative values under "config"
+        # alongside a user-writable "preferences" sibling (the web console
+        # persists UI prefs there). Discovery must read only "config", so a user
+        # who can write a preference cannot smuggle an acl.oidc.* key in to
+        # redirect the device code / refresh token. Ported from the Java client.
+        from questdb.auth._discovery import settings_config
+        resp = {
+            'config': {
+                'acl.oidc.client.id': 'questdb',
+                'acl.oidc.token.endpoint': 'https://idp.example.com/token'},
+            'preferences.version': 0,
+            'preferences': {
+                'acl.oidc.token.endpoint': 'https://evil.example.com/token'},
+        }
+        cfg = settings_config(resp)
+        self.assertEqual(cfg['acl.oidc.token.endpoint'],
+                         'https://idp.example.com/token')
+        self.assertNotIn('evil', str(cfg))
+        # A structured response (one carrying the user-writable "preferences"
+        # sibling) must NOT fall back to trusting the top level when "config" is
+        # absent or malformed: read nothing rather than the top level.
+        self.assertEqual(
+            settings_config({'preferences': {'acl.oidc.token.endpoint': 'x'}}),
+            {})
+        self.assertEqual(
+            settings_config({'config': None,
+                             'preferences': {'acl.oidc.client.id': 'x'}}),
+            {})
+        # A genuinely flat / legacy response (no config/preferences split) is
+        # still tolerated at the top level.
+        self.assertEqual(settings_config({'acl.oidc.client.id': 'q'}),
+                         {'acl.oidc.client.id': 'q'})
 
 
 class TestEndpointValidation(unittest.TestCase):

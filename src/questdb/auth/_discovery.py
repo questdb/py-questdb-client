@@ -89,17 +89,33 @@ def _as_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:
 
 def settings_config(settings: Any) -> Dict[str, Any]:
     """
-    Return the flat config map from a ``/settings`` response.
+    Return the trusted config map from a ``/settings`` response.
 
-    Modern servers nest values under a ``"config"`` object; older ones return
-    them at the top level. We tolerate both.
+    Modern QuestDB nests the server-authoritative values under a top-level
+    ``"config"`` object, alongside a **user-writable** ``"preferences"`` sibling
+    (the web console persists UI preferences there via ``PUT /settings``).
+    Discovery must read only ``"config"`` and never the top level, so a user who
+    can write a preference cannot smuggle an ``acl.oidc.*`` key — e.g. a
+    redirected ``token.endpoint`` that points the device code / refresh token at
+    an attacker — into the resolved OIDC configuration.
+
+    A genuinely flat, legacy ``/settings`` response (no ``"config"`` /
+    ``"preferences"`` split) is still tolerated at the top level.
     """
-    if isinstance(settings, dict):
-        cfg = settings.get('config')
-        if isinstance(cfg, dict):
-            return cfg
-        return settings
-    return {}
+    if not isinstance(settings, dict):
+        return {}
+    cfg = settings.get('config')
+    if isinstance(cfg, dict):
+        return cfg
+    # A structured response carries the user-writable "preferences" sibling
+    # (and normally the "config" object). If either marker is present, the top
+    # level is NOT trusted config: read "config" or nothing — so user-writable
+    # preferences can never be mistaken for server-authoritative config, even
+    # when "config" is absent or malformed.
+    if 'config' in settings or 'preferences' in settings:
+        return {}
+    # Legacy flat response: no config/preferences split; tolerate top-level keys.
+    return settings
 
 
 def fetch_settings(
