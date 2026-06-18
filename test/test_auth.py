@@ -1228,6 +1228,39 @@ class TestAdapters(unittest.TestCase):
             QuestDB('https://questdb.example.com:notaport', _FakeAuth(),
                     insecure=True)
 
+    def test_host_with_conf_metachars_rejected(self):
+        # C1: a host containing the ILP conf delimiters (';' / '=') or
+        # whitespace must be rejected, never spliced into the
+        # `addr=host:port;` conf string. Otherwise a crafted/tampered URL host
+        # injects extra conf params — e.g. `tls_verify=unsafe_off`, which
+        # silently disables the sender's TLS certificate verification, or
+        # `auto_flush=off` (data loss). urlparse() keeps ';'/'=' in .hostname.
+        for bad in ('https://realhost;tls_verify=unsafe_off;x=',
+                    'https://a=b'):
+            with self.subTest(url=bad):
+                with self.assertRaises(OidcConfigError):
+                    self._qdb(bad)._require_host()
+        # An explicit host= override goes through the same guard (incl.
+        # whitespace, which is never valid in a host).
+        for bad_host in ('evil;tls_verify=unsafe_off', 'a=b', 'h ost'):
+            with self.subTest(host=bad_host):
+                with self.assertRaises(OidcConfigError):
+                    self._qdb()._require_host(bad_host)
+        # A legitimate host (incl. an IPv6 literal, which contains ':') is
+        # still accepted — the guard must not over-reject.
+        self.assertEqual(self._qdb()._require_host('::1'), '::1')
+        self.assertEqual(
+            self._qdb()._require_host('questdb.example.com'),
+            'questdb.example.com')
+        # The guard fires through the adapter (sender), before the conf string
+        # is built and handed to Sender.from_conf.
+        qdb = self._qdb('https://realhost;tls_verify=unsafe_off:9000')
+        fake = types.ModuleType('questdb.ingress')
+        fake.Sender = object()  # import must succeed so we reach the guard
+        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
+            with self.assertRaises(OidcConfigError):
+                qdb.sender()
+
     def test_sender_hostless_url_raises(self):
         # The guard propagates through an adapter (not just the helper):
         # sender() on a host-less URL raises OidcConfigError. See M5.

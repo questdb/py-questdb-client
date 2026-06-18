@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from typing import Any, Dict, Optional
 
@@ -35,6 +36,15 @@ from ._http import request, safe_urlparse
 
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
+
+# A hostname or IP literal never contains the ILP conf-string delimiters (';'
+# separates parameters, '=' separates key from value) nor whitespace/control
+# characters. Reject them in the resolved host so a crafted or tampered URL
+# can't smuggle extra conf parameters — e.g. ';tls_verify=unsafe_off;', which
+# silently disables TLS certificate verification — into the 'addr=host:port;'
+# string sender() hands to Sender.from_conf. Note ':' is intentionally allowed
+# (IPv6 literals contain it; _ilp_addr brackets them).
+_ILLEGAL_HOST_CHARS = re.compile(r'[\x00-\x20\x7f;=]')
 
 _AUTH_HINT = (
     'QuestDB rejected the token (HTTP {status}). Common causes:\n'
@@ -208,6 +218,14 @@ class QuestDB:
                 f'The QuestDB URL {self.url!r} has no host. Use a URL with an '
                 'explicit host (e.g. "https://questdb.example.com:9000"), or '
                 'pass host=... to the adapter.')
+        if _ILLEGAL_HOST_CHARS.search(resolved):
+            raise OidcConfigError(
+                f'The QuestDB host {resolved!r} contains an illegal character '
+                "(';', '=', whitespace or a control character). A hostname or "
+                'IP address never does; this indicates a malformed or tampered '
+                'URL. (Such a host could otherwise inject ILP conf parameters '
+                'such as "tls_verify=unsafe_off" into the sender, silently '
+                'disabling TLS certificate verification.)')
         return resolved
 
     @staticmethod
