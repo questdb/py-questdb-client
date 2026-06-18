@@ -1459,6 +1459,33 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertIn('<a href="https://idp.example.com/device"',
                       captured['html'])
 
+    def test_terminal_prompt_strips_control_chars(self):
+        # A hostile/MITM'd device response must not inject ANSI escape sequences
+        # into the plain-text terminal prompt (cursor moves / screen clears that
+        # could spoof the sign-in URL). The Jupyter path html-escapes; the
+        # terminal path strips control characters. See M5.
+        import io
+        from questdb.auth._render import format_prompt, TerminalRenderer
+        resp = {
+            'user_code': 'WDJB\x1bMJHT',
+            'verification_uri': 'https://idp.example.com/\x1b[31mdevice',
+            'verification_uri_complete': 'https://idp.example.com/d\x07ev',
+        }
+        text = format_prompt(resp)
+        self.assertNotIn('\x1b', text)            # ESC stripped
+        self.assertNotIn('\x07', text)            # BEL stripped
+        self.assertIn('WDJBMJHT', text)           # printable user_code survives
+        self.assertIn('idp.example.com', text)
+
+        # The full terminal path (on_prompt + on_failure) is clean too.
+        buf = io.StringIO()
+        r = TerminalRenderer(stream=buf)
+        r.on_prompt(resp)
+        r.on_failure('denied \x1b[2K by idp')     # IdP error_description path
+        out = buf.getvalue()
+        self.assertNotIn('\x1b', out)
+        self.assertNotIn('\x07', out)
+
 
 if __name__ == '__main__':
     unittest.main()

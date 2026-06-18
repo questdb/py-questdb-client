@@ -34,6 +34,7 @@ lazily and only when actually used.
 from __future__ import annotations
 
 import html
+import re
 import sys
 import urllib.parse
 from typing import Any, Dict, Optional, TextIO
@@ -118,11 +119,30 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
             f'rel="noopener noreferrer">{label}</a>')
 
 
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def _strip_control(text: Optional[str]) -> str:
+    """
+    Strip C0/C1 control characters (incl. ESC) from an untrusted string before
+    it is written to a terminal.
+
+    The verification URL, user code and IdP error strings come from the device-
+    authorization response (untrusted). Writing them verbatim to a TTY would let
+    a hostile or MITM'd response inject ANSI escape sequences — cursor moves,
+    screen clears — to spoof the prompt or hide the real sign-in URL. The
+    Jupyter renderer html-escapes its output; the plain-text path needs this.
+    """
+    if not text:
+        return ''
+    return _CONTROL_CHARS.sub('', text)
+
+
 def format_prompt(resp: Dict[str, Any]) -> str:
     """Plain-text sign-in prompt (also used as the notebook fallback)."""
-    uri = _verification_uri(resp)
-    code = resp.get('user_code', '')
-    complete = _verification_uri_complete(resp)
+    uri = _strip_control(_verification_uri(resp))
+    code = _strip_control(str(resp.get('user_code', '')))
+    complete = _strip_control(_verification_uri_complete(resp))
     lines = [
         '🔐 Sign in to QuestDB',
         f'   Open {uri}  and enter code:  {code}',
@@ -184,7 +204,7 @@ class TerminalRenderer(Renderer):
         if self._countdown_active:
             self._write('\n')
             self._countdown_active = False
-        who = f' as {identity}' if identity else ''
+        who = f' as {_strip_control(identity)}' if identity else ''
         mins = max(1, int(round(expires_in / 60)))
         self._write(f'✅ Signed in{who} — token cached, expires in {mins} min\n')
 
@@ -192,7 +212,7 @@ class TerminalRenderer(Renderer):
         if self._countdown_active:
             self._write('\n')
             self._countdown_active = False
-        self._write(f'❌ {message}\n')
+        self._write(f'❌ {_strip_control(message)}\n')
 
 
 class JupyterRenderer(Renderer):
