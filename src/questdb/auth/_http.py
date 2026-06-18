@@ -38,6 +38,7 @@ supplied explicitly or via ``REQUESTS_CA_BUNDLE`` / ``SSL_CERT_FILE``.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import os
@@ -221,7 +222,12 @@ def request(
         return HttpResponse(e.code, body, e.headers or {})
     except urllib.error.URLError as e:
         raise OidcNetworkError(f'Failed to reach {url}: {e.reason}') from e
-    except (TimeoutError, OSError) as e:
+    except http.client.InvalidURL as e:
+        # A malformed URL (e.g. a non-integer port) can't be turned into a
+        # request; surface it as a config error rather than letting a raw
+        # http.client exception escape the package's typed-error contract.
+        raise OidcConfigError(f'Malformed URL {url!r}: {e}') from e
+    except (TimeoutError, OSError, http.client.HTTPException) as e:
         raise OidcNetworkError(f'Failed to reach {url}: {e}') from e
 
 

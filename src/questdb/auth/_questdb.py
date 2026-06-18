@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional
 
 from ._device import OidcDeviceAuth
 from ._errors import OidcAuthError, OidcConfigError, OidcError
-from ._http import request
+from ._http import request, safe_urlparse
 
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
@@ -60,6 +60,15 @@ def _import_pandas():
 
 def _exec_json_to_df(data: Dict[str, Any], pandas):
     columns = data.get('columns') or []
+    # /exec returns a list of {"name", "type"} column descriptors. A malformed
+    # response (a non-list, or entries that aren't objects) must surface as a
+    # clean OidcError, not an AttributeError from .get() escaping the package's
+    # typed-error contract.
+    if not isinstance(columns, list) or not all(
+            isinstance(c, dict) for c in columns):
+        raise OidcError(
+            'QuestDB /exec returned a malformed "columns" field; '
+            'cannot build a DataFrame.')
     names = [c.get('name') for c in columns]
     dataset = data.get('dataset')
     if dataset is None:
@@ -114,7 +123,10 @@ class QuestDB:
         self.auth = auth
         self._insecure = insecure
         self._ctx = auth._ctx
-        self._parts = urllib.parse.urlparse(self.url)
+        # safe_urlparse validates the port up-front, raising OidcConfigError
+        # (not a bare ValueError) for a malformed one, so the adapters that read
+        # the port stay within the package's typed-error contract.
+        self._parts, self._port = safe_urlparse(self.url)
 
     # -- token access -------------------------------------------------------
 
@@ -293,7 +305,7 @@ class QuestDB:
                 '(`pip install questdb`).') from e
 
         scheme = 'https' if self._parts.scheme == 'https' else 'http'
-        resolved_port = port or self._parts.port or (
+        resolved_port = port or self._port or (
             443 if scheme == 'https' else 9000)
         conf = (f'{scheme}::addr='
                 f'{self._ilp_addr(self._require_host(), resolved_port)};')

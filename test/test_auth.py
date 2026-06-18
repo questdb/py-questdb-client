@@ -930,6 +930,15 @@ class TestRestAdapter(AuthTestBase):
             qdb.sql('SELECT 1')
         self.assertNotIsInstance(cm.exception, OidcAuthError)
 
+    def test_sql_non_dict_columns_raises_oidc_error(self):
+        # A /exec body whose "columns" entries aren't objects must raise a clean
+        # OidcError, not an AttributeError from .get() on the column. See M3.
+        qdb = self._connected()
+        self.state.exec_response = {'columns': [None], 'dataset': [[1]]}
+        with self.assertRaises(OidcError) as cm:
+            qdb.sql('SELECT 1')
+        self.assertNotIsInstance(cm.exception, OidcAuthError)
+
 
 class TestConcurrency(AuthTestBase):
     def test_valid_cached_token_does_not_block_during_signin(self):
@@ -1157,6 +1166,13 @@ class TestAdapters(unittest.TestCase):
             QuestDB('localhost', _FakeAuth())._require_host('h.example'),
             'h.example')
 
+    def test_malformed_port_url_raises_config_error(self):
+        # A QuestDB URL with a non-integer port must raise OidcConfigError at
+        # construction, not a bare ValueError when an adapter reads .port. M3.
+        with self.assertRaises(OidcConfigError):
+            QuestDB('https://questdb.example.com:notaport', _FakeAuth(),
+                    insecure=True)
+
     def test_sender_hostless_url_raises(self):
         # The guard propagates through an adapter (not just the helper):
         # sender() on a host-less URL raises OidcConfigError. See M5.
@@ -1209,6 +1225,13 @@ class TestConfigHelpers(unittest.TestCase):
                          'https://idp.example.com:443/as/token.oauth2')
         self.assertEqual(_resolve_endpoint('https://idp/x', cfg),
                          'https://idp/x')  # absolute is kept verbatim
+
+    def test_resolve_endpoint_ignores_non_string(self):
+        # A non-string endpoint from /settings (e.g. a JSON number) must be
+        # treated as absent, not raise AttributeError from .startswith(). M3.
+        from questdb.auth._discovery import _resolve_endpoint
+        self.assertIsNone(_resolve_endpoint(8080, {}))
+        self.assertIsNone(_resolve_endpoint(True, {}))
 
     def test_settings_config_nesting(self):
         from questdb.auth._discovery import settings_config
@@ -1373,6 +1396,15 @@ class TestTransportSecurity(unittest.TestCase):
         # off-origin target never saw the request (or the bearer token).
         self.assertEqual(resp.status, 302)
         self.assertEqual(seen, [('/exec', 'Bearer SECRET')])
+
+    def test_malformed_url_raises_config_error(self):
+        # A non-integer port must surface as OidcConfigError, not a raw
+        # http.client.InvalidURL escaping the typed-error contract — this is the
+        # path the QuestDB /settings / discovery fetches go through. See M3.
+        from questdb.auth._http import request
+        with self.assertRaises(OidcConfigError):
+            request('GET', 'https://questdb.example.com:notaport/settings',
+                    timeout=5)
 
 
 class TestRendererSecurity(unittest.TestCase):

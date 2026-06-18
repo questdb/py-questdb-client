@@ -197,6 +197,12 @@ def _resolve_endpoint(value: Optional[str], cfg: Dict[str, Any]) -> Optional[str
     """
     if not value:
         return None
+    if not isinstance(value, str):
+        # A non-string endpoint from /settings (e.g. a JSON number) is
+        # malformed; treat it as absent so resolution falls through to a clear
+        # OidcConfigError (or the IdP-discovery fallback) instead of an
+        # AttributeError from .startswith() escaping the typed-error contract.
+        return None
     if value.startswith('http://') or value.startswith('https://'):
         return value
     if value.startswith('/'):
