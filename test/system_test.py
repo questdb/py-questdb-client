@@ -3772,6 +3772,61 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertIn('unix epoch', str(cm.exception).lower())
         self._assert_table_empty(table)
 
+    def test_arrow_designated_timestamp_ms_s_units_widen_to_micros(self):
+        """ArrowDtype ``timestamp('ms')`` / ``timestamp('s')``
+        designated-``at`` columns are widened to microseconds in Rust by
+        the millis/seconds designated-timestamp FFI (no client-side
+        cast). A mixed frame (numpy value column) forces the manual
+        columnar planner, the path that routes these units to the new
+        FFI. The sub-second 'ms' value proves the scale is applied rather
+        than the raw value copied straight onto the micros wire."""
+        import pyarrow as pa
+        import numpy as np
+        self._require_qwp_ws()
+        # 2023-06-15T12:34:56(.789) UTC, expressed in each unit.
+        for unit, raw, scale in (('ms', 1686832496789, 1000),
+                                 ('s', 1686832496, 1_000_000)):
+            table = self._table()
+            self._create_table(table, 'v LONG')
+            df = pd.DataFrame({
+                'ts': self._arrow_series(
+                    [raw], pa.timestamp(unit, tz='UTC')),
+                'v': pd.Series([1], dtype=np.int64),  # numpy -> manual
+            })
+            with qi.Client.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=table, at='ts')
+            self.qdb_plain.retry_check_table(table, min_rows=1)
+            with qi.Client.from_conf(self._conf()) as client:
+                got = client.query(f'SELECT ts FROM {table}').to_arrow()
+            self.assertEqual(
+                got.column('ts').type, pa.timestamp('us', tz='UTC'))
+            got_us = got.column('ts').cast(pa.int64()).to_pylist()[0]
+            self.assertEqual(got_us, raw * scale)
+
+    def test_arrow_designated_timestamp_ms_null_rejected_before_publish(self):
+        """The plan validator's designated-timestamp null guard covers
+        the widened ms/s sources too, not just us/ns. A numpy value
+        column keeps the frame on the manual planner where the guard
+        runs."""
+        import pyarrow as pa
+        import numpy as np
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v LONG')
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                [1686832496789, None], pa.timestamp('ms', tz='UTC')),
+            'v': pd.Series([1, 2], dtype=np.int64),  # numpy -> manual
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(
+                    qi.UnsupportedDataFrameShapeError) as cm:
+                client.dataframe(df, table_name=table, at='ts')
+        reasons = ' '.join(
+            f['reason'] for f in cm.exception.column_failures).lower()
+        self.assertIn('null', reasons)
+        self._assert_table_empty(table)
+
     def test_arrow_timestamp_field_null_rejected_before_publish(self):
         import pyarrow as pa
         self._require_qwp_ws()

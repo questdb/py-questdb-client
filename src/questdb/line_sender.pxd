@@ -799,6 +799,20 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint column_sender_chunk_designated_timestamp_millis(
+        column_sender_chunk* chunk,
+        const int64_t* data,
+        size_t row_count,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_designated_timestamp_seconds(
+        column_sender_chunk* chunk,
+        const int64_t* data,
+        size_t row_count,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     cdef enum column_sender_symbol_mode:
         column_sender_symbol_mode_auto = 0
         column_sender_symbol_mode_symbol = 1

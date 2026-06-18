@@ -112,6 +112,8 @@ cdef enum col_target_t:
     col_target_column_long256 = 16
     col_target_column_ipv4 = 17
     col_target_column_binary = 18
+    # Generic Arrow field passthrough to the Rust importer; column-QWP only.
+    col_target_column_arrow = 19
 
 
 cdef dict _TARGET_NAMES = {
@@ -134,6 +136,7 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_long256: "long256",
     col_target_t.col_target_column_ipv4: "ipv4",
     col_target_t.col_target_column_binary: "binary",
+    col_target_t.col_target_column_arrow: "arrow",
 }
 
 
@@ -175,6 +178,10 @@ cdef enum col_source_t:
     col_source_dt64ns_tz_arrow =        502000
     col_source_dt64us_numpy =           601000
     col_source_dt64us_tz_arrow =        602000
+    # Designated-`at` only (columnar): widened to micros in Rust by the
+    # millis/seconds designated-timestamp FFI.
+    col_source_dt64ms_tz_arrow =        603000
+    col_source_dt64s_tz_arrow =         604000
     col_source_arr_f64_numpyobj =       701100
     col_source_decimal_pyobj =          801100
     col_source_decimal32_arrow =        802000
@@ -194,6 +201,7 @@ cdef enum col_source_t:
     col_source_ipv4_pyobj =             904100
     col_source_datetime_pyobj =         905100
     col_source_bytes_pyobj =            906100
+    col_source_arrow_passthrough =     1000000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -300,6 +308,9 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_column_binary: {
         col_source_t.col_source_bytes_pyobj,
     },
+    col_target_t.col_target_column_arrow: {
+        col_source_t.col_source_arrow_passthrough,
+    },
     # The Rust Arrow path treats UInt32 as IPV4 only when Arrow field
     # metadata says questdb.column_type=ipv4. Pandas drops Arrow field
     # metadata before it reaches this planner, so plain UInt32 must
@@ -337,6 +348,8 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_dt64ns_tz_arrow,
         col_source_t.col_source_dt64us_numpy,
         col_source_t.col_source_dt64us_tz_arrow,
+        col_source_t.col_source_dt64ms_tz_arrow,
+        col_source_t.col_source_dt64s_tz_arrow,
         col_source_t.col_source_datetime_pyobj,
     },
 }
@@ -390,7 +403,8 @@ cdef tuple _FIELD_TARGETS_QWP = (
     # (FixedSizeBinary widths).
     col_target_t.col_target_column_uuid,
     col_target_t.col_target_column_long256,
-    col_target_t.col_target_column_binary)
+    col_target_t.col_target_column_binary,
+    col_target_t.col_target_column_arrow)
 
 
 # Targets that map directly from a meta target.
@@ -1097,12 +1111,25 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
                 return col_source_t.col_source_dt64ns_tz_arrow
             elif arrow_type.unit == "us":
                 return col_source_t.col_source_dt64us_tz_arrow
-            else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
-                    f'Unsupported arrow dtype {dtype} unit {arrow_type.unit}. ' +
-                    'Raise an issue if you think it should be supported: ' +
-                    'https://github.com/questdb/py-questdb-client/issues.')
+            # s / ms fall through: field -> generic Arrow passthrough;
+            # designated-at -> _dataframe_classify_at_timestamp_dtype.
+    return 0
+
+
+cdef int _dataframe_classify_at_timestamp_dtype(object dtype) except -1:
+    # ms / s designated-`at` Arrow timestamps, widened to micros in Rust by
+    # the millis/seconds designated-timestamp FFI. Kept out of the shared
+    # field classifier so timestamp fields still route to the generic Arrow
+    # passthrough and row-ILP stays untouched.
+    cdef object arrow_type
+    if isinstance(dtype, _PANDAS.ArrowDtype):
+        _dataframe_require_pyarrow()
+        arrow_type = dtype.pyarrow_dtype
+        if arrow_type.id == _PYARROW.lib.Type_TIMESTAMP:
+            if arrow_type.unit == "ms":
+                return col_source_t.col_source_dt64ms_tz_arrow
+            elif arrow_type.unit == "s":
+                return col_source_t.col_source_dt64s_tz_arrow
     return 0
 
 
@@ -1111,11 +1138,13 @@ cdef ssize_t _dataframe_resolve_at(
         col_t_arr* cols,
         object at,
         size_t col_count,
-        int64_t* at_value_out) except -2:
+        int64_t* at_value_out,
+        bint columnar) except -2:
     cdef size_t col_index
     cdef object dtype
     cdef PandasCol pandas_col
     cdef TimestampNanos at_nanos
+    cdef int at_source
     if at is None:
         at_value_out[0] = _AT_IS_SERVER_NOW
         return -1
@@ -1145,10 +1174,21 @@ cdef ssize_t _dataframe_resolve_at(
         col = &cols.d[col_index]
         col.setup.meta_target = meta_target_t.meta_target_at
         return col_index
-    else:
-        raise TypeError(
-            f'Bad argument `at`: Bad dtype `{dtype}` ' +
-            f'for the {at!r} column: Must be a {_SUPPORTED_DATETIMES} column.')
+    if columnar:
+        # ms / s Arrow timestamps resolved to the generic passthrough source
+        # in `_dataframe_resolve_source_and_buffers`; the buffers are already
+        # mapped, so override the source to the designated-ts unit and let the
+        # Rust millis/seconds FFI widen to micros.
+        at_source = _dataframe_classify_at_timestamp_dtype(dtype)
+        if at_source != 0:
+            at_value_out[0] = _AT_IS_SET_BY_COLUMN
+            col = &cols.d[col_index]
+            col.setup.source = <col_source_t>at_source
+            col.setup.meta_target = meta_target_t.meta_target_at
+            return col_index
+    raise TypeError(
+        f'Bad argument `at`: Bad dtype `{dtype}` ' +
+        f'for the {at!r} column: Must be a {_SUPPORTED_DATETIMES} column.')
 
 
 cdef void_int _dataframe_alloc_chunks(
@@ -1344,11 +1384,9 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif arrowtype.id == _PYARROW.lib.Type_UINT32:
         col.setup.source = col_source_t.col_source_u32_arrow
     else:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
-            f'Unsupported arrow type {arrowtype} for column {pandas_col.name!r}. ' +
-            'Raise an issue if you think it should be supported: ' +
-            'https://github.com/questdb/py-questdb-client/issues.')
+        col.setup.source = col_source_t.col_source_arrow_passthrough
+        col.scale = 0
+        return 0
     if is_decimal_col:
         if arrowtype.scale < 0 or arrowtype.scale > 76:
             raise IngressError(
@@ -1688,7 +1726,9 @@ cdef void_int _dataframe_resolve_args(
         table_name_col,
         col_count,
         c_table_name_out)
-    at_col = _dataframe_resolve_at(df, cols, at, col_count, at_value_out)
+    at_col = _dataframe_resolve_at(
+        df, cols, at, col_count, at_value_out,
+        field_targets is _FIELD_TARGETS_QWP)
     _dataframe_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
     _dataframe_resolve_cols_target_name_and_dc(
         b, pandas_cols, cols, field_targets)

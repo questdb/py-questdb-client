@@ -2511,7 +2511,9 @@ cdef object _dataframe_columnar_plan_failures(
                     col_source_t.col_source_dt64ns_numpy,
                     col_source_t.col_source_dt64us_numpy,
                     col_source_t.col_source_dt64ns_tz_arrow,
-                    col_source_t.col_source_dt64us_tz_arrow):
+                    col_source_t.col_source_dt64us_tz_arrow,
+                    col_source_t.col_source_dt64ms_tz_arrow,
+                    col_source_t.col_source_dt64s_tz_arrow):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
@@ -2520,7 +2522,9 @@ cdef object _dataframe_columnar_plan_failures(
                     'designated timestamp columns.'))
             elif (col.setup.source in (
                         col_source_t.col_source_dt64ns_tz_arrow,
-                        col_source_t.col_source_dt64us_tz_arrow)
+                        col_source_t.col_source_dt64us_tz_arrow,
+                        col_source_t.col_source_dt64ms_tz_arrow,
+                        col_source_t.col_source_dt64s_tz_arrow)
                     and col.setup.chunks.chunks[0].null_count != 0):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
@@ -2548,13 +2552,15 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_uuid,
                 col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
-                col_target_t.col_target_column_binary):
+                col_target_t.col_target_column_binary,
+                col_target_t.col_target_column_arrow):
             # Column-QWP-only targets reached via `_FIELD_TARGETS_QWP`.
             # Each currently reachable target's source-set in
             # `_TARGET_TO_SOURCES` is a singleton, so the source is
             # already constrained by routing. The contiguous-buffer +
             # validity checks above cover layout; the per-type FFI
-            # handles the wire encoding.
+            # handles the wire encoding. col_target_column_arrow delegates
+            # type validation to the Rust importer.
             pass
         else:
             failures.append(_dataframe_columnar_col_failure(
@@ -3628,6 +3634,10 @@ cdef void_int _dataframe_columnar_append_field(
             chunk, col, row_offset, row_count,
             column_sender_symbol_mode_symbol)
         return 0
+    elif col.setup.target == col_target_t.col_target_column_arrow:
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
     else:
         raise RuntimeError('Unsupported columnar field target.')
 
@@ -3684,6 +3694,20 @@ cdef void_int _dataframe_columnar_append_at(
                 data + row_offset,
                 row_count,
                 &err)
+    elif col.setup.source == col_source_t.col_source_dt64ms_tz_arrow:
+        with nogil:
+            ok = column_sender_chunk_designated_timestamp_millis(
+                chunk,
+                data + row_offset,
+                row_count,
+                &err)
+    elif col.setup.source == col_source_t.col_source_dt64s_tz_arrow:
+        with nogil:
+            ok = column_sender_chunk_designated_timestamp_seconds(
+                chunk,
+                data + row_offset,
+                row_count,
+                &err)
     else:
         raise RuntimeError('Unsupported columnar designated timestamp source.')
 
@@ -3718,6 +3742,30 @@ cdef object _dataframe_normalize_nullable(object df):
     out = df.copy(deep=False)
     for name in convert:
         out[name] = df[name].astype(object)
+    out.attrs = dict(df.attrs)
+    return out
+
+
+cdef object _dataframe_normalize_at_timestamp(object df, object at):
+    # tz-aware (DatetimeTZ) ms/s designated-`at` columns can't reach the
+    # columnar resolver's source override (the shared classifier rejects
+    # non-ns/us tz units first), so widen them to us here. ArrowDtype ms/s
+    # is widened to micros in Rust by the millis/seconds designated-ts FFI.
+    cdef object dtype, new_dtype, out
+    if not isinstance(at, str) or not _is_pandas_dataframe_object(df):
+        return df
+    _dataframe_may_import_deps()
+    try:
+        if at not in df.columns:
+            return df
+        dtype = df[at].dtype
+    except Exception:
+        return df
+    if not isinstance(dtype, _PANDAS.DatetimeTZDtype) or dtype.unit not in ('s', 'ms'):
+        return df
+    new_dtype = _PANDAS.DatetimeTZDtype('us', dtype.tz)
+    out = df.copy(deep=False)
+    out[at] = df[at].astype(new_dtype)
     out.attrs = dict(df.attrs)
     return out
 
@@ -5200,6 +5248,7 @@ cdef class Client:
                 return self
 
             df = _dataframe_normalize_nullable(df)
+            df = _dataframe_normalize_at_timestamp(df, at)
             _dataframe_plan_build(
                 b,
                 df,

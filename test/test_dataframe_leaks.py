@@ -4,6 +4,20 @@ import ctypes
 import gc
 import unittest
 
+
+def _limit_malloc_arenas():
+    # Pin glibc to one arena before the sender's threads spawn; per-thread
+    # arenas otherwise inflate RSS without a real leak.
+    if not sys.platform.startswith('linux'):
+        return
+    try:
+        ctypes.CDLL('libc.so.6', use_errno=False).mallopt(-8, 1)  # M_ARENA_MAX
+    except (OSError, AttributeError):
+        pass
+
+
+_limit_malloc_arenas()
+
 import patch_path
 
 import questdb.ingress as qi
@@ -41,6 +55,27 @@ def _malloc_trim():
 def _rss():
     _malloc_trim()
     return _PROCESS.memory_info().rss
+
+
+def _assert_no_leak(test, work, warmup, measure):
+    # Measure steady-state growth (second half only): a real leak grows
+    # linearly, while allocator retention plateaus after warmup.
+    for _ in range(warmup):
+        work()
+    gc.collect()
+    half = measure // 2
+    for _ in range(half):
+        work()
+    gc.collect()
+    mid = _rss()
+    for _ in range(measure - half):
+        work()
+    gc.collect()
+    growth = _rss() - mid
+    test.assertLess(
+        growth, 8 * 1024 * 1024,
+        f'RSS grew {growth} bytes over the second half of {measure} '
+        'iterations; a native buffer is likely leaked.')
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -84,18 +119,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
         return frames
 
     def _assert_stable(self, work, warmup, measure):
-        for _ in range(warmup):
-            work()
-        gc.collect()
-        before = _rss()
-        for _ in range(measure):
-            work()
-        gc.collect()
-        growth = _rss() - before
-        self.assertLess(
-            growth, 8 * 1024 * 1024,
-            f'RSS grew by {growth} bytes over {measure} iterations; '
-            'a native buffer is likely leaked.')
+        _assert_no_leak(self, work, warmup, measure)
 
     def test_row_path_no_leak(self):
         frames = self._frames()
@@ -160,18 +184,7 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         return frames
 
     def _assert_stable(self, work, warmup, measure):
-        for _ in range(warmup):
-            work()
-        gc.collect()
-        before = _rss()
-        for _ in range(measure):
-            work()
-        gc.collect()
-        growth = _rss() - before
-        self.assertLess(
-            growth, 8 * 1024 * 1024,
-            f'RSS grew by {growth} bytes over {measure} iterations; '
-            'a native buffer is likely leaked.')
+        _assert_no_leak(self, work, warmup, measure)
 
     def test_pyobj_columnar_path_no_leak(self):
         from qwp_ws_ack_server import QwpAckServer
