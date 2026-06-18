@@ -1209,6 +1209,52 @@ class TestTransportSecurity(unittest.TestCase):
         with self.assertRaises(OidcConfigError):
             auth.token()
 
+    def test_redirects_are_not_followed(self):
+        # A 30x must NOT be followed: urllib would otherwise re-send the
+        # Authorization: Bearer header (and downgrade to plaintext http) to the
+        # redirect target, leaking the QuestDB token off-origin (only the
+        # original URL is vetted, never the redirect target). The redirect must
+        # surface as a non-2xx response, and the off-origin host must never be
+        # contacted. See C1.
+        from questdb.auth import _http
+
+        seen = []
+
+        class _Redir(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get('Authorization')))
+                if self.path == '/exec':
+                    self.send_response(302)
+                    self.send_header('Location', attacker + '/stolen')
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Length', '2')
+                    self.end_headers()
+                    self.wfile.write(b'{}')
+
+        victim = http.server.HTTPServer(('127.0.0.1', 0), _Redir)
+        thief = http.server.HTTPServer(('127.0.0.1', 0), _Redir)
+        attacker = f'http://127.0.0.1:{thief.server_port}'
+        for srv in (victim, thief):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            resp = _http.request(
+                'GET', f'http://127.0.0.1:{victim.server_port}/exec',
+                headers={'Authorization': 'Bearer SECRET'}, timeout=5)
+        finally:
+            for srv in (victim, thief):
+                srv.shutdown()
+                srv.server_close()
+
+        # The redirect surfaced as a non-2xx response, was not followed, and the
+        # off-origin target never saw the request (or the bearer token).
+        self.assertEqual(resp.status, 302)
+        self.assertEqual(seen, [('/exec', 'Bearer SECRET')])
+
 
 class TestRendererSecurity(unittest.TestCase):
     """The Jupyter prompt must never turn an IdP-supplied URL into a

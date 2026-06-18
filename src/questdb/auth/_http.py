@@ -137,12 +137,36 @@ def _require_secure(url: str, insecure: bool) -> None:
         'insecure=True only to permit plaintext to a non-loopback host.')
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow HTTP redirects.
+
+    The discovery / device / token / ``/settings`` / ``/exec`` endpoints never
+    legitimately redirect. Auto-following a ``30x`` is unsafe here because only
+    the *original* URL is vetted: ``_require_secure`` and
+    ``validate_endpoint_origins`` never see the redirect target. urllib also
+    does not strip the ``Authorization`` header on a cross-origin redirect, so a
+    single ``302`` from ``/exec`` would re-send ``Authorization: Bearer
+    <token>`` to an attacker-chosen host — including a downgrade to plaintext
+    ``http`` — leaking the QuestDB token off-origin.
+
+    Returning ``None`` makes urllib stop following and surface the ``30x`` as an
+    ``HTTPError`` (which :func:`request` turns into a non-2xx
+    :class:`HttpResponse`), so callers see a clean failure instead of a
+    silently-followed redirect.
+    """
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 def _opener(ctx: Optional[ssl.SSLContext]) -> urllib.request.OpenerDirector:
     # build_opener keeps the default ProxyHandler (which reads *_PROXY env
-    # vars), while letting us pin our own TLS context.
-    if ctx is None:
-        return urllib.request.build_opener()
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    # vars), while letting us pin our own TLS context and forbid redirects
+    # (the credential/token endpoints never legitimately redirect).
+    handlers: list = [_NoRedirect()]
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
 
 
 def request(
