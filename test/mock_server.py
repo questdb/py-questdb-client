@@ -161,12 +161,7 @@ class HttpServer:
                             self.wfile.write(response_data)
                         else:
                             self.send_error(404, "Endpoint not found")
-                    # Close the connection after each response instead of
-                    # keeping it alive. A kept-alive connection lingers in the
-                    # sender's pool and, on the loaded x64 macOS CI agents,
-                    # stalls ~35s per test when the sender tears it down at
-                    # test end. Closing here keeps the pool empty.
-                    self.close_connection = True
+                    self.close_connection = False
                 except BrokenPipeError:
                     pass
 
@@ -191,12 +186,7 @@ class HttpServer:
                     self.end_headers()
                     if body:
                         self.wfile.write(body)
-                    # Close the connection after each response instead of
-                    # keeping it alive. A kept-alive connection lingers in the
-                    # sender's pool and, on the loaded x64 macOS CI agents,
-                    # stalls ~35s per test when the sender tears it down at
-                    # test end. Closing here keeps the pool empty.
-                    self.close_connection = True
+                    self.close_connection = False
                 except BrokenPipeError:
                     pass
 
@@ -205,17 +195,7 @@ class HttpServer:
     def __enter__(self):
         self._stop_event = threading.Event()
         handler_class = self.create_handler()
-        # Use a threaded server with daemonized handler threads so a sender
-        # that leaves an HTTP keep-alive connection open (its connection pool
-        # outlives the test) cannot block server shutdown. The previous
-        # single-threaded HTTPServer ran the keep-alive handler on its only
-        # thread, so __exit__'s shutdown() waited ~30s for that idle handler
-        # to time out -- per test. On macOS the connection lingered every
-        # time, which is why the macOS leg took over an hour.
-        self._http_server = hs.ThreadingHTTPServer(
-            ('', 0), handler_class, bind_and_activate=True)
-        self._http_server.daemon_threads = True
-        self._http_server.block_on_close = False
+        self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server.timeout = 30
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()
