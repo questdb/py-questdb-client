@@ -36,8 +36,8 @@ The level controls how much of the review below actually runs. Lower levels keep
 
 | Level | What runs |
 |-------|-----------|
-| **0 (default)** | Steps 1, 2, 4. Skip Step 2.5. Skip Step 3 — no agent spawn; review the diff inline in the main loop, using Read/Grep on demand to resolve ambiguities. Skip Step 3b — verify each finding inline as you write it. Single-pass review covering correctness, Cython memory/refcount/GIL safety, C-ABI binding correctness, tests, and coding standards on the diff itself. |
-| **1** | Adds Step 2.5a (semantic delta only — skip 2.5b/2.5c/2.5d). In Step 3, launch only Agent 1 (correctness), Agent 2 (Cython memory & refcount safety), and Agent 7 (tests) in parallel. Skip all other agents. Skip Step 3b — verify findings inline as you draft the report. |
+| **0 (default)** | Steps 1, 2, 4. Skip Steps 2.5a-d, but still run Step 2.5e (build & binding profile — mandatory at every level). Skip Step 3 — no agent spawn; review the diff inline in the main loop, using Read/Grep on demand to resolve ambiguities. Skip Step 3b — verify each finding inline as you write it. Single-pass review covering correctness, Cython memory/refcount/GIL safety, C-ABI binding correctness, tests, and coding standards on the diff itself. |
+| **1** | Adds Step 2.5a (semantic delta only — skip 2.5b/2.5c/2.5d; Step 2.5e still runs, as at every level). In Step 3, launch only Agent 1 (correctness), Agent 2 (Cython memory & refcount safety), and Agent 7 (tests) in parallel. Skip all other agents. Skip Step 3b — verify findings inline as you draft the report. |
 | **2** | Full Step 2.5, but in 2.5b restrict the callsite inventory to public Python symbols (exported in `__all__` / `ingress.pyi`) plus every `cdef`/`cpdef` function and every C-ABI symbol declared in the `.pxd` files. In Step 3, launch Agents 1-8. Skip Agent 9 (cross-context) and Agent 10 (adversarial fresh-context). Step 3b uses a single batched verification agent for all findings instead of one per finding. |
 | **3** | Every step below as written, all 10 agents, per-finding verification. The full mission-critical pass. |
 
