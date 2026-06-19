@@ -88,6 +88,12 @@ class TokenCache:
 # Module-global so that re-running a notebook cell (which constructs a fresh
 # ``OidcDeviceAuth``) reuses the already-acquired token instead of re-prompting.
 _MEMORY_STORE: Dict[str, TokenSet] = {}
+# Per-key counter bumped on every clear(). store_if_current() uses it to drop a
+# write from an acquisition that began before a concurrent clear() — including a
+# clear() on a *different* OidcDeviceAuth that shares this process-global store,
+# whose per-instance lock does not serialize against this one — so clear() can't
+# be silently undone by an in-flight sign-in / refresh.
+_MEMORY_GENERATION: Dict[str, int] = {}
 _MEMORY_LOCK = threading.Lock()
 
 
@@ -114,6 +120,35 @@ class MemoryCache(TokenCache):
     def clear(self, key: str) -> None:
         with _MEMORY_LOCK:
             _MEMORY_STORE.pop(key, None)
+            _MEMORY_GENERATION[key] = _MEMORY_GENERATION.get(key, 0) + 1
+
+    def generation(self, key: str) -> int:
+        """
+        Current clear()-generation for ``key``.
+
+        Captured before an acquisition's IdP round-trip and handed back to
+        :meth:`store_if_current`, which drops the write if a ``clear()`` bumped
+        the counter meanwhile (see :meth:`store_if_current`).
+        """
+        with _MEMORY_LOCK:
+            return _MEMORY_GENERATION.get(key, 0)
+
+    def store_if_current(
+            self, key: str, tokens: TokenSet, generation: int) -> bool:
+        """
+        Store ``tokens`` only if no :meth:`clear` happened since ``generation``.
+
+        If a concurrent ``clear()`` — on this or any other
+        :class:`~questdb.auth.OidcDeviceAuth` sharing this process-global store —
+        bumped the counter after ``generation`` was captured, the write is
+        dropped (returns ``False``) so the just-cleared entry is not resurrected
+        with a now-stale token. Returns ``True`` when the token was stored.
+        """
+        with _MEMORY_LOCK:
+            if _MEMORY_GENERATION.get(key, 0) != generation:
+                return False
+            _MEMORY_STORE[key] = replace(tokens)
+            return True
 
 
 class NullCache(TokenCache):

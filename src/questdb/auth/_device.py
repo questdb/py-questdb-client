@@ -360,8 +360,12 @@ class OidcDeviceAuth:
 
     def clear(self) -> None:
         """Forget the cached token (forces a fresh sign-in next time)."""
-        # Serialize against acquisition so a concurrent refresh/sign-in can't
-        # re-populate the cache right after we clear it.
+        # self._lock serializes against THIS instance's acquisition; the shared
+        # MemoryCache additionally bumps a per-key generation here, so an
+        # in-flight acquisition on ANOTHER OidcDeviceAuth that shares the
+        # process-global store can't repopulate the entry after this clear (its
+        # _store sees the bumped generation and drops the write). This resets the
+        # local / process cache only — it does not revoke the token at the IdP.
         with self._lock:
             self._tokens = None
             self._cache.clear(self.cache_key)
@@ -425,6 +429,12 @@ class OidcDeviceAuth:
         # overlapping refreshes or double-prompt; the loser re-checks and
         # reuses the winner's freshly acquired token.
         with self._lock:
+            # Capture the cache generation before reading or acquiring, so a
+            # clear() that races this acquisition — including one on another
+            # OidcDeviceAuth that shares the process-global MemoryCache (whose
+            # per-instance lock does not serialize against ours) — invalidates
+            # the store below instead of resurrecting the just-cleared entry.
+            generation = self._cache_generation()
             # Promote a cached token into the field under the lock (even an
             # expired one, so _acquire can reuse its refresh_token for a silent
             # refresh). Done here, not on the lock-free fast path, so every
@@ -436,7 +446,7 @@ class OidcDeviceAuth:
             tokens = self._valid_cached()
             if tokens is not None:
                 return tokens
-            return self._acquire()
+            return self._acquire(generation)
 
     def _valid_cached(self) -> Optional[TokenSet]:
         # Read-only: reads the published field, falling back to a read of the
@@ -451,9 +461,11 @@ class OidcDeviceAuth:
             return tokens
         return None
 
-    def _acquire(self) -> TokenSet:
+    def _acquire(self, generation: int) -> TokenSet:
         # Called while holding self._lock. Try a silent refresh, else run the
-        # interactive device flow.
+        # interactive device flow. `generation` was captured before the cache
+        # read in _obtain_tokens; _store drops its write if a concurrent clear()
+        # has bumped it since (see _store / _cache_generation).
         tokens = self._tokens
         if tokens is not None and tokens.refresh_token:
             try:
@@ -476,16 +488,34 @@ class OidcDeviceAuth:
                 # a response is unusable, so fall through to the interactive
                 # flow rather than caching it and looping on every call.
                 if self._has_required_token(refreshed):
-                    self._store(refreshed)
+                    self._store(refreshed, generation)
                     return refreshed
 
         fresh = self._run_device_flow()
-        self._store(fresh)
+        self._store(fresh, generation)
         return fresh
 
-    def _store(self, tokens: TokenSet) -> None:
+    def _store(self, tokens: TokenSet, generation: int) -> None:
+        # self._tokens is this instance's own view, so always set it — the
+        # caller uses the token it just acquired. The shared-cache write is
+        # conditional: a clear() (here or on another instance sharing the
+        # process-global store) that bumped the generation since it was captured
+        # drops the write, so clear() is not silently undone. Backends without
+        # generation support (NullCache / a custom TokenCache) store
+        # unconditionally, exactly as before.
         self._tokens = tokens
-        self._cache.store(self.cache_key, tokens)
+        store_if_current = getattr(self._cache, 'store_if_current', None)
+        if store_if_current is not None:
+            store_if_current(self.cache_key, tokens, generation)
+        else:
+            self._cache.store(self.cache_key, tokens)
+
+    def _cache_generation(self) -> int:
+        # MemoryCache tracks a per-key clear()-generation for the cross-instance
+        # CAS in _store; other backends don't, so default to 0 (the store is
+        # then unconditional, matching the pre-existing behavior).
+        generation = getattr(self._cache, 'generation', None)
+        return generation(self.cache_key) if generation is not None else 0
 
     def _tokenset_from_response(self, body: Dict[str, Any]) -> TokenSet:
         try:

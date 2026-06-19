@@ -64,7 +64,8 @@ from questdb.auth import (  # noqa: E402
     OidcNetworkError,
     TokenSet,
 )
-from questdb.auth._cache import MemoryCache, _MEMORY_STORE  # noqa: E402
+from questdb.auth._cache import (  # noqa: E402
+    MemoryCache, _MEMORY_GENERATION, _MEMORY_STORE)
 from questdb.auth._render import Renderer  # noqa: E402
 
 try:
@@ -303,6 +304,7 @@ class _MockServer(http.server.HTTPServer):
 class AuthTestBase(unittest.TestCase):
     def setUp(self):
         _MEMORY_STORE.clear()
+        _MEMORY_GENERATION.clear()
         self.server = _MockServer()
         self.state = self.server.state
         self.thread = threading.Thread(
@@ -1262,6 +1264,43 @@ class TestConcurrency(AuthTestBase):
         self.assertIsNone(auth._tokens)            # nothing published yet
         self.assertEqual(auth.token(), ID_TOKEN)   # served via the fast path
         self.assertIsNone(auth._tokens)            # fast path did not write it
+
+    def test_clear_on_other_instance_survives_inflight_acquire(self):
+        # Two OidcDeviceAuth instances share the process-global MemoryCache
+        # (same cache_key) but have separate per-instance locks. If instance B
+        # clears the entry while instance A's sign-in is in flight, A's store
+        # must NOT resurrect it: the per-key generation A captured before its
+        # round-trip no longer matches, so the write is dropped and the cache
+        # stays cleared (the next fresh load re-prompts, honoring clear()). A
+        # still returns the token it just acquired. See store_if_current.
+        a = self.make_auth()
+        b = self.make_auth()
+        self.assertEqual(a.cache_key, b.cache_key)
+
+        class _ClearMidFlow(Renderer):
+            def on_prompt(self, resp):
+                b.clear()                 # concurrent clear during A's sign-in
+
+        a._renderer = _ClearMidFlow()
+        self.assertEqual(a.token(), ID_TOKEN)          # A still gets its token
+        # A's store was dropped, so the shared cache is NOT repopulated; a fresh
+        # instance therefore re-signs in rather than reusing the cleared token.
+        self.assertNotIn(a.cache_key, _MEMORY_STORE)
+
+    def test_store_if_current_drops_write_after_concurrent_clear(self):
+        # Unit cover for the CAS primitive the cross-instance guard relies on:
+        # a generation captured before a clear() must not be allowed to store.
+        cache = MemoryCache()
+        key = 'k'
+        gen = cache.generation(key)                    # captured before clear
+        cache.clear(key)                               # concurrent clear
+        self.assertFalse(
+            cache.store_if_current(key, TokenSet(access_token='T1'), gen))
+        self.assertIsNone(cache.load(key))             # write dropped
+        gen2 = cache.generation(key)                   # unraced store succeeds
+        self.assertTrue(
+            cache.store_if_current(key, TokenSet(access_token='T2'), gen2))
+        self.assertIsNotNone(cache.load(key))
 
 
 class TestAdapters(unittest.TestCase):
