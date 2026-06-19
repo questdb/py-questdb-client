@@ -202,6 +202,10 @@ class OidcDeviceAuth:
         # cleartext over the network even when this is set.
         self.insecure = insecure
         self.open_browser = open_browser
+        # Kept so adapters that build their own transport (QuestDB.sender's ILP
+        # Sender) can forward the same private CA the urllib _ctx uses, instead
+        # of falling back to the default trust roots. See QuestDB.sender.
+        self._ca_bundle = ca_bundle
         self._interactive = interactive
         self._default_interval = default_interval
         # Per-request network timeout for every IdP call (device-code request,
@@ -251,6 +255,7 @@ class OidcDeviceAuth:
             interactive: Optional[bool] = None,
             qr: bool = False,
             renderer: Optional[Renderer] = None,
+            default_interval: int = 5,
             timeout: float = 30,
             _clock=None) -> 'OidcDeviceAuth':  # injectable time source
         """
@@ -291,6 +296,7 @@ class OidcDeviceAuth:
             interactive=interactive,
             qr=qr,
             renderer=renderer,
+            default_interval=default_interval,
             timeout=timeout,
             _clock=_clock)
 
@@ -391,9 +397,13 @@ class OidcDeviceAuth:
             'access_token.')
 
     def _obtain_tokens(self) -> TokenSet:
-        # Fast path: return a valid cached token without taking the lock, so a
-        # caller with a usable token never blocks behind another thread's
-        # in-progress refresh or interactive sign-in.
+        # Fast path: return a valid token without taking the lock, so a caller
+        # with a usable token never blocks behind another thread's in-progress
+        # refresh or interactive sign-in. This path is READ-ONLY: it never
+        # writes self._tokens (M4). Every write to that field happens under the
+        # lock (the promotion below, plus _store and clear), so the lock-free
+        # reader can't race a concurrent write / lose an update / resurrect a
+        # just-cleared token.
         tokens = self._valid_cached()
         if tokens is not None:
             return tokens
@@ -401,17 +411,27 @@ class OidcDeviceAuth:
         # overlapping refreshes or double-prompt; the loser re-checks and
         # reuses the winner's freshly acquired token.
         with self._lock:
+            # Promote a cached token into the field under the lock (even an
+            # expired one, so _acquire can reuse its refresh_token for a silent
+            # refresh). Done here, not on the lock-free fast path, so every
+            # write to self._tokens stays serialized.
+            if self._tokens is None:
+                cached = self._cache.load(self.cache_key)
+                if cached is not None:
+                    self._tokens = cached
             tokens = self._valid_cached()
             if tokens is not None:
                 return tokens
             return self._acquire()
 
     def _valid_cached(self) -> Optional[TokenSet]:
+        # Read-only: reads the published field, falling back to a read of the
+        # shared cache backend. It never writes self._tokens — that write is
+        # done only under the lock (in _obtain_tokens' slow path / _store /
+        # clear) — so it is safe to call on the lock-free fast path.
         tokens = self._tokens
         if tokens is None:
             tokens = self._cache.load(self.cache_key)
-            if tokens is not None:
-                self._tokens = tokens
         if (tokens is not None and tokens.is_valid(self._now())
                 and self._has_required_token(tokens)):
             return tokens

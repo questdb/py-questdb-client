@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import urllib.parse
 from typing import Any, Dict, Optional
@@ -133,6 +134,10 @@ class QuestDB:
         self.auth = auth
         self._insecure = insecure
         self._ctx = auth._ctx
+        # Same private CA bundle the auth/REST transport uses, so sender() can
+        # forward it to the ILP Sender (which has its own TLS stack). getattr
+        # keeps test doubles that only set _ctx working.
+        self._ca_bundle = getattr(auth, '_ca_bundle', None)
         # safe_urlparse validates the port up-front, raising OidcConfigError
         # (not a bare ValueError) for a malformed one, so the adapters that read
         # the port stay within the package's typed-error contract.
@@ -328,6 +333,21 @@ class QuestDB:
             443 if scheme == 'https' else 9000)
         conf = (f'{scheme}::addr='
                 f'{self._ilp_addr(self._require_host(), resolved_port)};')
+        # Forward the private CA bundle (explicit ca_bundle=, else the
+        # REQUESTS_CA_BUNDLE / SSL_CERT_FILE env vars — same precedence as
+        # build_ssl_context) to the Sender's own TLS stack as tls_roots, so an
+        # https Sender against a private-CA QuestDB trusts the same roots the
+        # REST/IdP paths do. Only a PEM file works here (tls_roots is a file;
+        # the Sender has no capath equivalent), and only over https. The caller
+        # can still override via tls_roots=/tls_ca= in **sender_kwargs.
+        if (scheme == 'https'
+                and 'tls_roots' not in sender_kwargs
+                and 'tls_ca' not in sender_kwargs):
+            ca = (self._ca_bundle
+                  or os.environ.get('REQUESTS_CA_BUNDLE')
+                  or os.environ.get('SSL_CERT_FILE'))
+            if ca and os.path.isfile(ca):
+                sender_kwargs['tls_roots'] = ca
         return Sender.from_conf(conf, token=self.auth.token(), **sender_kwargs)
 
 

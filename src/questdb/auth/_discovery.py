@@ -161,6 +161,24 @@ def _settings_channel_is_plaintext(questdb_url: str) -> bool:
         parts.hostname)
 
 
+def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
+    """
+    True if ``endpoint``'s path is the issuer's path or a sub-path of it.
+
+    Segment-aware, so ``/realms/prod`` does not match ``/realms/production``. A
+    root issuer (no path, e.g. ``https://idp.example.com``) constrains the
+    origin only and matches any path. Used to keep a tampered ``/settings`` from
+    redirecting credentials to a different tenant on a path-based multi-tenant
+    IdP (Keycloak issuers are ``https://host/realms/{realm}``), which an
+    origin-only check can't catch.
+    """
+    base = (safe_urlparse(issuer)[0].path or '').rstrip('/')
+    if not base:
+        return True
+    ep = safe_urlparse(endpoint)[0].path or ''
+    return ep == base or ep.startswith(base + '/')
+
+
 def validate_endpoint_origins(
         token_endpoint: str,
         device_authorization_endpoint: str,
@@ -177,7 +195,16 @@ def validate_endpoint_origins(
     * the two credential endpoints must share a single origin (they are always
       co-located on the authorization server per RFC 8628); and
     * when the ``issuer`` is known independently (passed explicitly or resolved
-      from the IdP ``.well-known``), both endpoints must belong to it.
+      from the IdP ``.well-known``), both endpoints must share its **origin**.
+
+    This is an origin-level check: it does **not**, on its own, isolate
+    path-based multi-tenant realms (e.g. Keycloak issuers
+    ``https://host/realms/{realm}``, where every realm shares one origin). That
+    path-scoping is enforced separately in :func:`resolve_config`, and only for
+    endpoints advertised by the (untrusted) QuestDB ``/settings`` — endpoints
+    from IdP discovery (the issuer's own ``.well-known``) and caller-explicit
+    endpoints are authoritative and are not path-restricted (some IdPs, e.g.
+    Azure AD, legitimately place endpoints outside the issuer path).
 
     Pass ``issuer=`` to pin the IdP explicitly when QuestDB advertises the
     endpoints directly (so a compromised server cannot redirect the token POST).
@@ -356,6 +383,33 @@ def resolve_config(
             'pass the endpoints explicitly (token_endpoint=..., '
             'device_authorization_endpoint=...), or connect to QuestDB over '
             'https so /settings is authenticated.')
+
+    # When the credential endpoints came from QuestDB /settings (not the
+    # caller) and an issuer is pinned out-of-band, require each to sit under the
+    # issuer's PATH, not merely its origin. Path-based IdPs put every tenant on
+    # one origin (Keycloak issuers are https://host/realms/{realm}), so the
+    # origin check alone (validate_endpoint_origins) can't stop a tampered
+    # /settings from steering the device code / refresh token to a different
+    # realm on the same host. The issuer is out-of-band, so the server can't
+    # forge it. Caller-explicit endpoints, and endpoints from IdP discovery (the
+    # issuer's own .well-known), are authoritative and skip this — some IdPs
+    # (e.g. Azure AD) legitimately place endpoints outside the issuer path.
+    if issuer:
+        for label, url, from_settings in (
+                ('token endpoint', token_endpoint,
+                 not explicit_token_endpoint),
+                ('device-authorization endpoint',
+                 device_authorization_endpoint, not explicit_device_endpoint)):
+            if url and from_settings and not _endpoint_path_under_issuer(
+                    url, issuer):
+                raise OidcConfigError(
+                    f'The OIDC {label} advertised by QuestDB /settings '
+                    f'({url!r}) is not under the pinned issuer ({issuer!r}); '
+                    'refusing to send credentials to an endpoint outside the '
+                    'trusted issuer (e.g. a different realm on the same host). '
+                    'If your IdP places endpoints outside the issuer path, pass '
+                    'them explicitly (token_endpoint=..., '
+                    'device_authorization_endpoint=...).')
 
     # Fall back to IdP discovery when QuestDB doesn't advertise the device
     # endpoint (and/or the token endpoint). This contacts the IdP, so it is

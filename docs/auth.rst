@@ -217,14 +217,26 @@ Security notes
   origin and rejects the configuration otherwise. Because ``/settings`` is
   authoritative-by-QuestDB, a compromised server could in principle point them
   elsewhere; pass ``issuer=`` to **pin** the IdP so the endpoints are verified
-  to belong to it and credentials can't be redirected to another host. When the
-  server does not advertise the device-authorization endpoint (so it must be
-  discovered from the IdP), ``issuer=`` (or ``discovery_url=``) is **required**
-  for exactly this reason — the helper refuses to guess the discovery origin
-  from the server-supplied token endpoint.
+  to belong to it and credentials can't be redirected to another host. The pin
+  checks both the **origin** and, for endpoints advertised by ``/settings``, the
+  issuer **path** — so on a path-based multi-tenant IdP (e.g. Keycloak issuers
+  ``https://host/realms/{realm}``) a tampered ``/settings`` cannot redirect the
+  device code / refresh token to a *different realm on the same host*. (Caller-
+  supplied endpoints and endpoints from the IdP's own discovery document are
+  trusted as-is and not path-restricted, since some IdPs — e.g. Azure AD — place
+  their endpoints outside the issuer path; pass such endpoints explicitly or let
+  discovery resolve them.) When the server does not advertise the device-
+  authorization endpoint (so it must be discovered from the IdP), ``issuer=``
+  (or ``discovery_url=``) is **required** for exactly this reason — the helper
+  refuses to guess the discovery origin from the server-supplied token endpoint.
 * Adapters avoid logging the token / PG DSN. Avoid logging them yourself.
 * Standard proxy / CA settings (``HTTPS_PROXY``, ``REQUESTS_CA_BUNDLE``,
-  ``SSL_CERT_FILE``) are honoured; you can also pass ``ca_bundle=``.
+  ``SSL_CERT_FILE``) are honoured; you can also pass ``ca_bundle=``. The same
+  private CA is forwarded to the ingestion :meth:`~questdb.auth.QuestDB.sender`
+  (as the ILP ``tls_roots``) for an ``https`` QuestDB, so REST queries and ILP
+  ingestion trust the same roots. (Only a PEM **file** is forwarded this way;
+  for a CA *directory*, or to override, pass ``tls_roots=``/``tls_ca=`` to
+  ``sender()``.)
 
 Dependencies
 ===========

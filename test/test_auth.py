@@ -943,6 +943,18 @@ class TestDiscovery(AuthTestBase):
             OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
                                         insecure=True)
 
+    def test_connect_forwards_default_interval(self):
+        # M5: connect(**opts) routes through from_questdb; default_interval must
+        # be accepted (it previously raised TypeError) and reach the auth.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': self.base + '/token',
+            'acl.oidc.device.authorization.endpoint': self.base + '/device'}}
+        qdb = connect(self.base, insecure=True, eager=False, default_interval=9,
+                      renderer=Renderer(), interactive=True, _clock=FakeClock())
+        self.assertEqual(qdb.auth._default_interval, 9)
+
 
 class TestInsecureSettingsGuard(unittest.TestCase):
     """
@@ -1013,6 +1025,48 @@ class TestInsecureSettingsGuard(unittest.TestCase):
                             questdb_url='http://qdb.internal.example:9000',
                             insecure=True, issuer='https://evil.example.com')
         self.assertEqual(cfg.token_endpoint, 'https://evil.example.com/token')
+
+    def test_issuer_path_scopes_settings_endpoints(self):
+        # M1: a tampered /settings advertising a DIFFERENT realm's endpoints on
+        # the SAME host (Keycloak path-based multi-tenancy) is rejected when the
+        # issuer is pinned to a specific realm — the origin check alone can't
+        # catch it because both realms share one origin.
+        kc = 'https://idp.example.com/realms'
+        evil = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint':
+                kc + '/EVIL/protocol/openid-connect/token',
+            'acl.oidc.device.authorization.endpoint':
+                kc + '/EVIL/protocol/openid-connect/auth/device'}
+        with self.assertRaises(OidcConfigError) as cm:
+            self._resolve(evil, questdb_url='https://qdb.example.com:9000',
+                          issuer=kc + '/prod')
+        self.assertIn('issuer', str(cm.exception).lower())
+        # The pinned realm's own endpoints are accepted.
+        good = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint':
+                kc + '/prod/protocol/openid-connect/token',
+            'acl.oidc.device.authorization.endpoint':
+                kc + '/prod/protocol/openid-connect/auth/device'}
+        cfg = self._resolve(good, questdb_url='https://qdb.example.com:9000',
+                            issuer=kc + '/prod')
+        self.assertEqual(cfg.token_endpoint,
+                         kc + '/prod/protocol/openid-connect/token')
+
+    def test_issuer_path_scope_skips_explicit_endpoints(self):
+        # Caller-explicit endpoints are trusted and NOT path-checked, so an IdP
+        # that places endpoints outside the issuer path (e.g. Azure AD) still
+        # works when the endpoints are passed explicitly.
+        cfg = self._resolve(
+            {'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb'},
+            questdb_url='https://qdb.example.com:9000',
+            issuer='https://idp.example.com/realms/prod',
+            token_endpoint='https://idp.example.com/oauth2/v2.0/token',
+            device_authorization_endpoint=(
+                'https://idp.example.com/oauth2/v2.0/devicecode'))
+        self.assertEqual(cfg.token_endpoint,
+                         'https://idp.example.com/oauth2/v2.0/token')
 
 
 @unittest.skipIf(pd is None, 'pandas not installed')
@@ -1164,6 +1218,19 @@ class TestConcurrency(AuthTestBase):
         self.assertEqual(results.get('b'), ID_TOKEN)
         self.assertEqual(self.state.device_requests, 1)  # no second prompt
 
+    def test_fast_path_does_not_write_tokens_field(self):
+        # M4: the lock-free fast path must be READ-ONLY. Serving a valid token
+        # from the shared cache must not write self._tokens — only the locked
+        # slow path (and _store/clear) write it — so the lock-free reader can't
+        # race a concurrent write (lost update / clear() resurrection).
+        auth = self.make_auth()
+        valid = TokenSet(access_token='a', id_token=ID_TOKEN, refresh_token='r',
+                         expires_at=self._clock.now() + 3600)
+        auth._cache.store(auth.cache_key, valid)
+        self.assertIsNone(auth._tokens)            # nothing published yet
+        self.assertEqual(auth.token(), ID_TOKEN)   # served via the fast path
+        self.assertIsNone(auth._tokens)            # fast path did not write it
+
 
 class TestAdapters(unittest.TestCase):
     """Connection adapters: tested via injected fake modules (the real
@@ -1306,6 +1373,52 @@ class TestAdapters(unittest.TestCase):
         with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
             qdb.sender()
         self.assertEqual(captured['conf'], 'https::addr=[::1]:9000;')
+
+    def test_sender_forwards_ca_bundle_as_tls_roots(self):
+        # M2: an https Sender must inherit the private CA bundle (as tls_roots)
+        # so it trusts the same roots as the REST/IdP paths; http does not, and
+        # an explicit tls_roots= is never overridden.
+        import tempfile
+
+        def captured_conf_kwargs(url, *, ca_bundle, **sender_kwargs):
+            auth = _FakeAuth('TKN')
+            auth._ca_bundle = ca_bundle
+            qdb = QuestDB(url, auth, insecure=True)
+            captured = {}
+            fake = types.ModuleType('questdb.ingress')
+
+            class Sender:
+                @staticmethod
+                def from_conf(conf, *, token=None, **kw):
+                    captured['kw'] = kw
+                    return 'S'
+
+            fake.Sender = Sender
+            with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
+                qdb.sender(**sender_kwargs)
+            return captured['kw']
+
+        with tempfile.NamedTemporaryFile('w', suffix='.pem', delete=False) as f:
+            f.write('-----dummy-----')
+            ca = f.name
+        try:
+            # https + a real CA file -> forwarded as tls_roots.
+            self.assertEqual(
+                captured_conf_kwargs('https://db.example.com:9000',
+                                     ca_bundle=ca).get('tls_roots'), ca)
+            # http -> never forwarded (TLS roots are irrelevant).
+            self.assertNotIn(
+                'tls_roots',
+                captured_conf_kwargs('http://db.example.com:9000',
+                                     ca_bundle=ca))
+            # An explicit tls_roots= wins over the inherited bundle.
+            self.assertEqual(
+                captured_conf_kwargs('https://db.example.com:9000',
+                                     ca_bundle=ca,
+                                     tls_roots='/other/ca.pem').get('tls_roots'),
+                '/other/ca.pem')
+        finally:
+            os.unlink(ca)
 
     def test_psycopg_uses_bare_ipv6_host(self):
         # psycopg takes host and port separately, so the IPv6 host is passed
@@ -1555,6 +1668,22 @@ class TestEndpointValidation(unittest.TestCase):
                 device_authorization_endpoint='https://idp.example.com/device',
                 token_endpoint='https://attacker.example/token',
                 renderer=Renderer())
+
+    def test_endpoint_path_under_issuer(self):
+        # M1: segment-aware path containment used to isolate path-based realms.
+        from questdb.auth._discovery import _endpoint_path_under_issuer as under
+        iss = 'https://idp.example.com/realms/prod'
+        self.assertTrue(under(iss + '/protocol/openid-connect/token', iss))
+        self.assertTrue(under(iss, iss))                       # exact path
+        self.assertTrue(under(iss + '/', iss))                 # trailing slash
+        self.assertFalse(under('https://idp.example.com/realms/EVIL/token', iss))
+        self.assertFalse(  # not a *segment* prefix: prod != production
+            under('https://idp.example.com/realms/production/token', iss))
+        # A root issuer (no path) constrains the origin only -> any path is in.
+        self.assertTrue(
+            under('https://idp.example.com/anything', 'https://idp.example.com'))
+        self.assertTrue(
+            under('https://idp.example.com/x', 'https://idp.example.com/'))
 
 
 class TestCacheKey(unittest.TestCase):
