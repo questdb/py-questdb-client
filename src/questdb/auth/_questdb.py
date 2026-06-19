@@ -365,7 +365,9 @@ def connect(
         until the first call that needs a token.
     :param opts: Forwarded to :meth:`OidcDeviceAuth.from_questdb` (e.g.
         ``client_id``, ``scope``, ``audience``, ``issuer``, ``open_browser``,
-        ``qr``, ``ca_bundle``).
+        ``qr``, ``ca_bundle``, ``timeout`` — the per-request IdP network
+        timeout, which also bounds how long a stalled IdP can hold the
+        token-acquisition lock).
     """
     auth = OidcDeviceAuth.from_questdb(
         url, flow=flow, cache=cache, insecure=insecure, **opts)

@@ -36,6 +36,7 @@ Run directly::
 """
 
 import base64
+import contextlib
 import importlib.util
 import json
 import os
@@ -104,6 +105,41 @@ def _jwt(claims):
 ID_TOKEN = _jwt({'sub': 'user-1', 'email': 'alice@example.com',
                  'groups': ['analysts']})
 ACCESS_TOKEN = _jwt({'sub': 'user-1', 'scope': 'openid'})
+
+
+@contextlib.contextmanager
+def _raw_response_server(status, content_type, body):
+    """A throwaway HTTP server that returns one fixed (status, type, body).
+
+    Used to exercise the transport's handling of responses the scripted mock
+    IdP can't produce (non-JSON 2xx, non-dict JSON, non-2xx) on the token /
+    device / settings / discovery endpoints. Yields the base URL.
+    """
+    class _H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self):
+            self.send_response(status)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._send()
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get('Content-Length', 0)))
+            self._send()
+
+    srv = http.server.HTTPServer(('127.0.0.1', 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f'http://127.0.0.1:{srv.server_port}'
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 class FakeClock:
@@ -513,6 +549,47 @@ class TestDeviceFlow(AuthTestBase):
         auth = self.make_auth()
         self.assertEqual(auth.token(), ID_TOKEN)
 
+    def test_idp_requests_use_configured_timeout(self):
+        # The device-code / poll / refresh POSTs must use the configured
+        # timeout, so a stalled IdP can't pin the acquisition lock for the
+        # urllib default (30s) per network leg. See M3.
+        seen = []
+
+        def fake_post_form(url, form, *, ctx=None, insecure=False,
+                           timeout=None):
+            seen.append(timeout)
+            if url.endswith('/device'):
+                return 200, {'device_code': 'D', 'user_code': 'U',
+                             'verification_uri': 'https://idp/d',
+                             'expires_in': 600, 'interval': 5}
+            return 200, {'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+                         'token_type': 'Bearer', 'expires_in': 3600}
+
+        from questdb.auth import _device
+        auth = self.make_auth(timeout=3)
+        with mock.patch.object(_device, 'post_form', fake_post_form):
+            self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertTrue(seen)
+        self.assertTrue(
+            all(t == 3 for t in seen),
+            f'IdP POSTs did not all use the configured timeout: {seen}')
+
+    def test_connect_lazy_defers_signin(self):
+        # eager=False must return a session WITHOUT running the device flow; the
+        # first token-needing call then triggers exactly one sign-in. See M4.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.scope': 'openid groups',
+            'acl.oidc.groups.encoded.in.token': True,
+            'acl.oidc.token.endpoint': self.base + '/token',
+            'acl.oidc.device.authorization.endpoint': self.base + '/device'}}
+        qdb = connect(self.base, insecure=True, eager=False,
+                      renderer=Renderer(), interactive=True, _clock=FakeClock())
+        self.assertEqual(self.state.device_requests, 0)  # deferred
+        self.assertEqual(qdb.token(), ID_TOKEN)           # first use signs in
+        self.assertEqual(self.state.device_requests, 1)
+
     def test_open_browser_rejects_dangerous_scheme(self):
         auth = self.make_auth(open_browser=True)
         with mock.patch('webbrowser.open') as opener:
@@ -851,6 +928,20 @@ class TestDiscovery(AuthTestBase):
             self.base, issuer=self.base, insecure=True, renderer=Renderer())
         self.assertEqual(auth.config.device_authorization_endpoint,
                          self.base + '/device')
+
+    def test_well_known_404_raises_oidc_error(self):
+        # issuer pinned (so the IdP fallback is allowed), but the .well-known
+        # document 404s: get_json maps the non-2xx to OidcError rather than a
+        # silent miss that would later masquerade as a missing-endpoint error.
+        # See M4.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': self.base + '/token'}}
+        self.state.well_known = None  # the handler returns 404 for /.well-known
+        with self.assertRaises(OidcError):
+            OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                        insecure=True)
 
 
 class TestInsecureSettingsGuard(unittest.TestCase):
@@ -1382,6 +1473,18 @@ class TestConfigHelpers(unittest.TestCase):
         self.assertEqual(settings_config({'acl.oidc.client.id': 'q'}),
                          {'acl.oidc.client.id': 'q'})
 
+    def test_make_cache_variants(self):
+        # The cache factory resolves the documented specs and rejects an
+        # unknown one with a typed error. See M4.
+        from questdb.auth._cache import make_cache, MemoryCache, NullCache
+        self.assertIsInstance(make_cache('memory'), MemoryCache)
+        self.assertIsInstance(make_cache(None), NullCache)
+        self.assertIsInstance(make_cache('none'), NullCache)
+        custom = MemoryCache()
+        self.assertIs(make_cache(custom), custom)  # a TokenCache passes through
+        with self.assertRaises(OidcConfigError):
+            make_cache('disk')
+
 
 class TestEndpointValidation(unittest.TestCase):
     def setUp(self):
@@ -1634,6 +1737,40 @@ class TestTransportSecurity(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
+    def test_post_form_non_json_2xx_raises_oidc_error(self):
+        # A 2xx body from the token/device endpoint that isn't JSON (e.g. an
+        # HTML login page from a proxy in front of the IdP) must surface as
+        # OidcError, not a raw decoder error. Only /exec had this before. M4.
+        from questdb.auth import _http
+        with _raw_response_server(200, 'text/html', b'<html>login</html>') as b:
+            with self.assertRaises(OidcError):
+                _http.post_form(b + '/token', {'a': 'b'}, timeout=5)
+
+    def test_post_form_non_dict_json_raises_oidc_error(self):
+        # A 2xx JSON array (valid JSON but not an object) from the token
+        # endpoint must surface as OidcError. See M4.
+        from questdb.auth import _http
+        with _raw_response_server(200, 'application/json', b'[1, 2, 3]') as b:
+            with self.assertRaises(OidcError):
+                _http.post_form(b + '/token', {'a': 'b'}, timeout=5)
+
+    def test_get_json_non_2xx_raises_oidc_error(self):
+        # A non-2xx /settings or discovery response must surface as OidcError.
+        # See M4.
+        from questdb.auth import _http
+        with _raw_response_server(500, 'text/plain', b'boom') as b:
+            with self.assertRaises(OidcError):
+                _http.get_json(b + '/settings', timeout=5)
+
+    def test_get_json_non_json_2xx_raises_oidc_error(self):
+        # A 2xx /settings or discovery body that isn't JSON must surface as
+        # OidcError, not a raw JSONDecodeError. See M4.
+        from questdb.auth import _http
+        with _raw_response_server(200, 'text/html', b'<html>x</html>') as b:
+            with self.assertRaises(OidcError):
+                _http.get_json(
+                    b + '/.well-known/openid-configuration', timeout=5)
+
 
 class TestRendererSecurity(unittest.TestCase):
     """The Jupyter prompt must never turn an IdP-supplied URL into a
@@ -1732,6 +1869,16 @@ class TestRendererSecurity(unittest.TestCase):
             'verification_uri': 'https://idp.example.com/' + chr(0x202e)})
         self.assertNotIn(chr(0x202e), text)
         self.assertIn('idp.example.com', text)
+
+    def test_qr_helpers_degrade_without_qrcode(self):
+        # The QR helpers must degrade gracefully (return None), never raise,
+        # when `qrcode` is absent or the data is empty. See M4.
+        from questdb.auth import _render
+        with mock.patch.dict(sys.modules, {'qrcode': None}):
+            self.assertIsNone(_render._qr_ascii('https://idp/x'))
+            self.assertIsNone(_render._qr_data_uri('https://idp/x'))
+        self.assertIsNone(_render._qr_ascii(''))
+        self.assertIsNone(_render._qr_data_uri(''))
 
 
 if __name__ == '__main__':

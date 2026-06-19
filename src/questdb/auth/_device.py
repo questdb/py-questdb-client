@@ -166,6 +166,7 @@ class OidcDeviceAuth:
             qr: bool = False,
             renderer: Optional[Renderer] = None,
             default_interval: int = 5,
+            timeout: float = 30,
             _clock=None):  # injectable time source for testing
         if not client_id:
             raise OidcConfigError('client_id is required')
@@ -203,6 +204,13 @@ class OidcDeviceAuth:
         self.open_browser = open_browser
         self._interactive = interactive
         self._default_interval = default_interval
+        # Per-request network timeout for every IdP call (device-code request,
+        # each poll, refresh). It bounds how long a single network leg can pin
+        # the acquisition lock if the IdP stalls: lower it to reduce lock-hold
+        # (and connection-pool starvation) during an IdP outage; raise it for a
+        # slow IdP. The total interactive-poll duration is separately capped by
+        # _MAX_DEVICE_CODE_LIFETIME.
+        self._timeout = timeout
         self._cache = make_cache(cache)
         self._ctx = build_ssl_context(ca_bundle)
         self._renderer = renderer if renderer is not None else make_renderer(qr=qr)
@@ -243,6 +251,7 @@ class OidcDeviceAuth:
             interactive: Optional[bool] = None,
             qr: bool = False,
             renderer: Optional[Renderer] = None,
+            timeout: float = 30,
             _clock=None) -> 'OidcDeviceAuth':  # injectable time source
         """
         Build an :class:`OidcDeviceAuth` by discovering config from QuestDB.
@@ -265,7 +274,8 @@ class OidcDeviceAuth:
             issuer=issuer,
             discovery_url=discovery_url,
             ctx=ctx,
-            insecure=insecure)
+            insecure=insecure,
+            timeout=timeout)
         return cls(
             client_id=cfg.client_id,
             device_authorization_endpoint=cfg.device_authorization_endpoint,
@@ -281,6 +291,7 @@ class OidcDeviceAuth:
             interactive=interactive,
             qr=qr,
             renderer=renderer,
+            timeout=timeout,
             _clock=_clock)
 
     # -- public API ---------------------------------------------------------
@@ -462,8 +473,10 @@ class OidcDeviceAuth:
         # IdP POSTs carry the device code / refresh token, so they are always
         # required to be https (loopback http is fine for local dev); the
         # user's `insecure` flag — which is about the QuestDB link — never
-        # downgrades them.
-        return post_form(url, form, ctx=self._ctx, insecure=False)
+        # downgrades them. The timeout bounds how long this leg can hold the
+        # acquisition lock if the IdP stalls.
+        return post_form(
+            url, form, ctx=self._ctx, insecure=False, timeout=self._timeout)
 
     def _refresh(self, tokens: TokenSet) -> TokenSet:
         status, body = self._idp_post(
