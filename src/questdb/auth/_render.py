@@ -74,13 +74,20 @@ def detect_interactive() -> bool:
 
 def _verification_uri(resp: Dict[str, Any]) -> str:
     # RFC 8628 uses ``verification_uri``; some IdPs (older Google) use
-    # ``verification_url``.
-    return resp.get('verification_uri') or resp.get('verification_url') or ''
+    # ``verification_url``. The device response is untrusted: coerce to str so a
+    # non-string value (e.g. a JSON number) can't crash the renderer
+    # (``re.sub`` / ``html.escape``) with a raw TypeError before the prompt is
+    # even shown — matching the defensive ``str(user_code)`` at the call sites.
+    uri = resp.get('verification_uri') or resp.get('verification_url') or ''
+    return uri if isinstance(uri, str) else ''
 
 
 def _verification_uri_complete(resp: Dict[str, Any]) -> Optional[str]:
-    return (resp.get('verification_uri_complete')
-            or resp.get('verification_url_complete'))
+    # Coerce to str / None for the same untrusted-input reason as
+    # _verification_uri (a non-string would crash the renderer / _safe_link_url).
+    uri = (resp.get('verification_uri_complete')
+           or resp.get('verification_url_complete'))
+    return uri if isinstance(uri, str) else None
 
 
 def _safe_link_url(url: Optional[str]) -> Optional[str]:
@@ -93,7 +100,9 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     ``data:`` URL that executes in the notebook DOM when clicked
     (``html.escape`` guards markup, not the URL scheme).
     """
-    if not url:
+    if not url or not isinstance(url, str):
+        # A non-string (e.g. a JSON number from an untrusted device response)
+        # has no scheme to vet and would make urlparse raise; treat it as unsafe.
         return None
     try:
         scheme = urllib.parse.urlparse(url).scheme.lower()

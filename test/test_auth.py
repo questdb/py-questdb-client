@@ -549,6 +549,20 @@ class TestDeviceFlow(AuthTestBase):
         auth = self.make_auth()
         self.assertEqual(auth.token(), ID_TOKEN)
 
+    def test_deeply_nested_jwt_payload_does_not_crash(self):
+        # A hostile/buggy IdP returning an id_token whose payload base64-decodes
+        # to deeply-nested JSON must not crash token() with a raw RecursionError
+        # from the best-effort identity decode (RecursionError is not a
+        # ValueError); the decode degrades to no-identity and the token is still
+        # returned. See _decode_jwt_claims.
+        payload = base64.urlsafe_b64encode(
+            (('[' * 60000) + (']' * 60000)).encode()).rstrip(b'=').decode()
+        nested = f'aaa.{payload}.sig'
+        self.state.token_script = [(200, {
+            'id_token': nested, 'token_type': 'Bearer', 'expires_in': 3600})]
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), nested)
+
     def test_idp_requests_use_configured_timeout(self):
         # The device-code / poll / refresh POSTs must use the configured
         # timeout, so a stalled IdP can't pin the acquisition lock for the
@@ -1067,6 +1081,24 @@ class TestInsecureSettingsGuard(unittest.TestCase):
                 'https://idp.example.com/oauth2/v2.0/devicecode'))
         self.assertEqual(cfg.token_endpoint,
                          'https://idp.example.com/oauth2/v2.0/token')
+
+    def test_issuer_path_scope_rejects_dot_segment_traversal(self):
+        # A tampered /settings can't slip a different realm past the issuer-path
+        # scope with a '..' segment: '/realms/prod/../EVIL/...' satisfies a naive
+        # prefix test but the IdP normalizes it to the EVIL realm. The dotted
+        # path must be rejected (even percent-encoded). See
+        # _endpoint_path_under_issuer.
+        kc = 'https://idp.example.com/realms'
+        for ep in (kc + '/prod/../EVIL/protocol/openid-connect',
+                   kc + '/prod/%2e%2e/EVIL/protocol/openid-connect'):
+            evil = {
+                'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+                'acl.oidc.token.endpoint': ep + '/token',
+                'acl.oidc.device.authorization.endpoint': ep + '/auth/device'}
+            with self.assertRaises(OidcConfigError) as cm:
+                self._resolve(evil, questdb_url='https://qdb.example.com:9000',
+                              issuer=kc + '/prod')
+            self.assertIn('issuer', str(cm.exception).lower())
 
 
 @unittest.skipIf(pd is None, 'pandas not installed')
@@ -1684,6 +1716,12 @@ class TestEndpointValidation(unittest.TestCase):
             under('https://idp.example.com/anything', 'https://idp.example.com'))
         self.assertTrue(
             under('https://idp.example.com/x', 'https://idp.example.com/'))
+        # A '.' / '..' segment (even percent-encoded) is rejected: urllib sends
+        # the dotted path verbatim and the IdP / proxy normalizes it to a
+        # DIFFERENT realm, which an origin check can't catch.
+        self.assertFalse(under(iss + '/../EVIL/protocol/token', iss))
+        self.assertFalse(under(iss + '/%2e%2e/EVIL/token', iss))
+        self.assertFalse(under(iss + '/./token', iss))
 
 
 class TestCacheKey(unittest.TestCase):
@@ -2036,6 +2074,28 @@ class TestRendererSecurity(unittest.TestCase):
             self.assertIsNone(_render._qr_data_uri('https://idp/x'))
         self.assertIsNone(_render._qr_ascii(''))
         self.assertIsNone(_render._qr_data_uri(''))
+
+    def test_non_string_verification_uri_does_not_crash(self):
+        # A hostile/buggy device response with a non-string verification_uri /
+        # _complete (e.g. a JSON number or list) must not crash the renderer
+        # with a raw TypeError/AttributeError before the prompt is shown; the
+        # field is coerced away. See _verification_uri / _safe_link_url.
+        import io
+        from questdb.auth._render import (
+            format_prompt, TerminalRenderer, JupyterRenderer)
+        resp = {'user_code': 'WDJB-MJHT', 'verification_uri': 12345,
+                'verification_uri_complete': ['not', 'a', 'str'],
+                'expires_in': 600, 'interval': 5}
+        self.assertIn('WDJB-MJHT', format_prompt(resp))         # plain-text path
+        TerminalRenderer(stream=io.StringIO()).on_prompt(resp)  # must not raise
+        captured = {}
+
+        class _Cap(JupyterRenderer):
+            def _display(self, html_str):
+                captured['html'] = html_str
+
+        _Cap().on_prompt(resp)                                  # must not raise
+        self.assertNotIn('<a ', captured['html'])               # no link, non-str
 
 
 if __name__ == '__main__':

@@ -37,6 +37,7 @@ Resolution order, mirroring the design doc:
 from __future__ import annotations
 
 import ssl
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -171,11 +172,22 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     redirecting credentials to a different tenant on a path-based multi-tenant
     IdP (Keycloak issuers are ``https://host/realms/{realm}``), which an
     origin-only check can't catch.
+
+    A ``.`` / ``..`` path segment is rejected outright: urllib puts the dotted
+    path on the wire verbatim, but the IdP (or a reverse proxy in front of it)
+    normalizes it, so ``/realms/prod/../attacker/token`` would satisfy a naive
+    prefix test yet resolve server-side to a *different* realm — defeating the
+    very isolation this check exists to provide. Percent-encoded dot segments
+    (``%2e``) are decoded before the segment scan, since a server may unescape
+    before normalizing; a legitimate endpoint path never contains dot segments.
     """
     base = (safe_urlparse(issuer)[0].path or '').rstrip('/')
     if not base:
         return True
     ep = safe_urlparse(endpoint)[0].path or ''
+    decoded_segments = urllib.parse.unquote(ep).split('/')
+    if '.' in decoded_segments or '..' in decoded_segments:
+        return False
     return ep == base or ep.startswith(base + '/')
 
 

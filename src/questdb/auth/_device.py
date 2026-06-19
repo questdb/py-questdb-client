@@ -97,7 +97,11 @@ def _decode_jwt_claims(token: Optional[str]) -> Dict[str, Any]:
         raw = base64.urlsafe_b64decode(payload.encode('ascii'))
         claims = json.loads(raw)
         return claims if isinstance(claims, dict) else {}
-    except (ValueError, binascii.Error, UnicodeDecodeError):
+    except (ValueError, binascii.Error, UnicodeDecodeError, RecursionError):
+        # RecursionError: a deeply-nested JSON payload exhausts the decoder's
+        # stack; it is not a ValueError, so list it explicitly so a hostile or
+        # buggy token response can't crash token()/refresh with a raw exception
+        # here (mirrors the guards in _http.get_json / post_form / QuestDB.sql).
         return {}
 
 
@@ -125,6 +129,16 @@ class OidcDeviceAuth:
     serialized so concurrent callers don't double-prompt, while a valid cached
     token is returned without blocking on another thread's in-progress
     sign-in.
+
+    **Concurrency note.** The serialization lock is held for the whole of an
+    interactive sign-in (up to the device-code lifetime, ~30 min). A caller
+    that already holds a *valid* cached token never blocks, but a caller whose
+    token is missing or expired blocks behind whoever is signing in; if that
+    sign-in is abandoned, each waiter then re-prompts in turn. When several
+    threads share one auth object (e.g. a SQLAlchemy / psycopg connection
+    pool), sign in once up front — :func:`questdb.auth.connect` does this for
+    you with ``eager=True`` (the default), so the interactive flow runs a
+    single time on the main thread before the pool opens connections.
 
     .. code-block:: python
 
