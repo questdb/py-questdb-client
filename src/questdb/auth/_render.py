@@ -119,19 +119,27 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
             f'rel="noopener noreferrer">{label}</a>')
 
 
-_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+# C0/C1 control chars (incl. ESC, which drives ANSI escape sequences) plus the
+# Unicode bidi-control, zero-width and line/paragraph-separator ranges. All can
+# spoof a terminal prompt: U+202E (RIGHT-TO-LEFT OVERRIDE) reverses displayed
+# text to disguise a URL's host; U+2028/U+2029 inject fake lines; zero-width
+# chars hide content. Stripped from untrusted device-response fields.
+_CONTROL_CHARS = re.compile(
+    r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]')
 
 
 def _strip_control(text: Optional[str]) -> str:
     """
-    Strip C0/C1 control characters (incl. ESC) from an untrusted string before
-    it is written to a terminal.
+    Strip control / format characters from an untrusted string before it is
+    written to a terminal.
 
     The verification URL, user code and IdP error strings come from the device-
     authorization response (untrusted). Writing them verbatim to a TTY would let
-    a hostile or MITM'd response inject ANSI escape sequences — cursor moves,
-    screen clears — to spoof the prompt or hide the real sign-in URL. The
-    Jupyter renderer html-escapes its output; the plain-text path needs this.
+    a hostile or MITM'd response inject ANSI escape sequences (C0/C1 control
+    chars — cursor moves, screen clears) or Unicode bidi overrides / zero-width
+    / line separators to spoof the prompt or hide the real sign-in URL (e.g.
+    U+202E visually reverses the displayed host). The Jupyter renderer
+    html-escapes its output; the plain-text path needs this.
     """
     if not text:
         return ''

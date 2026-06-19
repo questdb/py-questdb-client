@@ -183,11 +183,12 @@ class QuestDB:
                 f'QuestDB query failed (HTTP {resp.status}): {detail}')
         try:
             data = resp.json()
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             # A 2xx body that isn't JSON (e.g. an HTML error/login page from a
-            # reverse proxy or captive portal) must surface as a clean
-            # OidcError, not a raw JSONDecodeError. Mirrors the error path and
-            # post_form().
+            # reverse proxy or captive portal), or deeply-nested JSON that
+            # exhausts the decoder's stack (RecursionError, not a ValueError),
+            # must surface as a clean OidcError, not a raw decoder exception.
+            # Mirrors the error path and post_form().
             raise OidcError(
                 'QuestDB returned a non-JSON success response from /exec: '
                 f'{resp.text()[:300]}')

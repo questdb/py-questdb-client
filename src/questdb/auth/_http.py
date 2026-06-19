@@ -64,11 +64,21 @@ def build_ssl_context(ca_bundle: Optional[str] = None) -> ssl.SSLContext:
         ca_bundle
         or os.environ.get('REQUESTS_CA_BUNDLE')
         or os.environ.get('SSL_CERT_FILE'))
-    if ca:
+    if not ca:
+        return ssl.create_default_context()
+    # A missing / unreadable / invalid bundle makes the stdlib raise a raw
+    # FileNotFoundError or ssl.SSLError; map it to the package's typed error so
+    # a mistyped ca_bundle path (or env var) fails clearly instead of leaking a
+    # bare stdlib exception.
+    try:
         if os.path.isdir(ca):
             return ssl.create_default_context(capath=ca)
         return ssl.create_default_context(cafile=ca)
-    return ssl.create_default_context()
+    except (OSError, ssl.SSLError) as e:
+        raise OidcConfigError(
+            f'Could not load the CA bundle {ca!r}: {e}. Check the path points '
+            'to a readable PEM/DER certificate file (or a directory of them).'
+        ) from e
 
 
 class HttpResponse:
@@ -96,17 +106,18 @@ def safe_urlparse(url: str) -> tuple:
     """
     ``urllib.parse.urlparse(url)`` paired with its port, but with a typed error.
 
-    ``ParseResult.port`` raises a bare ``ValueError`` for a non-integer port
-    (e.g. ``https://idp:notaport``); re-raise it as :class:`OidcConfigError` so
-    a malformed endpoint URL stays within the package's error contract instead
-    of escaping as a raw ``ValueError``. Returns ``(parts, port)``.
+    Both ``urlparse`` itself (e.g. ``https://[::1`` — a malformed IPv6 literal)
+    and ``ParseResult.port`` (e.g. ``https://idp:notaport`` — a non-integer
+    port) raise a bare ``ValueError``; re-raise it as :class:`OidcConfigError`
+    so a malformed endpoint URL stays within the package's error contract
+    instead of escaping as a raw ``ValueError``. Returns ``(parts, port)``.
     """
-    parts = urllib.parse.urlparse(url)
     try:
+        parts = urllib.parse.urlparse(url)
         return parts, parts.port
     except ValueError as e:
         raise OidcConfigError(
-            f'Malformed endpoint URL {url!r}: invalid port.') from e
+            f'Malformed endpoint URL {url!r}: {e}.') from e
 
 
 def _is_loopback(host: Optional[str]) -> bool:
@@ -123,7 +134,9 @@ def _is_loopback(host: Optional[str]) -> bool:
 
 
 def _require_secure(url: str, insecure: bool) -> None:
-    parts = urllib.parse.urlparse(url)
+    # safe_urlparse maps a malformed URL (bad IPv6 literal / non-integer port)
+    # to OidcConfigError instead of letting a bare ValueError escape.
+    parts, _ = safe_urlparse(url)
     scheme = parts.scheme.lower()
     if scheme == 'https':
         return
@@ -247,7 +260,9 @@ def get_json(
             f'HTTP {resp.status} from {url}: {resp.text()[:200]}')
     try:
         return resp.json()
-    except (ValueError, UnicodeDecodeError) as e:
+    except (ValueError, UnicodeDecodeError, RecursionError) as e:
+        # RecursionError: deeply-nested JSON exhausts the decoder's stack; it is
+        # not a ValueError, so catch it explicitly to keep the typed contract.
         raise OidcError(f'Invalid JSON from {url}: {e}') from e
 
 
@@ -270,7 +285,9 @@ def post_form(
         insecure=insecure)
     try:
         parsed = resp.json()
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        # RecursionError: deeply-nested JSON exhausts the decoder's stack; not a
+        # ValueError, so catch it explicitly to keep the typed contract.
         if resp.ok:
             raise OidcError(
                 f'Expected JSON from {url}, got: {resp.text()[:200]}')

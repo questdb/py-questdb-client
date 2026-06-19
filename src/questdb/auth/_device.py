@@ -437,7 +437,9 @@ class OidcDeviceAuth:
     def _tokenset_from_response(self, body: Dict[str, Any]) -> TokenSet:
         try:
             expires_in = int(body.get('expires_in', _DEFAULT_EXPIRES_IN))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: a JSON Infinity (json.loads accepts it) → int(inf);
+            # it is not a ValueError, so list it to keep the typed contract.
             expires_in = _DEFAULT_EXPIRES_IN
         if expires_in <= 0:
             # A non-positive lifetime would mark a just-issued token as already
@@ -539,7 +541,7 @@ class OidcDeviceAuth:
         device_code = resp['device_code']
         try:
             interval = int(resp.get('interval', self._default_interval))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             interval = self._default_interval
         # At least 1s (RFC 8628 floor), and capped so a hostile/huge value can't
         # pin the polling thread (which holds the acquisition lock) in one
@@ -547,7 +549,7 @@ class OidcDeviceAuth:
         interval = min(_MAX_POLL_INTERVAL, max(1, interval))
         try:
             expires_in = int(resp.get('expires_in', _DEFAULT_DEVICE_CODE_LIFETIME))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             expires_in = _DEFAULT_DEVICE_CODE_LIFETIME
         # A non-positive lifetime would time the flow out before the first poll
         # (the user has already been shown the code); treat it as unknown. Cap

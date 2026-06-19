@@ -491,6 +491,28 @@ class TestDeviceFlow(AuthTestBase):
         self.assertTrue(t.is_valid(t.issued_at))    # usable right after issue
         self.assertFalse(t.is_valid(t.expires_at))  # but still does expire
 
+    def test_overflow_expires_in_treated_as_unknown(self):
+        # A non-finite expires_in (JSON Infinity, which json.loads accepts and
+        # int(inf) turns into an OverflowError — not a ValueError) must not
+        # crash; treat it as unknown so the token stays usable. See M1.
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'token_type': 'Bearer', 'expires_in': float('inf')})]
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertTrue(auth._tokens.is_valid(self._clock.now()))
+
+    def test_overflow_device_timing_fields_do_not_crash(self):
+        # Non-finite interval / expires_in in the device-auth response (JSON
+        # Infinity) must be treated as unknown, not raise OverflowError. See M1.
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'X',
+            'verification_uri': 'https://idp/device',
+            'expires_in': float('inf'), 'interval': float('inf')}
+        self.state.token_script = [(200, None)]  # success on the first poll
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), ID_TOKEN)
+
     def test_open_browser_rejects_dangerous_scheme(self):
         auth = self.make_auth(open_browser=True)
         with mock.patch('webbrowser.open') as opener:
@@ -1391,6 +1413,19 @@ class TestEndpointValidation(unittest.TestCase):
             self._validate('https://idp:notaport/token',
                            'https://idp:notaport/device')
 
+    def test_malformed_ipv6_endpoint_raises_config_error(self):
+        # A malformed IPv6 literal makes urllib.parse.urlparse() itself raise
+        # ValueError (before .port is read); it must surface as OidcConfigError,
+        # not a bare ValueError escaping the typed-error contract. See M1.
+        with self.assertRaises(OidcConfigError):
+            self._validate('https://[::1', 'https://[::1')
+        with self.assertRaises(OidcConfigError):
+            OidcDeviceAuth(
+                client_id='questdb',
+                device_authorization_endpoint='https://[::1',
+                token_endpoint='https://[::1',
+                renderer=Renderer())
+
     def test_explicit_constructor_enforces_co_location(self):
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth(
@@ -1417,6 +1452,14 @@ class TestCacheKey(unittest.TestCase):
         from questdb.auth._device import _normalize_url
         with self.assertRaises(OidcConfigError):
             _normalize_url('https://idp:notaport/token')
+
+    def test_normalize_url_malformed_ipv6_raises_config_error(self):
+        # cache_key normalization must also map a malformed IPv6 literal (which
+        # makes urlparse itself raise) to OidcConfigError, not a bare
+        # ValueError. See M1.
+        from questdb.auth._device import _normalize_url
+        with self.assertRaises(OidcConfigError):
+            _normalize_url('https://[::1')
 
     def test_realm_path_distinguishes_key(self):
         # Multi-tenant IdP: same host, different realm path -> distinct keys
@@ -1528,6 +1571,69 @@ class TestTransportSecurity(unittest.TestCase):
             request('GET', 'https://questdb.example.com:notaport/settings',
                     timeout=5)
 
+    def test_require_secure_rejects_malformed_ipv6(self):
+        # _require_secure routes through safe_urlparse, so a malformed IPv6
+        # endpoint raises OidcConfigError instead of a bare ValueError (urlparse
+        # raises before the scheme is even inspected). See M1.
+        from questdb.auth._http import _require_secure
+        with self.assertRaises(OidcConfigError):
+            _require_secure('https://[::1', insecure=False)
+        # A well-formed IPv6 URL is still accepted (loopback http is allowed).
+        _require_secure('http://[::1]:8080/x', insecure=False)
+
+    def test_bad_ca_bundle_raises_config_error(self):
+        # A missing or invalid CA bundle path (explicit or via env) must surface
+        # as OidcConfigError, not a raw FileNotFoundError / ssl.SSLError. See M1.
+        import tempfile
+        from questdb.auth._http import build_ssl_context
+        with self.assertRaises(OidcConfigError):
+            build_ssl_context('/no/such/path/ca.pem')
+        with tempfile.NamedTemporaryFile('w', suffix='.pem', delete=False) as f:
+            f.write('not a certificate')
+            bad = f.name
+        try:
+            with self.assertRaises(OidcConfigError):
+                build_ssl_context(bad)
+        finally:
+            os.unlink(bad)
+
+    def test_deeply_nested_json_raises_oidc_error(self):
+        # Deeply-nested JSON makes json.loads raise RecursionError (not a
+        # ValueError); get_json / post_form must map it to OidcError rather than
+        # let it escape the typed-error contract. See M1.
+        from questdb.auth import _http
+        deep = (b'[' * 100000) + (b']' * 100000)
+
+        class _Deep(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(deep)))
+                self.end_headers()
+                self.wfile.write(deep)
+
+            def do_GET(self):
+                self._send()
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                self._send()
+
+        srv = http.server.HTTPServer(('127.0.0.1', 0), _Deep)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f'http://127.0.0.1:{srv.server_port}'
+        try:
+            with self.assertRaises(OidcError):
+                _http.get_json(base + '/x', timeout=5)
+            with self.assertRaises(OidcError):
+                _http.post_form(base + '/x', {'a': 'b'}, timeout=5)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
 
 class TestRendererSecurity(unittest.TestCase):
     """The Jupyter prompt must never turn an IdP-supplied URL into a
@@ -1607,6 +1713,25 @@ class TestRendererSecurity(unittest.TestCase):
         out = buf.getvalue()
         self.assertNotIn('\x1b', out)
         self.assertNotIn('\x07', out)
+
+    def test_strip_control_removes_bidi_and_zero_width(self):
+        # Beyond C0/C1, untrusted device-response fields must have Unicode
+        # bidi-override / zero-width / line-separator characters stripped before
+        # they reach a TTY: U+202E (RIGHT-TO-LEFT OVERRIDE) can visually reverse
+        # a URL to spoof the sign-in host. chr(cp) avoids embedding the
+        # (invisible) characters in the test source. See M2.
+        from questdb.auth._render import _strip_control, format_prompt
+        for cp in (0x202e, 0x202d, 0x2066, 0x2069, 0x200b, 0x200f,
+                   0x2028, 0x2029, 0xfeff):
+            self.assertEqual(_strip_control('a' + chr(cp) + 'b'), 'ab',
+                             f'U+{cp:04X} not stripped')
+        # Legitimate text (incl. accents / CJK / printable ASCII) is preserved.
+        self.assertEqual(_strip_control('café 北京 user-1'), 'café 北京 user-1')
+        text = format_prompt({
+            'user_code': 'WD' + chr(0x202e) + 'JB',
+            'verification_uri': 'https://idp.example.com/' + chr(0x202e)})
+        self.assertNotIn(chr(0x202e), text)
+        self.assertIn('idp.example.com', text)
 
 
 if __name__ == '__main__':
