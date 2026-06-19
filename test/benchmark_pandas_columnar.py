@@ -27,6 +27,18 @@ import questdb.ingress as qi
 from qwp_ws_ack_server import QwpAckServer
 
 
+def _env_int(name, default):
+    """Read an int knob from the environment, falling back to ``default``.
+
+    Mirrors the Rust column-sender suite knob names (plan s3.3) so a single
+    environment can drive both clients.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
 def git_rev(path):
     try:
         return subprocess.check_output(
@@ -74,6 +86,57 @@ def make_timestamp_series(rows):
     base = np.int64(1_704_067_200_000_000_000)
     values = base + np.arange(rows, dtype=np.int64)
     return pd.Series(values.view("datetime64[ns]"))
+
+
+# Defaults mirror the Rust column-sender suite (COLUMN_SENDER_PERF.md): the
+# headline S1 schema uses a low-cardinality symbol (card 8) and a short
+# (~16 byte) varchar so the numbers line up cross-client.
+DEFAULT_SYM_CARD = 8
+DEFAULT_VARCHAR_LEN = 16
+
+
+def make_s1_narrow(rows, *, sym_card=DEFAULT_SYM_CARD,
+                   varchar_len=DEFAULT_VARCHAR_LEN):
+    """S1 headline schema (QWP_DATAFRAME_BENCH_PLAN.md s3.1).
+
+    5 columns matching the Go/Rust ``qwp-egress-read`` narrow schema so the
+    cross-client parity table lines up:
+
+    * ``ts``    -> TIMESTAMP (designated), ``datetime64[ns]``, monotonic-unique
+    * ``id``    -> LONG, ``int64``
+    * ``price`` -> DOUBLE, ``float64``
+    * ``sym``   -> SYMBOL, pandas ``Categorical`` (cardinality ``sym_card``)
+    * ``note``  -> VARCHAR, Arrow-backed string of length ~``varchar_len``
+
+    ``ts`` is monotonic-unique so the DEDUP ``UPSERT KEYS(ts)`` table can assert
+    ``count() == rows`` even though QWP/WS is at-least-once on reconnect
+    (see plan s3.4).
+    """
+    if pa is None:
+        raise RuntimeError("pyarrow is not installed")
+    if sym_card < 1:
+        raise ValueError("--sym-card must be at least 1")
+    if varchar_len < 1:
+        raise ValueError("--varchar-len must be at least 1")
+    indexes = np.arange(rows, dtype=np.int64)
+    symbols = np.array([f"sym_{index:04}" for index in range(sym_card)])
+    # Build fixed-width ~varchar_len notes from a small rotating template; the
+    # cardinality of the text is intentionally low so VARCHAR cost is dominated
+    # by length, not distinctness.
+    note_templates = [
+        (f"note_{index:03}_" * varchar_len)[:varchar_len]
+        for index in range(min(rows, 1024) or 1)]
+    notes = [note_templates[index % len(note_templates)]
+             for index in range(rows)]
+    return pd.DataFrame({
+        "ts": make_timestamp_series(rows),
+        "id": pd.Series(indexes, dtype=np.int64),
+        "price": pd.Series(indexes.astype(np.float64) * 0.25),
+        "sym": pd.Categorical(symbols[indexes % len(symbols)]),
+        "note": pd.Series(
+            pa.array(notes, type=pa.string()),
+            dtype=pd.ArrowDtype(pa.string())),
+    })
 
 
 def make_numeric_core(rows):
@@ -209,7 +272,25 @@ SUPPORTED_SCHEMAS = {
     "mixed-physical": make_mixed_physical,
     "numeric-core": make_numeric_core,
     "numeric-wide": make_numeric_wide,
+    "s1-narrow": make_s1_narrow,
 }
+
+# Schemas whose generator accepts the --sym-card / --varchar-len knobs.
+KNOB_SCHEMAS = frozenset({"s1-narrow"})
+
+
+def build_schema_df(schema_name, rows, *, sym_card=DEFAULT_SYM_CARD,
+                    varchar_len=DEFAULT_VARCHAR_LEN):
+    """Build a benchmark DataFrame, threading knobs to schemas that accept them.
+
+    Most generators take only ``rows``; the headline S1 schema additionally
+    accepts ``sym_card`` / ``varchar_len``. Keeping the registry uniform lets
+    every call site build any schema without special-casing.
+    """
+    generator = SCHEMAS[schema_name]
+    if schema_name in KNOB_SCHEMAS:
+        return generator(rows, sym_card=sym_card, varchar_len=varchar_len)
+    return generator(rows)
 
 REJECTION_SCHEMAS = {
     "bool-unsigned-decision": make_bool_unsigned_decision,
@@ -292,6 +373,18 @@ CREATE TABLE {table} (
   f04 DOUBLE, f05 DOUBLE, f06 DOUBLE, f07 DOUBLE,
   ts TIMESTAMP
 ) TIMESTAMP(ts) PARTITION BY DAY WAL
+""",
+    # Headline S1 schema. DEDUP UPSERT KEYS(ts) + monotonic-unique ts keeps
+    # count() == rows even though QWP/WS replays frames on reconnect
+    # (at-least-once inflates 5-16%; see plan s3.4).
+    "s1-narrow": """
+CREATE TABLE {table} (
+  id LONG,
+  price DOUBLE,
+  sym SYMBOL,
+  note VARCHAR,
+  ts TIMESTAMP
+) TIMESTAMP(ts) PARTITION BY HOUR WAL DEDUP UPSERT KEYS(ts)
 """,
     "unsupported-object": """
 CREATE TABLE {table} (
@@ -453,6 +546,59 @@ def run_client_ack(
             "rows_ingested": rows * iterations,
         }
     return samples, cpu_samples, last
+
+
+def run_cold_warm_split(df, rows, warm_iters, *, ack_delay_s=0.0):
+    """Measure the cold first-flush vs warm steady-state on one connection.
+
+    The cold/warm axis is the symbol delta-dict + commit mode (plan s3.5):
+    the first frame on a fresh connection sends the full symbol dict from id 0
+    with an immediate commit (warming the server cache); later frames on the
+    same pooled connection send deltas with deferred commit. ``first_frame_sent``
+    travels with the pool slot, so this runs with **zero warmups** to capture
+    the genuine cold flush, then ``warm_iters`` warm flushes on the same slot.
+    """
+    cold_sample = None
+    cold_cpu = None
+    warm_samples = []
+    warm_cpu = []
+    with QwpAckServer(ack_delay_s=ack_delay_s) as server:
+        conf = _make_ack_conf(server)
+        with qi.Client.from_conf(conf) as client:
+            qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
+
+            def once():
+                return client.dataframe(
+                    df, table_name="bench_numeric", at="ts")
+
+            # Cold: the very first flush on a fresh pooled connection.
+            cold_sample, cold_cpu, _ = timed_call(once)
+            # Warm: subsequent flushes reuse the same connection / symbol cache.
+            for _ in range(warm_iters):
+                elapsed, cpu_elapsed, _ = timed_call(once)
+                warm_samples.append(elapsed)
+                warm_cpu.append(cpu_elapsed)
+            columnar_io_stats = _finish_columnar_io_stats(1 + warm_iters)
+
+        stats = server.snapshot()
+        reconnects_after_first = max(0, stats["accepted_connections"] - 1)
+        if reconnects_after_first:
+            raise AssertionError(
+                "cold/warm split opened extra physical connections: "
+                f"{stats['accepted_connections']} accepts (warm flushes must "
+                "reuse the cold connection)")
+        if stats["errors"]:
+            raise AssertionError(
+                "ACK server observed errors: " + "; ".join(stats["errors"]))
+    last = {
+        "ack_server": stats,
+        "ack_delay_s": ack_delay_s,
+        "columnar_io_stats": columnar_io_stats,
+        "pool_conf": conf,
+        "warm_iters": warm_iters,
+        "rows_ingested": rows * (1 + warm_iters),
+    }
+    return cold_sample, cold_cpu, warm_samples, warm_cpu, last
 
 
 def run_columnar_populate(
@@ -669,8 +815,11 @@ def schema_sql_report(schema_name):
     }
 
 
-def columnar_support_report(schema_name, rows, max_rows_per_chunk=None):
-    df = SCHEMAS[schema_name](rows)
+def columnar_support_report(schema_name, rows, max_rows_per_chunk=None,
+                            *, sym_card=DEFAULT_SYM_CARD,
+                            varchar_len=DEFAULT_VARCHAR_LEN):
+    df = build_schema_df(
+        schema_name, rows, sym_card=sym_card, varchar_len=varchar_len)
     table_name = _bench_table_name(schema_name)
     plan = qi._debug_dataframe_columnar_plan(
         df,
@@ -731,17 +880,232 @@ PATHS = {
     "real-row": run_real_row_path,
 }
 
+# JSON contract v1 (plan s3.2): each path is tagged with a phase. "floor" is a
+# no-network measurement (populate/encode/materialize); "e2e" includes the
+# round trip to a (mock or real) server.
+PATH_PHASE = {
+    "row": "floor",
+    "columnar-populate": "floor",
+    "arrow-materialize": "floor",
+    "client-ack": "e2e",
+    "client-ack-reuse": "e2e",
+    "real-client": "e2e",
+    "real-row": "e2e",
+}
 
-def add_rates(summary, rows, columns):
+
+_MIB = 1024.0 * 1024.0
+
+
+def add_rates(summary, rows, columns, wire_bytes=None):
     median = summary["median_s"]
     summary["rows_per_s_median"] = rows / median if median else None
     summary["cells_per_s_median"] = rows * columns / median if median else None
+    # mib_per_s is only meaningful when bytes actually crossed the wire; the
+    # no-network floor paths leave wire_bytes None (plan s3.2).
+    if wire_bytes and median:
+        summary["mib_per_s"] = (wire_bytes / _MIB) / median
+    else:
+        summary["mib_per_s"] = None
 
 
-def add_cpu_summary(summary, cpu_samples, rows, columns):
+def add_cpu_summary(summary, cpu_samples, rows, columns, wire_bytes=None):
     cpu_summary = summarize(cpu_samples)
-    add_rates(cpu_summary, rows, columns)
+    add_rates(cpu_summary, rows, columns, wire_bytes)
     summary["process_cpu"] = cpu_summary
+
+
+def compute_wire_bytes(df):
+    """Encode the DataFrame once to a QWP buffer to learn the per-flush wire
+    size, used for the mib_per_s metric in the JSON contract (plan s3.2).
+
+    This is the bytes pushed per ``Client.dataframe`` flush for this schema; it
+    is deterministic for a given DataFrame, so one encode suffices. Paths that
+    talk to a server prefer the bytes the server actually observed (see
+    ``measured_wire_bytes_per_call``); this is the fallback estimate.
+    """
+    buf = qi.Buffer.qwp()
+    buf.dataframe(df, table_name="bench_wire_size", at="ts")
+    return len(buf)
+
+
+def measured_wire_bytes_per_call(last):
+    """Per-flush wire bytes observed by the mock ACK server, if available.
+
+    The ACK server counts every binary frame byte it received; dividing by the
+    timed call count gives the real bytes-on-wire per flush, which is more
+    honest than the one-shot buffer estimate (it includes WS framing and the
+    warm symbol-dict). Returns ``None`` when no ACK snapshot is present.
+    """
+    if not isinstance(last, dict):
+        return None
+    ack = last.get("ack_server")
+    timed = last.get("timed_calls")
+    if not ack or not timed:
+        return None
+    total = ack.get("binary_bytes")
+    if not total:
+        return None
+    return total / timed
+
+
+def _machine_block():
+    return {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "processor": platform.processor(),
+        "pandas": pd.__version__,
+        "numpy": np.__version__,
+        "pyarrow": pa.__version__ if pa is not None else None,
+    }
+
+
+def _commits_block():
+    return {
+        "py_questdb_client": git_rev(os.getcwd()),
+        "c_questdb_client": git_rev(
+            os.path.join(os.getcwd(), "c-questdb-client")),
+    }
+
+
+def _path_summary(samples, cpu_samples, rows, columns, *, phase, warm,
+                  wire_bytes, last=None):
+    """Build a contract-conformant per-path summary block (plan s3.2)."""
+    rate_wire_bytes = wire_bytes if phase == "e2e" else None
+    summary = summarize(samples)
+    add_rates(summary, rows, columns, rate_wire_bytes)
+    add_cpu_summary(summary, cpu_samples, rows, columns, rate_wire_bytes)
+    summary["phase"] = phase
+    summary["warm"] = warm
+    summary["wire_bytes"] = wire_bytes
+    if last is not None:
+        summary["last"] = last
+    return summary
+
+
+def pandas_to_questdb_throughput(
+        *,
+        rows,
+        iterations,
+        warmups,
+        sym_card=DEFAULT_SYM_CARD,
+        varchar_len=DEFAULT_VARCHAR_LEN,
+        run_mode="full",
+        real_conf=None,
+        real_http=None,
+        real_table=None,
+        real_setup_sql=(),
+        real_reset_sql=(),
+        max_rows_per_chunk=None,
+        schema="s1-narrow"):
+    """WS-7 headline deliverable (plan s4): one call that yields S1 ingress
+    rows/s + MiB/s for the no-network floor *and* the end-to-end path, plus the
+    cold first-flush vs warm steady-state split and the honest
+    populate_plus_encode sum (plan s3.6).
+
+    * ``columnar-populate`` is the populate floor (descriptor building only).
+    * the cold/warm split runs against the in-process mock ACK server so the
+      encode + flush cost is measured without needing a server; the warm median
+      is the honest ``populate_plus_encode`` headline.
+    * when ``real_conf`` is given, ``real-client`` adds the true end-to-end
+      number against a live QuestDB and the DEDUP ``count() == rows`` gate.
+
+    Ack level is ``Ok`` (the mock server and the default qwpws conf). ``Durable``
+    is Enterprise (``request_durable_ack=on``) and is deferred (plan s13).
+    """
+    df = build_schema_df(
+        schema, rows, sym_card=sym_card, varchar_len=varchar_len)
+    columns = len(df.columns)
+    try:
+        wire_bytes = compute_wire_bytes(df)
+    except Exception:
+        wire_bytes = None
+
+    paths = {}
+
+    # Floor: populate only (no encode, no wire).
+    populate_samples, populate_cpu, populate_last = run_columnar_populate(
+        df, rows, iterations, warmups, max_rows_per_chunk)
+    paths["columnar-populate"] = _path_summary(
+        populate_samples, populate_cpu, rows, columns,
+        phase="floor", warm=warmups > 0, wire_bytes=wire_bytes,
+        last=populate_last)
+
+    # Cold/warm split over the in-process mock server (server-free e2e).
+    cold_s, cold_cpu, warm_samples, warm_cpu, split_last = run_cold_warm_split(
+        df, rows, max(iterations, 1))
+    measured = measured_wire_bytes_per_call(split_last)
+    e2e_wire_bytes = measured if measured is not None else wire_bytes
+    cold_summary = _path_summary(
+        [cold_s], [cold_cpu], rows, columns,
+        phase="e2e", warm=False, wire_bytes=e2e_wire_bytes)
+    warm_summary = _path_summary(
+        warm_samples, warm_cpu, rows, columns,
+        phase="e2e", warm=True, wire_bytes=e2e_wire_bytes, last=split_last)
+    paths["mock-cold-first-flush"] = cold_summary
+    paths["mock-warm-steady-state"] = warm_summary
+
+    # Optional true end-to-end against a live QuestDB (DEDUP count()==rows gate
+    # is enforced by the layer3 fixture; here we just record the rate).
+    if real_conf:
+        table_name = real_table or _bench_table_name(schema)
+        e2e_samples, e2e_cpu, e2e_last = run_real_client_path(
+            df, rows, iterations, warmups,
+            conf=real_conf, table_name=table_name, http_base=real_http,
+            setup_sqls=real_setup_sql, reset_sqls=real_reset_sql)
+        real_measured = measured_wire_bytes_per_call(e2e_last)
+        paths["real-client"] = _path_summary(
+            e2e_samples, e2e_cpu, rows, columns,
+            phase="e2e", warm=warmups > 0,
+            wire_bytes=real_measured if real_measured is not None
+            else wire_bytes,
+            last=e2e_last)
+
+    # Honest sum (plan s3.6): the warm e2e flush already includes populate +
+    # encode + flush, so it *is* populate_plus_encode. We surface the populate
+    # floor and the marginal encode+io cost alongside, never headlining the
+    # near-free descriptor append on its own.
+    populate_s = paths["columnar-populate"]["median_s"]
+    warm_e2e_s = warm_summary["median_s"]
+    encode_plus_io_s = max(warm_e2e_s - populate_s, 0.0)
+    headline = {
+        "populate_floor_s": populate_s,
+        "encode_plus_io_s": encode_plus_io_s,
+        "populate_plus_encode_s": warm_e2e_s,
+        "populate_plus_encode_rows_per_s": (
+            rows / warm_e2e_s if warm_e2e_s else None),
+        "populate_plus_encode_mib_per_s": (
+            (e2e_wire_bytes / _MIB) / warm_e2e_s
+            if e2e_wire_bytes and warm_e2e_s else None),
+        "cold_first_flush_s": cold_summary["median_s"],
+        "warm_steady_state_s": warm_e2e_s,
+        "cold_over_warm_ratio": (
+            cold_summary["median_s"] / warm_e2e_s if warm_e2e_s else None),
+        "warm_from_pool": True,
+    }
+    if real_conf:
+        headline["real_client_s"] = paths["real-client"]["median_s"]
+        headline["real_client_rows_per_s"] = (
+            paths["real-client"]["rows_per_s_median"])
+        headline["real_client_mib_per_s"] = (
+            paths["real-client"]["mib_per_s"])
+
+    return {
+        "schema": schema,
+        "rows": rows,
+        "columns": columns,
+        "dtypes": {name: str(dtype) for name, dtype in df.dtypes.items()},
+        "direction": "ingress",
+        "client": "py-pandas",
+        "run_mode": run_mode,
+        "warmups": warmups,
+        "wire_bytes": wire_bytes,
+        "ack_level": "Ok",
+        "machine": _machine_block(),
+        "commits": _commits_block(),
+        "headline": headline,
+        "paths": paths,
+    }
 
 
 def main():
@@ -753,9 +1117,35 @@ def main():
         "--schema",
         choices=sorted(SCHEMAS) + ["all"],
         default="numeric-core")
-    parser.add_argument("--rows", type=int, default=100_000)
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=_env_int("QUESTDB_COLUMN_BENCH_ROWS", 100_000),
+        help="Rows per DataFrame (env: QUESTDB_COLUMN_BENCH_ROWS).")
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--warmups", type=int, default=3)
+    parser.add_argument(
+        "--sym-card",
+        type=int,
+        default=_env_int("QUESTDB_COLUMN_BENCH_SYM_CARD", DEFAULT_SYM_CARD),
+        help=(
+            "SYMBOL cardinality for the s1-narrow schema "
+            "(env: QUESTDB_COLUMN_BENCH_SYM_CARD)."))
+    parser.add_argument(
+        "--varchar-len",
+        type=int,
+        default=_env_int(
+            "QUESTDB_COLUMN_BENCH_VARCHAR_LEN", DEFAULT_VARCHAR_LEN),
+        help=(
+            "VARCHAR byte length for the s1-narrow schema "
+            "(env: QUESTDB_COLUMN_BENCH_VARCHAR_LEN)."))
+    parser.add_argument(
+        "--run-mode",
+        choices=["quick", "full"],
+        default="full",
+        help=(
+            "Recorded in the JSON contract (plan s3.2). 'quick' is the CI "
+            "shape; 'full' is the headline shape."))
     parser.add_argument(
         "--max-rows-per-chunk",
         type=int,
@@ -821,7 +1211,41 @@ def main():
         help=(
             "Print QuestDB DROP/CREATE/TRUNCATE SQL metadata for selected "
             "benchmark schemas and exit."))
+    parser.add_argument(
+        "--headline",
+        action="store_true",
+        help=(
+            "Run the pandas_to_questdb_throughput headline (plan s4): the "
+            "columnar-populate floor + the cold/warm e2e split (mock server) + "
+            "the populate_plus_encode sum, on the selected schema (default "
+            "s1-narrow). Add --real-conf to include the live-server "
+            "real-client number."))
     args = parser.parse_args()
+
+    if args.headline:
+        schema = "s1-narrow" if args.schema == "numeric-core" else args.schema
+        if any(opt and not args.real_http
+               for opt in (args.real_setup_sql, args.real_reset_sql)):
+            parser.error("--real-http is required with real setup/reset SQL")
+        result = pandas_to_questdb_throughput(
+            rows=args.rows,
+            iterations=args.iterations,
+            warmups=args.warmups,
+            sym_card=args.sym_card,
+            varchar_len=args.varchar_len,
+            run_mode=args.run_mode,
+            real_conf=args.real_conf,
+            real_http=args.real_http,
+            real_table=args.real_table,
+            real_setup_sql=args.real_setup_sql,
+            real_reset_sql=args.real_reset_sql,
+            max_rows_per_chunk=args.max_rows_per_chunk,
+            schema=schema)
+        print(json.dumps(
+            result,
+            indent=2 if args.pretty else None,
+            sort_keys=True))
+        return
 
     if args.schema_sql:
         schema_names = (
@@ -845,7 +1269,9 @@ def main():
             columnar_support_report(
                 schema_name,
                 args.rows,
-                args.max_rows_per_chunk)
+                args.max_rows_per_chunk,
+                sym_card=args.sym_card,
+                varchar_len=args.varchar_len)
             for schema_name in schema_names
         ]
         output = {
@@ -872,13 +1298,20 @@ def main():
             parser.error("real-server paths require --real-conf")
         if (args.real_setup_sql or args.real_reset_sql) and not args.real_http:
             parser.error("--real-http is required with real setup/reset SQL")
-    df = SCHEMAS[args.schema](args.rows)
+    df = build_schema_df(
+        args.schema,
+        args.rows,
+        sym_card=args.sym_card,
+        varchar_len=args.varchar_len)
 
     results = {
         "schema": args.schema,
         "rows": args.rows,
         "columns": len(df.columns),
         "dtypes": {name: str(dtype) for name, dtype in df.dtypes.items()},
+        "direction": "ingress",
+        "client": "py-pandas",
+        "run_mode": args.run_mode,
         "warmups": args.warmups,
         "machine": {
             "python": sys.version,
@@ -895,6 +1328,15 @@ def main():
         },
         "paths": {},
     }
+
+    # Per-flush wire size for this schema (used by mib_per_s in the contract).
+    # Only DataFrames the columnar/row path can encode have a meaningful size;
+    # rejection schemas are skipped (they never reach the wire).
+    try:
+        wire_bytes = compute_wire_bytes(df)
+    except Exception:
+        wire_bytes = None
+    results["wire_bytes"] = wire_bytes
 
     for path in paths:
         if path == "columnar-populate":
@@ -949,9 +1391,23 @@ def main():
                 args.rows,
                 args.iterations,
                 args.warmups)
+        phase = PATH_PHASE.get(path, "e2e")
+        # Prefer the bytes the mock server actually observed; fall back to the
+        # one-shot encode estimate. mib_per_s is wire throughput, so it only
+        # applies to e2e paths; floor paths record wire_bytes for reference but
+        # report no rate.
+        measured = measured_wire_bytes_per_call(last)
+        path_wire_bytes_report = measured if measured is not None else wire_bytes
+        rate_wire_bytes = path_wire_bytes_report if phase == "e2e" else None
         summary = summarize(samples)
-        add_rates(summary, args.rows, len(df.columns))
-        add_cpu_summary(summary, cpu_samples, args.rows, len(df.columns))
+        add_rates(summary, args.rows, len(df.columns), rate_wire_bytes)
+        add_cpu_summary(
+            summary, cpu_samples, args.rows, len(df.columns), rate_wire_bytes)
+        summary["phase"] = phase
+        summary["wire_bytes"] = path_wire_bytes_report
+        # The timed samples are warm steady-state whenever warmups ran; the
+        # cold first-flush is reported separately by the cold/warm split.
+        summary["warm"] = args.warmups > 0
         summary["last"] = last
         results["paths"][path] = summary
 
