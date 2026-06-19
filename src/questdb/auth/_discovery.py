@@ -88,6 +88,20 @@ def _as_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:
     return default
 
 
+def _str_setting(value: Any) -> Optional[str]:
+    """
+    A ``/settings`` value as a non-empty string, else ``None``.
+
+    ``/settings`` is server-controlled (and tamperable over a plaintext insecure
+    channel). A non-string ``acl.oidc.*`` value — a JSON list/number from a buggy
+    or hostile server — must not reach ``scope.split()`` or the cache-key join as
+    a raw object, where it would escape the package's typed-error contract with a
+    bare ``AttributeError`` / ``TypeError``. Mirrors :func:`_resolve_endpoint`,
+    which already drops a non-string endpoint.
+    """
+    return value if isinstance(value, str) and value else None
+
+
 def settings_config(settings: Any) -> Dict[str, Any]:
     """
     Return the trusted config map from a ``/settings`` response.
@@ -340,18 +354,22 @@ def resolve_config(
                 f'QuestDB at {questdb_url} reports OIDC is disabled '
                 f'({_K_ENABLED}=false). Nothing to authenticate against.')
 
-    client_id = client_id or cfg.get(_K_CLIENT_ID)
+    # _str_setting drops a non-string /settings value (e.g. a JSON list) so it
+    # can't reach scope.split() / the cache-key join as a raw object and escape
+    # the typed-error contract; a non-string client.id thus reads as absent and
+    # surfaces the clear "Missing client_id" error below.
+    client_id = client_id or _str_setting(cfg.get(_K_CLIENT_ID))
     if not client_id:
         raise OidcConfigError(
             'Missing OIDC client_id. QuestDB did not advertise '
             f'{_K_CLIENT_ID!r} via /settings; pass client_id=... explicitly.')
 
     if scope is None:
-        scope = cfg.get(_K_SCOPE) or 'openid'
+        scope = _str_setting(cfg.get(_K_SCOPE)) or 'openid'
     if groups_in_token is None:
         groups_in_token = _as_bool(cfg.get(_K_GROUPS_IN_TOKEN), default=True)
     if audience is None:
-        audience = cfg.get(_K_AUDIENCE) or None
+        audience = _str_setting(cfg.get(_K_AUDIENCE))
 
     # Track which credential endpoints the caller supplied directly. Those are
     # trusted; endpoints learned from /settings are only as trustworthy as the
@@ -451,13 +469,21 @@ def resolve_config(
         doc = discover_device_endpoint_from_idp(
             issuer=issuer, discovery_url=discovery_url,
             ctx=ctx, insecure=False, timeout=timeout)
+        # The IdP discovery document is untrusted too: coerce its values the
+        # same way as /settings values. A non-string endpoint / issuer (a JSON
+        # number/list from a buggy or hostile IdP) must read as absent — the
+        # clear "could not resolve" OidcConfigError below, or no issuer pin —
+        # rather than reach safe_urlparse / the cache-key join as a raw object
+        # and escape the typed-error contract with a bare AttributeError.
         device_authorization_endpoint = (
             device_authorization_endpoint
-            or doc.get('device_authorization_endpoint'))
-        token_endpoint = token_endpoint or doc.get('token_endpoint')
+            or _str_setting(doc.get('device_authorization_endpoint')))
+        token_endpoint = (
+            token_endpoint or _str_setting(doc.get('token_endpoint')))
         authorization_endpoint = (
-            authorization_endpoint or doc.get('authorization_endpoint'))
-        issuer = issuer or doc.get('issuer')
+            authorization_endpoint
+            or _str_setting(doc.get('authorization_endpoint')))
+        issuer = issuer or _str_setting(doc.get('issuer'))
 
     if not token_endpoint:
         raise OidcConfigError(

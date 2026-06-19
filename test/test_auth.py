@@ -1627,6 +1627,81 @@ class TestConfigHelpers(unittest.TestCase):
         self.assertIsNone(_resolve_endpoint(8080, {}))
         self.assertIsNone(_resolve_endpoint(True, {}))
 
+    def test_str_setting_ignores_non_string(self):
+        # A non-empty string passes through; anything else (a JSON list /
+        # number / dict, None, empty string) reads as absent so it can't reach
+        # scope.split() / the cache-key join as a raw object.
+        from questdb.auth._discovery import _str_setting
+        self.assertEqual(_str_setting('openid email'), 'openid email')
+        for bad in (['openid'], 12345, {'x': 1}, True, '', None):
+            self.assertIsNone(_str_setting(bad))
+
+    def test_non_string_settings_do_not_crash_resolution(self):
+        # A buggy/tampered /settings advertising non-string acl.oidc.* values
+        # must stay within the typed-error contract instead of crashing later
+        # with a bare AttributeError / TypeError (scope.split() / the cache-key
+        # join). scope falls back to 'openid', audience drops to None, and a
+        # non-string client.id reads as absent -> clear OidcConfigError.
+        from questdb.auth import _discovery
+        base = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': 'https://idp.example.com/token',
+            'acl.oidc.device.authorization.endpoint':
+                'https://idp.example.com/device'}
+
+        def from_settings(settings):
+            with mock.patch.object(_discovery, 'fetch_settings',
+                                   return_value=settings):
+                return OidcDeviceAuth.from_questdb(
+                    'https://qdb.example.com:9000', renderer=Renderer())
+
+        auth = from_settings({**base, 'acl.oidc.scope': ['openid', 'groups'],
+                              'acl.oidc.audience': {'x': 1}})
+        self.assertEqual(auth.config.scope, 'openid')   # non-string -> default
+        self.assertIsNone(auth.config.audience)         # non-string -> dropped
+        self.assertTrue(auth.cache_key)                 # crash site now safe
+        # A non-string client.id reads as absent -> clear typed error.
+        with self.assertRaises(OidcConfigError):
+            from_settings({**base, 'acl.oidc.client.id': 12345})
+
+    def test_non_string_idp_discovery_values_do_not_crash(self):
+        # The IdP .well-known discovery document is untrusted too: a non-string
+        # endpoint / issuer (a JSON number/list from a buggy or hostile IdP)
+        # must read as absent -> a clear OidcConfigError, not a bare
+        # AttributeError from safe_urlparse later. See resolve_config discovery.
+        from questdb.auth import _discovery
+        settings = {'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb'}
+
+        def from_discovery(well_known, **kw):
+            with mock.patch.object(_discovery, 'fetch_settings',
+                                   return_value=settings), \
+                 mock.patch.object(
+                     _discovery, 'discover_device_endpoint_from_idp',
+                     return_value=well_known):
+                return OidcDeviceAuth.from_questdb(
+                    'https://qdb.example.com:9000', renderer=Renderer(), **kw)
+
+        # Non-string token / device endpoint -> absent -> clear typed error.
+        with self.assertRaises(OidcConfigError):
+            from_discovery(
+                {'device_authorization_endpoint': 'https://idp.example.com/device',
+                 'token_endpoint': 12345},
+                issuer='https://idp.example.com')
+        with self.assertRaises(OidcConfigError):
+            from_discovery(
+                {'device_authorization_endpoint': ['nope'],
+                 'token_endpoint': 'https://idp.example.com/token'},
+                issuer='https://idp.example.com')
+        # A non-string discovered issuer is dropped (no pin); valid endpoints
+        # still resolve and the cache key builds (the former crash site).
+        auth = from_discovery(
+            {'device_authorization_endpoint': 'https://idp.example.com/device',
+             'token_endpoint': 'https://idp.example.com/token',
+             'issuer': ['not', 'a', 'string']},
+            discovery_url='https://idp.example.com/.well-known/openid-configuration')
+        self.assertIsNone(auth.config.issuer)
+        self.assertTrue(auth.cache_key)
+
     def test_resolve_endpoint_relative_path_without_host_is_none(self):
         # A path-only endpoint with no acl.oidc.host can't be resolved; it must
         # be treated as absent (None) so resolution fails with a clear "could
