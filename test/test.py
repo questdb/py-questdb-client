@@ -66,10 +66,12 @@ from test_client_capsule_path import (
 )
 from test_client_dataframe_fuzz import (
     TestClientDataframeFuzz,
+    TestClientDataframeSfaFuzz,
     TestClientDataframeRoundTrip,
 )
 from test_client_polars_fuzz import (
     TestClientPolarsDataframeFuzz,
+    TestClientPolarsDataframeSfaFuzz,
     TestClientPolarsDataframeRoundTrip,
 )
 from test_dataframe_leaks import TestCategoricalArrowLeak, TestPyobjColumnarLeak

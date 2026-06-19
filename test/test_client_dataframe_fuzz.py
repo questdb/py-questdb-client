@@ -51,8 +51,10 @@ sys.dont_write_bytecode = True
 
 import datetime
 import os
+import pathlib
 import random
 import secrets
+import tempfile
 import unittest
 import uuid
 
@@ -79,6 +81,26 @@ from qwp_ws_ack_server import QwpAckServer
 SEED_ENV = 'QDB_CLIENT_FUZZ_SEED'
 ITER_SEED_ENV = 'QDB_CLIENT_FUZZ_ITER_SEED'
 ITERS_ENV = 'QDB_CLIENT_FUZZ_ITERS'
+
+
+def _sfa_conf(port, sender_id, sf_dir):
+    return (
+        f'qwpws::addr=127.0.0.1:{port};'
+        f'sender_id={sender_id};'
+        f'sf_dir={sf_dir};'
+        'pool_size=1;'
+        'pool_max=1;'
+        'pool_reap=manual;'
+        'reconnect_max_duration_millis=30000;'
+        'close_flush_timeout_millis=30000;')
+
+
+def _sfa_file_count(sf_dir, sender_id):
+    slot_dir = pathlib.Path(sf_dir) / sender_id
+    if not slot_dir.exists():
+        return 0
+    return sum(1 for path in slot_dir.iterdir()
+               if path.name.endswith('.sfa'))
 
 
 def _parse_int_env(name):
@@ -975,6 +997,35 @@ class TestClientDataframeFuzz(unittest.TestCase):
         with self.assertRaises(qi.IngressError) as cm:
             qi.Client.from_conf('qwpws::pool_size=1;')
         self.assertEqual(cm.exception.code, qi.IngressErrorCode.ConfigError)
+
+
+@unittest.skipIf(pd is None or pa is None, 'pandas/pyarrow not installed')
+class TestClientDataframeSfaFuzz(TestClientDataframeFuzz):
+    """Same pandas fuzz/property suite, through the columnar SFA backend."""
+
+    DEFAULT_ITERS = 25
+
+    def setUp(self):
+        self.server = QwpAckServer()
+        self.server.start()
+        self._sf_tmp = tempfile.TemporaryDirectory(
+            prefix='client-df-sfa-fuzz-')
+        self.sender_id = 'py-df-fuzz-' + uuid.uuid4().hex[:8]
+        self.conf = _sfa_conf(
+            self.server.port,
+            self.sender_id,
+            self._sf_tmp.name)
+
+    def tearDown(self):
+        try:
+            self.assertEqual(
+                _sfa_file_count(self._sf_tmp.name, self.sender_id),
+                0,
+                f'SFA files left after dataframe test; '
+                f'{self._master_label()}')
+        finally:
+            self.server.stop()
+            self._sf_tmp.cleanup()
 
 
 # ---------------------------------------------------------------------------

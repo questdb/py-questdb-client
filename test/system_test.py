@@ -4135,6 +4135,27 @@ class TestColumnIngressFailover(unittest.TestCase):
             conf += f'{k}={v};'
         return conf
 
+    def _sfa_conf(self, sender_id, sf_dir, endpoints=None, **extra):
+        sfa_extra = {
+            'sender_id': sender_id,
+            'sf_dir': sf_dir,
+            'pool_size': '1',
+            'pool_max': '1',
+            'pool_reap': 'manual',
+            'reconnect_max_duration_millis': '30000',
+            'close_flush_timeout_millis': '30000',
+        }
+        sfa_extra.update(extra)
+        return self._conf(endpoints=endpoints, **sfa_extra)
+
+    @staticmethod
+    def _sfa_file_count(sf_dir, sender_id):
+        slot_dir = pathlib.Path(sf_dir) / sender_id
+        if not slot_dir.exists():
+            return 0
+        return sum(1 for path in slot_dir.iterdir()
+                   if path.name.endswith('.sfa'))
+
     def _table(self, prefix='t_fo_'):
         name = prefix + uuid.uuid4().hex[:8]
         self.addCleanup(lambda: self._drop_quietly(name))
@@ -4176,6 +4197,136 @@ class TestColumnIngressFailover(unittest.TestCase):
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         return got.column('v').to_pylist()
+
+    def test_sfa_dataframe_numpy_round_trip(self):
+        """SFA through the parent Python ``Client.dataframe`` NumPy path."""
+        table = self._table('t_sfa_df_np_')
+        sender_id = 'py-df-np-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, v LONG, sym SYMBOL) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL '
+            'DEDUP UPSERT KEYS(ts, v)')
+        df = pd.DataFrame({
+            'ts': pd.to_datetime([
+                1_700_000_000_000_000,
+                1_700_000_000_001_000,
+                1_700_000_000_002_000,
+            ], unit='us'),
+            'v': np.array([0, 1, 2], dtype=np.int64),
+            'sym': pd.Categorical(['alpha', 'bravo', 'alpha']),
+        })
+
+        with tempfile.TemporaryDirectory(prefix='py-df-sfa-np-') as sf_dir:
+            with qi.Client.from_conf(
+                    self._sfa_conf(sender_id, sf_dir)) as client:
+                client.dataframe(
+                    df, table_name=table, at='ts', symbols=['sym'])
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        resp = self.qdb_plain.http_sql_query(
+            f'SELECT v, sym FROM {table} ORDER BY v')
+        self.assertEqual(
+            resp['dataset'],
+            [[0, 'alpha'], [1, 'bravo'], [2, 'alpha']])
+
+    def test_sfa_dataframe_arrow_round_trip(self):
+        """SFA through the parent Python ``Client.dataframe`` Arrow path."""
+        if pyarrow is None:
+            self.skipTest('pyarrow not installed')
+
+        table = self._table('t_sfa_df_arrow_')
+        sender_id = 'py-df-arrow-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, v LONG, sym SYMBOL) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL '
+            'DEDUP UPSERT KEYS(ts, v)')
+
+        ts_type = pyarrow.timestamp('us', tz='UTC')
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                pyarrow.array([
+                    1_700_000_000_000_000,
+                    1_700_000_000_001_000,
+                    1_700_000_000_002_000,
+                ], type=ts_type),
+                dtype=pd.ArrowDtype(ts_type)),
+            'v': pd.Series(
+                pyarrow.array([10, 11, 12], type=pyarrow.int64()),
+                dtype=pd.ArrowDtype(pyarrow.int64())),
+            'sym': pd.Series(
+                pyarrow.array(['xray', 'yankee', 'xray'],
+                              type=pyarrow.string()),
+                dtype=pd.ArrowDtype(pyarrow.string())),
+        })
+
+        with tempfile.TemporaryDirectory(prefix='py-df-sfa-arrow-') as sf_dir:
+            with qi.Client.from_conf(
+                    self._sfa_conf(sender_id, sf_dir)) as client:
+                client.dataframe(
+                    df,
+                    table_name=table,
+                    at='ts',
+                    schema_overrides={'sym': 'symbol'})
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        resp = self.qdb_plain.http_sql_query(
+            f'SELECT v, sym FROM {table} ORDER BY v')
+        self.assertEqual(
+            resp['dataset'],
+            [[10, 'xray'], [11, 'yankee'], [12, 'xray']])
+
+    def test_sfa_dataframe_rejection_reports_once_and_continues(self):
+        table = self._table('t_sfa_df_reject_')
+        sender_id = 'py-df-reject-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, v LONG, bad LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+
+        valid1 = pd.DataFrame({
+            'ts': pd.to_datetime([1_700_000_000_000_000], unit='us'),
+            'v': np.array([0], dtype=np.int64),
+        })
+        rejected = pd.DataFrame({
+            'ts': pd.to_datetime([1_700_000_000_001_000], unit='us'),
+            'bad': pd.Series(['not-a-long'], dtype=object),
+        })
+        valid2 = pd.DataFrame({
+            'ts': pd.to_datetime([1_700_000_000_002_000], unit='us'),
+            'v': np.array([2], dtype=np.int64),
+        })
+
+        with tempfile.TemporaryDirectory(prefix='py-df-sfa-reject-') as sf_dir:
+            with qi.Client.from_conf(
+                    self._sfa_conf(sender_id, sf_dir)) as client:
+                client.dataframe(valid1, table_name=table, at='ts')
+                with self.assertRaises(
+                        qi.IngressServerRejectionError) as raised:
+                    client.dataframe(rejected, table_name=table, at='ts')
+                diagnostic = raised.exception.qwp_ws_error
+                self.assertIsNotNone(diagnostic)
+                self.assertEqual(
+                    diagnostic.category,
+                    qi.QwpWsErrorCategory.SchemaMismatch)
+                self.assertEqual(
+                    diagnostic.applied_policy,
+                    qi.QwpWsErrorPolicy.DropAndContinue)
+                self.assertEqual(diagnostic.status, 0x03)
+                self.assertEqual(diagnostic.from_fsn, 1)
+                self.assertEqual(diagnostic.to_fsn, 1)
+
+                client.dataframe(valid2, table_name=table, at='ts')
+
+            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        resp = self.qdb_plain.http_sql_query(
+            f'SELECT v FROM {table} ORDER BY v')
+        self.assertEqual(resp['dataset'], [[0], [2]])
 
     def test_dead_then_live_endpoint_numpy_route(self):
         """A dead first endpoint + the live primary: the pool borrow

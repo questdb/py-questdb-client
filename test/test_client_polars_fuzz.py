@@ -27,8 +27,10 @@ import datetime
 import decimal
 import math
 import os
+import tempfile
 import time
 import unittest
+import uuid
 
 import patch_path
 patch_path.patch()
@@ -49,6 +51,8 @@ from test_client_dataframe_fuzz import (
     _parse_int_env,
     _derive_master_seed,
     _format_seed,
+    _sfa_conf,
+    _sfa_file_count,
     ITER_SEED_ENV,
     ITERS_ENV,
     ROW_COUNT_CHOICES,
@@ -463,6 +467,35 @@ class TestClientPolarsDataframeFuzz(unittest.TestCase):
             self.fail(
                 f'{len(failures)}/{len(seeds)} iterations failed.\n'
                 f'{self._master_label()}\n{preview}')
+
+
+@unittest.skipUnless(pl is not None, 'polars not installed')
+class TestClientPolarsDataframeSfaFuzz(TestClientPolarsDataframeFuzz):
+    """Same polars fuzz generator, through the columnar SFA backend."""
+
+    DEFAULT_ITERS = 25
+
+    def setUp(self):
+        self.server = QwpAckServer()
+        self.server.start()
+        self._sf_tmp = tempfile.TemporaryDirectory(
+            prefix='client-polars-sfa-fuzz-')
+        self.sender_id = 'py-pl-fuzz-' + uuid.uuid4().hex[:8]
+        self.conf = _sfa_conf(
+            self.server.port,
+            self.sender_id,
+            self._sf_tmp.name)
+
+    def tearDown(self):
+        try:
+            self.assertEqual(
+                _sfa_file_count(self._sf_tmp.name, self.sender_id),
+                0,
+                f'SFA files left after polars dataframe fuzz; '
+                f'{self._master_label()}')
+        finally:
+            self.server.stop()
+            self._sf_tmp.cleanup()
 
 
 def _norm_col(series):
