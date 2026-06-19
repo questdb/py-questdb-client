@@ -5,6 +5,7 @@ import contextlib
 import json
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -151,15 +152,32 @@ def fetch_http_endpoint(http_base, path):
         }
 
 
-def fetch_row_count(http_base, table_name, *, expected):
+def _count(http_base, table_name):
     result = execute_sql(http_base, f"SELECT count() FROM {table_name}")
     parsed = json.loads(result["body"])
-    actual = parsed["dataset"][0][0]
+    return parsed["dataset"][0][0], result["status"]
+
+
+def fetch_row_count(http_base, table_name, *, expected, timeout_sec=120):
+    """WAL-aware DEDUP count check.
+
+    QuestDB WAL tables apply asynchronously, so an immediate count() right after
+    ingest can read 0 (apply lag). Poll until count() reaches ``expected`` (or
+    exceeds it, which signals at-least-once DEDUP inflation), or the timeout
+    elapses (which signals data loss). This makes the count() == rows gate
+    (plan s3.4) robust instead of racing the WAL.
+    """
+    deadline = time.monotonic() + timeout_sec
+    actual, status = _count(http_base, table_name)
+    while actual < expected and time.monotonic() < deadline:
+        time.sleep(0.5)
+        actual, status = _count(http_base, table_name)
     return {
         "actual": actual,
         "expected": expected,
         "ok": actual == expected,
-        "status": result["status"],
+        "inflated": actual > expected,
+        "status": status,
     }
 
 

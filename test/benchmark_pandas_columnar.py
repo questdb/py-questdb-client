@@ -82,9 +82,17 @@ def strip_conf_keys(conf, keys):
     return prefix + "::" + "".join(f"{item};" for item in kept)
 
 
+# QuestDB's designated TIMESTAMP is microsecond resolution, so the generated
+# datetime64[ns] values must be spaced at least 1 microsecond (1000 ns) apart
+# to stay distinct once stored. Nanosecond-spaced timestamps collapse to ~1000
+# distinct microseconds, which DEDUP UPSERT KEYS(ts) then folds to ~1000 rows
+# (breaking the count() == rows invariant, plan s3.4).
+_TS_STEP_NS = np.int64(1000)
+
+
 def make_timestamp_series(rows):
     base = np.int64(1_704_067_200_000_000_000)
-    values = base + np.arange(rows, dtype=np.int64)
+    values = base + np.arange(rows, dtype=np.int64) * _TS_STEP_NS
     return pd.Series(values.view("datetime64[ns]"))
 
 
@@ -108,9 +116,10 @@ def make_s1_narrow(rows, *, sym_card=DEFAULT_SYM_CARD,
     * ``sym``   -> SYMBOL, pandas ``Categorical`` (cardinality ``sym_card``)
     * ``note``  -> VARCHAR, Arrow-backed string of length ~``varchar_len``
 
-    ``ts`` is monotonic-unique so the DEDUP ``UPSERT KEYS(ts)`` table can assert
+    ``ts`` is monotonic and unique *at microsecond resolution* (the designated
+    TIMESTAMP precision), so the DEDUP ``UPSERT KEYS(ts)`` table can assert
     ``count() == rows`` even though QWP/WS is at-least-once on reconnect
-    (see plan s3.4).
+    (see plan s3.4 and ``make_timestamp_series``).
     """
     if pa is None:
         raise RuntimeError("pyarrow is not installed")
