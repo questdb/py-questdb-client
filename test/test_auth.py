@@ -1896,41 +1896,23 @@ class TestTransportSecurity(unittest.TestCase):
             os.unlink(bad)
 
     def test_deeply_nested_json_raises_oidc_error(self):
-        # Deeply-nested JSON makes json.loads raise RecursionError (not a
-        # ValueError); get_json / post_form must map it to OidcError rather than
-        # let it escape the typed-error contract. See M1.
+        # A RecursionError from json.loads (a deeply-nested JSON body exhausts
+        # the decoder's stack) must be mapped to OidcError, not escape the
+        # typed-error contract. The depth at which json actually raises is a
+        # Python-version detail — the C scanner ignores sys.setrecursionlimit,
+        # and 3.14 parses far deeper than 3.13, so a fixed-depth body no longer
+        # raises there — so inject the RecursionError directly to test the
+        # mapping deterministically across versions. See M1.
         from questdb.auth import _http
-        deep = (b'[' * 100000) + (b']' * 100000)
-
-        class _Deep(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *a):
-                pass
-
-            def _send(self):
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Content-Length', str(len(deep)))
-                self.end_headers()
-                self.wfile.write(deep)
-
-            def do_GET(self):
-                self._send()
-
-            def do_POST(self):
-                self.rfile.read(int(self.headers.get('Content-Length', 0)))
-                self._send()
-
-        srv = http.server.HTTPServer(('127.0.0.1', 0), _Deep)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        base = f'http://127.0.0.1:{srv.server_port}'
-        try:
+        with _raw_response_server(
+                    200, 'application/json', b'{"ok": true}') as base, \
+                mock.patch.object(
+                    _http.json, 'loads',
+                    side_effect=RecursionError('nesting too deep')):
             with self.assertRaises(OidcError):
                 _http.get_json(base + '/x', timeout=5)
             with self.assertRaises(OidcError):
                 _http.post_form(base + '/x', {'a': 'b'}, timeout=5)
-        finally:
-            srv.shutdown()
-            srv.server_close()
 
     def test_post_form_non_json_2xx_raises_oidc_error(self):
         # A 2xx body from the token/device endpoint that isn't JSON (e.g. an
