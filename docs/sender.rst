@@ -947,6 +947,13 @@ are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
 Each result is consumed once; call :func:`QueryResult.cancel` to ask the server
 to stop streaming and :func:`QueryResult.close` to release resources.
 
+The same :class:`Client` can ingest dataframes through the pooled columnar QWP
+path with :func:`Client.dataframe`. Adding ``sf_dir=...`` to
+:func:`Client.from_conf` opts dataframe ingestion into the Rust
+store-and-forward column-sender backend. The dataframe method still waits for
+``AckLevel::Ok`` before returning; only lower-level columnar flush APIs return
+after local queue acceptance.
+
 ILP/HTTP is available from:
 
 * QuestDB 7.3.10 and later.

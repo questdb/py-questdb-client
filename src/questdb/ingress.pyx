@@ -5128,6 +5128,9 @@ cdef class Client:
         Construct a pooled client from a QWP/WebSocket configuration string.
 
         The underlying #148 pool is opened eagerly by `questdb_db_connect`.
+        Include ``sf_dir=...`` to opt the columnar dataframe path into
+        store-and-forward mode; without ``sf_dir`` dataframe ingestion uses the
+        direct QWP/WebSocket column sender.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
@@ -5183,6 +5186,12 @@ cdef class Client:
             schema_overrides: Optional[Dict[str, object]] = None):
         """
         Ingest a dataframe through the pooled columnar QWP path.
+
+        When this client was opened with ``sf_dir=...``,
+        :meth:`Client.dataframe` uses the store-and-forward column sender. Each
+        batch is accepted into the local SFA queue first, and this method still
+        waits for ``AckLevel::Ok`` before returning; low-level columnar
+        ``flush`` calls have the weaker local-acceptance contract.
 
         ``df`` accepts any of:
 
