@@ -1401,6 +1401,15 @@ class TestAdapters(unittest.TestCase):
         with self.assertRaises(ImportError):
             self._qdb().psycopg()
 
+    @unittest.skipIf(_HAS_PG_DRIVER, 'a PostgreSQL driver is installed')
+    def test_pg_module_missing_chains_cause(self):
+        # The "no PG driver" ImportError chains the underlying import failure
+        # (raise ... from e) so the traceback preserves the real cause.
+        from questdb.auth._questdb import _pg_module
+        with self.assertRaises(ImportError) as cm:
+            _pg_module()
+        self.assertIsInstance(cm.exception.__cause__, ImportError)
+
     @unittest.skipIf(importlib.util.find_spec('questdb.ingress') is not None,
                      'questdb.ingress extension is built')
     def test_sender_missing_extension_raises(self):
@@ -1433,6 +1442,16 @@ class TestConfigHelpers(unittest.TestCase):
         from questdb.auth._discovery import _resolve_endpoint
         self.assertIsNone(_resolve_endpoint(8080, {}))
         self.assertIsNone(_resolve_endpoint(True, {}))
+
+    def test_resolve_endpoint_relative_path_without_host_is_none(self):
+        # A path-only endpoint with no acl.oidc.host can't be resolved; it must
+        # be treated as absent (None) so resolution fails with a clear "could
+        # not resolve the ... endpoint" error rather than a scheme-less "/path"
+        # that later surfaces as a confusing "insecure/malformed URL".
+        from questdb.auth._discovery import _resolve_endpoint
+        self.assertIsNone(_resolve_endpoint('/as/token.oauth2', {}))
+        self.assertIsNone(  # port present but host missing -> still unresolved
+            _resolve_endpoint('/as/token.oauth2', {'acl.oidc.port': 443}))
 
     def test_settings_config_nesting(self):
         from questdb.auth._discovery import settings_config
@@ -1590,6 +1609,15 @@ class TestCacheKey(unittest.TestCase):
             self._auth(token_endpoint='https://idp.example.com/token').cache_key,
             self._auth(
                 token_endpoint='https://idp.example.com:443/token').cache_key)
+
+    def test_groups_in_token_distinguishes_key(self):
+        # groups_in_token selects which token kind _select returns, so two
+        # sessions differing ONLY in that mode must not collide on one cache
+        # entry (and evict each other). scope already has 'openid' here, so the
+        # keys can differ only by the mode.
+        self.assertNotEqual(
+            self._auth(groups_in_token=True).cache_key,
+            self._auth(groups_in_token=False).cache_key)
 
 
 class TestTransportSecurity(unittest.TestCase):

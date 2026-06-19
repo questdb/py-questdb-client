@@ -107,10 +107,10 @@ def _pg_module():
     try:
         import psycopg2  # type: ignore
         return psycopg2
-    except ImportError:
+    except ImportError as e:
         raise ImportError(
             'A PostgreSQL driver is required: install `psycopg` (v3) or '
-            '`psycopg2-binary`.')
+            '`psycopg2-binary`.') from e
 
 
 class QuestDB:

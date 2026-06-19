@@ -223,12 +223,19 @@ def _resolve_endpoint(value: Optional[str], cfg: Dict[str, Any]) -> Optional[str
         return value
     if value.startswith('/'):
         host = cfg.get(_K_HOST)
-        if host:
-            tls = _as_bool(cfg.get(_K_TLS_ENABLED), default=True)
-            scheme = 'https' if tls else 'http'
-            port = cfg.get(_K_PORT)
-            netloc = f'{host}:{port}' if port else str(host)
-            return f'{scheme}://{netloc}{value}'
+        if not host:
+            # A path-only endpoint with no acl.oidc.host to resolve it against
+            # can't be turned into a URL. Treat it as absent (return None) so
+            # resolution fails with the clear "could not resolve the ...
+            # endpoint" error rather than passing a scheme-less "/path"
+            # downstream, where it surfaces as a confusing "insecure/malformed
+            # URL" instead.
+            return None
+        tls = _as_bool(cfg.get(_K_TLS_ENABLED), default=True)
+        scheme = 'https' if tls else 'http'
+        port = cfg.get(_K_PORT)
+        netloc = f'{host}:{port}' if port else str(host)
+        return f'{scheme}://{netloc}{value}'
     return value
 
 

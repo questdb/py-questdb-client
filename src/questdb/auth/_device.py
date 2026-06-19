@@ -318,8 +318,15 @@ class OidcDeviceAuth:
         Two sessions share a cached token only when they would accept the same
         one: same IdP token endpoint (**path included**, so multi-tenant realms
         sharing a host don't collide), client id, scope *set* (order-insensitive),
-        and audience. The QuestDB URL is deliberately excluded — the same IdP
+        audience, and token-kind mode (``groups_in_token`` — id_token vs
+        access_token). The QuestDB URL is deliberately excluded — the same IdP
         token is valid against any QuestDB that trusts it.
+
+        ``groups_in_token`` is part of the key because it selects which token
+        kind :meth:`_select` returns; without it two sessions that differ only
+        in that mode would collide on one entry and repeatedly evict each
+        other's token (the gate self-corrects, but at the cost of avoidable
+        refreshes / re-prompts).
         """
         c = self.config
         scope = ' '.join(sorted(c.scope.split())) if c.scope else ''
@@ -328,7 +335,8 @@ class OidcDeviceAuth:
             _normalize_url(c.token_endpoint),
             c.client_id,
             scope,
-            c.audience or ''])
+            c.audience or '',
+            'groups' if c.groups_in_token else 'access'])
 
     def clear(self) -> None:
         """Forget the cached token (forces a fresh sign-in next time)."""
