@@ -659,13 +659,26 @@ class OidcDeviceAuth:
             # interval still shouldn't overshoot a short-lived code.
             self._sleep(min(interval, remaining))
 
-            status, body = self._idp_post(
-                self.config.token_endpoint,
-                {
-                    'grant_type': DEVICE_CODE_GRANT,
-                    'device_code': device_code,
-                    'client_id': self.config.client_id,
-                })
+            try:
+                status, body = self._idp_post(
+                    self.config.token_endpoint,
+                    {
+                        'grant_type': DEVICE_CODE_GRANT,
+                        'device_code': device_code,
+                        'client_id': self.config.client_id,
+                    })
+            except OidcError:
+                # Transient failure mid-poll, not a terminal OAuth decision: a
+                # dropped connection / DNS blip / per-request timeout
+                # (OidcNetworkError), or a non-2xx response with a non-JSON body
+                # such as an HTML 502/503/504 from a proxy or load balancer in
+                # front of the IdP (a bare OidcError from post_form). The user
+                # may already have authorized in the browser, and RFC 8628 §3.4
+                # expects polling to continue until the device code expires, so
+                # poll again instead of discarding the in-progress sign-in. The
+                # deadline check at the top of the loop bounds the total wait; a
+                # genuine rejection arrives as a JSON error body (handled below).
+                continue
 
             if status == 200:
                 # A 200 is the RFC 6749 §5.1 token response: the grant
@@ -685,6 +698,15 @@ class OidcDeviceAuth:
                     'Sign-in failed: the identity provider did not return the '
                     'token this server requires.')
                 raise self._missing_required_token_error()
+
+            # A 5xx or 429 that did carry a JSON body is also transient (a
+            # server-side error or a rate-limit) rather than a terminal OAuth
+            # rejection: back off on a rate-limit and keep polling until the
+            # deadline, matching the connection-failure handling above.
+            if status >= 500 or status == 429:
+                if status == 429:
+                    interval = min(_MAX_POLL_INTERVAL, interval + 5)
+                continue
 
             error = body.get('error')
             if error == 'authorization_pending':

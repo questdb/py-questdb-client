@@ -369,6 +369,46 @@ class TestDeviceFlow(AuthTestBase):
         # interval starts at 5, +5 after slow_down.
         self.assertEqual(self._clock.sleeps, [5, 10])
 
+    def test_transient_network_error_during_poll_keeps_polling(self):
+        # A dropped connection / DNS blip / timeout on a single poll must not
+        # abort a sign-in the user may already have completed in the browser:
+        # the loop keeps polling until the deadline (RFC 8628 §3.4). M1.
+        self.state.token_script = [(200, None)]  # success once actually polled
+        auth = self.make_auth()
+        real_idp_post = auth._idp_post
+        token_polls = {'n': 0}
+
+        def flaky(url, form):
+            # Fail only the first poll of the token endpoint; pass the device-
+            # code request and later polls through to the real transport.
+            if url == auth.config.token_endpoint:
+                token_polls['n'] += 1
+                if token_polls['n'] == 1:
+                    raise OidcNetworkError('connection reset mid-poll')
+            return real_idp_post(url, form)
+
+        auth._idp_post = flaky
+        self.assertEqual(auth.token(), ID_TOKEN)
+        # First poll raised (transient, retried); second poll reached the IdP.
+        self.assertEqual(token_polls['n'], 2)
+        self.assertEqual(len(self.state.token_requests), 1)
+        self.assertEqual(self._clock.sleeps, [5, 5])
+
+    def test_transient_5xx_and_429_during_poll_keep_polling(self):
+        # A 5xx server error or a 429 rate-limit (even carrying a JSON body) is
+        # transient, not a terminal OAuth rejection: keep polling, backing off
+        # on the rate-limit. M1.
+        self.state.token_script = [
+            (503, {'error': 'server_error'}),
+            (429, {'error': 'slow_down'}),
+            (200, None),
+        ]
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(len(self.state.token_requests), 3)
+        # 503 polled at the base interval; 429 bumps the interval by 5.
+        self.assertEqual(self._clock.sleeps, [5, 5, 10])
+
     def test_timeout_when_never_authorized(self):
         self.state.device_response = {
             'device_code': 'DEV-CODE', 'user_code': 'X',
