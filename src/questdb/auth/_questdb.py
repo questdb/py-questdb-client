@@ -72,11 +72,15 @@ def _import_pandas():
 def _exec_json_to_df(data: Dict[str, Any], pandas):
     columns = data.get('columns') or []
     # /exec returns a list of {"name", "type"} column descriptors. A malformed
-    # response (a non-list, or entries that aren't objects) must surface as a
-    # clean OidcError, not an AttributeError from .get() escaping the package's
-    # typed-error contract.
+    # response — a non-list, entries that aren't objects, or a non-string name —
+    # must surface as a clean OidcError, not a raw AttributeError from .get(),
+    # nor a TypeError from `name in df.columns` below when a name is
+    # non-hashable (a JSON list/object), escaping the package's typed-error
+    # contract. A real QuestDB column name is always a string.
     if not isinstance(columns, list) or not all(
-            isinstance(c, dict) for c in columns):
+            isinstance(c, dict)
+            and isinstance(c.get('name'), (str, type(None)))
+            for c in columns):
         raise OidcError(
             'QuestDB /exec returned a malformed "columns" field; '
             'cannot build a DataFrame.')
@@ -86,7 +90,9 @@ def _exec_json_to_df(data: Dict[str, Any], pandas):
         dataset = data.get('data') or []
     try:
         df = pandas.DataFrame(dataset, columns=names or None)
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
+        # TypeError too: a hostile/malformed dataset shape can make the pandas
+        # constructor raise it (not only ValueError); keep it within OidcError.
         raise OidcError(
             f'Unexpected shape in QuestDB /exec response: {e}') from e
     for col in columns:

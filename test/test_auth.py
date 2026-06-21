@@ -924,6 +924,22 @@ class TestDiscovery(AuthTestBase):
             OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
                                         insecure=True)
 
+    def test_non_dict_well_known_doc_raises_config_error(self):
+        # M2: an IdP discovery document that is valid JSON but not an object
+        # (a list/null/number/string from a captive portal, a misconfigured
+        # proxy, or a hostile IdP) must surface as a typed OidcConfigError, not
+        # a raw AttributeError from doc.get(...). issuer= is pinned so the
+        # fallback is allowed; the doc's shape is the error under test.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': self.base + '/token',
+        }}
+        self.state.well_known = []  # valid JSON, but not an object
+        with self.assertRaises(OidcConfigError):
+            OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                        insecure=True)
+
     def test_malformed_endpoint_port_raises_config_error(self):
         # /settings advertising a non-integer port in an endpoint must raise
         # OidcConfigError (the typed contract), not a bare ValueError that
@@ -1231,6 +1247,20 @@ class TestRestAdapter(AuthTestBase):
         # OidcError, not an AttributeError from .get() on the column. See M3.
         qdb = self._connected()
         self.state.exec_response = {'columns': [None], 'dataset': [[1]]}
+        with self.assertRaises(OidcError) as cm:
+            qdb.sql('SELECT 1')
+        self.assertNotIsInstance(cm.exception, OidcAuthError)
+
+    def test_sql_non_string_column_name_raises_oidc_error(self):
+        # M2: a column descriptor with a non-hashable name (a JSON list/object)
+        # and a TIMESTAMP/DATE type must raise a clean OidcError, not a raw
+        # TypeError ("unhashable type") from `name in df.columns` during the
+        # timestamp coercion.
+        qdb = self._connected()
+        self.state.exec_response = {
+            'columns': [{'name': ['evil'], 'type': 'TIMESTAMP'},
+                        {'name': 'b', 'type': 'LONG'}],
+            'dataset': [['2021-01-01T00:00:00.000000Z', 2]]}
         with self.assertRaises(OidcError) as cm:
             qdb.sql('SELECT 1')
         self.assertNotIsInstance(cm.exception, OidcAuthError)

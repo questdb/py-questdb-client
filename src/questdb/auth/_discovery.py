@@ -319,7 +319,16 @@ def discover_device_endpoint_from_idp(
             'Cannot discover the IdP device-authorization endpoint: no issuer '
             'or discovery_url was given. Pass issuer=... (or '
             'device_authorization_endpoint=... to skip discovery).')
-    return get_json(url, ctx=ctx, insecure=insecure, timeout=timeout)
+    doc = get_json(url, ctx=ctx, insecure=insecure, timeout=timeout)
+    # get_json guarantees valid JSON, not a JSON *object*. A discovery document
+    # that is valid-JSON-but-not-a-dict (a list/null/number/string from a
+    # captive portal, a misconfigured proxy, or a hostile IdP) must not reach
+    # resolve_config's doc.get(...) calls as a raw object, where it would escape
+    # the package's typed-error contract with a bare AttributeError. Coerce it
+    # to empty so resolution fails with the clear "could not resolve the ...
+    # endpoint" OidcConfigError instead — mirroring settings_config, which
+    # applies the same guard to the QuestDB /settings response.
+    return doc if isinstance(doc, dict) else {}
 
 
 def resolve_config(
