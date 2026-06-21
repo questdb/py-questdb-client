@@ -2185,6 +2185,40 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertIn('<a href="https://idp.example.com/device"',
                       captured['html'])
 
+    def test_jupyter_prompt_strips_control_and_bidi_chars(self):
+        # M3: the Jupyter path must ALSO strip control / bidi / zero-width chars
+        # from untrusted device-response fields — html.escape neutralizes markup
+        # but NOT a U+202E bidi override or zero-width chars, which can visually
+        # spoof the sign-in prompt in the notebook DOM. chr(cp) keeps the
+        # invisible characters out of the test source.
+        from questdb.auth._render import JupyterRenderer
+
+        captured = {}
+
+        class _Capturing(JupyterRenderer):
+            def _display(self, html_str):  # avoid importing IPython
+                captured['html'] = html_str
+
+        r = _Capturing()
+        r.on_prompt({
+            'user_code': 'WD' + chr(0x202e) + 'JB' + chr(0x200b),
+            'verification_uri': 'https://idp.example.com/' + chr(0x202e),
+            'verification_uri_complete':
+                'https://idp.example.com/c' + chr(0x200b) + 'omplete',
+            'expires_in': 600, 'interval': 5,
+        })
+        for cp in (0x202e, 0x200b):
+            self.assertNotIn(chr(cp), captured['html'],
+                             f'U+{cp:04X} reached the notebook DOM')
+        self.assertIn('idp.example.com', captured['html'])
+
+        # identity (untrusted JWT claim) on success and error_description on
+        # failure are sanitized too — both re-render the prompt head.
+        r.on_success('alice' + chr(0x202e) + '@evil', 3600)
+        self.assertNotIn(chr(0x202e), captured['html'])
+        r.on_failure('access denied ' + chr(0x202e) + 'spoof')
+        self.assertNotIn(chr(0x202e), captured['html'])
+
     def test_terminal_prompt_strips_control_chars(self):
         # A hostile/MITM'd device response must not inject ANSI escape sequences
         # into the plain-text terminal prompt (cursor moves / screen clears that
@@ -2220,7 +2254,9 @@ class TestRendererSecurity(unittest.TestCase):
         # (invisible) characters in the test source. See M2.
         from questdb.auth._render import _strip_control, format_prompt
         for cp in (0x202e, 0x202d, 0x2066, 0x2069, 0x200b, 0x200f,
-                   0x2028, 0x2029, 0xfeff):
+                   0x2028, 0x2029, 0xfeff,
+                   # also the format/bidi code points added for M3:
+                   0x00ad, 0x061c, 0x115f, 0x180e, 0x2060, 0x2064, 0xfff9):
             self.assertEqual(_strip_control('a' + chr(cp) + 'b'), 'ab',
                              f'U+{cp:04X} not stripped')
         # Legitimate text (incl. accents / CJK / printable ASCII) is preserved.

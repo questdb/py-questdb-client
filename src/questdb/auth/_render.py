@@ -128,13 +128,17 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
             f'rel="noopener noreferrer">{label}</a>')
 
 
-# C0/C1 control chars (incl. ESC, which drives ANSI escape sequences) plus the
-# Unicode bidi-control, zero-width and line/paragraph-separator ranges. All can
-# spoof a terminal prompt: U+202E (RIGHT-TO-LEFT OVERRIDE) reverses displayed
-# text to disguise a URL's host; U+2028/U+2029 inject fake lines; zero-width
-# chars hide content. Stripped from untrusted device-response fields.
+# C0/C1 control chars (incl. ESC, which drives ANSI escape sequences), the
+# Unicode bidi controls, the zero-width / invisible-format chars, the
+# line/paragraph separators and the interlinear-annotation controls. All can
+# spoof a prompt: U+202E (RIGHT-TO-LEFT OVERRIDE) reverses displayed text to
+# disguise a URL's host; U+2028/U+2029 inject fake lines; zero-width / invisible
+# chars hide or join content. Stripped from untrusted device-response fields on
+# BOTH the terminal and the Jupyter path (html.escape neutralizes markup, not
+# these). Covers the dangerous Unicode Cc/Cf code points for our inputs.
 _CONTROL_CHARS = re.compile(
-    r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]')
+    r'[\x00-\x1f\x7f-\x9f\u00ad\u061c\u115f\u180e\u200b-\u200f'
+    r'\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb]')
 
 
 def _strip_control(text: Optional[str]) -> str:
@@ -147,8 +151,9 @@ def _strip_control(text: Optional[str]) -> str:
     a hostile or MITM'd response inject ANSI escape sequences (C0/C1 control
     chars — cursor moves, screen clears) or Unicode bidi overrides / zero-width
     / line separators to spoof the prompt or hide the real sign-in URL (e.g.
-    U+202E visually reverses the displayed host). The Jupyter renderer
-    html-escapes its output; the plain-text path needs this.
+    U+202E visually reverses the displayed host). Needed on BOTH paths: the
+    plain-text terminal path (raw bytes to the TTY) and the Jupyter path —
+    ``html.escape`` neutralizes markup, not bidi/zero-width spoofing.
     """
     if not text:
         return ''
@@ -253,11 +258,25 @@ class JupyterRenderer(Renderer):
             'padding:12px 16px;font-family:sans-serif;max-width:520px">'
             + body + '</div>')
 
-    def on_prompt(self, resp: Dict[str, Any]) -> None:
-        self._resp = resp
-        uri = _verification_uri(resp)
-        code = html.escape(str(resp.get('user_code', '')))
+    def _prompt_head(self):
+        """Header + sanitized verification link and user code.
+
+        Shared by :meth:`on_prompt` and :meth:`_render_with_status` so the
+        sanitization can't be applied to one path and forgotten on the other.
+        ``verification_uri`` / ``user_code`` / ``verification_uri_complete`` are
+        untrusted device-response fields: strip control / bidi / zero-width
+        chars (which ``html.escape`` does NOT remove) before rendering, so a
+        hostile or MITM'd response can't inject a U+202E bidi override or
+        zero-width chars to visually spoof the prompt in the notebook DOM.
+        ``_render_link`` additionally html-escapes and scheme-vets the URL.
+        Returns ``(body, uri, complete)`` — the sanitized URLs are handed back
+        so the QR target isn't re-derived (and re-sanitized).
+        """
+        resp = self._resp
+        uri = _strip_control(_verification_uri(resp))
+        code = html.escape(_strip_control(str(resp.get('user_code', ''))))
         complete = _verification_uri_complete(resp)
+        complete = _strip_control(complete) if complete else None
         body = [
             '<div style="font-size:1.05em;font-weight:600;margin-bottom:6px">'
             '🔐 Sign in to QuestDB</div>',
@@ -270,6 +289,11 @@ class JupyterRenderer(Renderer):
                 '<div>' + _render_link(
                     complete, text='Click here to authorize directly →')
                 + '</div>')
+        return body, uri, complete
+
+    def on_prompt(self, resp: Dict[str, Any]) -> None:
+        self._resp = resp
+        body, uri, complete = self._prompt_head()
         if self._qr:
             qr_target = _safe_link_url(complete) or _safe_link_url(uri)
             data_uri = _qr_data_uri(qr_target) if qr_target else None
@@ -292,7 +316,9 @@ class JupyterRenderer(Renderer):
             color='#888')
 
     def on_success(self, identity: Optional[str], expires_in: float) -> None:
-        who = html.escape(identity) if identity else ''
+        # identity is derived from the (untrusted) JWT claims — strip control /
+        # bidi chars before html-escaping, as for the other rendered fields.
+        who = html.escape(_strip_control(identity)) if identity else ''
         mins = max(1, int(round(expires_in / 60)))
         suffix = f' as <b>{who}</b>' if who else ''
         self._render_with_status(
@@ -300,25 +326,12 @@ class JupyterRenderer(Renderer):
             color='#2e7d32')
 
     def on_failure(self, message: str) -> None:
-        self._render_with_status('❌ ' + html.escape(message), color='#c62828')
+        # message may interpolate the IdP's (untrusted) error_description.
+        self._render_with_status(
+            '❌ ' + html.escape(_strip_control(message)), color='#c62828')
 
     def _render_with_status(self, status_html: str, color: str) -> None:
-        resp = self._resp
-        uri = _verification_uri(resp)
-        code = html.escape(str(resp.get('user_code', '')))
-        complete = _verification_uri_complete(resp)
-        body = [
-            '<div style="font-size:1.05em;font-weight:600;margin-bottom:6px">'
-            '🔐 Sign in to QuestDB</div>',
-            f'<div>Open {_render_link(uri)} and enter code:</div>',
-            f'<div style="font-size:1.6em;font-family:monospace;'
-            f'letter-spacing:2px;margin:6px 0">{code}</div>',
-        ]
-        if _safe_link_url(complete):
-            body.append(
-                '<div>' + _render_link(
-                    complete, text='Click here to authorize directly →')
-                + '</div>')
+        body, _uri, _complete = self._prompt_head()
         body.append(
             f'<div style="color:{color};margin-top:8px">{status_html}</div>')
         self._display(self._panel(''.join(body)))
