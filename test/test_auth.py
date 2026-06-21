@@ -420,6 +420,16 @@ class TestDeviceFlow(AuthTestBase):
         with self.assertRaises(OidcTimeoutError):
             auth.token()
 
+    def test_idp_expired_token_error_raises_timeout(self):
+        # The token endpoint can itself answer a poll with error=expired_token
+        # (RFC 8628) — distinct from the local-deadline timeout. It must surface
+        # as OidcTimeoutError carrying that error, not loop or mis-classify it.
+        self.state.token_script = [(400, {'error': 'expired_token'})]
+        auth = self.make_auth()
+        with self.assertRaises(OidcTimeoutError) as cm:
+            auth.token()
+        self.assertEqual(cm.exception.error, 'expired_token')
+
     def test_nonpositive_expires_in_still_polls(self):
         # A non-positive expires_in in the device-auth response must be treated
         # as unknown, not as "already expired" — otherwise the flow times out
@@ -733,6 +743,20 @@ class TestRefresh(AuthTestBase):
         auth.token()
         self.assertEqual(auth._tokens.refresh_token, 'REFRESH-1')
 
+    def test_rotated_refresh_token_is_stored(self):
+        # When the IdP DOES rotate the refresh token, the new one must replace
+        # the old in the cached token set — else an IdP with one-time-use
+        # refresh tokens breaks on the NEXT refresh.
+        auth = self.make_auth()
+        self._seed_expired(auth)
+        self.state.refresh_response = (200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'refresh_token': 'REFRESH-2',  # rotated
+            'token_type': 'Bearer', 'expires_in': 3600})
+        auth.token()
+        self.assertEqual(auth._tokens.refresh_token, 'REFRESH-2')
+        self.assertEqual(self.state.device_requests, 0)  # no re-prompt
+
     def test_refresh_without_id_token_falls_back_to_device_flow(self):
         # groups_in_token=True but the IdP's refresh omits the id_token: the
         # refresh is unusable, so fall back to the interactive flow rather than
@@ -903,6 +927,30 @@ class TestDiscovery(AuthTestBase):
             insecure=True, renderer=Renderer())
         self.assertEqual(auth.config.device_authorization_endpoint,
                          self.base + '/device')
+
+    def test_discovery_url_rejects_off_origin_issuer_in_doc(self):
+        # M4: discovery_url= is advertised as an out-of-band pin, but the doc it
+        # points to could declare an attacker issuer AND endpoints all on one
+        # (attacker) origin — which passes co-location / issuer-origin vacuously.
+        # The discovered issuer must share the pinned discovery_url origin (OIDC
+        # Discovery §4.3), else refuse. /settings advertises NO endpoints, so
+        # both come from the (hostile) doc — the exact gap the fix closes.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+        }}
+        self.state.well_known = {
+            'issuer': 'https://attacker.example.net',
+            'token_endpoint': 'https://attacker.example.net/token',
+            'device_authorization_endpoint':
+                'https://attacker.example.net/device',
+        }
+        with self.assertRaises(OidcConfigError) as cm:
+            OidcDeviceAuth.from_questdb(
+                self.base,
+                discovery_url=self.base + '/.well-known/openid-configuration',
+                insecure=True)
+        self.assertIn('origin', str(cm.exception).lower())
 
     def test_oidc_disabled_raises(self):
         self.state.settings = {'config': {'acl.oidc.enabled': False}}
@@ -1266,6 +1314,47 @@ class TestRestAdapter(AuthTestBase):
         self.assertNotIsInstance(cm.exception, OidcAuthError)
 
 
+class TestRestAdapterAuthErrors(AuthTestBase):
+    """QuestDB.sql maps 401/403 to OidcAuthError BEFORE it builds a DataFrame,
+    so the mapping is testable without a real pandas. Kept out of the
+    pandas-gated TestRestAdapter so this security-relevant mapping runs on EVERY
+    CI leg, not just the ones where pandas is installed. M5."""
+
+    def _connected(self):
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.scope': 'openid groups',
+            'acl.oidc.groups.encoded.in.token': True,
+            'acl.oidc.token.endpoint': self.base + '/token',
+            'acl.oidc.device.authorization.endpoint': self.base + '/device',
+        }}
+        self.state.expected_bearer = ID_TOKEN
+        return connect(self.base, insecure=True, renderer=Renderer(),
+                       interactive=True, _clock=FakeClock())
+
+    @staticmethod
+    def _stub_pandas():
+        # sql() reaches the 401/403 check before it touches pandas, so a bare
+        # stub module is enough to exercise the mapping without the real
+        # (possibly absent) dependency.
+        return mock.patch.dict(
+            sys.modules, {'pandas': types.ModuleType('pandas')})
+
+    def test_sql_401_maps_to_auth_error_without_pandas(self):
+        qdb = self._connected()
+        self.state.expected_bearer = 'something-else'  # force 401
+        with self._stub_pandas(), self.assertRaises(OidcAuthError):
+            qdb.sql('SELECT 1')
+
+    def test_sql_403_maps_to_auth_error_without_pandas(self):
+        qdb = self._connected()
+        self.state.exec_status = 403            # bearer matches; server forbids
+        self.state.exec_response = {'error': 'forbidden'}
+        with self._stub_pandas(), self.assertRaises(OidcAuthError):
+            qdb.sql('SELECT 1')
+
+
 class TestConcurrency(AuthTestBase):
     def test_valid_cached_token_does_not_block_during_signin(self):
         # A caller with a valid cached token must NOT block behind another
@@ -1318,6 +1407,10 @@ class TestConcurrency(AuthTestBase):
         release.set()                      # let t1 finish signing in
         t1.join(5)
         t2.join(5)
+        # Fail loudly on a deadlock regression: a hung thread would otherwise
+        # leak and let the assertions below pass on a stale/half-filled dict.
+        self.assertFalse(t1.is_alive(), 'sign-in thread deadlocked')
+        self.assertFalse(t2.is_alive(), 'waiter thread deadlocked')
         self.assertEqual(results.get('a'), ID_TOKEN)
         self.assertEqual(results.get('b'), ID_TOKEN)
         self.assertEqual(self.state.device_requests, 1)  # no second prompt

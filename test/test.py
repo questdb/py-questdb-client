@@ -42,6 +42,7 @@ from test_auth import (
     TestDiscovery,
     TestInsecureSettingsGuard,
     TestRestAdapter,
+    TestRestAdapterAuthErrors,
     TestAdapters,
     TestConcurrency,
     TestConfigHelpers,

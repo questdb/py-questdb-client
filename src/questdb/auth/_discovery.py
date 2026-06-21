@@ -492,6 +492,36 @@ def resolve_config(
         authorization_endpoint = (
             authorization_endpoint
             or _str_setting(doc.get('authorization_endpoint')))
+        # OIDC Discovery §4.3 / RFC 8414 §3: when the IdP is pinned ONLY by
+        # discovery_url (no out-of-band issuer=), the document's self-declared
+        # issuer would otherwise be the trust anchor validate_endpoint_origins
+        # (in OidcDeviceAuth.__init__) checks the endpoints against — but that
+        # issuer comes from the same (possibly hostile, confused, or
+        # multi-tenant) document, so the check is vacuous, and an absent or
+        # non-string issuer makes it vacuous too (a document declaring attacker
+        # endpoints all on one origin would pass co-location trivially). Anchor
+        # instead to the caller-pinned discovery_url itself: require the
+        # credential endpoints to live on its origin, so a document can't
+        # redirect the device-code / refresh-token POSTs to an attacker origin.
+        # Origin-level, matching validate_endpoint_origins; pass issuer= and the
+        # endpoints explicitly if your IdP serves discovery and tokens from
+        # different origins.
+        if discovery_url and not issuer:
+            discovery_origin = _normalized_origin(discovery_url)
+            for label, url in (
+                    ('token endpoint', token_endpoint),
+                    ('device-authorization endpoint',
+                     device_authorization_endpoint)):
+                if url and _normalized_origin(url) != discovery_origin:
+                    raise OidcConfigError(
+                        f'The OIDC {label} ({url!r}) discovered via the pinned '
+                        f'discovery_url ({discovery_url!r}) is on a different '
+                        'origin; refusing to let a discovery document redirect '
+                        'credentials off the pinned IdP origin (OIDC Discovery '
+                        '§4.3). Pin the IdP with issuer="https://your-idp" and '
+                        'pass token_endpoint=/device_authorization_endpoint= '
+                        'explicitly if it serves discovery and tokens from '
+                        'different origins.')
         issuer = issuer or _str_setting(doc.get('issuer'))
 
     if not token_endpoint:
