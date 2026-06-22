@@ -1511,6 +1511,49 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
         col_chunks, symbol_categories, np, pd, col_masks)
 
 
+cdef object _polars_dataframe_with_fast_symbols(object table, object pl, object pa):
+    # Build a polars DataFrame from a pyarrow Table. Non-dictionary columns
+    # go through pl.from_arrow unchanged, so their polars dtypes are
+    # identical to today. SYMBOL (dictionary) columns are built from their
+    # codes + categories via a positional gather, avoiding pl.from_arrow's
+    # per-row Dictionary->Categorical remap; the result is still Categorical.
+    cdef list types = table.schema.types
+    cdef list is_dict = [pa.types.is_dictionary(t) for t in types]
+    if not any(is_dict):
+        return pl.from_arrow(table)
+    cdef list names = table.column_names
+    cdef Py_ssize_t i
+    cols = []
+    for i in range(len(types)):
+        if is_dict[i]:
+            cols.append(
+                _polars_categorical_from_arrow_dict(
+                    table.column(i), names[i], pl))
+        else:
+            cols.append(pl.from_arrow(table.column(i)).alias(names[i]))
+    return pl.DataFrame(cols)
+
+
+cdef object _polars_categorical_from_arrow_dict(object col, object name, object pl):
+    # col: a pyarrow ChunkedArray of dictionary type, one (batch-local) dict
+    # per chunk. Unify them into one shared category index space, then build
+    # the polars Categorical by positionally gathering the codes — gather is
+    # positional, so a code indexes the categories directly with no per-row
+    # intern. Uses only stable public polars/pyarrow API (cross-version).
+    if col.num_chunks == 0:
+        return pl.Series(name, [], dtype=pl.Categorical)
+    arr = col.unify_dictionaries().combine_chunks()
+    categories = arr.dictionary.to_pylist()
+    idx = pl.from_arrow(arr.indices)
+    if len(categories) == 0:
+        return pl.Series(name, [None] * len(idx), dtype=pl.Categorical)
+    base = pl.Series(name, categories, dtype=pl.Categorical)
+    gather = getattr(base, 'gather', None)
+    if gather is None:
+        gather = base.take
+    return gather(idx).alias(name)
+
+
 cdef class _NumpyBatchIter:
     cdef _CursorHandle handle
     cdef object np
@@ -1750,6 +1793,13 @@ class QueryResult:
         """Read the full result into a ``polars.DataFrame``. Requires polars
         and pyarrow.
 
+        Non-``SYMBOL`` columns keep their exact ``polars.from_arrow`` dtypes
+        (tz-aware ``Datetime``, ``Decimal``, ``Binary``, ``List``/``Array``,
+        …). ``SYMBOL`` columns are built into a polars ``Categorical`` from
+        their codes + dictionary via a positional gather, avoiding the
+        per-row ``Dictionary -> Categorical`` remap ``polars.from_arrow``
+        performs.
+
         Materialise-whole: a mid-query failover replays the result
         transparently. This accumulates batches in-library (via pyarrow)
         so the partial result can be discarded on failover; for the
@@ -1773,7 +1823,8 @@ class QueryResult:
         schema, batches = _fetch_all_record_batches(handle, pa)
         if schema is None:
             return pl.from_arrow(pa.table({}))
-        return pl.from_arrow(pa.Table.from_batches(batches, schema))
+        table = pa.Table.from_batches(batches, schema)
+        return _polars_dataframe_with_fast_symbols(table, pl, pa)
 
     def _to_pandas_numpy(self):
         return _numpy_frame_from_cursor(self._take_cursor_handle())
