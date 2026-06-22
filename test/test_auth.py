@@ -2413,6 +2413,44 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertNotIn('\x1b', out)
         self.assertNotIn('\x07', out)
 
+    def test_terminal_prompt_survives_unencodable_stream(self):
+        # On a stream whose encoding can't represent the prompt's emoji (a
+        # legacy code-page Windows console, an `ascii` PYTHONIOENCODING, or a
+        # redirected stderr), the decorative glyphs must degrade but the
+        # verification URL and user code must STILL reach the user — not vanish
+        # into a silent hang. M3.
+        from questdb.auth._render import TerminalRenderer
+
+        class _AsciiStream:
+            encoding = 'ascii'
+
+            def __init__(self):
+                self.parts = []
+
+            def write(self, s):
+                s.encode(self.encoding)  # raises UnicodeEncodeError, like a TTY
+                self.parts.append(s)
+
+            def flush(self):
+                pass
+
+        stream = _AsciiStream()
+        r = TerminalRenderer(stream=stream)
+        r.on_prompt({
+            'user_code': 'WDJB-MJHT',
+            'verification_uri': 'https://idp.example.com/device',
+        })
+        r.on_success('alice@example.com', 3600)
+        r.on_failure('access denied')
+        out = ''.join(stream.parts)
+        # The essential content survived (only the un-encodable glyphs were
+        # replaced); nothing was blackholed and no exception escaped.
+        self.assertIn('https://idp.example.com/device', out)
+        self.assertIn('WDJB-MJHT', out)
+        self.assertIn('alice@example.com', out)
+        self.assertIn('access denied', out)
+        out.encode('ascii')  # the whole transcript is ascii-encodable
+
     def test_strip_control_removes_bidi_and_zero_width(self):
         # Beyond C0/C1, untrusted device-response fields must have Unicode
         # bidi-override / zero-width / line-separator characters stripped before

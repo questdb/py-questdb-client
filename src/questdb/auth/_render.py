@@ -205,7 +205,18 @@ class TerminalRenderer(Renderer):
 
     def _write(self, text: str) -> None:
         try:
-            self._stream.write(text)
+            try:
+                self._stream.write(text)
+            except UnicodeEncodeError:
+                # The stream's encoding can't represent some characters (e.g.
+                # the emoji on a legacy code-page Windows console, an ``ascii``
+                # PYTHONIOENCODING, or a redirected stderr). Degrade only those
+                # characters instead of letting the whole prompt — including the
+                # verification URL and user code — vanish, which would make the
+                # sign-in look like a silent hang.
+                enc = getattr(self._stream, 'encoding', None) or 'ascii'
+                self._stream.write(
+                    text.encode(enc, 'replace').decode(enc, 'replace'))
             self._stream.flush()
         except Exception:
             pass
