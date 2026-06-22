@@ -126,6 +126,22 @@ def benchmark(*args):
 
 
 @command
+def pandas_to_questdb_throughput(*args):
+    """WS-7 headline ingress run (QWP_DATAFRAME_BENCH_PLAN.md s4).
+
+    Runs the s1-narrow columnar-populate floor + the cold/warm e2e split
+    (in-process mock server) + the populate_plus_encode sum. Pass extra args
+    through to the harness, e.g. ``--rows 10000000 --pretty`` or
+    ``--real-conf qwpws::addr=... --real-http http://...`` to add the
+    live-server real-client number. Ack level is Ok; Durable is Enterprise and
+    deferred.
+    """
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    _run('python3', 'test/benchmark_pandas_columnar.py', '--headline',
+         '--schema', 's1-narrow', *args, env=env)
+
+
+@command
 def gdb_test(*args):
     env = {'TEST_QUESTDB_PATCH_PATH': '1', 'PYTHONMALLOC': 'malloc'}
     _run('gdb', '-ex', 'r', '--args', 'python3', 'test/test.py', '-v', *args,
