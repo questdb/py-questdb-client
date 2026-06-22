@@ -183,6 +183,7 @@ class MockState:
         self.device_requests = 0
         self.token_requests = []
         self.refresh_requests = 0
+        self.refresh_forms = []
         self.exec_requests = []
 
 
@@ -269,6 +270,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             grant = form.get('grant_type')
             if grant == 'refresh_token':
                 self.state.refresh_requests += 1
+                self.state.refresh_forms.append(form)
                 status, body = self.state.refresh_response or (
                     200, self._default_token_body())
                 self._send_json(status, body)
@@ -429,6 +431,21 @@ class TestDeviceFlow(AuthTestBase):
         # to the device-code deadline.
         self.assertNotIsInstance(cm.exception, OidcTimeoutError)
         self.assertLessEqual(len(self._clock.sleeps), 1)
+
+    def test_device_200_without_codes_is_rejected_clearly(self):
+        # A 200 device-authorization response missing device_code/user_code is
+        # a non-conformant body, not an HTTP failure: the error must say so
+        # plainly (NOT the self-contradictory "failed (HTTP 200)") and the flow
+        # must never start polling.
+        self.state.device_status = 200
+        self.state.device_response = {'verification_uri': 'https://idp/device'}
+        auth = self.make_auth()
+        with self.assertRaises(OidcDeviceFlowError) as cm:
+            auth.token()
+        msg = str(cm.exception)
+        self.assertNotIn('HTTP 200', msg)
+        self.assertIn('device_code', msg)
+        self.assertEqual(self.state.token_requests, [])  # never polled
 
     def test_timeout_when_never_authorized(self):
         self.state.device_response = {
@@ -866,6 +883,27 @@ class TestRefresh(AuthTestBase):
             auth.token()
         self.assertEqual(self.state.device_requests, 0)
         self.assertEqual(auth._tokens.refresh_token, 'REFRESH-1')
+
+    def test_refresh_includes_audience_when_configured(self):
+        # The audience is re-sent on refresh (mirroring the device-auth
+        # request), so an IdP that scopes `aud` per request keeps it on the
+        # rotated token instead of minting one QuestDB rejects after a silent
+        # refresh. When no audience is configured the param is omitted.
+        auth = self.make_auth(audience='questdb-api')
+        self._seed_expired(auth)
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(
+            self.state.refresh_forms[-1].get('audience'), 'questdb-api')
+
+        # Without an audience, the refresh form carries no audience key.
+        _MEMORY_STORE.clear()
+        _MEMORY_GENERATION.clear()
+        self.state.refresh_forms.clear()
+        auth2 = self.make_auth()  # no audience
+        self._seed_expired(auth2)
+        auth2.token()
+        self.assertNotIn('audience', self.state.refresh_forms[-1])
 
     def test_refresh_transient_5xx_non_interactive_does_not_hard_fail(self):
         # The worst case: in a non-interactive context (papermill / cron / CI) a
@@ -1825,6 +1863,17 @@ class TestAdapters(unittest.TestCase):
         with self.assertRaises(ImportError):
             self._qdb().sender()
 
+    def test_sender_rejects_non_integer_port(self):
+        # A non-integer port kwarg must be rejected before it can be
+        # interpolated into the addr= conf string, where ";tls_verify=
+        # unsafe_off" would silently disable TLS verification — the same
+        # injection _require_host() blocks for the host. The coercion runs
+        # before the extension import, so this fails cleanly even without it.
+        qdb = self._qdb('https://db.example.com:9000')
+        for bad in ('9000;tls_verify=unsafe_off', 'notaport', ['9000']):
+            with self.assertRaises(OidcConfigError):
+                qdb.sender(port=bad)
+
 
 class TestConfigHelpers(unittest.TestCase):
     def test_as_bool_variants(self):
@@ -1936,6 +1985,22 @@ class TestConfigHelpers(unittest.TestCase):
         self.assertIsNone(_resolve_endpoint('/as/token.oauth2', {}))
         self.assertIsNone(  # port present but host missing -> still unresolved
             _resolve_endpoint('/as/token.oauth2', {'acl.oidc.port': 443}))
+
+    def test_resolve_endpoint_ignores_non_string_host(self):
+        # A non-string acl.oidc.host (a JSON number/list from a buggy or hostile
+        # /settings) must not be interpolated raw into the netloc (e.g.
+        # https://12345:9000/path); treat it as absent so a path-only endpoint
+        # reads as unresolvable, mirroring how endpoint values are coerced.
+        from questdb.auth._discovery import _resolve_endpoint
+        for bad_host in (12345, ['idp'], {'h': 'idp'}, True):
+            self.assertIsNone(
+                _resolve_endpoint('/as/token', {'acl.oidc.host': bad_host}))
+        # A non-numeric port is dropped rather than corrupting the netloc.
+        self.assertEqual(
+            _resolve_endpoint('/as/token', {
+                'acl.oidc.host': 'idp', 'acl.oidc.tls.enabled': True,
+                'acl.oidc.port': ['x']}),
+            'https://idp/as/token')
 
     def test_settings_config_nesting(self):
         from questdb.auth._discovery import settings_config

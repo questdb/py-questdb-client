@@ -578,6 +578,13 @@ class OidcDeviceAuth:
                     'refresh_token': tokens.refresh_token,
                     'client_id': self.config.client_id,
                     'scope': self.config.scope,
+                    # Re-send the audience on refresh too, mirroring the
+                    # device-authorization request: some IdPs (e.g. Auth0) need
+                    # it to keep the rotated access token's `aud`, and would
+                    # otherwise mint a token QuestDB rejects only AFTER a silent
+                    # refresh. IdPs that don't use it ignore the param; post_form
+                    # drops it entirely when audience is None (not configured).
+                    'audience': self.config.audience,
                 })
         except OidcNetworkError:
             # Already transient (socket drop / DNS / per-request timeout):
@@ -649,6 +656,17 @@ class OidcDeviceAuth:
         if status == 200 and body.get('device_code') and body.get('user_code'):
             return body
         error = body.get('error')
+        if status == 200:
+            # 200 but the success guard above failed: the response is missing
+            # device_code/user_code. That is a non-conformant body, not an
+            # HTTP-level failure — say so plainly rather than the contradictory
+            # "Device authorization request failed (HTTP 200)".
+            raise OidcDeviceFlowError(
+                'The IdP returned a 200 device-authorization response that is '
+                'missing the required "device_code"/"user_code" fields; cannot '
+                'start the device flow.',
+                error=error,
+                error_description=body.get('error_description'))
         if status in (400, 404, 405) or error in (
                 'invalid_client', 'unauthorized_client',
                 'unsupported_grant_type'):

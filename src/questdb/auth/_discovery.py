@@ -309,7 +309,12 @@ def _resolve_endpoint(value: Optional[str], cfg: Dict[str, Any]) -> Optional[str
     if value.startswith('http://') or value.startswith('https://'):
         return value
     if value.startswith('/'):
-        host = cfg.get(_K_HOST)
+        # _str_setting drops a non-string acl.oidc.host (a JSON number/list from
+        # a buggy or hostile /settings) so it can't be interpolated raw into the
+        # netloc — e.g. https://12345:9000/path — and instead reads as absent,
+        # mirroring how endpoint values above are coerced. (safe_urlparse would
+        # otherwise reject the bogus URL only incidentally, downstream.)
+        host = _str_setting(cfg.get(_K_HOST))
         if not host:
             # A path-only endpoint with no acl.oidc.host to resolve it against
             # can't be turned into a URL. Treat it as absent (return None) so
@@ -320,8 +325,15 @@ def _resolve_endpoint(value: Optional[str], cfg: Dict[str, Any]) -> Optional[str
             return None
         tls = _as_bool(cfg.get(_K_TLS_ENABLED), default=True)
         scheme = 'https' if tls else 'http'
+        # A usable port is an int or a digit string; anything else (a JSON
+        # list/object, a bool, or a non-numeric string) would corrupt the
+        # netloc, so drop it and resolve host-only.
         port = cfg.get(_K_PORT)
-        netloc = f'{host}:{port}' if port else str(host)
+        if isinstance(port, bool) or not (
+                isinstance(port, int)
+                or (isinstance(port, str) and port.isdigit())):
+            port = None
+        netloc = f'{host}:{port}' if port else host
         return f'{scheme}://{netloc}{value}'
     return value
 

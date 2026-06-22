@@ -326,6 +326,21 @@ class QuestDB:
         The token is captured at creation time; create a new sender to pick up
         a refreshed token.
         """
+        scheme = 'https' if self._parts.scheme == 'https' else 'http'
+        resolved_port = port or self._port or (
+            443 if scheme == 'https' else 9000)
+        # Coerce to int (before the heavy import, so bad input fails fast) so a
+        # stray non-integer port kwarg can't smuggle ILP conf parameters — e.g.
+        # "9000;tls_verify=unsafe_off" — into the addr= string via _ilp_addr,
+        # the same injection _require_host() blocks for the host. The
+        # URL-derived self._port is already an int.
+        try:
+            resolved_port = int(resolved_port)
+        except (TypeError, ValueError):
+            raise OidcConfigError(
+                f'Invalid port {resolved_port!r} for QuestDB.sender(); expected '
+                'an integer.')
+
         try:
             from questdb.ingress import Sender
         except ImportError as e:
@@ -334,9 +349,6 @@ class QuestDB:
                 'QuestDB.sender(). Install the full client wheel '
                 '(`pip install questdb`).') from e
 
-        scheme = 'https' if self._parts.scheme == 'https' else 'http'
-        resolved_port = port or self._port or (
-            443 if scheme == 'https' else 9000)
         conf = (f'{scheme}::addr='
                 f'{self._ilp_addr(self._require_host(), resolved_port)};')
         # Forward the private CA bundle (explicit ca_bundle=, else the
