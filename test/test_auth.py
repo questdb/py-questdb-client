@@ -409,6 +409,27 @@ class TestDeviceFlow(AuthTestBase):
         # 503 polled at the base interval; 429 bumps the interval by 5.
         self.assertEqual(self._clock.sleeps, [5, 5, 10])
 
+    def test_non_json_4xx_during_poll_is_terminal(self):
+        # A non-JSON 4xx during polling (an HTML/plain error page from a WAF or
+        # reverse proxy in front of the IdP, or a non-conformant IdP) is a
+        # terminal rejection: a conformant OAuth error is JSON, so it can't be
+        # authorization_pending / slow_down. Fail fast with a device-flow error
+        # instead of polling on to a misleading "code expired". M1.
+        auth = self.make_auth()
+        with _raw_response_server(
+                403, 'text/html', b'<html>denied</html>') as raw:
+            # Point only the poll (token) endpoint at the non-JSON 403; the
+            # device-code request still hits the JSON mock IdP. Set it post-
+            # construction so the (already-satisfied) co-location check isn't
+            # re-run against the throwaway origin.
+            auth.config.token_endpoint = raw + '/token'
+            with self.assertRaises(OidcDeviceFlowError) as cm:
+                auth.token()
+        # Terminal on the first poll: not a timeout, and it did not keep polling
+        # to the device-code deadline.
+        self.assertNotIsInstance(cm.exception, OidcTimeoutError)
+        self.assertLessEqual(len(self._clock.sleeps), 1)
+
     def test_timeout_when_never_authorized(self):
         self.state.device_response = {
             'device_code': 'DEV-CODE', 'user_code': 'X',
@@ -820,6 +841,44 @@ class TestRefresh(AuthTestBase):
         # fallback (device endpoint), and the refresh token is kept for a retry.
         self.assertIn('/token', str(cm.exception))
         self.assertEqual(auth._tokens.refresh_token, 'REFRESH-1')
+
+    def test_refresh_transient_5xx_kept_for_retry(self):
+        # A transient IdP error (5xx) during a silent refresh must NOT tear the
+        # session down and re-prompt: the refresh token is still valid, so it is
+        # surfaced as a retryable OidcNetworkError and the cached token (with its
+        # refresh token) is kept for a later retry — matching the poll loop,
+        # which also treats 5xx/429 as transient. M2.
+        auth = self.make_auth()
+        self._seed_expired(auth)
+        self.state.refresh_response = (503, {'error': 'temporarily_unavailable'})
+        with self.assertRaises(OidcNetworkError):
+            auth.token()
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(self.state.device_requests, 0)   # NOT re-prompted
+        self.assertEqual(auth._tokens.refresh_token, 'REFRESH-1')  # kept
+
+    def test_refresh_transient_429_kept_for_retry(self):
+        # Same as the 5xx case for a 429 rate-limit. M2.
+        auth = self.make_auth()
+        self._seed_expired(auth)
+        self.state.refresh_response = (429, {'error': 'slow_down'})
+        with self.assertRaises(OidcNetworkError):
+            auth.token()
+        self.assertEqual(self.state.device_requests, 0)
+        self.assertEqual(auth._tokens.refresh_token, 'REFRESH-1')
+
+    def test_refresh_transient_5xx_non_interactive_does_not_hard_fail(self):
+        # The worst case: in a non-interactive context (papermill / cron / CI) a
+        # transient refresh error must surface as a retryable OidcNetworkError,
+        # NOT escalate to OidcInteractionRequired — which a fall-through to the
+        # device flow would raise, hard-failing a session whose refresh token is
+        # still valid and would succeed on the next attempt. M2.
+        auth = self.make_auth(interactive=False)
+        self._seed_expired(auth)
+        self.state.refresh_response = (503, {'error': 'temporarily_unavailable'})
+        with self.assertRaises(OidcNetworkError):
+            auth.token()
+        self.assertEqual(self.state.device_requests, 0)
 
 
 class TestDiscovery(AuthTestBase):
@@ -2077,6 +2136,21 @@ class TestTransportSecurity(unittest.TestCase):
         with self.assertRaises(OidcConfigError):
             _require_secure('http://idp.example.com/x', insecure=False)
         _require_secure('http://idp.example.com/x', insecure=True)
+
+    def test_post_form_attaches_status_to_non_json_error(self):
+        # The device-flow poll loop and the silent refresh classify a non-JSON
+        # token-endpoint failure (4xx terminal vs 5xx/429 transient) by the HTTP
+        # status, so post_form must attach it to the raised OidcError. M1/M2.
+        from questdb.auth._http import post_form
+        with _raw_response_server(403, 'text/plain', b'forbidden') as raw:
+            with self.assertRaises(OidcError) as cm:
+                post_form(raw + '/token', {'grant_type': 'x'})
+        self.assertEqual(cm.exception.status, 403)
+        # A non-JSON 5xx likewise carries its status (classified as transient).
+        with _raw_response_server(503, 'text/html', b'<h1>bad gw</h1>') as raw:
+            with self.assertRaises(OidcError) as cm:
+                post_form(raw + '/token', {'grant_type': 'x'})
+        self.assertEqual(cm.exception.status, 503)
 
     def test_insecure_does_not_downgrade_idp(self):
         # insecure=True must NOT permit plaintext to a non-loopback IdP: the

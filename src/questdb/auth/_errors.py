@@ -32,6 +32,15 @@ from typing import Optional
 class OidcError(Exception):
     """Base class for every error raised by :mod:`questdb.auth`."""
 
+    def __init__(self, *args, status: Optional[int] = None):
+        super().__init__(*args)
+        # HTTP status that produced this error, when it originated from a
+        # non-JSON HTTP response (else None). Lets the device-flow poll loop and
+        # the silent refresh tell a terminal 4xx rejection (e.g. a WAF/proxy
+        # error page) from a transient 5xx/429/network blip even when the body
+        # was not a conformant JSON OAuth error.
+        self.status = status
+
 
 class OidcConfigError(OidcError):
     """

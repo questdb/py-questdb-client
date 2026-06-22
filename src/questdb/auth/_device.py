@@ -113,6 +113,25 @@ def _identity_from_claims(claims: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _http_status_is_terminal_4xx(status: Optional[int]) -> bool:
+    """
+    True for a client-error HTTP status that is a definitive rejection.
+
+    A non-JSON response body carrying such a status (e.g. an HTML/plain ``403``
+    from a WAF or reverse proxy in front of the IdP, or a non-conformant IdP) is
+    never a RFC-conformant ``authorization_pending`` / ``slow_down`` — those are
+    always JSON — so the device-flow poll must fail fast rather than keep
+    retrying to a misleading "code expired". ``429`` is excluded: it is a
+    rate-limit, handled as transient with back-off.
+    """
+    return status is not None and 400 <= status < 500 and status != 429
+
+
+def _http_status_is_transient(status: Optional[int]) -> bool:
+    """True for a server-side (5xx) or rate-limit (429) status worth retrying."""
+    return status is not None and (status >= 500 or status == 429)
+
+
 class OidcDeviceAuth:
     """
     Acquire and refresh an OIDC token via the device authorization grant.
@@ -551,14 +570,29 @@ class OidcDeviceAuth:
             url, form, ctx=self._ctx, insecure=False, timeout=self._timeout)
 
     def _refresh(self, tokens: TokenSet) -> TokenSet:
-        status, body = self._idp_post(
-            self.config.token_endpoint,
-            {
-                'grant_type': REFRESH_GRANT,
-                'refresh_token': tokens.refresh_token,
-                'client_id': self.config.client_id,
-                'scope': self.config.scope,
-            })
+        try:
+            status, body = self._idp_post(
+                self.config.token_endpoint,
+                {
+                    'grant_type': REFRESH_GRANT,
+                    'refresh_token': tokens.refresh_token,
+                    'client_id': self.config.client_id,
+                    'scope': self.config.scope,
+                })
+        except OidcNetworkError:
+            # Already transient (socket drop / DNS / per-request timeout):
+            # propagate so _acquire keeps the still-valid refresh token and
+            # retries later instead of re-prompting.
+            raise
+        except OidcError as e:
+            # Non-JSON HTTP error body (e.g. an HTML 5xx from a proxy in front
+            # of the IdP). A 5xx / 429 is a transient hiccup — re-raise as a
+            # network error so _acquire keeps the refresh token; a 4xx is a
+            # genuine rejection, so let it fall through (as an OidcError) to a
+            # fresh interactive sign-in.
+            if _http_status_is_transient(getattr(e, 'status', None)):
+                raise OidcNetworkError(str(e)) from e
+            raise
         if status == 200:
             refreshed = self._tokenset_from_response(body)
             # Many IdPs do not rotate the refresh token; keep the old one.
@@ -567,6 +601,16 @@ class OidcDeviceAuth:
                 refreshed = replace(
                     refreshed, refresh_token=tokens.refresh_token)
             return refreshed
+        # A transient IdP error (5xx / 429) during a silent refresh must not
+        # tear down the session: the refresh token is still valid, so surface it
+        # as a network error and let _acquire keep it and retry later — matching
+        # the poll loop, which also treats 5xx/429 as transient. Only a genuine
+        # rejection (an expired/revoked refresh token, a 4xx invalid_grant)
+        # falls through to a fresh interactive sign-in.
+        if _http_status_is_transient(status):
+            raise OidcNetworkError(
+                f'Token refresh hit a transient IdP error (HTTP {status}); '
+                'the refresh token is still valid — retry later.')
         raise OidcDeviceFlowError(
             f"Token refresh failed: {body.get('error', 'unknown error')}",
             error=body.get('error'),
@@ -667,17 +711,30 @@ class OidcDeviceAuth:
                         'device_code': device_code,
                         'client_id': self.config.client_id,
                     })
-            except OidcError:
-                # Transient failure mid-poll, not a terminal OAuth decision: a
-                # dropped connection / DNS blip / per-request timeout
-                # (OidcNetworkError), or a non-2xx response with a non-JSON body
-                # such as an HTML 502/503/504 from a proxy or load balancer in
-                # front of the IdP (a bare OidcError from post_form). The user
+            except OidcError as e:
+                # A non-JSON 4xx is a terminal rejection (e.g. an HTML/plain
+                # error page from a WAF or reverse proxy in front of the IdP, or
+                # a non-conformant IdP): a conformant OAuth error is JSON, so it
+                # can never be authorization_pending / slow_down. Fail fast
+                # instead of polling on to a misleading "code expired".
+                if _http_status_is_terminal_4xx(getattr(e, 'status', None)):
+                    self._renderer.on_failure(
+                        'Sign-in failed: the identity provider rejected the '
+                        'request.')
+                    raise OidcDeviceFlowError(
+                        f'Device flow failed: the IdP rejected the token '
+                        f'request ({e}).') from e
+                # Otherwise transient, not a terminal OAuth decision: a dropped
+                # connection / DNS blip / per-request timeout (OidcNetworkError),
+                # or a non-JSON 5xx/429 such as an HTML 502/503/504 from a proxy
+                # in front of the IdP (a bare OidcError from post_form). The user
                 # may already have authorized in the browser, and RFC 8628 §3.4
                 # expects polling to continue until the device code expires, so
                 # poll again instead of discarding the in-progress sign-in. The
                 # deadline check at the top of the loop bounds the total wait; a
-                # genuine rejection arrives as a JSON error body (handled below).
+                # genuine JSON rejection arrives as a JSON error body (below).
+                if getattr(e, 'status', None) == 429:
+                    interval = min(_MAX_POLL_INTERVAL, interval + 5)
                 continue
 
             if status == 200:

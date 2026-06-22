@@ -290,9 +290,15 @@ def post_form(
         # ValueError, so catch it explicitly to keep the typed contract.
         if resp.ok:
             raise OidcError(
-                f'Expected JSON from {url}, got: {resp.text()[:200]}')
-        # Non-JSON error body: surface the status + text.
-        raise OidcError(f'HTTP {resp.status} from {url}: {resp.text()[:200]}')
+                f'Expected JSON from {url}, got: {resp.text()[:200]}',
+                status=resp.status)
+        # Non-JSON error body: surface the status + text. Attach the HTTP status
+        # so callers (the device-flow poll loop / silent refresh) can tell a
+        # terminal 4xx rejection from a transient 5xx/429 even though the body
+        # was not a conformant JSON OAuth error.
+        raise OidcError(
+            f'HTTP {resp.status} from {url}: {resp.text()[:200]}',
+            status=resp.status)
     if not isinstance(parsed, dict):
         raise OidcError(f'Unexpected JSON shape from {url}: {parsed!r}')
     return resp.status, parsed
