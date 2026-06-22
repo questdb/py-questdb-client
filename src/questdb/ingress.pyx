@@ -3286,6 +3286,7 @@ cdef void_int _dataframe_columnar_append_pyobj_simple(
             col.name.len,
             dtype,
             (<const uint8_t*>prebuilt.data) + row_offset * elem_size,
+            row_count * elem_size,
             row_count,
             validity_ptr,
             NULL,
@@ -3415,6 +3416,7 @@ cdef void_int _dataframe_columnar_append_field(
                     column_sender_numpy_dtype.column_sender_numpy_bool,
                     (<const uint8_t*>data) + row_offset,
                     row_count,
+                    row_count,
                     validity_ptr,
                     NULL,
                     &err)
@@ -3442,6 +3444,7 @@ cdef void_int _dataframe_columnar_append_field(
                     col.name.len,
                     column_sender_numpy_dtype.column_sender_numpy_i64,
                     (<const uint8_t*>prebuilt.data) + row_offset * 8,
+                    row_count * 8,
                     row_count,
                     validity_ptr,
                     NULL,
@@ -3500,6 +3503,7 @@ cdef void_int _dataframe_columnar_append_field(
                     col.name.len,
                     numpy_dtype,
                     (<const uint8_t*>data) + row_offset * element_size,
+                    row_count * element_size,
                     row_count,
                     validity_ptr,
                     extras_ptr,
@@ -3517,6 +3521,7 @@ cdef void_int _dataframe_columnar_append_field(
                     col.name.len,
                     numpy_dtype,
                     (<const uint8_t*>data) + row_offset * element_size,
+                    row_count * element_size,
                     row_count,
                     validity_ptr,
                     NULL,
@@ -3533,6 +3538,7 @@ cdef void_int _dataframe_columnar_append_field(
                     col.name.len,
                     numpy_dtype,
                     (<const uint8_t*>data) + row_offset * element_size,
+                    row_count * element_size,
                     row_count,
                     validity_ptr,
                     NULL,
@@ -3558,6 +3564,7 @@ cdef void_int _dataframe_columnar_append_field(
                     col.name.len,
                     column_sender_numpy_dtype.column_sender_numpy_f64,
                     (<const uint8_t*>prebuilt.data) + row_offset * 8,
+                    row_count * 8,
                     row_count,
                     validity_ptr,
                     NULL,
@@ -3573,6 +3580,7 @@ cdef void_int _dataframe_columnar_append_field(
                     col.name.len,
                     column_sender_numpy_dtype.column_sender_numpy_datetime64_ns,
                     (<const uint8_t*>data) + row_offset * 8,
+                    row_count * 8,
                     row_count,
                     validity_ptr,
                     NULL,
@@ -3585,6 +3593,7 @@ cdef void_int _dataframe_columnar_append_field(
                     col.name.len,
                     column_sender_numpy_dtype.column_sender_numpy_datetime64_us,
                     (<const uint8_t*>data) + row_offset * 8,
+                    row_count * 8,
                     row_count,
                     validity_ptr,
                     NULL,
@@ -4022,7 +4031,7 @@ cdef void_int _dataframe_arrow_flush_batch(
             conn, table, array, schema, ts_column[0],
             overrides, overrides_len, &err)
     else:
-        ok = column_sender_flush_arrow_batch(
+        ok = column_sender_flush_arrow_batch_server_stamped(
             conn, table, array, schema,
             overrides, overrides_len, &err)
     _ensure_has_gil(&gs)
@@ -4106,7 +4115,8 @@ def _bench_dataframe_flush_arrow_batch(
         object conf=None,
         size_t iterations=1):
     """
-    Internal benchmark hook for `column_sender_flush_arrow_batch` FFI.
+    Internal benchmark hook for `column_sender_flush_arrow_batch_server_stamped`
+    FFI.
 
     `arrow_source` must expose the Arrow PyCapsule Interface
     (`__arrow_c_stream__`) — pa.RecordBatch, pa.Table, pa.RecordBatchReader,

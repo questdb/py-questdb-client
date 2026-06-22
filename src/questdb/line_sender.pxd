@@ -919,6 +919,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         size_t name_len,
         uint32_t dtype,
         const uint8_t* data,
+        size_t data_len_bytes,
         size_t row_count,
         const column_sender_validity* validity,
         const column_sender_numpy_extras* extras,
@@ -949,7 +950,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         uint32_t kind
         uint32_t arg
 
-    bint column_sender_flush_arrow_batch(
+    bint column_sender_flush_arrow_batch_server_stamped(
         column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
