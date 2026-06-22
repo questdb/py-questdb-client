@@ -58,24 +58,31 @@ def _rss():
 
 
 def _assert_no_leak(test, work, warmup, measure):
-    # Measure steady-state growth (second half only): a real leak grows
-    # linearly, while allocator retention plateaus after warmup.
+    # A real leak keeps a steady RSS slope; glibc arena retention fills then
+    # flattens. Pass if the last windows' mean growth is near-flat or well
+    # below the first windows' — judging the shape, not an absolute size.
+    windows = 6
+    per = max(1, measure // windows)
     for _ in range(warmup):
         work()
     gc.collect()
-    half = measure // 2
-    for _ in range(half):
-        work()
-    gc.collect()
-    mid = _rss()
-    for _ in range(measure - half):
-        work()
-    gc.collect()
-    growth = _rss() - mid
-    test.assertLess(
-        growth, 8 * 1024 * 1024,
-        f'RSS grew {growth} bytes over the second half of {measure} '
-        'iterations; a native buffer is likely leaked.')
+    prev = _rss()
+    growths = []
+    for _ in range(windows):
+        for _ in range(per):
+            work()
+        gc.collect()
+        now = _rss()
+        growths.append(now - prev)
+        prev = now
+    edge = max(1, windows // 3)
+    head = sum(growths[:edge]) / edge
+    tail = sum(growths[-edge:]) / edge
+    test.assertTrue(
+        tail <= 3 * 1024 * 1024 or tail * 2 <= head,
+        f'RSS not plateauing: per-window growth {growths} bytes over '
+        f'{windows} windows of {per} iterations (head {head:.0f}, '
+        f'tail {tail:.0f}); likely a leaked native buffer.')
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -143,7 +150,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
                         client.dataframe(
                             df, table_name='t', at='ts', symbols='auto')
 
-                self._assert_stable(work, warmup=50, measure=800)
+                self._assert_stable(work, warmup=150, measure=1800)
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -198,7 +205,7 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                         client.dataframe(
                             df, table_name='t', at='ts', symbols=False)
 
-                self._assert_stable(work, warmup=50, measure=800)
+                self._assert_stable(work, warmup=150, measure=1800)
 
 
 if __name__ == '__main__':

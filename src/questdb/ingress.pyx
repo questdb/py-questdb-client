@@ -184,7 +184,7 @@ class IngressErrorCode(Enum):
     # numeric value is never sent over FFI.
     BadDataFrame = 0x10000
     Cancelled = 0x10001
-    # Egress-only (line_reader_error_code 21); not a line_sender_error_code.
+    # Egress-only (reader_error_code 21); not a line_sender_error_code.
     FailoverWouldDuplicate = 0x10002
 
     def __str__(self) -> str:
@@ -3756,8 +3756,13 @@ cdef object _dataframe_normalize_nullable(object df):
     cdef object masked_base = _pandas_masked_dtype()
     convert = []
     for name, dtype in zip(df.columns, df.dtypes):
-        if (isinstance(dtype, masked_base)
-                or isinstance(dtype, _PANDAS.StringDtype)):
+        # pyarrow-backed strings keep their Arrow buffers (resolved as
+        # str_utf8_arrow), so an all-null column survives as a null VARCHAR
+        # instead of collapsing to a skipped all-null object column.
+        if isinstance(dtype, masked_base):
+            convert.append(name)
+        elif (isinstance(dtype, _PANDAS.StringDtype)
+                and getattr(dtype, 'storage', None) != 'pyarrow'):
             convert.append(name)
     if not convert:
         return df
@@ -3890,7 +3895,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
         chunk, at_col, at_prebuilt, row_offset, row_count)
 
 
-cdef void_int _dataframe_columnar_sync(qwpws_conn* conn) except -1:
+cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
@@ -3913,7 +3918,7 @@ cdef void_int _dataframe_columnar_sync(qwpws_conn* conn) except -1:
 
 
 cdef bint _dataframe_columnar_force_drop_after_error(
-        qwpws_conn* conn,
+        column_sender* conn,
         bint flushed,
         bint flush_attempted,
         bint sync_attempted) noexcept:
@@ -3926,14 +3931,14 @@ cdef bint _dataframe_columnar_force_drop_after_error(
     if conn == NULL:
         return False
     if not flush_attempted:
-        return qwpws_conn_must_close(conn)
-    if flushed and not sync_attempted and not qwpws_conn_must_close(conn):
+        return column_sender_must_close(conn)
+    if flushed and not sync_attempted and not column_sender_must_close(conn):
         try:
             _dataframe_columnar_sync(conn)
             return False
         except Exception:
             pass
-    return qwpws_conn_must_close(conn)
+    return column_sender_must_close(conn)
 
 
 cdef bint _dataframe_columnar_is_deferred_capacity_error(
@@ -3949,7 +3954,7 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
 
 
 cdef void_int _dataframe_columnar_flush(
-        qwpws_conn* conn,
+        column_sender* conn,
         column_sender_chunk* chunk,
         bint retry_after_sync) except -1:
     cdef line_sender_error* err = NULL
@@ -3995,7 +4000,7 @@ cdef void_int _dataframe_columnar_flush(
 
 
 cdef void_int _dataframe_arrow_flush_batch(
-        qwpws_conn* conn,
+        column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         ArrowSchema* schema,
@@ -4116,7 +4121,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef size_t col_count = 0
     cdef size_t completed = 0
     cdef questdb_db* db = NULL
-    cdef qwpws_conn* conn = NULL
+    cdef column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef qdb_pystr_buf* b = NULL
     cdef PyThreadState* gs = NULL
@@ -4176,7 +4181,7 @@ def _bench_dataframe_flush_arrow_batch(
             c_ts_column_ptr = &c_ts_column
 
         _ensure_doesnt_have_gil(&gs)
-        conn = questdb_db_borrow_conn(db, &err)
+        conn = questdb_db_borrow_column_sender(db, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -4189,7 +4194,7 @@ def _bench_dataframe_flush_arrow_batch(
             _dataframe_columnar_sync(conn)
             completed = iterations
         finally:
-            questdb_db_return_conn(db, conn)
+            questdb_db_return_column_sender(db, conn)
     finally:
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
@@ -4346,7 +4351,7 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
 
 
 cdef void_int _capsule_consume_stream(
-        qwpws_conn* conn,
+        column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -4869,7 +4874,7 @@ cdef bint _dataframe_client_try_capsule_path(
         size_t max_rows_per_batch,
         object schema_overrides) except -1:
     cdef qdb_pystr_buf* b = NULL
-    cdef qwpws_conn* conn = NULL
+    cdef column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
     cdef object sliceable = None
@@ -4978,9 +4983,9 @@ cdef bint _dataframe_client_try_capsule_path(
 
         _ensure_doesnt_have_gil(&gs)
         if budget_ms == 0:
-            conn = questdb_db_borrow_conn(db, &err)
+            conn = questdb_db_borrow_column_sender(db, &err)
         else:
-            conn = questdb_db_borrow_conn_with_retry(db, budget_ms, &err)
+            conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -5018,9 +5023,9 @@ cdef bint _dataframe_client_try_capsule_path(
         _ensure_has_gil(&gs)
         if conn != NULL:
             if force_drop_conn:
-                questdb_db_drop_conn(db, conn)
+                questdb_db_drop_column_sender(db, conn)
             else:
-                questdb_db_return_conn(db, conn)
+                questdb_db_return_column_sender(db, conn)
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
         if c_overrides != NULL:
@@ -5030,7 +5035,7 @@ cdef bint _dataframe_client_try_capsule_path(
 
 
 cdef void_int _capsule_consume_stream_with_hint(
-        qwpws_conn* conn,
+        column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -5084,7 +5089,7 @@ cdef class Client:
     Pooled QWP/WebSocket client.
 
     This is the ownership surface for the #148 `questdb_db` pool. DataFrame
-    ingestion will borrow `qwpws_conn` handles from this pool.
+    ingestion will borrow `column_sender` handles from this pool.
     """
     cdef questdb_db* _db
     cdef object _conf_str
@@ -5318,7 +5323,7 @@ cdef class Client:
             object at,
             size_t max_rows_per_batch):
         cdef column_sender_chunk* chunk = NULL
-        cdef qwpws_conn* conn = NULL
+        cdef column_sender* conn = NULL
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
         cdef bint flushed = False
@@ -5351,9 +5356,9 @@ cdef class Client:
 
             _ensure_doesnt_have_gil(&gs)
             if budget_ms == 0:
-                conn = questdb_db_borrow_conn(db, &err)
+                conn = questdb_db_borrow_column_sender(db, &err)
             else:
-                conn = questdb_db_borrow_conn_with_retry(db, budget_ms, &err)
+                conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
             _ensure_has_gil(&gs)
             if conn == NULL:
                 raise c_err_to_py(err)
@@ -5397,9 +5402,9 @@ cdef class Client:
             _ensure_has_gil(&gs)
             if conn != NULL:
                 if force_drop_conn:
-                    questdb_db_drop_conn(db, conn)
+                    questdb_db_drop_column_sender(db, conn)
                 else:
-                    questdb_db_return_conn(db, conn)
+                    questdb_db_return_column_sender(db, conn)
             if chunk != NULL:
                 column_sender_chunk_free(chunk)
             # The plan is rebuilt on each failover attempt; release this

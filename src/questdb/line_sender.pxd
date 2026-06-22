@@ -683,7 +683,7 @@ cdef extern from "questdb/ingress/column_sender.h":
     cdef struct questdb_db:
         pass
 
-    cdef struct qwpws_conn:
+    cdef struct column_sender:
         pass
 
     cdef struct column_sender_chunk:
@@ -710,12 +710,12 @@ cdef extern from "questdb/ingress/column_sender.h":
         questdb_db* db
         ) noexcept nogil
 
-    qwpws_conn* questdb_db_borrow_conn(
+    column_sender* questdb_db_borrow_column_sender(
         questdb_db* db,
         line_sender_error** err_out
         ) noexcept nogil
 
-    qwpws_conn* questdb_db_borrow_conn_with_retry(
+    column_sender* questdb_db_borrow_column_sender_with_retry(
         questdb_db* db,
         uint64_t budget_ms,
         line_sender_error** err_out
@@ -725,22 +725,22 @@ cdef extern from "questdb/ingress/column_sender.h":
         const questdb_db* db
         ) noexcept nogil
 
-    void questdb_db_return_conn(
+    void questdb_db_return_column_sender(
         questdb_db* db,
-        qwpws_conn* conn
+        column_sender* conn
         ) noexcept nogil
 
-    void questdb_db_drop_conn(
+    void questdb_db_drop_column_sender(
         questdb_db* db,
-        qwpws_conn* conn
+        column_sender* conn
         ) noexcept nogil
 
     size_t questdb_db_reap_idle(
         questdb_db* db
         ) noexcept nogil
 
-    bint qwpws_conn_must_close(
-        const qwpws_conn* conn
+    bint column_sender_must_close(
+        const column_sender* conn
         ) noexcept nogil
 
     column_sender_chunk* column_sender_chunk_new(
@@ -926,13 +926,13 @@ cdef extern from "questdb/ingress/column_sender.h":
         ) noexcept nogil
 
     bint column_sender_flush(
-        qwpws_conn* conn,
+        column_sender* conn,
         column_sender_chunk* chunk,
         line_sender_error** err_out
         ) noexcept nogil
 
     bint column_sender_sync(
-        qwpws_conn* conn,
+        column_sender* conn,
         uint32_t ack_level,
         line_sender_error** err_out
         ) noexcept nogil
@@ -950,7 +950,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         uint32_t arg
 
     bint column_sender_flush_arrow_batch(
-        qwpws_conn* conn,
+        column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,
@@ -960,7 +960,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         ) noexcept nogil
 
     bint column_sender_flush_arrow_batch_at_column(
-        qwpws_conn* conn,
+        column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,
@@ -971,194 +971,194 @@ cdef extern from "questdb/ingress/column_sender.h":
         ) noexcept nogil
 
 
-cdef extern from "questdb/egress/line_reader.h":
-    cdef struct line_reader:
+cdef extern from "questdb/egress/reader.h":
+    cdef struct reader:
         pass
 
-    cdef struct line_reader_query:
+    cdef struct reader_query:
         pass
 
-    cdef struct line_reader_cursor:
+    cdef struct reader_cursor:
         pass
 
-    cdef struct line_reader_error:
+    cdef struct reader_error:
         pass
 
-    cdef enum line_reader_error_code:
-        line_reader_error_could_not_resolve_addr = 0
-        line_reader_error_config_error = 1
-        line_reader_error_invalid_api_call = 2
-        line_reader_error_socket_error = 3
-        line_reader_error_tls_error = 4
-        line_reader_error_handshake_error = 5
-        line_reader_error_auth_error = 6
-        line_reader_error_unsupported_server = 7
-        line_reader_error_role_mismatch = 8
-        line_reader_error_protocol_error = 9
-        line_reader_error_invalid_utf8 = 10
-        line_reader_error_invalid_bind = 11
-        line_reader_error_server_schema_mismatch = 14
-        line_reader_error_server_parse_error = 15
-        line_reader_error_server_internal_error = 16
-        line_reader_error_server_security_error = 17
-        line_reader_error_limit_exceeded = 18
-        line_reader_error_server_limit_exceeded = 19
-        line_reader_error_cancelled = 20
-        line_reader_error_failover_would_duplicate = 21
-        line_reader_error_schema_drift = 22
-        line_reader_error_no_schema = 23
-        line_reader_error_arrow_export = 24
+    cdef enum reader_error_code:
+        reader_error_could_not_resolve_addr = 0
+        reader_error_config_error = 1
+        reader_error_invalid_api_call = 2
+        reader_error_socket_error = 3
+        reader_error_tls_error = 4
+        reader_error_handshake_error = 5
+        reader_error_auth_error = 6
+        reader_error_unsupported_server = 7
+        reader_error_role_mismatch = 8
+        reader_error_protocol_error = 9
+        reader_error_invalid_utf8 = 10
+        reader_error_invalid_bind = 11
+        reader_error_server_schema_mismatch = 14
+        reader_error_server_parse_error = 15
+        reader_error_server_internal_error = 16
+        reader_error_server_security_error = 17
+        reader_error_limit_exceeded = 18
+        reader_error_server_limit_exceeded = 19
+        reader_error_cancelled = 20
+        reader_error_failover_would_duplicate = 21
+        reader_error_schema_drift = 22
+        reader_error_no_schema = 23
+        reader_error_arrow_export = 24
 
-    cdef enum line_reader_arrow_batch_result:
-        line_reader_arrow_batch_ok = 0
-        line_reader_arrow_batch_end = 1
-        line_reader_arrow_batch_error = 2
+    cdef enum reader_arrow_batch_result:
+        reader_arrow_batch_ok = 0
+        reader_arrow_batch_end = 1
+        reader_arrow_batch_error = 2
 
-    line_reader_error_code line_reader_error_get_code(
-        const line_reader_error* error
+    reader_error_code reader_error_get_code(
+        const reader_error* error
         ) noexcept nogil
 
-    const char* line_reader_error_msg(
-        const line_reader_error* error,
+    const char* reader_error_msg(
+        const reader_error* error,
         size_t* len_out
         ) noexcept nogil
 
-    void line_reader_error_free(
-        line_reader_error* error
+    void reader_error_free(
+        reader_error* error
         ) noexcept nogil
 
-    line_reader* line_reader_from_conf(
+    reader* reader_from_conf(
         line_sender_utf8 config,
-        line_reader_error** err_out
+        reader_error** err_out
         ) noexcept nogil
 
-    void line_reader_close(
-        line_reader* reader
+    void reader_close(
+        reader* reader
         ) noexcept nogil
 
-    line_reader_query* line_reader_prepare(
-        line_reader* reader,
+    reader_query* reader_prepare(
+        reader* reader,
         line_sender_utf8 sql,
-        line_reader_error** err_out
+        reader_error** err_out
         ) noexcept nogil
 
-    void line_reader_query_free(
-        line_reader_query* query
+    void reader_query_free(
+        reader_query* query
         ) noexcept nogil
 
-    line_reader_cursor* line_reader_query_execute(
-        line_reader_query** query_inout,
-        line_reader_error** err_out
+    reader_cursor* reader_query_execute(
+        reader_query** query_inout,
+        reader_error** err_out
         ) noexcept nogil
 
-    line_reader_cursor* line_reader_execute(
-        line_reader* reader,
+    reader_cursor* reader_execute(
+        reader* reader,
         line_sender_utf8 sql,
-        line_reader_error** err_out
+        reader_error** err_out
         ) noexcept nogil
 
-    cdef struct line_reader_failover_event:
+    cdef struct reader_failover_event:
         pass
 
-    ctypedef void (*line_reader_failover_callback)(
-        const line_reader_failover_event* event,
+    ctypedef void (*reader_failover_callback)(
+        const reader_failover_event* event,
         void* user_data) noexcept nogil
 
-    void line_reader_failover_event_failed_host(
-        const line_reader_failover_event* event,
+    void reader_failover_event_failed_host(
+        const reader_failover_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    uint16_t line_reader_failover_event_failed_port(
-        const line_reader_failover_event* event
+    uint16_t reader_failover_event_failed_port(
+        const reader_failover_event* event
         ) noexcept nogil
 
-    void line_reader_failover_event_new_host(
-        const line_reader_failover_event* event,
+    void reader_failover_event_new_host(
+        const reader_failover_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    uint16_t line_reader_failover_event_new_port(
-        const line_reader_failover_event* event
+    uint16_t reader_failover_event_new_port(
+        const reader_failover_event* event
         ) noexcept nogil
 
-    int64_t line_reader_failover_event_new_request_id(
-        const line_reader_failover_event* event
+    int64_t reader_failover_event_new_request_id(
+        const reader_failover_event* event
         ) noexcept nogil
 
-    uint32_t line_reader_failover_event_attempts(
-        const line_reader_failover_event* event
+    uint32_t reader_failover_event_attempts(
+        const reader_failover_event* event
         ) noexcept nogil
 
-    uint64_t line_reader_failover_event_elapsed_ns(
-        const line_reader_failover_event* event
+    uint64_t reader_failover_event_elapsed_ns(
+        const reader_failover_event* event
         ) noexcept nogil
 
-    line_reader_error_code line_reader_failover_event_trigger_code(
-        const line_reader_failover_event* event
+    reader_error_code reader_failover_event_trigger_code(
+        const reader_failover_event* event
         ) noexcept nogil
 
-    void line_reader_failover_event_trigger_msg(
-        const line_reader_failover_event* event,
+    void reader_failover_event_trigger_msg(
+        const reader_failover_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    void line_reader_query_on_failover_reset(
-        line_reader_query* query,
-        line_reader_failover_callback callback,
+    void reader_query_on_failover_reset(
+        reader_query* query,
+        reader_failover_callback callback,
         void* user_data
         ) noexcept nogil
 
-    void line_reader_cursor_free(
-        line_reader_cursor* cursor
+    void reader_cursor_free(
+        reader_cursor* cursor
         ) noexcept nogil
 
-    bint line_reader_cursor_cancel(
-        line_reader_cursor* cursor,
-        line_reader_error** err_out
+    bint reader_cursor_cancel(
+        reader_cursor* cursor,
+        reader_error** err_out
         ) noexcept nogil
 
-    line_reader_arrow_batch_result line_reader_cursor_next_arrow_batch(
-        line_reader_cursor* cursor,
+    reader_arrow_batch_result reader_cursor_next_arrow_batch(
+        reader_cursor* cursor,
         ArrowArray* out_array,
         ArrowSchema* out_schema,
-        line_reader_error** err_out
+        reader_error** err_out
         ) noexcept nogil
 
-    cdef enum line_reader_column_kind:
-        line_reader_column_kind_boolean = 0x01
-        line_reader_column_kind_byte = 0x02
-        line_reader_column_kind_short = 0x03
-        line_reader_column_kind_int = 0x04
-        line_reader_column_kind_long = 0x05
-        line_reader_column_kind_float = 0x06
-        line_reader_column_kind_double = 0x07
-        line_reader_column_kind_symbol = 0x09
-        line_reader_column_kind_timestamp = 0x0A
-        line_reader_column_kind_date = 0x0B
-        line_reader_column_kind_uuid = 0x0C
-        line_reader_column_kind_long256 = 0x0D
-        line_reader_column_kind_geohash = 0x0E
-        line_reader_column_kind_varchar = 0x0F
-        line_reader_column_kind_timestamp_nanos = 0x10
-        line_reader_column_kind_double_array = 0x11
-        line_reader_column_kind_long_array = 0x12
-        line_reader_column_kind_decimal64 = 0x13
-        line_reader_column_kind_decimal128 = 0x14
-        line_reader_column_kind_decimal256 = 0x15
-        line_reader_column_kind_char = 0x16
-        line_reader_column_kind_binary = 0x17
-        line_reader_column_kind_ipv4 = 0x18
-        line_reader_column_kind_unknown = 0xFF
+    cdef enum reader_column_kind:
+        reader_column_kind_boolean = 0x01
+        reader_column_kind_byte = 0x02
+        reader_column_kind_short = 0x03
+        reader_column_kind_int = 0x04
+        reader_column_kind_long = 0x05
+        reader_column_kind_float = 0x06
+        reader_column_kind_double = 0x07
+        reader_column_kind_symbol = 0x09
+        reader_column_kind_timestamp = 0x0A
+        reader_column_kind_date = 0x0B
+        reader_column_kind_uuid = 0x0C
+        reader_column_kind_long256 = 0x0D
+        reader_column_kind_geohash = 0x0E
+        reader_column_kind_varchar = 0x0F
+        reader_column_kind_timestamp_nanos = 0x10
+        reader_column_kind_double_array = 0x11
+        reader_column_kind_long_array = 0x12
+        reader_column_kind_decimal64 = 0x13
+        reader_column_kind_decimal128 = 0x14
+        reader_column_kind_decimal256 = 0x15
+        reader_column_kind_char = 0x16
+        reader_column_kind_binary = 0x17
+        reader_column_kind_ipv4 = 0x18
+        reader_column_kind_unknown = 0xFF
 
-    cdef struct line_reader_batch:
+    cdef struct reader_batch:
         pass
 
-    cdef struct line_reader_column_data:
-        line_reader_column_kind kind
+    cdef struct reader_column_data:
+        reader_column_kind kind
         size_t row_count
         const uint8_t* validity
         const void* values
@@ -1170,8 +1170,8 @@ cdef extern from "questdb/egress/line_reader.h":
         int8_t decimal_scale
         uint8_t geohash_precision_bits
 
-    cdef struct line_reader_array_data:
-        line_reader_column_kind kind
+    cdef struct reader_array_data:
+        reader_column_kind kind
         size_t row_count
         const uint8_t* validity
         const uint8_t* data
@@ -1181,90 +1181,90 @@ cdef extern from "questdb/egress/line_reader.h":
         size_t shapes_len
         const uint32_t* shape_offsets
 
-    cdef struct line_reader_symbol_entry:
+    cdef struct reader_symbol_entry:
         uint32_t offset
         uint32_t length
 
-    cdef struct line_reader_symbol_dict:
+    cdef struct reader_symbol_dict:
         size_t entry_count
         const uint8_t* heap
         size_t heap_len
-        const line_reader_symbol_entry* entries
+        const reader_symbol_entry* entries
 
-    const line_reader_batch* line_reader_cursor_next_batch(
-        line_reader_cursor* cursor,
-        line_reader_error** err_out
+    const reader_batch* reader_cursor_next_batch(
+        reader_cursor* cursor,
+        reader_error** err_out
         ) noexcept nogil
 
-    size_t line_reader_batch_row_count(
-        const line_reader_batch* batch
+    size_t reader_batch_row_count(
+        const reader_batch* batch
         ) noexcept nogil
 
-    size_t line_reader_batch_column_count(
-        const line_reader_batch* batch
+    size_t reader_batch_column_count(
+        const reader_batch* batch
         ) noexcept nogil
 
-    bint line_reader_batch_column_kind(
-        const line_reader_batch* batch,
+    bint reader_batch_column_kind(
+        const reader_batch* batch,
         size_t col_idx,
-        line_reader_column_kind* out_kind,
-        line_reader_error** err_out
+        reader_column_kind* out_kind,
+        reader_error** err_out
         ) noexcept nogil
 
-    bint line_reader_batch_column_name(
-        const line_reader_batch* batch,
+    bint reader_batch_column_name(
+        const reader_batch* batch,
         size_t col_idx,
         const char** out_buf,
         size_t* out_len,
-        line_reader_error** err_out
+        reader_error** err_out
         ) noexcept nogil
 
-    bint line_reader_batch_column_data(
-        const line_reader_batch* batch,
+    bint reader_batch_column_data(
+        const reader_batch* batch,
         size_t col_idx,
-        line_reader_column_data* out,
-        line_reader_error** err_out
+        reader_column_data* out,
+        reader_error** err_out
         ) noexcept nogil
 
-    bint line_reader_batch_array_column_data(
-        const line_reader_batch* batch,
+    bint reader_batch_array_column_data(
+        const reader_batch* batch,
         size_t col_idx,
-        line_reader_array_data* out,
-        line_reader_error** err_out
+        reader_array_data* out,
+        reader_error** err_out
         ) noexcept nogil
 
-    bint line_reader_batch_symbol_dict(
-        const line_reader_batch* batch,
-        line_reader_symbol_dict* out,
-        line_reader_error** err_out
+    bint reader_batch_symbol_dict(
+        const reader_batch* batch,
+        reader_symbol_dict* out,
+        reader_error** err_out
         ) noexcept nogil
 
-    bint line_reader_batch_symbol(
-        const line_reader_batch* batch,
+    bint reader_batch_symbol(
+        const reader_batch* batch,
         size_t col_idx,
         uint32_t code,
         const char** out_buf,
         size_t* out_len,
-        line_reader_error** err_out
+        reader_error** err_out
         ) noexcept nogil
 
-    void line_reader_mark_must_close(
-        line_reader* reader
+    void reader_mark_must_close(
+        reader* reader
         ) noexcept nogil
 
-    # Reader-pool entry points. Same FFI surface as questdb_db_*_conn
-    # but for line_reader handles. Live here (alongside line_reader)
-    # because they wrap/unwrap line_reader instances; the questdb_db
+    # Reader-pool entry points. Same FFI surface as questdb_db_*_column_sender
+    # but for reader handles. Live here (alongside reader)
+    # because they wrap/unwrap reader instances; the questdb_db
     # opaque is forward-declared from the column_sender extern block
     # above.
-    line_reader* questdb_db_borrow_reader(
+    reader* questdb_db_borrow_reader(
         questdb_db* db,
-        line_reader_error** err_out
+        reader_error** err_out
         ) noexcept nogil
 
     void questdb_db_return_reader(
         questdb_db* db,
-        line_reader* reader
+        reader* reader
         ) noexcept nogil
 
     size_t questdb_db_dbg_reader_free_count(
