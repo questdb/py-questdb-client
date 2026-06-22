@@ -71,6 +71,8 @@ from benchmark_pandas_columnar import (
 PATH_PHASE = {
     "decode-only": "floor",
     "to-pandas": "e2e",
+    "to-pandas-arrow": "e2e",
+    "to-pandas-nullable": "e2e",
     "to-polars": "e2e",
     "arrow-c-stream": "e2e",
     "iter-pandas": "e2e",
@@ -97,6 +99,25 @@ def _drain_arrow(result):
 
 def _to_pandas(result):
     df = result.to_pandas()
+    return {"rows": len(df), "columns": len(df.columns)}
+
+
+def _to_pandas_arrow(result):
+    # Arrow-backed pandas: dtype_backend="pyarrow" routes through to_arrow()
+    # and maps every Arrow type to pandas ArrowDtype, so VARCHAR stays an
+    # Arrow string array (three O(1) buffers shared from the decode) instead
+    # of an object column of N per-row Python str objects. This is the
+    # cardinality-independent VARCHAR egress win (vs the numpy default).
+    df = result.to_pandas(dtype_backend="pyarrow")
+    return {"rows": len(df), "columns": len(df.columns)}
+
+
+def _to_pandas_nullable(result):
+    # numpy-nullable backend: Arrow -> pandas masked extension dtypes
+    # (Int64/Float64/boolean). VARCHAR maps to StringDtype (string[python]),
+    # so it still materialises N Python str objects like the numpy default;
+    # this arm isolates the masked-numeric overhead from the Arrow-string win.
+    df = result.to_pandas(dtype_backend="numpy_nullable")
     return {"rows": len(df), "columns": len(df.columns)}
 
 
@@ -129,6 +150,12 @@ def _make_runner(path, pl):
     if path == "to-pandas":
         _require_pyarrow()
         return _to_pandas
+    if path == "to-pandas-arrow":
+        _require_pyarrow()
+        return _to_pandas_arrow
+    if path == "to-pandas-nullable":
+        _require_pyarrow()
+        return _to_pandas_nullable
     if path == "to-polars":
         return _to_polars
     if path == "arrow-c-stream":
@@ -290,7 +317,8 @@ def build_egress_report(
                 (wire_bytes / (1024.0 * 1024.0)) / assemble_e2e_s
                 if wire_bytes and assemble_e2e_s else None),
         }
-        for alt in ("to-polars", "arrow-c-stream"):
+        for alt in ("to-pandas-arrow", "to-pandas-nullable",
+                    "to-polars", "arrow-c-stream"):
             if alt in path_results:
                 headline[f"{alt}_rows_per_s"] = (
                     path_results[alt]["rows_per_s_median"])

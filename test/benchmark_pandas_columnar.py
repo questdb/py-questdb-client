@@ -104,7 +104,8 @@ DEFAULT_VARCHAR_LEN = 16
 
 
 def make_s1_narrow(rows, *, sym_card=DEFAULT_SYM_CARD,
-                   varchar_len=DEFAULT_VARCHAR_LEN):
+                   varchar_len=DEFAULT_VARCHAR_LEN,
+                   varchar_charset="ascii"):
     """S1 headline schema (QWP_DATAFRAME_BENCH_PLAN.md s3.1).
 
     5 columns matching the Go/Rust ``qwp-egress-read`` narrow schema so the
@@ -115,6 +116,8 @@ def make_s1_narrow(rows, *, sym_card=DEFAULT_SYM_CARD,
     * ``price`` -> DOUBLE, ``float64``
     * ``sym``   -> SYMBOL, pandas ``Categorical`` (cardinality ``sym_card``)
     * ``note``  -> VARCHAR, Arrow-backed string of length ~``varchar_len``
+                  (``varchar_charset="ascii"`` default; ``"unicode"`` for
+                  non-ASCII content that defeats the numpy ASCII fast path)
 
     ``ts`` is monotonic and unique *at microsecond resolution* (the designated
     TIMESTAMP precision), so the DEDUP ``UPSERT KEYS(ts)`` table can assert
@@ -131,10 +134,26 @@ def make_s1_narrow(rows, *, sym_card=DEFAULT_SYM_CARD,
     symbols = np.array([f"sym_{index:04}" for index in range(sym_card)])
     # Build fixed-width ~varchar_len notes from a small rotating template; the
     # cardinality of the text is intentionally low so VARCHAR cost is dominated
-    # by length, not distinctness.
-    note_templates = [
+    # by length, not distinctness (neither the numpy nor the Arrow egress path
+    # dedups a plain VARCHAR, so low-card text flatters neither).
+    if varchar_charset not in ("ascii", "unicode"):
+        raise ValueError("varchar_charset must be 'ascii' or 'unicode'")
+    ascii_templates = [
         (f"note_{index:03}_" * varchar_len)[:varchar_len]
         for index in range(min(rows, 1024) or 1)]
+    if varchar_charset == "unicode":
+        # Shift every codepoint into Latin Extended-A (U+0100+): same per-index
+        # distinctness and codepoint count as the ascii templates, but every
+        # codepoint is non-ASCII (2 UTF-8 bytes), so the numpy to_pandas loop
+        # (PyUnicode_FromStringAndSize per row) cannot take CPython's ASCII
+        # fast path and must build wider (UCS-2) str objects. Isolates the
+        # charset axis; rows/s stays the apples-to-apples metric (the unicode
+        # table is ~2x the on-wire bytes for the same row/codepoint count).
+        note_templates = [
+            "".join(chr(ord(ch) + 0x100) for ch in tmpl)
+            for tmpl in ascii_templates]
+    else:
+        note_templates = ascii_templates
     notes = [note_templates[index % len(note_templates)]
              for index in range(rows)]
     return pd.DataFrame({
@@ -289,16 +308,19 @@ KNOB_SCHEMAS = frozenset({"s1-narrow"})
 
 
 def build_schema_df(schema_name, rows, *, sym_card=DEFAULT_SYM_CARD,
-                    varchar_len=DEFAULT_VARCHAR_LEN):
+                    varchar_len=DEFAULT_VARCHAR_LEN,
+                    varchar_charset="ascii"):
     """Build a benchmark DataFrame, threading knobs to schemas that accept them.
 
     Most generators take only ``rows``; the headline S1 schema additionally
-    accepts ``sym_card`` / ``varchar_len``. Keeping the registry uniform lets
-    every call site build any schema without special-casing.
+    accepts ``sym_card`` / ``varchar_len`` / ``varchar_charset``. Keeping the
+    registry uniform lets every call site build any schema without special-casing.
     """
     generator = SCHEMAS[schema_name]
     if schema_name in KNOB_SCHEMAS:
-        return generator(rows, sym_card=sym_card, varchar_len=varchar_len)
+        return generator(
+            rows, sym_card=sym_card, varchar_len=varchar_len,
+            varchar_charset=varchar_charset)
     return generator(rows)
 
 REJECTION_SCHEMAS = {

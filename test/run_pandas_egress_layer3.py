@@ -57,7 +57,8 @@ def run_layer3(args):
         schema = "s1-narrow"
         df = build_schema_df(
             schema, args.rows,
-            sym_card=args.sym_card, varchar_len=args.varchar_len)
+            sym_card=args.sym_card, varchar_len=args.varchar_len,
+            varchar_charset=args.varchar_charset)
         sql = schema_sql_report(schema)
         table_name = sql["table_name"]
         setup_sqls = [sql["drop_sql"], sql["create_sql"]]
@@ -104,6 +105,11 @@ def run_layer3(args):
                         pathlib.Path(args.questdb_repo).resolve()),
                     "http_base": http_base,
                     "real_conf": conf,
+                    "knobs": {
+                        "sym_card": args.sym_card,
+                        "varchar_len": args.varchar_len,
+                        "varchar_charset": args.varchar_charset,
+                    },
                     "schema_sql": sql,
                     "row_count_check": count_check,
                     "settings": fetch_http_endpoint(http_base, "/settings"),
@@ -131,6 +137,10 @@ def main():
         "--sym-card", type=int, default=DEFAULT_SYM_CARD)
     parser.add_argument(
         "--varchar-len", type=int, default=DEFAULT_VARCHAR_LEN)
+    parser.add_argument(
+        "--varchar-charset", choices=["ascii", "unicode"], default="ascii",
+        help="VARCHAR note content charset (unicode = non-ASCII codepoints, "
+             "defeats the numpy ASCII fast path; ~2x on-wire bytes).")
     parser.add_argument(
         "--run-mode", choices=["quick", "full"], default="full")
     parser.add_argument(
