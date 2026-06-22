@@ -176,6 +176,29 @@ def _settings_channel_is_plaintext(questdb_url: str) -> bool:
         parts.hostname)
 
 
+def _decode_path_segments(path: str) -> list:
+    """
+    Fully percent-decode a URL path and split it into ``/`` segments.
+
+    Decoding is repeated until stable so a double/triple-encoded dot segment
+    (``%252e%252e`` -> ``%2e%2e`` -> ``..``), or an encoded slash (``%2f``) that
+    splits a segment, is unmasked — a server or reverse proxy may unescape more
+    than once before it normalizes. A backslash is treated as a separator, since
+    some proxies fold ``\\`` to ``/`` before routing. The returned segments are
+    what the containment check compares, never the raw string urllib puts on the
+    wire, so an encoding the server later undoes can't smuggle a ``..`` past the
+    scan. The loop is bounded (a real path needs 0-1 passes; more layers than a
+    server would itself decode can't resolve to a traversal anyway).
+    """
+    decoded = path
+    for _ in range(10):  # bounded; each pass peels one percent-encoding layer
+        nxt = urllib.parse.unquote(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    return decoded.replace('\\', '/').split('/')
+
+
 def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     """
     True if ``endpoint``'s path is the issuer's path or a sub-path of it.
@@ -187,22 +210,33 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     IdP (Keycloak issuers are ``https://host/realms/{realm}``), which an
     origin-only check can't catch.
 
-    A ``.`` / ``..`` path segment is rejected outright: urllib puts the dotted
-    path on the wire verbatim, but the IdP (or a reverse proxy in front of it)
-    normalizes it, so ``/realms/prod/../attacker/token`` would satisfy a naive
-    prefix test yet resolve server-side to a *different* realm — defeating the
-    very isolation this check exists to provide. Percent-encoded dot segments
-    (``%2e``) are decoded before the segment scan, since a server may unescape
-    before normalizing; a legitimate endpoint path never contains dot segments.
+    The comparison is done on the fully *decoded* path segments, never the raw
+    string urllib sends. A ``.`` / ``..`` segment is rejected outright: urllib
+    puts the dotted path on the wire verbatim, but the IdP (or a reverse proxy
+    in front of it) normalizes it, so ``/realms/prod/../attacker/token`` would
+    satisfy a naive prefix test yet resolve server-side to a *different* realm —
+    defeating the very isolation this check exists to provide. Encoded dot
+    segments are unmasked first — including double-encoded (``%252e``) and
+    encoded slashes (``%2f``) a server may unescape more than once — a backslash
+    is treated as a separator, and the last segment's ``;params`` (which urllib
+    splits off ``.path``) is folded back in, so none of those can smuggle a
+    traversal past the segment scan. A legitimate endpoint path never contains
+    dot segments.
     """
     base = (safe_urlparse(issuer)[0].path or '').rstrip('/')
     if not base:
         return True
-    ep = safe_urlparse(endpoint)[0].path or ''
-    decoded_segments = urllib.parse.unquote(ep).split('/')
-    if '.' in decoded_segments or '..' in decoded_segments:
+    base_segs = _decode_path_segments(base)
+    eparts = safe_urlparse(endpoint)[0]
+    # urllib splits the last segment's ;params off .path; fold it back so a
+    # traversal hidden there (…/token;..%2f..%2fEVIL) can't slip past the scan.
+    ep_path = eparts.path or ''
+    if eparts.params:
+        ep_path = f'{ep_path};{eparts.params}'
+    ep_segs = _decode_path_segments(ep_path)
+    if '.' in ep_segs or '..' in ep_segs:
         return False
-    return ep == base or ep.startswith(base + '/')
+    return ep_segs[:len(base_segs)] == base_segs
 
 
 def validate_endpoint_origins(

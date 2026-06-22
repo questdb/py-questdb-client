@@ -1255,7 +1255,10 @@ class TestInsecureSettingsGuard(unittest.TestCase):
         # _endpoint_path_under_issuer.
         kc = 'https://idp.example.com/realms'
         for ep in (kc + '/prod/../EVIL/protocol/openid-connect',
-                   kc + '/prod/%2e%2e/EVIL/protocol/openid-connect'):
+                   kc + '/prod/%2e%2e/EVIL/protocol/openid-connect',
+                   # double-encoded: a server that unescapes twice resolves the
+                   # '..' the old single-decode check missed (M4).
+                   kc + '/prod/%252e%252e/EVIL/protocol/openid-connect'):
             evil = {
                 'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
                 'acl.oidc.token.endpoint': ep + '/token',
@@ -2058,6 +2061,17 @@ class TestEndpointValidation(unittest.TestCase):
         self.assertFalse(under(iss + '/../EVIL/protocol/token', iss))
         self.assertFalse(under(iss + '/%2e%2e/EVIL/token', iss))
         self.assertFalse(under(iss + '/./token', iss))
+        # Encodings/escapes the old decode-once-then-compare-raw check let
+        # through (M4): a server that unescapes more than once, folds a
+        # backslash to '/', or normalizes the last segment's ;params would
+        # resolve these to a DIFFERENT realm, so they must be rejected too.
+        self.assertFalse(under(iss + '/%252e%252e/EVIL/token', iss))   # 2x-enc
+        self.assertFalse(under(iss + '/..\\EVIL/token', iss))          # backslash
+        self.assertFalse(under(iss + '/token;..%2f..%2fEVIL', iss))    # ;params
+        # A legitimate sub-path with a (non-traversal) percent-escape or matrix
+        # param is still accepted — only dot traversal is rejected.
+        self.assertTrue(under(iss + '/some%20path/token', iss))
+        self.assertTrue(under(iss + '/token;jsessionid=abc', iss))
 
 
 class TestCacheKey(unittest.TestCase):
