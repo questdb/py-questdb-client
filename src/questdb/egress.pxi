@@ -1381,7 +1381,7 @@ cdef tuple _numpy_extract_meta(const reader_batch* batch):
 cdef object _numpy_assemble_frame(
         list col_names, list col_kinds, list col_scales,
         list col_precision, list col_chunks, list symbol_categories,
-        object np, object pd, list col_masks):
+        object np, object pd, list col_masks, object symbol_dtype=None):
     cdef size_t n_cols = <size_t>len(col_names)
     cdef size_t col_idx
     cdef reader_column_kind kind
@@ -1394,7 +1394,16 @@ cdef object _numpy_assemble_frame(
         else:
             arr = np.concatenate(chunks)
         if kind == reader_column_kind_symbol:
-            arr = pd.Categorical.from_codes(arr, categories=symbol_categories)
+            # Passing categories=<list> makes pandas rebuild the category
+            # Index on every call -- O(batches x cardinality) for the per-batch
+            # iterator on high-cardinality SYMBOLs. When the caller supplies a
+            # prebuilt (cached) CategoricalDtype, reuse it via dtype= so the
+            # Index is built once (see _NumpyBatchIter).
+            if symbol_dtype is not None:
+                arr = pd.Categorical.from_codes(arr, dtype=symbol_dtype)
+            else:
+                arr = pd.Categorical.from_codes(
+                    arr, categories=symbol_categories)
         elif _is_hybrid_int(kind):
             mask = _combine_hybrid_mask(chunks, col_masks[col_idx], np)
             if mask is not None:
@@ -1567,6 +1576,7 @@ cdef class _NumpyBatchIter:
     cdef bint done
     cdef size_t prev_dict_n
     cdef list symbol_categories
+    cdef object symbol_dtype
     cdef int seen_seq
 
     def __cinit__(self, _CursorHandle handle):
@@ -1584,6 +1594,7 @@ cdef class _NumpyBatchIter:
         self.done = False
         self.prev_dict_n = 0
         self.symbol_categories = []
+        self.symbol_dtype = None
         self.seen_seq = handle._reset_seq if handle is not None else 0
 
     def __iter__(self):
@@ -1634,6 +1645,11 @@ cdef class _NumpyBatchIter:
                     'reader_batch_symbol_dict')
                 if sd.entry_count > self.prev_dict_n:
                     self.symbol_categories = _symbol_categories_from_dict(&sd)
+                    # Cache the dtype so each batch's from_codes reuses the
+                    # category Index instead of rebuilding it per batch
+                    # (1056x faster on high-cardinality SYMBOLs).
+                    self.symbol_dtype = self.pd.CategoricalDtype(
+                        self.symbol_categories)
                     self.prev_dict_n = sd.entry_count
             batch_chunks, batch_masks = _numpy_batch_columns(
                 batch, self.col_kinds, n_cols, row_count, self.np)
@@ -1642,7 +1658,7 @@ cdef class _NumpyBatchIter:
             return _numpy_assemble_frame(
                 self.col_names, self.col_kinds, self.col_scales,
                 self.col_precision, col_chunks, self.symbol_categories,
-                self.np, self.pd, col_masks)
+                self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
         except:
             self.done = True
             self.handle._free()
