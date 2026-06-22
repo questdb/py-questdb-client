@@ -277,6 +277,7 @@ def build_egress_report(
         run_mode,
         paths,
         wire_bytes,
+        schema="s1-narrow",
         zero_copy=None,
         extra=None):
     sql = f"SELECT * FROM {table_name}"
@@ -325,7 +326,7 @@ def build_egress_report(
                 headline[f"{alt}_mib_per_s"] = path_results[alt]["mib_per_s"]
 
     report = {
-        "schema": "s1-narrow",
+        "schema": schema,
         "rows": rows,
         "columns": columns,
         "direction": "egress",
@@ -374,7 +375,14 @@ def main():
         help="QuestDB HTTP base URL (for the count() sanity check).")
     parser.add_argument(
         "--real-table",
-        help="Table to read back (defaults to the s1-narrow bench table).")
+        help="Table to read back (defaults to the schema's bench table).")
+    parser.add_argument(
+        "--schema", default="s1-narrow",
+        help="Schema name recorded in the report; also picks the default "
+             "table name (e.g. s1-narrow, s2-wide).")
+    parser.add_argument(
+        "--columns", type=int, default=5,
+        help="Column count recorded in the report (s1-narrow=5, s2-wide=15).")
     parser.add_argument(
         "--path",
         choices=ALL_PATHS,
@@ -387,7 +395,7 @@ def main():
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
-    table_name = args.real_table or _bench_table_name("s1-narrow")
+    table_name = args.real_table or _bench_table_name(args.schema)
     paths = args.path or ALL_PATHS
 
     with qi.Client.from_conf(args.real_conf) as client:
@@ -405,7 +413,8 @@ def main():
             client=client,
             table_name=table_name,
             rows=args.rows,
-            columns=5,
+            columns=args.columns,
+            schema=args.schema,
             iterations=args.iterations,
             warmups=args.warmups,
             run_mode=args.run_mode,

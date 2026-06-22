@@ -28,6 +28,7 @@ from fixture import QuestDbFixture, install_questdb_from_repo
 
 import questdb.ingress as qi
 from benchmark_pandas_columnar import (
+    DEFAULT_HI_SYM_CARD,
     DEFAULT_SYM_CARD,
     DEFAULT_VARCHAR_LEN,
     build_schema_df,
@@ -54,11 +55,12 @@ def run_layer3(args):
         conf = (
             f"qwpws::addr={qdb.host}:{qdb.http_server_port};"
             "pool_size=1;pool_max=1;pool_reap=manual;")
-        schema = "s1-narrow"
+        schema = args.schema
         df = build_schema_df(
             schema, args.rows,
             sym_card=args.sym_card, varchar_len=args.varchar_len,
-            varchar_charset=args.varchar_charset)
+            varchar_charset=args.varchar_charset,
+            hi_sym_card=args.hi_sym_card)
         sql = schema_sql_report(schema)
         table_name = sql["table_name"]
         setup_sqls = [sql["drop_sql"], sql["create_sql"]]
@@ -92,6 +94,7 @@ def run_layer3(args):
                 table_name=table_name,
                 rows=args.rows,
                 columns=len(df.columns),
+                schema=schema,
                 iterations=args.iterations,
                 warmups=args.warmups,
                 run_mode=args.run_mode,
@@ -109,6 +112,7 @@ def run_layer3(args):
                         "sym_card": args.sym_card,
                         "varchar_len": args.varchar_len,
                         "varchar_charset": args.varchar_charset,
+                        "hi_sym_card": args.hi_sym_card,
                     },
                     "schema_sql": sql,
                     "row_count_check": count_check,
@@ -130,17 +134,25 @@ def main():
         help=(
             "Path to a built QuestDB repo containing "
             "core/target/questdb-*-SNAPSHOT.jar."))
+    parser.add_argument(
+        "--schema", choices=["s1-narrow", "s2-wide"], default="s1-narrow",
+        help="DEDUP-correct schema to ingest then read back.")
     parser.add_argument("--rows", type=int, default=100_000)
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument(
-        "--sym-card", type=int, default=DEFAULT_SYM_CARD)
+        "--sym-card", type=int, default=DEFAULT_SYM_CARD,
+        help="Low-cardinality SYMBOL `sym` (both schemas).")
     parser.add_argument(
         "--varchar-len", type=int, default=DEFAULT_VARCHAR_LEN)
     parser.add_argument(
         "--varchar-charset", choices=["ascii", "unicode"], default="ascii",
         help="VARCHAR note content charset (unicode = non-ASCII codepoints, "
              "defeats the numpy ASCII fast path; ~2x on-wire bytes).")
+    parser.add_argument(
+        "--hi-sym-card", type=int, default=DEFAULT_HI_SYM_CARD,
+        help="s2-wide high-cardinality SYMBOLs s1..s5 (uniform; default 100k "
+             "= the Go qwp-egress-read-wide anchor).")
     parser.add_argument(
         "--run-mode", choices=["quick", "full"], default="full")
     parser.add_argument(

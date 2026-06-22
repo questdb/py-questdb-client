@@ -101,6 +101,45 @@ def make_timestamp_series(rows):
 # (~16 byte) varchar so the numbers line up cross-client.
 DEFAULT_SYM_CARD = 8
 DEFAULT_VARCHAR_LEN = 16
+# S2-wide high-cardinality SYMBOL columns (s1..s5): default matches the Go
+# qwp-egress-read-wide anchor (100k distinct/col, uniform). Pass a length-5
+# sequence instead for the plan's 10k-100k spread (dict-scale characterisation).
+DEFAULT_HI_SYM_CARD = 100_000
+S2_SPREAD_HI_SYM_CARD = (10_000, 25_000, 50_000, 75_000, 100_000)
+
+
+def _build_note_series(rows, varchar_len, varchar_charset):
+    """VARCHAR ``note`` column shared by S1/S2 (plan s3.1).
+
+    Fixed-width ~``varchar_len`` notes from a low-cardinality rotating template
+    (neither the numpy nor the Arrow egress path dedups a plain VARCHAR, so
+    low-card text flatters neither). ``varchar_charset="unicode"`` shifts every
+    codepoint into Latin Extended-A (U+0100+): same per-index distinctness and
+    codepoint count as ascii, but every codepoint is non-ASCII (2 UTF-8 bytes),
+    so the numpy to_pandas loop (``PyUnicode_FromStringAndSize`` per row) cannot
+    take CPython's ASCII fast path and must build wider (UCS-2) str objects.
+    rows/s stays the apples-to-apples metric (unicode is ~2x the on-wire bytes
+    for the same row/codepoint count).
+    """
+    if pa is None:
+        raise RuntimeError("pyarrow is not installed")
+    if varchar_len < 1:
+        raise ValueError("--varchar-len must be at least 1")
+    if varchar_charset not in ("ascii", "unicode"):
+        raise ValueError("varchar_charset must be 'ascii' or 'unicode'")
+    ascii_templates = [
+        (f"note_{index:03}_" * varchar_len)[:varchar_len]
+        for index in range(min(rows, 1024) or 1)]
+    if varchar_charset == "unicode":
+        note_templates = [
+            "".join(chr(ord(ch) + 0x100) for ch in tmpl)
+            for tmpl in ascii_templates]
+    else:
+        note_templates = ascii_templates
+    notes = [note_templates[index % len(note_templates)]
+             for index in range(rows)]
+    return pd.Series(
+        pa.array(notes, type=pa.string()), dtype=pd.ArrowDtype(pa.string()))
 
 
 def make_s1_narrow(rows, *, sym_card=DEFAULT_SYM_CARD,
@@ -128,43 +167,62 @@ def make_s1_narrow(rows, *, sym_card=DEFAULT_SYM_CARD,
         raise RuntimeError("pyarrow is not installed")
     if sym_card < 1:
         raise ValueError("--sym-card must be at least 1")
-    if varchar_len < 1:
-        raise ValueError("--varchar-len must be at least 1")
     indexes = np.arange(rows, dtype=np.int64)
     symbols = np.array([f"sym_{index:04}" for index in range(sym_card)])
-    # Build fixed-width ~varchar_len notes from a small rotating template; the
-    # cardinality of the text is intentionally low so VARCHAR cost is dominated
-    # by length, not distinctness (neither the numpy nor the Arrow egress path
-    # dedups a plain VARCHAR, so low-card text flatters neither).
-    if varchar_charset not in ("ascii", "unicode"):
-        raise ValueError("varchar_charset must be 'ascii' or 'unicode'")
-    ascii_templates = [
-        (f"note_{index:03}_" * varchar_len)[:varchar_len]
-        for index in range(min(rows, 1024) or 1)]
-    if varchar_charset == "unicode":
-        # Shift every codepoint into Latin Extended-A (U+0100+): same per-index
-        # distinctness and codepoint count as the ascii templates, but every
-        # codepoint is non-ASCII (2 UTF-8 bytes), so the numpy to_pandas loop
-        # (PyUnicode_FromStringAndSize per row) cannot take CPython's ASCII
-        # fast path and must build wider (UCS-2) str objects. Isolates the
-        # charset axis; rows/s stays the apples-to-apples metric (the unicode
-        # table is ~2x the on-wire bytes for the same row/codepoint count).
-        note_templates = [
-            "".join(chr(ord(ch) + 0x100) for ch in tmpl)
-            for tmpl in ascii_templates]
-    else:
-        note_templates = ascii_templates
-    notes = [note_templates[index % len(note_templates)]
-             for index in range(rows)]
     return pd.DataFrame({
         "ts": make_timestamp_series(rows),
         "id": pd.Series(indexes, dtype=np.int64),
         "price": pd.Series(indexes.astype(np.float64) * 0.25),
         "sym": pd.Categorical(symbols[indexes % len(symbols)]),
-        "note": pd.Series(
-            pa.array(notes, type=pa.string()),
-            dtype=pd.ArrowDtype(pa.string())),
+        "note": _build_note_series(rows, varchar_len, varchar_charset),
     })
+
+
+def make_s2_wide(rows, *, sym_card=DEFAULT_SYM_CARD,
+                 varchar_len=DEFAULT_VARCHAR_LEN, varchar_charset="ascii",
+                 hi_sym_card=DEFAULT_HI_SYM_CARD):
+    """S2 wide schema (QWP_DATAFRAME_BENCH_PLAN.md s8), matching the Go
+    ``qwp-egress-read-wide`` anchor so the wide parity number lines up: it is
+    S1-narrow plus 5 DOUBLE and 5 high-cardinality SYMBOL columns (15 total).
+
+    * ``ts``/``id``/``price``/``sym``/``note`` -> identical to S1-narrow
+      (``sym`` stays low-cardinality, ``card sym_card``)
+    * ``d1``..``d5`` -> DOUBLE, ``float64`` (widen the fixed-width payload)
+    * ``s1``..``s5`` -> SYMBOL, pandas ``Categorical``, high cardinality
+
+    ``hi_sym_card`` sets the cardinality of ``s1``..``s5``: an int applies
+    uniformly (default 100k, the anchor) or a length-5 sequence gives a spread
+    (``S2_SPREAD_HI_SYM_CARD`` = 10k-100k). The 5 high-card SYMBOLs are the
+    connection-scoped delta-dict stress (plan s3.5); the extra DOUBLEs plus the
+    wider row are the "QWP wins on wide rows" axis.
+    """
+    if pa is None:
+        raise RuntimeError("pyarrow is not installed")
+    if sym_card < 1:
+        raise ValueError("--sym-card must be at least 1")
+    cards = ([int(hi_sym_card)] * 5 if isinstance(hi_sym_card, int)
+             else [int(c) for c in hi_sym_card])
+    if len(cards) != 5 or any(c < 1 for c in cards):
+        raise ValueError(
+            "hi_sym_card must be a positive int or 5 positive ints")
+    indexes = np.arange(rows, dtype=np.int64)
+    symbols = np.array([f"sym_{index:04}" for index in range(sym_card)])
+    cols = {
+        "ts": make_timestamp_series(rows),
+        "id": pd.Series(indexes, dtype=np.int64),
+        "price": pd.Series(indexes.astype(np.float64) * 0.25),
+        "sym": pd.Categorical(symbols[indexes % len(symbols)]),
+        "note": _build_note_series(rows, varchar_len, varchar_charset),
+    }
+    for d in range(1, 6):
+        cols[f"d{d}"] = pd.Series(indexes.astype(np.float64) * (0.5 + d))
+    # from_codes avoids materialising rows*5 symbol strings: codes = index mod
+    # card, categories built once per column.
+    for i, card in enumerate(cards):
+        codes = (indexes % card).astype(np.int32)
+        cats = pd.Index([f"s{i}_{v:06d}" for v in range(card)], dtype="object")
+        cols[f"s{i + 1}"] = pd.Categorical.from_codes(codes, categories=cats)
+    return pd.DataFrame(cols)
 
 
 def make_numeric_core(rows):
@@ -301,26 +359,32 @@ SUPPORTED_SCHEMAS = {
     "numeric-core": make_numeric_core,
     "numeric-wide": make_numeric_wide,
     "s1-narrow": make_s1_narrow,
+    "s2-wide": make_s2_wide,
 }
 
-# Schemas whose generator accepts the --sym-card / --varchar-len knobs.
-KNOB_SCHEMAS = frozenset({"s1-narrow"})
+# Schemas whose generator accepts the --sym-card / --varchar-len knobs
+# (s2-wide additionally accepts --hi-sym-card).
+KNOB_SCHEMAS = frozenset({"s1-narrow", "s2-wide"})
 
 
 def build_schema_df(schema_name, rows, *, sym_card=DEFAULT_SYM_CARD,
                     varchar_len=DEFAULT_VARCHAR_LEN,
-                    varchar_charset="ascii"):
+                    varchar_charset="ascii",
+                    hi_sym_card=DEFAULT_HI_SYM_CARD):
     """Build a benchmark DataFrame, threading knobs to schemas that accept them.
 
-    Most generators take only ``rows``; the headline S1 schema additionally
-    accepts ``sym_card`` / ``varchar_len`` / ``varchar_charset``. Keeping the
-    registry uniform lets every call site build any schema without special-casing.
+    Most generators take only ``rows``; the S1/S2 schemas additionally accept
+    ``sym_card`` / ``varchar_len`` / ``varchar_charset`` (and ``hi_sym_card``
+    for s2-wide's high-cardinality s1..s5). Keeping the registry uniform lets
+    every call site build any schema without special-casing.
     """
     generator = SCHEMAS[schema_name]
     if schema_name in KNOB_SCHEMAS:
-        return generator(
-            rows, sym_card=sym_card, varchar_len=varchar_len,
-            varchar_charset=varchar_charset)
+        kwargs = dict(sym_card=sym_card, varchar_len=varchar_len,
+                      varchar_charset=varchar_charset)
+        if schema_name == "s2-wide":
+            kwargs["hi_sym_card"] = hi_sym_card
+        return generator(rows, **kwargs)
     return generator(rows)
 
 REJECTION_SCHEMAS = {
@@ -414,6 +478,23 @@ CREATE TABLE {table} (
   price DOUBLE,
   sym SYMBOL,
   note VARCHAR,
+  ts TIMESTAMP
+) TIMESTAMP(ts) PARTITION BY HOUR WAL DEDUP UPSERT KEYS(ts)
+""",
+    # S2 wide schema (plan s8), matching the Go qwp-egress-read-wide anchor:
+    # S1-narrow + 5 DOUBLE + 5 high-cardinality SYMBOL (CAPACITY 200000 fits the
+    # 100k distinct values/col with slack). DEDUP added (harness requirement,
+    # plan s3.4) on top of the anchor's column layout.
+    "s2-wide": """
+CREATE TABLE {table} (
+  id LONG,
+  price DOUBLE,
+  sym SYMBOL,
+  note VARCHAR,
+  d1 DOUBLE, d2 DOUBLE, d3 DOUBLE, d4 DOUBLE, d5 DOUBLE,
+  s1 SYMBOL CAPACITY 200000, s2 SYMBOL CAPACITY 200000,
+  s3 SYMBOL CAPACITY 200000, s4 SYMBOL CAPACITY 200000,
+  s5 SYMBOL CAPACITY 200000,
   ts TIMESTAMP
 ) TIMESTAMP(ts) PARTITION BY HOUR WAL DEDUP UPSERT KEYS(ts)
 """,

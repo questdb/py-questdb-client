@@ -19,6 +19,7 @@ sys.path.append(str(PROJ_ROOT / "c-questdb-client" / "system_test"))
 from fixture import QuestDbFixture, install_questdb_from_repo
 
 from benchmark_pandas_columnar import (
+    DEFAULT_HI_SYM_CARD,
     DEFAULT_SYM_CARD,
     DEFAULT_VARCHAR_LEN,
     PATH_PHASE,
@@ -56,7 +57,9 @@ def run_layer3(args):
             args.schema,
             args.rows,
             sym_card=args.sym_card,
-            varchar_len=args.varchar_len)
+            varchar_len=args.varchar_len,
+            varchar_charset=args.varchar_charset,
+            hi_sym_card=args.hi_sym_card)
         schema_sql = schema_sql_report(args.schema)
         # The CREATE carries DEDUP UPSERT KEYS(ts); combined with the
         # monotonic-unique ts the schema generates, this keeps count() == rows
@@ -70,10 +73,13 @@ def run_layer3(args):
         except Exception:
             wire_bytes = None
 
+        runners = {
+            "real-row": run_real_row_path,
+            "real-client": run_real_client_path,
+        }
         paths = {}
-        for path_name, runner in (
-                ("real-row", run_real_row_path),
-                ("real-client", run_real_client_path)):
+        for path_name in (args.path or list(runners)):
+            runner = runners[path_name]
             samples, cpu_samples, last = runner(
                 df,
                 args.rows,
@@ -203,12 +209,22 @@ def main():
         "--sym-card",
         type=int,
         default=DEFAULT_SYM_CARD,
-        help="SYMBOL cardinality for the s1-narrow schema.")
+        help="Low-cardinality SYMBOL `sym` (s1-narrow / s2-wide).")
     parser.add_argument(
         "--varchar-len",
         type=int,
         default=DEFAULT_VARCHAR_LEN,
-        help="VARCHAR byte length for the s1-narrow schema.")
+        help="VARCHAR byte length (s1-narrow / s2-wide).")
+    parser.add_argument(
+        "--varchar-charset", choices=["ascii", "unicode"], default="ascii",
+        help="VARCHAR note charset (unicode defeats the numpy ASCII fast path).")
+    parser.add_argument(
+        "--hi-sym-card", type=int, default=DEFAULT_HI_SYM_CARD,
+        help="s2-wide high-cardinality SYMBOLs s1..s5 (default 100k anchor).")
+    parser.add_argument(
+        "--path", choices=["real-row", "real-client"], action="append",
+        help="Ingest path(s). Default both; use --path real-client for large "
+             "rows (real-row is a single flush, capped at 16 MiB).")
     parser.add_argument(
         "--run-mode",
         choices=["quick", "full"],
