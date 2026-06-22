@@ -25,16 +25,12 @@
 """
 OIDC authentication helper for QuestDB (Jupyter-first).
 
-Runs the OAuth 2.0 Device Authorization Grant (RFC 8628) entirely client-side,
-obtains a token, and presents it to QuestDB over the auth paths it already
-supports (HTTP ``Bearer`` / PG-wire ``_sso``). Designed for data scientists on
-local **and remote** kernels (JupyterHub, SageMaker, Colab, VS Code-remote),
-where the kernel has no browser: you authorize in any browser (laptop or
-phone), the kernel only makes outbound calls to the IdP.
+Runs the OAuth 2.0 Device Authorization Grant (RFC 8628) client-side and
+presents the token to QuestDB (HTTP ``Bearer`` / PG-wire ``_sso``). Works on
+browserless local and remote kernels (JupyterHub, SageMaker, Colab,
+VS Code-remote): authorize in any browser, the kernel only calls the IdP.
 
-Two ways to use it, depending on your needs:
-
-* **Just the token** — works with anything (PG-wire, HTTP, your own tooling)::
+* **Just the token** — works with anything; no optional dependencies::
 
       from questdb.auth import OidcDeviceAuth
 
@@ -52,10 +48,8 @@ Two ways to use it, depending on your needs:
       with qdb.sender() as sender:              # ingestion (ILP/HTTP)
           ...
 
-Only ``token()`` / ``headers()`` are needed for the bring-your-own-client path,
-and they require no optional dependencies. ``pandas`` (for ``sql()``),
-``sqlalchemy`` / ``psycopg`` (adapters), ``qrcode`` and ``IPython`` are imported
-lazily, only when used.
+Optional deps (``pandas``, ``sqlalchemy``/``psycopg``, ``qrcode``, ``IPython``)
+are imported lazily, only when used.
 """
 
 from ._device import OidcDeviceAuth

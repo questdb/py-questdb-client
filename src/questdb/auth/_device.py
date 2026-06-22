@@ -62,11 +62,10 @@ _VALID_FLOWS = ('auto', 'device', 'loopback')
 # A non-positive expires_in is non-conformant; treat it as "unknown".
 _DEFAULT_EXPIRES_IN = 3600
 
-# Bounds for the device-authorization response's timing fields (RFC 8628). The
-# device code is short-lived, so the IdP-supplied values are clamped: a hostile
-# or buggy response must not be able to time the flow out before its first poll,
-# nor pin the polling thread — which holds the acquisition lock — in one
-# enormous sleep, nor keep the loop (and the lock) alive indefinitely.
+# Clamp the device-authorization timing fields (RFC 8628): a hostile/buggy
+# response must not time the flow out before its first poll, pin the polling
+# thread (which holds the acquisition lock) in one huge sleep, or keep the loop
+# (and lock) alive indefinitely.
 _DEFAULT_DEVICE_CODE_LIFETIME = 600   # expires_in fallback (absent/invalid/<=0)
 _MAX_DEVICE_CODE_LIFETIME = 1800      # cap on how long we keep polling
 _MAX_POLL_INTERVAL = 60               # cap on the poll interval (incl. slow_down)
@@ -86,8 +85,8 @@ def _decode_jwt_claims(token: Optional[str]) -> Dict[str, Any]:
     """
     Best-effort decode of a JWT payload **without signature verification**.
 
-    Used only to show a friendly identity in the sign-in message. QuestDB
-    performs the real validation. Returns ``{}`` for opaque/invalid tokens.
+    Used only to show a friendly identity in the sign-in message; QuestDB does
+    the real validation. Returns ``{}`` for opaque/invalid tokens.
     """
     if not token or token.count('.') < 2:
         return {}
@@ -98,10 +97,9 @@ def _decode_jwt_claims(token: Optional[str]) -> Dict[str, Any]:
         claims = json.loads(raw)
         return claims if isinstance(claims, dict) else {}
     except (ValueError, binascii.Error, UnicodeDecodeError, RecursionError):
-        # RecursionError: a deeply-nested JSON payload exhausts the decoder's
-        # stack; it is not a ValueError, so list it explicitly so a hostile or
-        # buggy token response can't crash token()/refresh with a raw exception
-        # here (mirrors the guards in _http.get_json / post_form / QuestDB.sql).
+        # RecursionError (deeply-nested JSON exhausts the decoder stack) isn't a
+        # ValueError, so list it explicitly: a hostile token must not crash
+        # token()/refresh here.
         return {}
 
 
@@ -115,14 +113,12 @@ def _identity_from_claims(claims: Dict[str, Any]) -> Optional[str]:
 
 def _http_status_is_terminal_4xx(status: Optional[int]) -> bool:
     """
-    True for a client-error HTTP status that is a definitive rejection.
+    True for a 4xx that is a definitive rejection.
 
-    A non-JSON response body carrying such a status (e.g. an HTML/plain ``403``
-    from a WAF or reverse proxy in front of the IdP, or a non-conformant IdP) is
-    never a RFC-conformant ``authorization_pending`` / ``slow_down`` — those are
-    always JSON — so the device-flow poll must fail fast rather than keep
-    retrying to a misleading "code expired". ``429`` is excluded: it is a
-    rate-limit, handled as transient with back-off.
+    A non-JSON body with such a status (e.g. an HTML ``403`` from a WAF/proxy or
+    non-conformant IdP) is never an ``authorization_pending`` / ``slow_down``
+    (those are always JSON), so the poll must fail fast rather than retry to a
+    misleading "code expired". ``429`` is excluded — it's a transient rate-limit.
     """
     return status is not None and 400 <= status < 500 and status != 429
 
@@ -136,28 +132,23 @@ class OidcDeviceAuth:
     """
     Acquire and refresh an OIDC token via the device authorization grant.
 
-    The token is presented to QuestDB over the auth paths it already
-    supports: HTTP ``Authorization: Bearer`` or PG-wire ``_sso`` (token as
-    password). The flow runs entirely client-side; QuestDB is never in the
-    token-acquisition path.
+    The token is presented to QuestDB over the auth paths it already supports:
+    HTTP ``Authorization: Bearer`` or PG-wire ``_sso`` (token as password). The
+    flow runs entirely client-side; QuestDB is never in the acquisition path.
 
-    Most users only ever call :meth:`token` (or :meth:`headers`). The first
-    call runs the interactive device flow; subsequent calls return the cached
-    token and refresh it silently (synchronously, on the first call made after
-    it nears expiry — there is no background thread). Acquisition is
-    serialized so concurrent callers don't double-prompt, while a valid cached
-    token is returned without blocking on another thread's in-progress
-    sign-in.
+    Most users only call :meth:`token` (or :meth:`headers`). The first call runs
+    the interactive device flow; later calls return the cached token, refreshing
+    it silently and synchronously once it nears expiry (no background thread).
+    Acquisition is serialized so concurrent callers don't double-prompt, while a
+    valid cached token is returned without blocking on another's sign-in.
 
-    **Concurrency note.** The serialization lock is held for the whole of an
-    interactive sign-in (up to the device-code lifetime, ~30 min). A caller
-    that already holds a *valid* cached token never blocks, but a caller whose
-    token is missing or expired blocks behind whoever is signing in; if that
-    sign-in is abandoned, each waiter then re-prompts in turn. When several
-    threads share one auth object (e.g. a SQLAlchemy / psycopg connection
-    pool), sign in once up front — :func:`questdb.auth.connect` does this for
-    you with ``eager=True`` (the default), so the interactive flow runs a
-    single time on the main thread before the pool opens connections.
+    **Concurrency note.** The lock is held for a whole interactive sign-in (up
+    to the device-code lifetime, ~30 min): a caller with a *valid* cached token
+    never blocks, but one whose token is missing/expired waits behind the
+    signer. So when threads share an auth object (e.g. a SQLAlchemy/psycopg
+    pool), sign in once up front — :func:`questdb.auth.connect` does this via
+    ``eager=True`` (the default), running the flow once on the main thread before
+    the pool opens connections.
 
     .. code-block:: python
 
@@ -221,43 +212,38 @@ class OidcDeviceAuth:
             audience=audience,
             issuer=issuer)
 
-        # Enforce the credential-endpoint co-location / issuer pin on every
-        # construction path (not just discovery), so the documented guarantee
-        # holds for the explicit constructor too.
+        # Enforce the credential-endpoint co-location / issuer pin here too (not
+        # just on the discovery path), so the guarantee holds for this
+        # constructor as well.
         validate_endpoint_origins(
             self.config.token_endpoint,
             self.config.device_authorization_endpoint,
             self.config.issuer)
 
-        # `insecure` permits plaintext http only to QuestDB (e.g. a local dev
-        # server). The IdP is always held to https — or loopback http — by
-        # _idp_post, so the device code / refresh token are never sent in
-        # cleartext over the network even when this is set.
+        # `insecure` permits plaintext http only to QuestDB (e.g. local dev).
+        # _idp_post always holds the IdP to https (or loopback http), so the
+        # device code / refresh token are never sent in cleartext even when set.
         self.insecure = insecure
         self.open_browser = open_browser
-        # Kept so adapters that build their own transport (QuestDB.sender's ILP
-        # Sender) can forward the same private CA the urllib _ctx uses, instead
-        # of falling back to the default trust roots. See QuestDB.sender.
+        # Kept so adapters with their own transport (QuestDB.sender's ILP Sender)
+        # can forward the same private CA as _ctx rather than the default roots.
         self._ca_bundle = ca_bundle
         self._interactive = interactive
         self._default_interval = default_interval
-        # Per-request network timeout for every IdP call (device-code request,
-        # each poll, refresh). It bounds how long a single network leg can pin
-        # the acquisition lock if the IdP stalls: lower it to reduce lock-hold
-        # (and connection-pool starvation) during an IdP outage; raise it for a
-        # slow IdP. The total interactive-poll duration is separately capped by
+        # Per-request network timeout for every IdP call (device-code, each poll,
+        # refresh). Bounds how long one network leg pins the acquisition lock if
+        # the IdP stalls; the total poll duration is separately capped by
         # _MAX_DEVICE_CODE_LIFETIME.
         self._timeout = timeout
         self._cache = make_cache(cache)
         self._ctx = build_ssl_context(ca_bundle)
         self._renderer = renderer if renderer is not None else make_renderer(qr=qr)
-        # Serializes token *acquisition* (a silent refresh or the interactive
-        # sign-in) only. Concurrent callers are possible via the threaded
-        # SQLAlchemy/psycopg adapters: without this, several connections
-        # opening as the token expires would run overlapping refreshes, and
-        # with refresh-token rotation all but one would fail and force a
-        # spurious re-prompt. It is NOT held on the fast path, so a caller with
-        # a valid cached token never blocks behind another thread's sign-in.
+        # Serializes token *acquisition* (silent refresh or interactive sign-in)
+        # only. Without it, threaded SQLAlchemy/psycopg connections opening as
+        # the token expires would run overlapping refreshes — and with
+        # refresh-token rotation all but one would fail and re-prompt. NOT held
+        # on the fast path, so a valid cached token never blocks behind a
+        # sign-in.
         self._lock = threading.Lock()
         self._tokens: Optional[TokenSet] = None
         clock = _clock or _SYSTEM_CLOCK
@@ -296,8 +282,8 @@ class OidcDeviceAuth:
 
         Reads ``{url}/settings`` for the OIDC client id, scope, endpoints and
         groups mode, falling back to the IdP ``.well-known`` document for the
-        device-authorization endpoint when QuestDB does not advertise it.
-        Any explicit keyword overrides discovery.
+        device-authorization endpoint when QuestDB doesn't advertise it. Any
+        explicit keyword overrides discovery.
         """
         _validate_flow(flow)
         ctx = build_ssl_context(ca_bundle)
@@ -340,7 +326,7 @@ class OidcDeviceAuth:
         Return a valid token for QuestDB, acquiring or refreshing as needed.
 
         Returns the ``id_token`` when the server expects groups encoded in the
-        token (``acl.oidc.groups.encoded.in.token=true``), otherwise the
+        token (``acl.oidc.groups.encoded.in.token=true``), else the
         ``access_token`` — mirroring QuestDB's own selection logic.
         """
         return self._select(self._obtain_tokens())
@@ -354,18 +340,17 @@ class OidcDeviceAuth:
         """
         Identifies the token's security context for caching.
 
-        Two sessions share a cached token only when they would accept the same
-        one: same IdP token endpoint (**path included**, so multi-tenant realms
-        sharing a host don't collide), client id, scope *set* (order-insensitive),
+        Two sessions share a cached token only when they'd accept the same one:
+        same IdP token endpoint (**path included**, so multi-tenant realms on one
+        host don't collide), client id, scope *set* (order-insensitive),
         audience, and token-kind mode (``groups_in_token`` — id_token vs
-        access_token). The QuestDB URL is deliberately excluded — the same IdP
-        token is valid against any QuestDB that trusts it.
+        access_token). The QuestDB URL is excluded — the same IdP token is valid
+        against any QuestDB that trusts it.
 
-        ``groups_in_token`` is part of the key because it selects which token
-        kind :meth:`_select` returns; without it two sessions that differ only
-        in that mode would collide on one entry and repeatedly evict each
-        other's token (the gate self-corrects, but at the cost of avoidable
-        refreshes / re-prompts).
+        ``groups_in_token`` is keyed because it selects the token kind
+        :meth:`_select` returns; otherwise two sessions differing only in that
+        mode would collide and repeatedly evict each other's token (self-
+        correcting, but at the cost of avoidable refreshes / re-prompts).
         """
         c = self.config
         scope = ' '.join(sorted(c.scope.split())) if c.scope else ''
@@ -380,11 +365,10 @@ class OidcDeviceAuth:
     def clear(self) -> None:
         """Forget the cached token (forces a fresh sign-in next time)."""
         # self._lock serializes against THIS instance's acquisition; the shared
-        # MemoryCache additionally bumps a per-key generation here, so an
-        # in-flight acquisition on ANOTHER OidcDeviceAuth that shares the
-        # process-global store can't repopulate the entry after this clear (its
-        # _store sees the bumped generation and drops the write). This resets the
-        # local / process cache only — it does not revoke the token at the IdP.
+        # MemoryCache also bumps a per-key generation, so an in-flight acquire on
+        # ANOTHER instance sharing the process-global store can't repopulate the
+        # entry (its _store sees the bumped generation and drops the write).
+        # Resets the local/process cache only — does not revoke at the IdP.
         with self._lock:
             self._tokens = None
             self._cache.clear(self.cache_key)
@@ -406,10 +390,10 @@ class OidcDeviceAuth:
 
     def _has_required_token(self, tokens: TokenSet) -> bool:
         """
-        True if ``tokens`` carries the kind :meth:`_select` will return — the
-        ``id_token`` when groups are encoded in the token, else the
-        ``access_token``. The cache gate and the post-refresh check share this
-        predicate so they can't disagree with ``_select``.
+        True if ``tokens`` carries the kind :meth:`_select` will return (the
+        ``id_token`` in groups mode, else the ``access_token``). The cache gate
+        and post-refresh check share this predicate so they can't disagree with
+        ``_select``.
         """
         if self.config.groups_in_token:
             return bool(tokens.id_token)
@@ -417,11 +401,10 @@ class OidcDeviceAuth:
 
     def _missing_required_token_error(self) -> OidcDeviceFlowError:
         """
-        Build the terminal error for a *completed* grant whose token response
-        omits the kind :meth:`_select` needs (the ``id_token`` in groups mode,
-        else the ``access_token``). Mirrors :meth:`_select`'s diagnostics, but
-        is an :class:`OidcDeviceFlowError` — a flow failure — so the device-flow
-        poll can raise it without first caching an unusable response.
+        Terminal error for a *completed* grant whose response omits the kind
+        :meth:`_select` needs. Mirrors :meth:`_select`'s diagnostics but as an
+        :class:`OidcDeviceFlowError`, so the poll can raise it without first
+        caching an unusable response.
         """
         if self.config.groups_in_token:
             return OidcDeviceFlowError(
@@ -434,29 +417,26 @@ class OidcDeviceAuth:
             'access_token.')
 
     def _obtain_tokens(self) -> TokenSet:
-        # Fast path: return a valid token without taking the lock, so a caller
-        # with a usable token never blocks behind another thread's in-progress
-        # refresh or interactive sign-in. This path is READ-ONLY: it never
-        # writes self._tokens (M4). Every write to that field happens under the
-        # lock (the promotion below, plus _store and clear), so the lock-free
-        # reader can't race a concurrent write / lose an update / resurrect a
-        # just-cleared token.
+        # Fast path: return a valid token without the lock, so a caller with a
+        # usable token never blocks behind another thread's refresh/sign-in.
+        # READ-ONLY — never writes self._tokens; every write to that field is
+        # under the lock (the promotion below, _store, clear), so this lock-free
+        # reader can't race a write or resurrect a just-cleared token.
         tokens = self._valid_cached()
         if tokens is not None:
             return tokens
-        # Slow path: serialize acquisition so concurrent callers don't run
-        # overlapping refreshes or double-prompt; the loser re-checks and
-        # reuses the winner's freshly acquired token.
+        # Slow path: serialize acquisition so concurrent callers don't overlap
+        # refreshes or double-prompt; the loser re-checks and reuses the
+        # winner's token.
         with self._lock:
-            # Capture the cache generation before reading or acquiring, so a
-            # clear() that races this acquisition — including one on another
-            # OidcDeviceAuth that shares the process-global MemoryCache (whose
-            # per-instance lock does not serialize against ours) — invalidates
-            # the store below instead of resurrecting the just-cleared entry.
+            # Capture the generation before reading/acquiring, so a racing
+            # clear() — including on another instance sharing the process-global
+            # MemoryCache (whose per-instance lock doesn't serialize against
+            # ours) — invalidates the store below instead of resurrecting the
+            # cleared entry.
             generation = self._cache_generation()
-            # Promote a cached token into the field under the lock (even an
-            # expired one, so _acquire can reuse its refresh_token for a silent
-            # refresh). Done here, not on the lock-free fast path, so every
+            # Promote a cached token under the lock (even expired, so _acquire
+            # can reuse its refresh_token). Here, not on the fast path, so every
             # write to self._tokens stays serialized.
             if self._tokens is None:
                 cached = self._cache.load(self.cache_key)
@@ -468,10 +448,9 @@ class OidcDeviceAuth:
             return self._acquire(generation)
 
     def _valid_cached(self) -> Optional[TokenSet]:
-        # Read-only: reads the published field, falling back to a read of the
-        # shared cache backend. It never writes self._tokens — that write is
-        # done only under the lock (in _obtain_tokens' slow path / _store /
-        # clear) — so it is safe to call on the lock-free fast path.
+        # Read-only: reads the published field, falling back to the shared cache
+        # backend. Never writes self._tokens (that's lock-only), so it's safe on
+        # the lock-free fast path.
         tokens = self._tokens
         if tokens is None:
             tokens = self._cache.load(self.cache_key)
@@ -481,31 +460,26 @@ class OidcDeviceAuth:
         return None
 
     def _acquire(self, generation: int) -> TokenSet:
-        # Called while holding self._lock. Try a silent refresh, else run the
-        # interactive device flow. `generation` was captured before the cache
-        # read in _obtain_tokens; _store drops its write if a concurrent clear()
-        # has bumped it since (see _store / _cache_generation).
+        # Holds self._lock. Try a silent refresh, else run the device flow.
+        # `generation` was captured before the cache read in _obtain_tokens;
+        # _store drops its write if a concurrent clear() bumped it since.
         tokens = self._tokens
         if tokens is not None and tokens.refresh_token:
             try:
                 refreshed = self._refresh(tokens)
             except OidcNetworkError:
-                # Transient connectivity failure: the refresh token is still
-                # valid, so re-authenticating won't help (the interactive flow
-                # needs the same network) and would needlessly re-prompt.
-                # Surface it — the cached token + refresh_token are kept, so a
-                # later call retries the refresh.
+                # Transient: the refresh token is still valid, so the interactive
+                # flow (same network) wouldn't help and would needlessly
+                # re-prompt. Surface it; the cached token is kept for a retry.
                 raise
             except OidcError:
-                # The refresh token was rejected (expired/revoked) or the IdP
-                # returned an unusable response: fall through to a fresh
-                # interactive sign-in.
+                # Refresh token rejected (expired/revoked) or unusable response:
+                # fall through to a fresh interactive sign-in.
                 pass
             else:
-                # Only accept a refresh that actually yields the token kind we
-                # need. Some IdPs don't re-issue the id_token on refresh; such
-                # a response is unusable, so fall through to the interactive
-                # flow rather than caching it and looping on every call.
+                # Accept only a refresh that yields the kind we need: some IdPs
+                # don't re-issue the id_token on refresh, so fall through rather
+                # than cache an unusable response and loop on every call.
                 if self._has_required_token(refreshed):
                     self._store(refreshed, generation)
                     return refreshed
@@ -515,13 +489,12 @@ class OidcDeviceAuth:
         return fresh
 
     def _store(self, tokens: TokenSet, generation: int) -> None:
-        # self._tokens is this instance's own view, so always set it — the
-        # caller uses the token it just acquired. The shared-cache write is
-        # conditional: a clear() (here or on another instance sharing the
-        # process-global store) that bumped the generation since it was captured
-        # drops the write, so clear() is not silently undone. Backends without
-        # generation support (NullCache / a custom TokenCache) store
-        # unconditionally, exactly as before.
+        # self._tokens is this instance's own view, so always set it (the caller
+        # uses what it just acquired). The shared-cache write is conditional: a
+        # clear() (here or on another instance sharing the store) that bumped the
+        # generation drops the write, so clear() isn't silently undone. Backends
+        # without generation support (NullCache / custom TokenCache) store
+        # unconditionally.
         self._tokens = tokens
         store_if_current = getattr(self._cache, 'store_if_current', None)
         if store_if_current is not None:
@@ -531,8 +504,8 @@ class OidcDeviceAuth:
 
     def _cache_generation(self) -> int:
         # MemoryCache tracks a per-key clear()-generation for the cross-instance
-        # CAS in _store; other backends don't, so default to 0 (the store is
-        # then unconditional, matching the pre-existing behavior).
+        # CAS in _store; other backends don't, so default to 0 (unconditional
+        # store).
         generation = getattr(self._cache, 'generation', None)
         return generation(self.cache_key) if generation is not None else 0
 
@@ -540,12 +513,12 @@ class OidcDeviceAuth:
         try:
             expires_in = int(body.get('expires_in', _DEFAULT_EXPIRES_IN))
         except (TypeError, ValueError, OverflowError):
-            # OverflowError: a JSON Infinity (json.loads accepts it) → int(inf);
-            # it is not a ValueError, so list it to keep the typed contract.
+            # OverflowError: a JSON Infinity (json.loads accepts it) → int(inf)
+            # isn't a ValueError, so list it to keep the typed contract.
             expires_in = _DEFAULT_EXPIRES_IN
         if expires_in <= 0:
-            # A non-positive lifetime would mark a just-issued token as already
-            # expired, causing refresh/re-prompt churn. Treat it as unknown.
+            # A non-positive lifetime marks a just-issued token as expired,
+            # causing refresh/re-prompt churn. Treat it as unknown.
             expires_in = _DEFAULT_EXPIRES_IN
         claims = (_decode_jwt_claims(body.get('id_token'))
                   or _decode_jwt_claims(body.get('access_token')))
@@ -561,11 +534,10 @@ class OidcDeviceAuth:
             sub=claims.get('sub'))
 
     def _idp_post(self, url: str, form: Dict[str, Any]):
-        # IdP POSTs carry the device code / refresh token, so they are always
-        # required to be https (loopback http is fine for local dev); the
-        # user's `insecure` flag — which is about the QuestDB link — never
-        # downgrades them. The timeout bounds how long this leg can hold the
-        # acquisition lock if the IdP stalls.
+        # IdP POSTs carry the device code / refresh token, so always https
+        # (loopback http is fine for local dev); the user's `insecure` flag (the
+        # QuestDB link) never downgrades them. The timeout bounds how long this
+        # leg can hold the acquisition lock if the IdP stalls.
         return post_form(
             url, form, ctx=self._ctx, insecure=False, timeout=self._timeout)
 
@@ -578,42 +550,38 @@ class OidcDeviceAuth:
                     'refresh_token': tokens.refresh_token,
                     'client_id': self.config.client_id,
                     'scope': self.config.scope,
-                    # Re-send the audience on refresh too, mirroring the
-                    # device-authorization request: some IdPs (e.g. Auth0) need
-                    # it to keep the rotated access token's `aud`, and would
-                    # otherwise mint a token QuestDB rejects only AFTER a silent
-                    # refresh. IdPs that don't use it ignore the param; post_form
-                    # drops it entirely when audience is None (not configured).
+                    # Re-send the audience (mirroring the device-authorization
+                    # request): some IdPs (e.g. Auth0) need it to keep the
+                    # rotated token's `aud`, else they mint one QuestDB rejects
+                    # only after a silent refresh. Others ignore it; post_form
+                    # drops it when audience is None.
                     'audience': self.config.audience,
                 })
         except OidcNetworkError:
-            # Already transient (socket drop / DNS / per-request timeout):
-            # propagate so _acquire keeps the still-valid refresh token and
-            # retries later instead of re-prompting.
+            # Already transient (socket drop / DNS / timeout): propagate so
+            # _acquire keeps the still-valid refresh token and retries later.
             raise
         except OidcError as e:
-            # Non-JSON HTTP error body (e.g. an HTML 5xx from a proxy in front
-            # of the IdP). A 5xx / 429 is a transient hiccup — re-raise as a
-            # network error so _acquire keeps the refresh token; a 4xx is a
-            # genuine rejection, so let it fall through (as an OidcError) to a
-            # fresh interactive sign-in.
+            # Non-JSON HTTP error body (e.g. an HTML 5xx from a proxy). 5xx/429
+            # is transient → re-raise as a network error so _acquire keeps the
+            # refresh token; a 4xx is a genuine rejection, so let it fall through
+            # to a fresh interactive sign-in.
             if _http_status_is_transient(getattr(e, 'status', None)):
                 raise OidcNetworkError(str(e)) from e
             raise
         if status == 200:
             refreshed = self._tokenset_from_response(body)
-            # Many IdPs do not rotate the refresh token; keep the old one.
-            # TokenSet is frozen, so derive a copy rather than mutating.
+            # Many IdPs don't rotate the refresh token; keep the old one.
+            # TokenSet is frozen, so derive a copy.
             if not refreshed.refresh_token:
                 refreshed = replace(
                     refreshed, refresh_token=tokens.refresh_token)
             return refreshed
-        # A transient IdP error (5xx / 429) during a silent refresh must not
-        # tear down the session: the refresh token is still valid, so surface it
-        # as a network error and let _acquire keep it and retry later — matching
-        # the poll loop, which also treats 5xx/429 as transient. Only a genuine
-        # rejection (an expired/revoked refresh token, a 4xx invalid_grant)
-        # falls through to a fresh interactive sign-in.
+        # A transient 5xx/429 during a silent refresh must not tear down the
+        # session: the refresh token is still valid, so surface it as a network
+        # error for _acquire to retry — matching the poll loop. Only a genuine
+        # rejection (expired/revoked token, 4xx invalid_grant) falls through to a
+        # fresh sign-in.
         if _http_status_is_transient(status):
             raise OidcNetworkError(
                 f'Token refresh hit a transient IdP error (HTTP {status}); '
@@ -657,10 +625,9 @@ class OidcDeviceAuth:
             return body
         error = body.get('error')
         if status == 200:
-            # 200 but the success guard above failed: the response is missing
-            # device_code/user_code. That is a non-conformant body, not an
-            # HTTP-level failure — say so plainly rather than the contradictory
-            # "Device authorization request failed (HTTP 200)".
+            # 200 but the guard above failed: device_code/user_code missing.
+            # A non-conformant body, not an HTTP failure — say so plainly rather
+            # than a contradictory "failed (HTTP 200)".
             raise OidcDeviceFlowError(
                 'The IdP returned a 200 device-authorization response that is '
                 'missing the required "device_code"/"user_code" fields; cannot '
@@ -690,18 +657,16 @@ class OidcDeviceAuth:
             interval = int(resp.get('interval', self._default_interval))
         except (TypeError, ValueError, OverflowError):
             interval = self._default_interval
-        # At least 1s (RFC 8628 floor), and capped so a hostile/huge value can't
-        # pin the polling thread (which holds the acquisition lock) in one
-        # enormous sleep.
+        # At least 1s (RFC 8628 floor), capped so a hostile value can't pin the
+        # polling thread (which holds the lock) in one enormous sleep.
         interval = min(_MAX_POLL_INTERVAL, max(1, interval))
         try:
             expires_in = int(resp.get('expires_in', _DEFAULT_DEVICE_CODE_LIFETIME))
         except (TypeError, ValueError, OverflowError):
             expires_in = _DEFAULT_DEVICE_CODE_LIFETIME
-        # A non-positive lifetime would time the flow out before the first poll
-        # (the user has already been shown the code); treat it as unknown. Cap
-        # the upper end so a hostile expires_in can't keep the loop — and the
-        # lock — alive indefinitely.
+        # A non-positive lifetime would time out before the first poll (the code
+        # is already shown); treat it as unknown. Cap the upper end so a hostile
+        # value can't keep the loop — and the lock — alive indefinitely.
         if expires_in <= 0:
             expires_in = _DEFAULT_DEVICE_CODE_LIFETIME
         expires_in = min(expires_in, _MAX_DEVICE_CODE_LIFETIME)
@@ -717,8 +682,7 @@ class OidcDeviceAuth:
                     'Run the sign-in again.',
                     error='expired_token')
             self._renderer.on_waiting(remaining)
-            # Never sleep past the deadline (remaining > 0 here): a clamped
-            # interval still shouldn't overshoot a short-lived code.
+            # Never sleep past the deadline (remaining > 0 here).
             self._sleep(min(interval, remaining))
 
             try:
@@ -730,11 +694,10 @@ class OidcDeviceAuth:
                         'client_id': self.config.client_id,
                     })
             except OidcError as e:
-                # A non-JSON 4xx is a terminal rejection (e.g. an HTML/plain
-                # error page from a WAF or reverse proxy in front of the IdP, or
-                # a non-conformant IdP): a conformant OAuth error is JSON, so it
-                # can never be authorization_pending / slow_down. Fail fast
-                # instead of polling on to a misleading "code expired".
+                # A non-JSON 4xx is a terminal rejection (e.g. an HTML error page
+                # from a WAF/proxy, or a non-conformant IdP): a conformant OAuth
+                # error is JSON, so it can never be authorization_pending /
+                # slow_down. Fail fast instead of polling on to "code expired".
                 if _http_status_is_terminal_4xx(getattr(e, 'status', None)):
                     self._renderer.on_failure(
                         'Sign-in failed: the identity provider rejected the '
@@ -742,42 +705,36 @@ class OidcDeviceAuth:
                     raise OidcDeviceFlowError(
                         f'Device flow failed: the IdP rejected the token '
                         f'request ({e}).') from e
-                # Otherwise transient, not a terminal OAuth decision: a dropped
-                # connection / DNS blip / per-request timeout (OidcNetworkError),
-                # or a non-JSON 5xx/429 such as an HTML 502/503/504 from a proxy
-                # in front of the IdP (a bare OidcError from post_form). The user
-                # may already have authorized in the browser, and RFC 8628 §3.4
-                # expects polling to continue until the device code expires, so
-                # poll again instead of discarding the in-progress sign-in. The
-                # deadline check at the top of the loop bounds the total wait; a
-                # genuine JSON rejection arrives as a JSON error body (below).
+                # Otherwise transient: a dropped connection / DNS blip / timeout
+                # (OidcNetworkError) or a non-JSON 5xx/429 from a proxy (bare
+                # OidcError). The user may already have authorized, and RFC 8628
+                # §3.4 expects polling to continue until the code expires, so
+                # poll again rather than discard the sign-in (the deadline bounds
+                # the total wait; a genuine JSON rejection arrives below).
                 if getattr(e, 'status', None) == 429:
                     interval = min(_MAX_POLL_INTERVAL, interval + 5)
                 continue
 
             if status == 200:
-                # A 200 is the RFC 6749 §5.1 token response: the grant
-                # completed. Accept it only if it actually carries the kind
-                # _select will hand to QuestDB (the id_token in groups mode,
-                # else the access_token), using the same predicate as the cache
-                # gate and the post-refresh check so the three can't disagree.
+                # The RFC 6749 §5.1 token response: the grant completed. Accept
+                # it only if it carries the kind _select hands to QuestDB, using
+                # the same predicate as the cache gate and post-refresh check so
+                # the three can't disagree.
                 tokens = self._tokenset_from_response(body)
                 if self._has_required_token(tokens):
                     return tokens
-                # The grant completed but the required kind is absent: a stable
-                # misconfiguration, not a transient poll state. Raise a clear
-                # terminal error here instead of caching an unusable token and
-                # silently re-running the whole interactive flow on every later
-                # token() call.
+                # Grant completed but the required kind is absent: a stable
+                # misconfiguration, not a transient poll state. Raise a terminal
+                # error rather than cache an unusable token and silently re-run
+                # the whole flow on every later token() call.
                 self._renderer.on_failure(
                     'Sign-in failed: the identity provider did not return the '
                     'token this server requires.')
                 raise self._missing_required_token_error()
 
-            # A 5xx or 429 that did carry a JSON body is also transient (a
-            # server-side error or a rate-limit) rather than a terminal OAuth
-            # rejection: back off on a rate-limit and keep polling until the
-            # deadline, matching the connection-failure handling above.
+            # A 5xx/429 with a JSON body is also transient (server error or
+            # rate-limit), not a terminal rejection: back off on 429 and keep
+            # polling until the deadline, as above.
             if status >= 500 or status == 429:
                 if status == 429:
                     interval = min(_MAX_POLL_INTERVAL, interval + 5)
@@ -812,12 +769,12 @@ class OidcDeviceAuth:
         return detect_interactive()
 
     def _maybe_open_browser(self, resp: Dict[str, Any]) -> None:
-        # Never auto-open on a (possibly remote) notebook kernel; only do so
-        # for an explicitly opted-in local terminal session.
+        # Never auto-open on a (possibly remote) notebook kernel; only on an
+        # opted-in local terminal.
         if not self.open_browser or in_ipython_kernel():
             return
-        # Only open an http(s) URL — never a javascript:/data: scheme from a
-        # malicious or MITM'd device response.
+        # Only http(s) — never a javascript:/data: scheme from a malicious or
+        # MITM'd device response.
         target = _safe_link_url(
             resp.get('verification_uri_complete')
             or resp.get('verification_uri')
@@ -841,9 +798,9 @@ def _validate_flow(flow: str) -> None:
 
 
 def _normalize_url(url: str) -> str:
-    # Full URL with scheme/host lower-cased and the default port dropped, but
-    # the path kept (it distinguishes multi-tenant realms). Used for the cache
-    # key so trivial spelling differences don't cause a spurious re-prompt.
+    # Full URL with scheme/host lower-cased and default port dropped, but path
+    # kept (it distinguishes multi-tenant realms). Used for the cache key so
+    # trivial spelling differences don't cause a spurious re-prompt.
     parts, port = safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
     host = (parts.hostname or '').lower()

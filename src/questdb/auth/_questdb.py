@@ -38,12 +38,10 @@ from ._http import request, safe_urlparse
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
 
-# A hostname or IP literal never contains the ILP conf-string delimiters (';'
-# separates parameters, '=' separates key from value) nor whitespace/control
-# characters. Reject them in the resolved host so a crafted or tampered URL
-# can't smuggle extra conf parameters — e.g. ';tls_verify=unsafe_off;', which
-# silently disables TLS certificate verification — into the 'addr=host:port;'
-# string sender() hands to Sender.from_conf. Note ':' is intentionally allowed
+# Reject ILP conf-string delimiters (';', '=') and whitespace/control chars in
+# the host: a real hostname/IP never has them, so their presence means a
+# tampered URL trying to inject conf params like ';tls_verify=unsafe_off;'
+# (which disables TLS verification) into the addr= string. ':' is allowed
 # (IPv6 literals contain it; _ilp_addr brackets them).
 _ILLEGAL_HOST_CHARS = re.compile(r'[\x00-\x20\x7f;=]')
 
@@ -71,12 +69,10 @@ def _import_pandas():
 
 def _exec_json_to_df(data: Dict[str, Any], pandas):
     columns = data.get('columns') or []
-    # /exec returns a list of {"name", "type"} column descriptors. A malformed
-    # response — a non-list, entries that aren't objects, or a non-string name —
-    # must surface as a clean OidcError, not a raw AttributeError from .get(),
-    # nor a TypeError from `name in df.columns` below when a name is
-    # non-hashable (a JSON list/object), escaping the package's typed-error
-    # contract. A real QuestDB column name is always a string.
+    # /exec returns a list of {"name", "type"} descriptors. Validate the shape
+    # (a real column name is always a string) so a malformed response raises a
+    # clean OidcError rather than a raw AttributeError from .get() or a
+    # TypeError from `name in df.columns` on a non-hashable name.
     if not isinstance(columns, list) or not all(
             isinstance(c, dict)
             and isinstance(c.get('name'), (str, type(None)))
@@ -91,8 +87,8 @@ def _exec_json_to_df(data: Dict[str, Any], pandas):
     try:
         df = pandas.DataFrame(dataset, columns=names or None)
     except (ValueError, TypeError) as e:
-        # TypeError too: a hostile/malformed dataset shape can make the pandas
-        # constructor raise it (not only ValueError); keep it within OidcError.
+        # A malformed dataset shape can make the pandas constructor raise
+        # ValueError or TypeError; keep both within OidcError.
         raise OidcError(
             f'Unexpected shape in QuestDB /exec response: {e}') from e
     for col in columns:
@@ -124,10 +120,9 @@ class QuestDB:
     """
     A thin, authenticated QuestDB session built on an :class:`OidcDeviceAuth`.
 
-    Provides a one-call DataFrame query over REST plus adapters that feed the
-    same auto-refreshed token into your existing tools (SQLAlchemy / psycopg /
-    the ingestion ``Sender``). You can also just take :meth:`token` /
-    :meth:`headers` and wire them up yourself.
+    Offers a one-call DataFrame query over REST plus adapters that feed the
+    same auto-refreshed token into SQLAlchemy / psycopg / the ingestion
+    ``Sender``, or take :meth:`token` / :meth:`headers` and wire it up yourself.
     """
 
     def __init__(
@@ -141,12 +136,11 @@ class QuestDB:
         self._insecure = insecure
         self._ctx = auth._ctx
         # Same private CA bundle the auth/REST transport uses, so sender() can
-        # forward it to the ILP Sender (which has its own TLS stack). getattr
-        # keeps test doubles that only set _ctx working.
+        # forward it to the ILP Sender's own TLS stack. getattr keeps test
+        # doubles that only set _ctx working.
         self._ca_bundle = getattr(auth, '_ca_bundle', None)
         # safe_urlparse validates the port up-front, raising OidcConfigError
-        # (not a bare ValueError) for a malformed one, so the adapters that read
-        # the port stay within the package's typed-error contract.
+        # (not a bare ValueError) for a malformed one.
         self._parts, self._port = safe_urlparse(self.url)
 
     # -- token access -------------------------------------------------------
@@ -168,7 +162,7 @@ class QuestDB:
         :class:`pandas.DataFrame`.
 
         Uses ``Authorization: Bearer`` (no token-length limit, unlike PG-wire),
-        which makes it the recommended path for large groups-encoded JWTs.
+        so it's the recommended path for large groups-encoded JWTs.
 
         :param query: The SQL query to run.
         :param limit: Optional QuestDB ``limit`` (e.g. ``"1,1000"``).
@@ -195,17 +189,15 @@ class QuestDB:
         try:
             data = resp.json()
         except (ValueError, UnicodeDecodeError, RecursionError):
-            # A 2xx body that isn't JSON (e.g. an HTML error/login page from a
-            # reverse proxy or captive portal), or deeply-nested JSON that
-            # exhausts the decoder's stack (RecursionError, not a ValueError),
-            # must surface as a clean OidcError, not a raw decoder exception.
-            # Mirrors the error path and post_form().
+            # A 2xx body that isn't JSON (e.g. an HTML page from a proxy/captive
+            # portal) or deeply-nested JSON that exhausts the decoder's stack
+            # (RecursionError) surfaces as a clean OidcError. Mirrors post_form().
             raise OidcError(
                 'QuestDB returned a non-JSON success response from /exec: '
                 f'{resp.text()[:300]}')
         if not isinstance(data, dict):
-            # Valid JSON but not an object (e.g. a bare list) would make
-            # _exec_json_to_df fail with AttributeError on .get(); reject it.
+            # Valid JSON but not an object (e.g. a bare list) would break
+            # _exec_json_to_df's .get(); reject it.
             raise OidcError(
                 'QuestDB /exec returned JSON that is not an object '
                 f'(got {type(data).__name__}); cannot build a DataFrame.')
@@ -216,13 +208,13 @@ class QuestDB:
     def _require_host(self, host: Optional[str] = None) -> str:
         """
         Resolve the PG-wire / ILP host: an explicit ``host`` override, else the
-        host from the QuestDB URL. Raises when neither yields one (e.g. a URL
-        with no authority such as ``"localhost"`` or ``"questdb:9000"``) instead
-        of passing a bare ``None`` down to the driver.
+        host from the QuestDB URL. Raises (rather than passing a bare ``None``
+        to the driver) when neither yields one, e.g. a URL with no authority
+        such as ``"localhost"`` or ``"questdb:9000"``.
 
-        The returned host is *unbracketed* — psycopg and SQLAlchemy take the
-        address and port as separate arguments. :meth:`_ilp_addr` adds the
-        brackets an IPv6 literal needs in the ILP ``addr=host:port`` form.
+        The returned host is *unbracketed* — psycopg and SQLAlchemy take address
+        and port separately. :meth:`_ilp_addr` adds the brackets an IPv6 literal
+        needs in the ILP ``addr=host:port`` form.
         """
         resolved = host or self._parts.hostname
         if not resolved:
@@ -242,8 +234,8 @@ class QuestDB:
 
     @staticmethod
     def _ilp_addr(host: str, port: int) -> str:
-        # Bracket an IPv6 literal so the ILP conf parser reads host:port
-        # unambiguously; hostnames and IPv4 addresses never contain ':'.
+        # Bracket an IPv6 literal (it contains ':', unlike hostnames/IPv4) so
+        # the ILP conf parser reads host:port unambiguously.
         bracketed = f'[{host}]' if ':' in host else host
         return f'{bracketed}:{port}'
 
@@ -258,8 +250,8 @@ class QuestDB:
         """
         Build a SQLAlchemy ``Engine`` for QuestDB's PG-wire endpoint.
 
-        Connects as user ``_sso`` and injects a **fresh** token as the password
-        for every new connection (via a ``do_connect`` listener), so pooled
+        Connects as user ``_sso``, injecting a **fresh** token as the password
+        on every new connection (via a ``do_connect`` listener) so pooled
         connections always authenticate with a valid token. Requires
         ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
         """
@@ -305,8 +297,8 @@ class QuestDB:
         Open a raw psycopg (v3) or psycopg2 connection to QuestDB's PG-wire
         endpoint, authenticating as ``_sso`` with the current token.
 
-        The token is captured at connect time; open a new connection to pick up
-        a refreshed token.
+        The token is captured at connect time; reconnect to pick up a refreshed
+        token.
         """
         mod = _pg_module()
         return mod.connect(
@@ -320,8 +312,8 @@ class QuestDB:
     def sender(self, *, port: Optional[int] = None,
                **sender_kwargs) -> 'questdb.ingress.Sender':
         """
-        Build a :class:`questdb.ingress.Sender` (ILP-over-HTTP) configured with
-        the current bearer token, for ingestion.
+        Build a :class:`questdb.ingress.Sender` (ILP-over-HTTP) for ingestion,
+        configured with the current bearer token.
 
         The token is captured at creation time; create a new sender to pick up
         a refreshed token.
@@ -330,8 +322,8 @@ class QuestDB:
         resolved_port = port or self._port or (
             443 if scheme == 'https' else 9000)
         # Coerce to int (before the heavy import, so bad input fails fast) so a
-        # stray non-integer port kwarg can't smuggle ILP conf parameters — e.g.
-        # "9000;tls_verify=unsafe_off" — into the addr= string via _ilp_addr,
+        # stray non-integer port can't inject conf params like
+        # "9000;tls_verify=unsafe_off" into the addr= string via _ilp_addr —
         # the same injection _require_host() blocks for the host. The
         # URL-derived self._port is already an int.
         try:
@@ -353,11 +345,10 @@ class QuestDB:
                 f'{self._ilp_addr(self._require_host(), resolved_port)};')
         # Forward the private CA bundle (explicit ca_bundle=, else the
         # REQUESTS_CA_BUNDLE / SSL_CERT_FILE env vars — same precedence as
-        # build_ssl_context) to the Sender's own TLS stack as tls_roots, so an
-        # https Sender against a private-CA QuestDB trusts the same roots the
-        # REST/IdP paths do. Only a PEM file works here (tls_roots is a file;
-        # the Sender has no capath equivalent), and only over https. The caller
-        # can still override via tls_roots=/tls_ca= in **sender_kwargs.
+        # build_ssl_context) to the Sender as tls_roots, so an https Sender
+        # against a private-CA QuestDB trusts the same roots the REST/IdP paths
+        # do. Only a PEM file works (tls_roots takes a file, no capath), only
+        # over https, and the caller can still override via tls_roots=/tls_ca=.
         if (scheme == 'https'
                 and 'tls_roots' not in sender_kwargs
                 and 'tls_ca' not in sender_kwargs):
@@ -395,17 +386,16 @@ def connect(
     :param url: The QuestDB HTTP(S) base URL, e.g.
         ``"https://questdb.example.com:9000"``.
     :param flow: ``"auto"`` (default), ``"device"`` or ``"loopback"``. Today
-        ``"auto"`` always resolves to the device flow (works on local and
-        remote kernels); ``"loopback"`` is reserved for a future release.
+        ``"auto"`` resolves to the device flow (works on local and remote
+        kernels); ``"loopback"`` is reserved for a future release.
     :param cache: Token cache backend: ``"memory"`` (default) or ``None``.
     :param insecure: Allow plaintext ``http://`` URLs (development only).
     :param eager: If ``True`` (default), sign in immediately; otherwise defer
         until the first call that needs a token.
     :param opts: Forwarded to :meth:`OidcDeviceAuth.from_questdb` (e.g.
         ``client_id``, ``scope``, ``audience``, ``issuer``, ``open_browser``,
-        ``qr``, ``ca_bundle``, ``timeout`` — the per-request IdP network
-        timeout, which also bounds how long a stalled IdP can hold the
-        token-acquisition lock).
+        ``qr``, ``ca_bundle``, ``timeout`` — the per-request IdP network timeout,
+        which also bounds how long a stalled IdP can hold the token lock).
     """
     auth = OidcDeviceAuth.from_questdb(
         url, flow=flow, cache=cache, insecure=insecure, **opts)

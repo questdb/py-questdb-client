@@ -23,17 +23,16 @@
 ################################################################################
 
 """
-A tiny HTTP helper built on the standard library.
+A tiny stdlib-only HTTP helper.
 
-OIDC device flow implementation deliberately avoids a hard dependency on ``requests``/``httpx``
-so that ``OidcDeviceAuth.token()`` / ``headers()`` work out of the box with no
-extra installs. Only the device flow, discovery and the REST adapter use this
-module; the heavier adapters (SQLAlchemy / psycopg / ingestion ``Sender``) bring
-their own transports.
+Avoids a hard dependency on ``requests``/``httpx`` so ``OidcDeviceAuth.token()``
+/ ``headers()`` work with no extra installs. Only the device flow, discovery and
+the REST adapter use this; heavier adapters (SQLAlchemy / psycopg / ingestion
+``Sender``) bring their own transports.
 
-Standard proxy environment variables (``HTTPS_PROXY`` / ``HTTP_PROXY`` /
-``NO_PROXY``) are honoured automatically by ``urllib``. A custom CA bundle can be
-supplied explicitly or via ``REQUESTS_CA_BUNDLE`` / ``SSL_CERT_FILE``.
+``urllib`` honours the standard proxy env vars (``HTTPS_PROXY`` / ``HTTP_PROXY``
+/ ``NO_PROXY``); a custom CA bundle can come from ``REQUESTS_CA_BUNDLE`` /
+``SSL_CERT_FILE``.
 """
 
 from __future__ import annotations
@@ -56,9 +55,8 @@ _USER_AGENT = 'questdb-python-client (oidc-auth)'
 
 def build_ssl_context(ca_bundle: Optional[str] = None) -> ssl.SSLContext:
     """
-    Build an SSL context, honouring an explicit CA bundle or the
-    ``REQUESTS_CA_BUNDLE`` / ``SSL_CERT_FILE`` environment variables
-    (useful behind a corporate TLS-intercepting proxy).
+    Build an SSL context from an explicit CA bundle or the ``REQUESTS_CA_BUNDLE``
+    / ``SSL_CERT_FILE`` env vars (useful behind a TLS-intercepting proxy).
     """
     ca = (
         ca_bundle
@@ -66,10 +64,8 @@ def build_ssl_context(ca_bundle: Optional[str] = None) -> ssl.SSLContext:
         or os.environ.get('SSL_CERT_FILE'))
     if not ca:
         return ssl.create_default_context()
-    # A missing / unreadable / invalid bundle makes the stdlib raise a raw
-    # FileNotFoundError or ssl.SSLError; map it to the package's typed error so
-    # a mistyped ca_bundle path (or env var) fails clearly instead of leaking a
-    # bare stdlib exception.
+    # Map the raw FileNotFoundError / ssl.SSLError from a missing/invalid bundle
+    # to a typed error so a mistyped path fails clearly.
     try:
         if os.path.isdir(ca):
             return ssl.create_default_context(capath=ca)
@@ -104,13 +100,12 @@ class HttpResponse:
 
 def safe_urlparse(url: str) -> tuple:
     """
-    ``urllib.parse.urlparse(url)`` paired with its port, but with a typed error.
+    ``urlparse(url)`` paired with its port, but with a typed error.
 
-    Both ``urlparse`` itself (e.g. ``https://[::1`` — a malformed IPv6 literal)
-    and ``ParseResult.port`` (e.g. ``https://idp:notaport`` — a non-integer
-    port) raise a bare ``ValueError``; re-raise it as :class:`OidcConfigError`
-    so a malformed endpoint URL stays within the package's error contract
-    instead of escaping as a raw ``ValueError``. Returns ``(parts, port)``.
+    Both ``urlparse`` (malformed IPv6 literal) and ``ParseResult.port``
+    (non-integer port) raise a bare ``ValueError``; re-raise as
+    :class:`OidcConfigError` to keep a malformed URL within the error contract.
+    Returns ``(parts, port)``.
     """
     try:
         parts = urllib.parse.urlparse(url)
@@ -121,8 +116,7 @@ def safe_urlparse(url: str) -> tuple:
 
 
 def _is_loopback(host: Optional[str]) -> bool:
-    # Traffic to a loopback address never leaves the host, so plaintext http
-    # carries no network interception risk and is always permitted.
+    # Loopback traffic never leaves the host, so plaintext http is safe here.
     if not host:
         return False
     if host.lower() == 'localhost':
@@ -134,8 +128,7 @@ def _is_loopback(host: Optional[str]) -> bool:
 
 
 def _require_secure(url: str, insecure: bool) -> None:
-    # safe_urlparse maps a malformed URL (bad IPv6 literal / non-integer port)
-    # to OidcConfigError instead of letting a bare ValueError escape.
+    # safe_urlparse maps a malformed URL to OidcConfigError, not a bare ValueError.
     parts, _ = safe_urlparse(url)
     scheme = parts.scheme.lower()
     if scheme == 'https':
@@ -154,19 +147,16 @@ def _require_secure(url: str, insecure: bool) -> None:
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse to follow HTTP redirects.
 
-    The discovery / device / token / ``/settings`` / ``/exec`` endpoints never
-    legitimately redirect. Auto-following a ``30x`` is unsafe here because only
-    the *original* URL is vetted: ``_require_secure`` and
-    ``validate_endpoint_origins`` never see the redirect target. urllib also
-    does not strip the ``Authorization`` header on a cross-origin redirect, so a
-    single ``302`` from ``/exec`` would re-send ``Authorization: Bearer
-    <token>`` to an attacker-chosen host — including a downgrade to plaintext
-    ``http`` — leaking the QuestDB token off-origin.
+    These endpoints never legitimately redirect, and auto-following is unsafe:
+    only the *original* URL is vetted (``_require_secure`` /
+    ``validate_endpoint_origins`` never see the target), and urllib does not
+    strip ``Authorization`` on a cross-origin redirect — so one ``302`` from
+    ``/exec`` could re-send the bearer token to an attacker host, even
+    downgrading to plaintext ``http``.
 
-    Returning ``None`` makes urllib stop following and surface the ``30x`` as an
-    ``HTTPError`` (which :func:`request` turns into a non-2xx
-    :class:`HttpResponse`), so callers see a clean failure instead of a
-    silently-followed redirect.
+    Returning ``None`` surfaces the ``30x`` as an ``HTTPError`` (which
+    :func:`request` turns into a non-2xx :class:`HttpResponse`), giving callers a
+    clean failure.
     """
 
     def redirect_request(self, *args, **kwargs):
@@ -174,9 +164,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _opener(ctx: Optional[ssl.SSLContext]) -> urllib.request.OpenerDirector:
-    # build_opener keeps the default ProxyHandler (which reads *_PROXY env
-    # vars), while letting us pin our own TLS context and forbid redirects
-    # (the credential/token endpoints never legitimately redirect).
+    # build_opener keeps the default ProxyHandler (reads *_PROXY env vars) while
+    # letting us pin our own TLS context and forbid redirects.
     handlers: list = [_NoRedirect()]
     if ctx is not None:
         handlers.append(urllib.request.HTTPSHandler(context=ctx))
@@ -196,11 +185,11 @@ def request(
     """
     Perform a single HTTP request.
 
-    ``form`` is form-url-encoded into the body (``application/x-www-form-
-    urlencoded``). HTTP error statuses (``4xx``/``5xx``) are returned as an
-    :class:`HttpResponse` rather than raised, so callers can inspect OAuth
-    error bodies (e.g. ``authorization_pending``). Only genuine network
-    failures raise (:class:`OidcNetworkError`).
+    ``form`` is encoded into the body as ``application/x-www-form-urlencoded``.
+    HTTP error statuses (``4xx``/``5xx``) are returned as an
+    :class:`HttpResponse`, not raised, so callers can inspect OAuth error bodies
+    (e.g. ``authorization_pending``); only genuine network failures raise
+    (:class:`OidcNetworkError`).
     """
     _require_secure(url, insecure)
     body: Optional[bytes] = data
@@ -221,10 +210,9 @@ def request(
                 resp.read(),
                 resp.headers)
     except urllib.error.HTTPError as e:
-        # 4xx/5xx still carry a (possibly JSON) body we want to inspect.
-        # Map a mid-body read failure to a network error (rather than letting a
-        # bare OSError escape) and close the error response so its socket isn't
-        # leaked (the poll loop drives many 400s during a long sign-in).
+        # 4xx/5xx still carry a (possibly JSON) body to inspect. Map a mid-body
+        # read failure to a network error, and close the response so its socket
+        # isn't leaked (the poll loop drives many 400s during a long sign-in).
         try:
             body = e.read()
         except (TimeoutError, OSError) as read_err:
@@ -236,9 +224,8 @@ def request(
     except urllib.error.URLError as e:
         raise OidcNetworkError(f'Failed to reach {url}: {e.reason}') from e
     except http.client.InvalidURL as e:
-        # A malformed URL (e.g. a non-integer port) can't be turned into a
-        # request; surface it as a config error rather than letting a raw
-        # http.client exception escape the package's typed-error contract.
+        # A malformed URL (e.g. non-integer port) can't become a request;
+        # surface it as a config error, not a raw http.client exception.
         raise OidcConfigError(f'Malformed URL {url!r}: {e}') from e
     except (TimeoutError, OSError, http.client.HTTPException) as e:
         raise OidcNetworkError(f'Failed to reach {url}: {e}') from e
@@ -261,8 +248,8 @@ def get_json(
     try:
         return resp.json()
     except (ValueError, UnicodeDecodeError, RecursionError) as e:
-        # RecursionError: deeply-nested JSON exhausts the decoder's stack; it is
-        # not a ValueError, so catch it explicitly to keep the typed contract.
+        # RecursionError (deeply-nested JSON) isn't a ValueError, so catch it
+        # explicitly to keep the typed contract.
         raise OidcError(f'Invalid JSON from {url}: {e}') from e
 
 
@@ -278,7 +265,7 @@ def post_form(
     POST a form-url-encoded body and parse the JSON response.
 
     Returns ``(status, parsed_json)``. Used for the device-authorization and
-    token endpoints, which return JSON bodies on both success and error.
+    token endpoints, which return JSON on both success and error.
     """
     resp = request(
         'POST', url, form=form, headers=headers, timeout=timeout, ctx=ctx,
@@ -286,16 +273,14 @@ def post_form(
     try:
         parsed = resp.json()
     except (ValueError, UnicodeDecodeError, RecursionError):
-        # RecursionError: deeply-nested JSON exhausts the decoder's stack; not a
-        # ValueError, so catch it explicitly to keep the typed contract.
+        # RecursionError (deeply-nested JSON) isn't a ValueError, so catch it
+        # explicitly to keep the typed contract.
         if resp.ok:
             raise OidcError(
                 f'Expected JSON from {url}, got: {resp.text()[:200]}',
                 status=resp.status)
-        # Non-JSON error body: surface the status + text. Attach the HTTP status
-        # so callers (the device-flow poll loop / silent refresh) can tell a
-        # terminal 4xx rejection from a transient 5xx/429 even though the body
-        # was not a conformant JSON OAuth error.
+        # Non-JSON error body: attach the HTTP status so callers (poll loop /
+        # silent refresh) can tell a terminal 4xx from a transient 5xx/429.
         raise OidcError(
             f'HTTP {resp.status} from {url}: {resp.text()[:200]}',
             status=resp.status)

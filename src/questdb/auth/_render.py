@@ -25,10 +25,9 @@
 """
 Presentation of the device-flow prompt.
 
-Renders a clickable link + user code in Jupyter (via ``IPython.display``) and
-falls back to plain text on a terminal. Nothing here is required for
-``token()`` / ``headers()`` to work; ``IPython`` and ``qrcode`` are imported
-lazily and only when actually used.
+Renders a clickable link + user code in Jupyter (via ``IPython.display``),
+falling back to plain text on a terminal. Not required for ``token()`` /
+``headers()``; ``IPython`` and ``qrcode`` are imported lazily.
 """
 
 from __future__ import annotations
@@ -49,8 +48,8 @@ def in_ipython_kernel() -> bool:
     ip = get_ipython()
     if ip is None:
         return False
-    # ZMQInteractiveShell == notebook / qtconsole / lab; TerminalInteractive
-    # Shell == ipython in a terminal (still interactive).
+    # ZMQInteractiveShell == notebook/qtconsole/lab; TerminalInteractiveShell
+    # == ipython in a terminal.
     return ip.__class__.__name__ in (
         'ZMQInteractiveShell', 'TerminalInteractiveShell')
 
@@ -59,9 +58,8 @@ def detect_interactive() -> bool:
     """
     Best-effort detection of whether a human can complete the sign-in.
 
-    Interactive when attached to a TTY or running in an interactive IPython
-    shell. This guards against hanging forever in a non-interactive context
-    (papermill / cron / CI).
+    Interactive when attached to a TTY or an interactive IPython shell; guards
+    against hanging forever in a non-interactive context (papermill/cron/CI).
     """
     if in_ipython_kernel():
         return True
@@ -74,17 +72,14 @@ def detect_interactive() -> bool:
 
 def _verification_uri(resp: Dict[str, Any]) -> str:
     # RFC 8628 uses ``verification_uri``; some IdPs (older Google) use
-    # ``verification_url``. The device response is untrusted: coerce to str so a
-    # non-string value (e.g. a JSON number) can't crash the renderer
-    # (``re.sub`` / ``html.escape``) with a raw TypeError before the prompt is
-    # even shown — matching the defensive ``str(user_code)`` at the call sites.
+    # ``verification_url``. Coerce to str: the device response is untrusted, and
+    # a non-string (e.g. a JSON number) would crash the renderer.
     uri = resp.get('verification_uri') or resp.get('verification_url') or ''
     return uri if isinstance(uri, str) else ''
 
 
 def _verification_uri_complete(resp: Dict[str, Any]) -> Optional[str]:
-    # Coerce to str / None for the same untrusted-input reason as
-    # _verification_uri (a non-string would crash the renderer / _safe_link_url).
+    # Coerce to str/None for the same untrusted-input reason as _verification_uri.
     uri = (resp.get('verification_uri_complete')
            or resp.get('verification_url_complete'))
     return uri if isinstance(uri, str) else None
@@ -94,15 +89,13 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     """
     Return ``url`` only if it uses an ``http(s)`` scheme, else ``None``.
 
-    The verification URL comes from the IdP's device-authorization response,
-    which is untrusted input. Embedding it in an HTML ``href`` without a scheme
-    allowlist would let a malicious/MITM'd response inject a ``javascript:`` or
-    ``data:`` URL that executes in the notebook DOM when clicked
-    (``html.escape`` guards markup, not the URL scheme).
+    The verification URL is untrusted (from the IdP's device-authorization
+    response); the scheme allowlist blocks a ``javascript:`` / ``data:`` href
+    from executing in the notebook DOM (``html.escape`` guards markup, not the
+    scheme).
     """
     if not url or not isinstance(url, str):
-        # A non-string (e.g. a JSON number from an untrusted device response)
-        # has no scheme to vet and would make urlparse raise; treat it as unsafe.
+        # A non-string has no scheme to vet and would make urlparse raise.
         return None
     try:
         scheme = urllib.parse.urlparse(url).scheme.lower()
@@ -116,9 +109,8 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
     Render ``url`` as a clickable link, or as inert escaped text if its scheme
     is not ``http(s)``.
 
-    The visible label defaults to the URL itself. When the URL is rejected, the
-    (escaped) URL is shown as plain text so the user can still see/copy it, but
-    it is never turned into a clickable/executable link.
+    The label defaults to the URL itself. A rejected URL is shown as escaped
+    plain text (still visible/copyable) but never made clickable.
     """
     safe = _safe_link_url(url)
     label = html.escape(text if text is not None else (url or ''))
@@ -128,14 +120,10 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
             f'rel="noopener noreferrer">{label}</a>')
 
 
-# C0/C1 control chars (incl. ESC, which drives ANSI escape sequences), the
-# Unicode bidi controls, the zero-width / invisible-format chars, the
-# line/paragraph separators and the interlinear-annotation controls. All can
-# spoof a prompt: U+202E (RIGHT-TO-LEFT OVERRIDE) reverses displayed text to
-# disguise a URL's host; U+2028/U+2029 inject fake lines; zero-width / invisible
-# chars hide or join content. Stripped from untrusted device-response fields on
-# BOTH the terminal and the Jupyter path (html.escape neutralizes markup, not
-# these). Covers the dangerous Unicode Cc/Cf code points for our inputs.
+# Strips C0/C1/ESC, bidi overrides, zero-width and line/paragraph separators
+# — all can spoof the prompt (e.g. U+202E reverses a URL's host). Applied to
+# untrusted device-response fields on both paths; html.escape would not catch
+# these.
 _CONTROL_CHARS = re.compile(
     r'[\x00-\x1f\x7f-\x9f\u00ad\u061c\u115f\u180e\u200b-\u200f'
     r'\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb]')
@@ -143,17 +131,12 @@ _CONTROL_CHARS = re.compile(
 
 def _strip_control(text: Optional[str]) -> str:
     """
-    Strip control / format characters from an untrusted string before it is
-    written to a terminal.
+    Strip control / format characters from an untrusted string before display.
 
-    The verification URL, user code and IdP error strings come from the device-
-    authorization response (untrusted). Writing them verbatim to a TTY would let
-    a hostile or MITM'd response inject ANSI escape sequences (C0/C1 control
-    chars — cursor moves, screen clears) or Unicode bidi overrides / zero-width
-    / line separators to spoof the prompt or hide the real sign-in URL (e.g.
-    U+202E visually reverses the displayed host). Needed on BOTH paths: the
-    plain-text terminal path (raw bytes to the TTY) and the Jupyter path —
-    ``html.escape`` neutralizes markup, not bidi/zero-width spoofing.
+    The verification URL, user code and IdP error strings are untrusted; raw
+    ANSI escapes or bidi/zero-width/line-separator chars could spoof the prompt
+    or hide the real sign-in URL. Needed on both paths — ``html.escape`` does
+    not catch bidi/zero-width spoofing.
     """
     if not text:
         return ''
@@ -208,12 +191,10 @@ class TerminalRenderer(Renderer):
             try:
                 self._stream.write(text)
             except UnicodeEncodeError:
-                # The stream's encoding can't represent some characters (e.g.
-                # the emoji on a legacy code-page Windows console, an ``ascii``
-                # PYTHONIOENCODING, or a redirected stderr). Degrade only those
-                # characters instead of letting the whole prompt — including the
-                # verification URL and user code — vanish, which would make the
-                # sign-in look like a silent hang.
+                # The stream's encoding can't represent some chars (e.g. the
+                # emoji on a legacy Windows console or ascii PYTHONIOENCODING).
+                # Degrade only those, so the URL/code don't vanish and look like
+                # a silent hang.
                 enc = getattr(self._stream, 'encoding', None) or 'ascii'
                 self._stream.write(
                     text.encode(enc, 'replace').decode(enc, 'replace'))
@@ -272,16 +253,12 @@ class JupyterRenderer(Renderer):
     def _prompt_head(self):
         """Header + sanitized verification link and user code.
 
-        Shared by :meth:`on_prompt` and :meth:`_render_with_status` so the
-        sanitization can't be applied to one path and forgotten on the other.
-        ``verification_uri`` / ``user_code`` / ``verification_uri_complete`` are
-        untrusted device-response fields: strip control / bidi / zero-width
-        chars (which ``html.escape`` does NOT remove) before rendering, so a
-        hostile or MITM'd response can't inject a U+202E bidi override or
-        zero-width chars to visually spoof the prompt in the notebook DOM.
-        ``_render_link`` additionally html-escapes and scheme-vets the URL.
-        Returns ``(body, uri, complete)`` — the sanitized URLs are handed back
-        so the QR target isn't re-derived (and re-sanitized).
+        Shared by :meth:`on_prompt` and :meth:`_render_with_status` so
+        sanitization is applied on both paths, never forgotten on one. The
+        untrusted device-response fields are stripped of control/bidi/zero-width
+        chars (which ``html.escape`` does NOT remove) before rendering;
+        ``_render_link`` also html-escapes and scheme-vets the URL. Returns
+        ``(body, uri, complete)`` so the QR target isn't re-derived.
         """
         resp = self._resp
         uri = _strip_control(_verification_uri(resp))
@@ -327,8 +304,7 @@ class JupyterRenderer(Renderer):
             color='#888')
 
     def on_success(self, identity: Optional[str], expires_in: float) -> None:
-        # identity is derived from the (untrusted) JWT claims — strip control /
-        # bidi chars before html-escaping, as for the other rendered fields.
+        # identity comes from untrusted JWT claims: strip then html-escape.
         who = html.escape(_strip_control(identity)) if identity else ''
         mins = max(1, int(round(expires_in / 60)))
         suffix = f' as <b>{who}</b>' if who else ''
@@ -337,7 +313,7 @@ class JupyterRenderer(Renderer):
             color='#2e7d32')
 
     def on_failure(self, message: str) -> None:
-        # message may interpolate the IdP's (untrusted) error_description.
+        # message may interpolate the IdP's untrusted error_description.
         self._render_with_status(
             '❌ ' + html.escape(_strip_control(message)), color='#c62828')
 

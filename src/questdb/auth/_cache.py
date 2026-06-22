@@ -39,14 +39,13 @@ DEFAULT_SKEW_SECONDS = 30
 @dataclass(frozen=True)
 class TokenSet:
     """
-    A set of tokens obtained from the IdP, plus their expiry.
+    IdP tokens plus their expiry.
 
-    Immutable (``frozen``): the lock-free fast path in
+    ``frozen`` because the lock-free fast path in
     :class:`~questdb.auth._device.OidcDeviceAuth` reads a published ``TokenSet``
-    without holding a lock, which is only safe because its fields never change
-    after construction. Derive a modified copy with :func:`dataclasses.replace`
-    rather than mutating in place. The three secret fields are kept out of
-    ``repr`` so a token can't leak into a log line or traceback.
+    without a lock, which is safe only if its fields never change; use
+    :func:`dataclasses.replace` for a modified copy. The secret fields are
+    excluded from ``repr`` so a token can't leak into a log or traceback.
     """
 
     access_token: Optional[str] = field(default=None, repr=False)
@@ -62,9 +61,8 @@ class TokenSet:
         """True if the token is present and not within ``skew`` of expiry."""
         if self.expires_at <= 0:
             return False
-        # Never let the early-refresh skew exceed half the token's own
-        # lifetime, so a short-lived (< 2*skew) token isn't reported expired
-        # the instant it is issued (which would refresh on every call).
+        # Cap skew at half the token lifetime, so a short-lived (< 2*skew)
+        # token isn't reported expired the instant it's issued.
         if self.issued_at:
             lifetime = self.expires_at - self.issued_at
             if lifetime > 0:
@@ -85,14 +83,13 @@ class TokenCache:
         raise NotImplementedError
 
 
-# Module-global so that re-running a notebook cell (which constructs a fresh
-# ``OidcDeviceAuth``) reuses the already-acquired token instead of re-prompting.
+# Module-global so a re-run notebook cell (fresh ``OidcDeviceAuth``) reuses the
+# acquired token instead of re-prompting.
 _MEMORY_STORE: Dict[str, TokenSet] = {}
-# Per-key counter bumped on every clear(). store_if_current() uses it to drop a
-# write from an acquisition that began before a concurrent clear() — including a
-# clear() on a *different* OidcDeviceAuth that shares this process-global store,
-# whose per-instance lock does not serialize against this one — so clear() can't
-# be silently undone by an in-flight sign-in / refresh.
+# Per-key counter bumped on every clear(); store_if_current() uses it to drop a
+# write from an acquisition that began before a concurrent clear() — even a
+# clear() on a different OidcDeviceAuth sharing this store, whose per-instance
+# lock doesn't serialize against this one — so clear() can't be silently undone.
 _MEMORY_GENERATION: Dict[str, int] = {}
 _MEMORY_LOCK = threading.Lock()
 
@@ -101,14 +98,12 @@ class MemoryCache(TokenCache):
     """
     Process-global, in-memory cache (the default).
 
-    Safest backend: nothing is written to disk. Tokens survive for the life
-    of the Python process, so re-running cells is silent, but a kernel
-    restart re-prompts once.
+    Safest backend: nothing hits disk. Tokens live for the life of the process,
+    so re-running cells is silent; a kernel restart re-prompts once.
     """
 
     def load(self, key: str) -> Optional[TokenSet]:
-        # Return a copy so callers can't mutate the cached entry in place
-        # (the live token is refreshed/rotated independently).
+        # Return a copy so callers can't mutate the cached entry in place.
         with _MEMORY_LOCK:
             tokens = _MEMORY_STORE.get(key)
         return replace(tokens) if tokens is not None else None
@@ -126,9 +121,8 @@ class MemoryCache(TokenCache):
         """
         Current clear()-generation for ``key``.
 
-        Captured before an acquisition's IdP round-trip and handed back to
-        :meth:`store_if_current`, which drops the write if a ``clear()`` bumped
-        the counter meanwhile (see :meth:`store_if_current`).
+        Capture before an IdP round-trip and pass to :meth:`store_if_current`,
+        which drops the write if a ``clear()`` bumped the counter meanwhile.
         """
         with _MEMORY_LOCK:
             return _MEMORY_GENERATION.get(key, 0)
@@ -138,11 +132,10 @@ class MemoryCache(TokenCache):
         """
         Store ``tokens`` only if no :meth:`clear` happened since ``generation``.
 
-        If a concurrent ``clear()`` — on this or any other
-        :class:`~questdb.auth.OidcDeviceAuth` sharing this process-global store —
+        If a concurrent ``clear()`` (on any OidcDeviceAuth sharing this store)
         bumped the counter after ``generation`` was captured, the write is
-        dropped (returns ``False``) so the just-cleared entry is not resurrected
-        with a now-stale token. Returns ``True`` when the token was stored.
+        dropped (``False``) so the cleared entry isn't resurrected with a stale
+        token; returns ``True`` when stored.
         """
         with _MEMORY_LOCK:
             if _MEMORY_GENERATION.get(key, 0) != generation:

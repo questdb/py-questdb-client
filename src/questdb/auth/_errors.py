@@ -34,21 +34,17 @@ class OidcError(Exception):
 
     def __init__(self, *args, status: Optional[int] = None):
         super().__init__(*args)
-        # HTTP status that produced this error, when it originated from a
-        # non-JSON HTTP response (else None). Lets the device-flow poll loop and
-        # the silent refresh tell a terminal 4xx rejection (e.g. a WAF/proxy
-        # error page) from a transient 5xx/429/network blip even when the body
-        # was not a conformant JSON OAuth error.
+        # HTTP status behind a non-JSON HTTP response (else None), so the poll
+        # loop and silent refresh can tell a terminal 4xx (e.g. a WAF error
+        # page) from a transient 5xx/429/network blip.
         self.status = status
 
 
 class OidcConfigError(OidcError):
     """
-    The OIDC configuration could not be resolved or is inconsistent.
-
-    Raised, for example, when QuestDB does not advertise OIDC, when the
-    IdP device-authorization endpoint cannot be discovered, or when a
-    required argument is missing.
+    The OIDC configuration could not be resolved or is inconsistent (e.g.
+    QuestDB does not advertise OIDC, the IdP device-authorization endpoint
+    cannot be discovered, or a required argument is missing).
     """
 
 
@@ -58,21 +54,16 @@ class OidcNetworkError(OidcError):
 
 class OidcInteractionRequired(OidcError):
     """
-    Interactive sign-in is required but the process is not interactive.
-
-    This is raised instead of hanging forever when the device flow is
-    started from a context with no human to authorize it (e.g. a
-    ``papermill`` run, a cron job or CI). Use a QuestDB service-account
-    REST token or the OAuth2 client-credentials grant in those contexts.
+    Interactive sign-in is required, but raised instead of hanging in a
+    non-interactive context (``papermill``, cron, CI). Use a QuestDB
+    service-account REST token or the OAuth2 client-credentials grant there.
     """
 
 
 class OidcDeviceFlowError(OidcError):
     """
-    The OAuth 2.0 device authorization grant failed.
-
-    The original IdP ``error``/``error_description`` are preserved on the
-    exception when available.
+    The OAuth 2.0 device authorization grant failed; the IdP
+    ``error``/``error_description`` are preserved when available.
     """
 
     def __init__(
@@ -92,9 +83,7 @@ class OidcTimeoutError(OidcDeviceFlowError):
 
 class OidcAuthError(OidcError):
     """
-    QuestDB rejected the token we presented.
-
-    Typically a ``401``/``403`` from the server. The message includes hints
-    about the most common causes (scope / ``groups.encoded.in.token`` /
+    QuestDB rejected the token (typically a ``401``/``403`` from the server);
+    the message hints at common causes (scope / ``groups.encoded.in.token`` /
     ``audience`` mismatches).
     """
