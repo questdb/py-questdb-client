@@ -58,9 +58,10 @@ def _rss():
 
 
 def _assert_no_leak(test, work, warmup, measure):
-    # A real leak keeps a steady RSS slope; glibc arena retention fills then
-    # flattens. Pass if the last windows' mean growth is near-flat or well
-    # below the first windows' — judging the shape, not an absolute size.
+    # A real leak keeps a steady RSS slope; glibc/obmalloc arena retention
+    # fills then flattens, sometimes with a one-off mid-run spike. Compare the
+    # median per-window growth of the last windows against the first so a single
+    # transient spike can't read as a leak — judging the shape, not a size.
     windows = 6
     per = max(1, measure // windows)
     for _ in range(warmup):
@@ -75,9 +76,9 @@ def _assert_no_leak(test, work, warmup, measure):
         now = _rss()
         growths.append(now - prev)
         prev = now
-    edge = max(1, windows // 3)
-    head = sum(growths[:edge]) / edge
-    tail = sum(growths[-edge:]) / edge
+    half = max(1, windows // 2)
+    head = sorted(growths[:half])[half // 2]
+    tail = sorted(growths[-half:])[half // 2]
     test.assertTrue(
         tail <= 3 * 1024 * 1024 or tail * 2 <= head,
         f'RSS not plateauing: per-window growth {growths} bytes over '

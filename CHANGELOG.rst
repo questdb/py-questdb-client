@@ -49,11 +49,16 @@ Query Egress
 Adds :class:`Client` with :meth:`Client.query`, returning a
 :class:`QueryResult` that streams rows as Arrow record batches over the
 QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
-``to_pandas``, ``to_polars``, ``iter_arrow``, ``iter_pandas`` or the Arrow
-C stream PyCapsule protocol (``__arrow_c_stream__``) — the latter two
-(``to_polars`` / ``__arrow_c_stream__``) without requiring pyarrow.
-SYMBOL columns are dictionary-encoded on the wire and map to pandas
-``Categorical`` (``to_pandas`` / ``iter_pandas``).
+``to_pandas``, ``to_polars``, ``iter_arrow``, ``iter_pandas``,
+``iter_polars`` or the Arrow C stream PyCapsule protocol
+(``__arrow_c_stream__``). ``to_polars`` / ``iter_polars`` use pyarrow to
+buffer failover-safe batches; ``__arrow_c_stream__`` (consumed as
+``polars.from_arrow(result)``) is the pyarrow-free polars path. SYMBOL
+columns are dictionary-encoded on the wire and map to a pandas
+``Categorical`` (``to_pandas`` / ``iter_pandas``) or a polars
+``Categorical`` (``to_polars`` / ``iter_polars``), the latter sharing one
+persistent ``Categories`` identity across streamed batches so
+``polars.concat`` stitches them without a categories-mismatch error.
 
 ``to_pandas`` / ``iter_pandas`` default to a native (no-pyarrow) build
 straight from the QWP column buffers: a nullable integer column becomes a

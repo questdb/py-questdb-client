@@ -1602,6 +1602,31 @@ cdef tuple _polars_dict_codes_cats(object col, object pl):
     return (pl.Series([], dtype=pl.UInt32), cats)
 
 
+cdef object _cast_to_string_view(object col, object svt, object pa, object pc):
+    # Cast a Utf8 / LargeUtf8 ChunkedArray to Arrow ``string_view``, repairing the
+    # null trailing variadic data buffer that pyarrow's cast leaves behind for a
+    # chunk whose every value is inline (<= 12 bytes). The null buffer validates
+    # fine in-process, but the Arrow C-Data-Interface exporter dereferences it
+    # unconditionally — so it crashes (SIGSEGV) the moment polars re-exports the
+    # column across the C-ABI. Swapping the null for a shared 0-length buffer is
+    # zero-copy and makes the export safe. A natively built string_view already
+    # uses an empty (non-null) buffer here, so only the cast output needs fixing.
+    cdef list chunks = []
+    cdef object empty = None
+    cdef object ch, view, bufs
+    for ch in col.chunks:
+        view = pc.cast(ch, svt)
+        bufs = view.buffers()
+        if bufs and bufs[-1] is None:
+            if empty is None:
+                empty = pa.allocate_buffer(0)
+            view = pa.Array.from_buffers(
+                svt, len(view), bufs[:-1] + [empty],
+                null_count=view.null_count, offset=view.offset)
+        chunks.append(view)
+    return pa.chunked_array(chunks, type=svt)
+
+
 cdef object _polars_nonsymbol_frame(
         object table, list nd_idx, object pl, object pa):
     # `pl.from_arrow` for the non-SYMBOL columns. Utf8 / LargeUtf8 columns are
@@ -1614,15 +1639,17 @@ cdef object _polars_nonsymbol_frame(
     cdef object tbl = table.select(nd_idx)
     cdef object types = tbl.schema.types
     cdef object sv = getattr(pa, 'string_view', None)
+    cdef object svt
     cdef Py_ssize_t j
     if sv is not None and any(
             pa.types.is_string(t) or pa.types.is_large_string(t) for t in types):
         import pyarrow.compute as pc
+        svt = sv()
         for j in range(len(types)):
             if pa.types.is_string(types[j]) or pa.types.is_large_string(types[j]):
                 tbl = tbl.set_column(
-                    j, tbl.schema.field(j).with_type(sv()),
-                    pc.cast(tbl.column(j), sv()))
+                    j, tbl.schema.field(j).with_type(svt),
+                    _cast_to_string_view(tbl.column(j), svt, pa, pc))
     return pl.from_arrow(tbl)
 
 
