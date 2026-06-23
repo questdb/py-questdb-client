@@ -42,6 +42,7 @@ import ipaddress
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -51,6 +52,15 @@ from ._errors import OidcConfigError, OidcNetworkError, OidcError
 
 _DEFAULT_TIMEOUT = 30
 _USER_AGENT = 'questdb-python-client (oidc-auth)'
+
+# Bound a response body by total size and wall-clock time. urllib's timeout is
+# per-socket-read, so a server dribbling the body (a byte just inside each
+# timeout window) could keep a bare read() running indefinitely, and a huge
+# body would buffer unbounded into memory. OIDC / JSON responses are KBs, so
+# 4 MiB is ample headroom.
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_READ_CHUNK = 65536
+_monotonic = time.monotonic
 
 
 def build_ssl_context(ca_bundle: Optional[str] = None) -> ssl.SSLContext:
@@ -172,6 +182,32 @@ def _opener(ctx: Optional[ssl.SSLContext]) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(*handlers)
 
 
+def _read_body(resp: Any, *, max_bytes: int, deadline: float) -> bytes:
+    """
+    Read a response body bounded by a total byte cap and a wall-clock deadline.
+
+    Reads in chunks so a hostile or stalled server can neither dribble the body
+    past the caller's timeout (urllib's timeout is per-socket-read, not a
+    whole-read bound) nor exhaust memory with an unbounded body.
+    """
+    chunks = []
+    total = 0
+    while True:
+        if _monotonic() > deadline:
+            raise OidcNetworkError(
+                'Timed out reading the response body; the server is too slow '
+                'or is dribbling data.')
+        chunk = resp.read(_READ_CHUNK)
+        if not chunk:
+            return b''.join(chunks)
+        total += len(chunk)
+        if total > max_bytes:
+            raise OidcNetworkError(
+                f'Response body exceeded the {max_bytes}-byte limit; refusing '
+                'to buffer an unbounded response.')
+        chunks.append(chunk)
+
+
 def request(
         method: str,
         url: str,
@@ -207,14 +243,17 @@ def request(
         with _opener(ctx).open(req, timeout=timeout) as resp:
             return HttpResponse(
                 getattr(resp, 'status', resp.getcode()),
-                resp.read(),
+                _read_body(resp, max_bytes=_MAX_RESPONSE_BYTES,
+                           deadline=_monotonic() + timeout),
                 resp.headers)
     except urllib.error.HTTPError as e:
-        # 4xx/5xx still carry a (possibly JSON) body to inspect. Map a mid-body
-        # read failure to a network error, and close the response so its socket
-        # isn't leaked (the poll loop drives many 400s during a long sign-in).
+        # 4xx/5xx still carry a (possibly JSON) body to inspect. Bound the read
+        # (same cap/deadline), map a mid-body read failure to a network error,
+        # and close the response so its socket isn't leaked (the poll loop drives
+        # many 400s during a long sign-in).
         try:
-            body = e.read()
+            body = _read_body(e, max_bytes=_MAX_RESPONSE_BYTES,
+                              deadline=_monotonic() + timeout)
         except (TimeoutError, OSError) as read_err:
             raise OidcNetworkError(
                 f'Failed to read response from {url}: {read_err}') from read_err

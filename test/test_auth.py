@@ -90,6 +90,16 @@ class _FakeAuth:
         return {'Authorization': f'Bearer {self._token}'}
 
 
+class _ChunkStream:
+    """A response stub whose read(n) yields preset chunks, then b'' at EOF."""
+
+    def __init__(self, *chunks):
+        self._chunks = list(chunks)
+
+    def read(self, n):
+        return self._chunks.pop(0) if self._chunks else b''
+
+
 def _jwt(claims):
     """Build an unsigned JWT-shaped string with the given payload claims."""
     def b64(obj):
@@ -2084,6 +2094,31 @@ class TestTransportSecurity(unittest.TestCase):
             _require_secure('https://[::1', insecure=False)
         # A well-formed IPv6 URL is still accepted (loopback http is allowed).
         _require_secure('http://[::1]:8080/x', insecure=False)
+
+    def test_read_body_accepts_normal_body(self):
+        from questdb.auth._http import _read_body
+        resp = _ChunkStream(b'hello ', b'world')
+        self.assertEqual(
+            _read_body(resp, max_bytes=1000, deadline=1e18), b'hello world')
+
+    def test_read_body_rejects_oversized(self):
+        # A body over the cap raises instead of buffering unbounded into memory.
+        from questdb.auth._http import _read_body
+        resp = _ChunkStream(b'x' * 60, b'y' * 60)   # 120 bytes > 100-byte cap
+        with self.assertRaises(OidcNetworkError):
+            _read_body(resp, max_bytes=100, deadline=1e18)
+
+    def test_read_body_aborts_on_slow_dribble(self):
+        # A steady dribble that never trips the per-read socket timeout must
+        # still abort once the whole-read wall-clock deadline passes — the gap
+        # urllib's per-operation timeout leaves open.
+        from questdb.auth import _http
+        body = _ChunkStream(*([b'a'] * 10000))       # endless trickle
+        ticks = iter([0.0, 0.2, 0.4, 2.0])           # advance past deadline=1.0
+        with mock.patch.object(_http, '_monotonic',
+                               lambda: next(ticks, 100.0)):
+            with self.assertRaises(OidcNetworkError):
+                _http._read_body(body, max_bytes=10 ** 9, deadline=1.0)
 
     def test_bad_ca_bundle_raises_config_error(self):
         # A missing or invalid CA bundle path (explicit or via env) must surface
