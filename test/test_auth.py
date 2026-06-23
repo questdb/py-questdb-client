@@ -633,6 +633,28 @@ class TestDeviceFlow(AuthTestBase):
             insecure=True, renderer=Renderer())
         self.assertIn('openid', auth.config.scope.split())
 
+    def test_constructor_rejects_bad_typed_args(self):
+        # A bad-typed constructor arg must raise the typed OidcConfigError, not a
+        # bare AttributeError/TypeError surfacing later from scope.split(),
+        # safe_urlparse(<non-str>), or the cache-key join. (from_questdb is
+        # unaffected — resolve_config guarantees strings.) See review Minors.
+        good = dict(
+            client_id='questdb',
+            device_authorization_endpoint='https://idp.example.com/device',
+            token_endpoint='https://idp.example.com/token',
+            renderer=Renderer())
+        OidcDeviceAuth(**good)  # sanity: the good kwargs construct fine
+        for bad in (
+                {'client_id': None}, {'client_id': 123}, {'client_id': ''},
+                {'device_authorization_endpoint': 123},
+                {'device_authorization_endpoint': None},
+                {'token_endpoint': 123}, {'token_endpoint': ''},
+                {'scope': None}, {'scope': 123},
+                {'scope': None, 'groups_in_token': True},  # the scope.split() case
+                {'audience': 123}, {'issuer': 123}):
+            with self.assertRaises(OidcConfigError):
+                OidcDeviceAuth(**{**good, **bad})
+
     def test_zero_expires_in_is_treated_as_unknown(self):
         # A non-positive expires_in must not mark the just-issued token expired.
         self.state.token_script = [(200, {
@@ -858,11 +880,14 @@ class TestDeviceFlow(AuthTestBase):
     def test_tokenset_repr_redacts_secrets(self):
         # The access/id/refresh tokens must never appear in repr() — a TokenSet
         # landing in a log line or traceback would otherwise leak credentials.
+        # The JWT subject (PII) is redacted too; non-secret metadata stays.
         r = repr(TokenSet(access_token='SECRET-A', id_token='SECRET-I',
-                          refresh_token='SECRET-R', scope='openid'))
+                          refresh_token='SECRET-R', sub='subject-PII-12345',
+                          scope='openid'))
         self.assertNotIn('SECRET-A', r)
         self.assertNotIn('SECRET-I', r)
         self.assertNotIn('SECRET-R', r)
+        self.assertNotIn('subject-PII-12345', r)
         self.assertIn('openid', r)  # non-secret metadata still shown
 
 

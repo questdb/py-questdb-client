@@ -52,7 +52,8 @@ class TokenSet:
     expires_at: float = 0.0  # epoch seconds; 0 == unknown
     token_type: str = 'Bearer'
     scope: Optional[str] = None
-    sub: Optional[str] = None
+    # subject id, derived from the (unverified) JWT — PII, so keep it out of repr
+    sub: Optional[str] = field(default=None, repr=False)
     issued_at: float = 0.0  # epoch seconds; 0 == unknown
 
     def is_valid(self, now: float, skew: float = DEFAULT_SKEW_SECONDS) -> bool:

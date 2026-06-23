@@ -207,12 +207,27 @@ class OidcDeviceAuth:
             default_interval: int = 5,
             timeout: float = 30,
             _clock=None):  # injectable time source for testing
-        if not client_id:
-            raise OidcConfigError('client_id is required')
-        if not device_authorization_endpoint:
-            raise OidcConfigError('device_authorization_endpoint is required')
-        if not token_endpoint:
-            raise OidcConfigError('token_endpoint is required')
+        # Validate types up front so a bad-typed arg raises the module's typed
+        # error, not a bare AttributeError/TypeError surfacing later from
+        # scope.split(), safe_urlparse(<non-str>), or the cache-key join.
+        # from_questdb is unaffected: resolve_config already returns strings.
+        if not isinstance(client_id, str) or not client_id:
+            raise OidcConfigError(
+                'client_id is required and must be a non-empty string')
+        if (not isinstance(device_authorization_endpoint, str)
+                or not device_authorization_endpoint):
+            raise OidcConfigError(
+                'device_authorization_endpoint is required and must be a '
+                'non-empty string')
+        if not isinstance(token_endpoint, str) or not token_endpoint:
+            raise OidcConfigError(
+                'token_endpoint is required and must be a non-empty string')
+        if not isinstance(scope, str):
+            raise OidcConfigError('scope must be a string')
+        if audience is not None and not isinstance(audience, str):
+            raise OidcConfigError('audience must be a string or None')
+        if issuer is not None and not isinstance(issuer, str):
+            raise OidcConfigError('issuer must be a string or None')
 
         # Sending the id_token requires the ``openid`` scope.
         if groups_in_token and 'openid' not in scope.split():
