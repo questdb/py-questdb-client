@@ -302,6 +302,12 @@ class AuthTestBase(unittest.TestCase):
     def setUp(self):
         _MEMORY_STORE.clear()
         _MEMORY_GENERATION.clear()
+        # open_browser defaults to True, so stub webbrowser.open: device-flow
+        # tests must never spawn a real browser. Tests asserting open/skip
+        # behaviour use self.mock_browser_open (or patch it themselves).
+        patcher = mock.patch('webbrowser.open')
+        self.mock_browser_open = patcher.start()
+        self.addCleanup(patcher.stop)
         self.server = _MockServer()
         self.state = self.server.state
         self.thread = threading.Thread(
@@ -712,6 +718,42 @@ class TestDeviceFlow(AuthTestBase):
             auth._maybe_open_browser(
                 {'verification_uri': 'https://idp.example.com/device'})
             opener.assert_called_once_with('https://idp.example.com/device')
+
+    def test_open_browser_default_is_true(self):
+        # We try to open the browser by default ("always when possible"), via
+        # both the explicit constructor and discovery.
+        auth = OidcDeviceAuth(
+            client_id='questdb',
+            device_authorization_endpoint=self.base + '/device',
+            token_endpoint=self.base + '/token',
+            insecure=True, renderer=Renderer(), _clock=FakeClock())
+        self.assertTrue(auth.open_browser)
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': self.base + '/token',
+            'acl.oidc.device.authorization.endpoint': self.base + '/device'}}
+        disc = OidcDeviceAuth.from_questdb(
+            self.base, insecure=True, renderer=Renderer(), _clock=FakeClock())
+        self.assertTrue(disc.open_browser)
+
+    def test_signin_opens_browser_by_default(self):
+        # On a (non-kernel) terminal, signing in opens the verification URL with
+        # no opt-in — make_auth() leaves open_browser at its default.
+        auth = self.make_auth()
+        auth.token()
+        self.mock_browser_open.assert_called_once_with(
+            'https://idp.example.com/device?user_code=WDJB-MJHT')
+
+    def test_open_browser_suppressed_in_notebook_kernel(self):
+        # Never open on a (possibly remote) notebook kernel, even when enabled:
+        # the kernel host is not the user's machine.
+        auth = self.make_auth(open_browser=True)
+        with mock.patch('questdb.auth._device.in_ipython_kernel',
+                        return_value=True):
+            auth._maybe_open_browser(
+                {'verification_uri': 'https://idp.example.com/device'})
+        self.mock_browser_open.assert_not_called()
 
     def test_memory_cache_returns_independent_copy(self):
         cache = MemoryCache()

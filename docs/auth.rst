@@ -57,6 +57,11 @@ Jupyter, plain text on a terminal)::
        ⏳ waiting for authorization… (4:51 left)
     ✅ Signed in as alice@example.com — token cached, expires in 60 min
 
+On a local terminal the verification URL is also opened in your default browser
+automatically (pass ``open_browser=False`` to disable); on a notebook kernel it
+is not — the kernel host isn't your machine, so the clickable link above is
+used instead.
+
 Re-running is silent — the token is cached and refreshed silently on the next
 use once it nears expiry.
 

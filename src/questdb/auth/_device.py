@@ -182,7 +182,7 @@ class OidcDeviceAuth:
             cache: Any = 'memory',
             insecure: bool = False,
             ca_bundle: Optional[str] = None,
-            open_browser: bool = False,
+            open_browser: bool = True,
             interactive: Optional[bool] = None,
             qr: bool = False,
             renderer: Optional[Renderer] = None,
@@ -266,7 +266,7 @@ class OidcDeviceAuth:
             cache: Any = 'memory',
             insecure: bool = False,
             ca_bundle: Optional[str] = None,
-            open_browser: bool = False,
+            open_browser: bool = True,
             interactive: Optional[bool] = None,
             qr: bool = False,
             renderer: Optional[Renderer] = None,
@@ -764,8 +764,9 @@ class OidcDeviceAuth:
         return detect_interactive()
 
     def _maybe_open_browser(self, resp: Dict[str, Any]) -> None:
-        # Never auto-open on a (possibly remote) notebook kernel; only on an
-        # opted-in local terminal.
+        # Open on a local terminal by default; never on a (possibly remote)
+        # notebook kernel, where the prompt is already a clickable link and the
+        # kernel host isn't the user's machine. Suppress with open_browser=False.
         if not self.open_browser or in_ipython_kernel():
             return
         # Only http(s) — never a javascript:/data: scheme from a malicious or
