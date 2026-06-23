@@ -1583,23 +1583,24 @@ cdef class _PolarsSymbolRegistry:
 
 
 cdef tuple _polars_dict_codes_cats(object col, object pl):
-    # col: a pyarrow ChunkedArray of dictionary type, one (growing, append-only)
-    # dict per chunk. Returns (polars Series of the dict indices with nulls
-    # preserved via Arrow validity, the full dictionary values array). Codes are
-    # global QWP codes — stable across the query — so the largest chunk
-    # dictionary covers every code. The indices flow straight from Arrow to
-    # polars (no numpy round-trip, no -1 sentinel).
-    cdef object cats = None
+    # col: a pyarrow ChunkedArray of dictionary type, one chunk per wire batch.
+    # The dict is append-only and shared across the query — the Rust egress
+    # attaches the full active connection dict to every batch and only ever grows
+    # it (see `SymbolValuesCache` in c-questdb-client), and `Table.from_batches`
+    # keeps the chunks in emission order — so the last chunk's dictionary is the
+    # largest and covers every (global, stable) code. Returns (polars Series of
+    # the dict indices with nulls preserved via Arrow validity, the full
+    # dictionary values array). The indices flow straight from Arrow to polars
+    # (no numpy round-trip, no -1 sentinel).
+    cdef list chunks = col.chunks
     cdef list parts = []
-    cdef object ch, d
-    for ch in col.chunks:
-        d = ch.dictionary
-        if cats is None or len(d) > len(cats):
-            cats = d
+    cdef object ch
+    if not chunks:
+        return (pl.Series([], dtype=pl.UInt32), None)
+    for ch in chunks:
         parts.append(pl.from_arrow(ch.indices))
-    if parts:
-        return (pl.concat(parts) if len(parts) > 1 else parts[0], cats)
-    return (pl.Series([], dtype=pl.UInt32), cats)
+    return (pl.concat(parts) if len(parts) > 1 else parts[0],
+            chunks[-1].dictionary)
 
 
 cdef object _cast_to_string_view(object col, object svt, object pa, object pc):
