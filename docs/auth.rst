@@ -135,7 +135,10 @@ The helper mirrors QuestDB's own selection logic
 ``false``                                     ``access_token``
 ============================================ =================
 
-When sending the ``id_token`` the ``openid`` scope is requested automatically.
+When neither the server's ``/settings`` nor an explicit ``groups_in_token=``
+specifies it, the helper defaults to ``False`` (send the ``access_token``),
+mirroring the QuestDB server default. When sending the ``id_token`` the
+``openid`` scope is requested automatically.
 
 Token lifecycle (cache + refresh)
 ---------------------------------

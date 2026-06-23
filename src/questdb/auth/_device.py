@@ -179,7 +179,7 @@ class OidcDeviceAuth:
             token_endpoint: str,
             *,
             scope: str = 'openid',
-            groups_in_token: bool = True,
+            groups_in_token: bool = False,
             audience: Optional[str] = None,
             issuer: Optional[str] = None,
             cache: Any = 'memory',

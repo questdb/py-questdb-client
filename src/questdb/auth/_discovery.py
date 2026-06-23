@@ -65,7 +65,7 @@ class OidcConfig:
     token_endpoint: str
     device_authorization_endpoint: str
     scope: str = 'openid'
-    groups_in_token: bool = True
+    groups_in_token: bool = False
     audience: Optional[str] = None
     issuer: Optional[str] = None
     authorization_endpoint: Optional[str] = None
@@ -383,7 +383,7 @@ def resolve_config(
     if scope is None:
         scope = _str_setting(cfg.get(_K_SCOPE)) or 'openid'
     if groups_in_token is None:
-        groups_in_token = _as_bool(cfg.get(_K_GROUPS_IN_TOKEN), default=True)
+        groups_in_token = _as_bool(cfg.get(_K_GROUPS_IN_TOKEN), default=False)
     if audience is None:
         audience = _str_setting(cfg.get(_K_AUDIENCE))
 

@@ -356,6 +356,20 @@ class TestDeviceFlow(AuthTestBase):
         auth = self.make_auth(groups_in_token=False)
         self.assertEqual(auth.token(), ACCESS_TOKEN)
 
+    def test_constructor_defaults_to_access_token(self):
+        # The bare constructor default is groups_in_token=False (send the
+        # access_token), matching the QuestDB server default.
+        auth = OidcDeviceAuth(
+            client_id='questdb',
+            device_authorization_endpoint=self.base + '/device',
+            token_endpoint=self.base + '/token',
+            insecure=True,
+            interactive=True,
+            renderer=Renderer(),
+            _clock=FakeClock())
+        self.assertFalse(auth.config.groups_in_token)
+        self.assertEqual(auth.token(), ACCESS_TOKEN)
+
     def test_headers(self):
         auth = self.make_auth()
         self.assertEqual(auth.headers(),
@@ -937,6 +951,23 @@ class TestDiscovery(AuthTestBase):
         self.assertEqual(auth.config.device_authorization_endpoint,
                          self.base + '/device')
         self.assertEqual(auth.token(), ID_TOKEN)
+
+    def test_groups_mode_defaults_to_access_token_when_unset(self):
+        # /settings omits acl.oidc.groups.encoded.in.token: the helper mirrors
+        # the QuestDB server default (groups NOT encoded in the token) and sends
+        # the access_token rather than the id_token.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.scope': 'openid',
+            'acl.oidc.token.endpoint': self.base + '/token',
+            'acl.oidc.device.authorization.endpoint': self.base + '/device',
+        }}
+        auth = OidcDeviceAuth.from_questdb(
+            self.base, insecure=True, interactive=True, renderer=Renderer(),
+            _clock=FakeClock())
+        self.assertFalse(auth.config.groups_in_token)
+        self.assertEqual(auth.token(), ACCESS_TOKEN)
 
     def test_user_writable_preferences_cannot_override_config(self):
         # A user-writable "preferences" sibling in /settings must never override
