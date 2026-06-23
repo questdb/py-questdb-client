@@ -57,8 +57,13 @@ from ._render import (
 DEVICE_CODE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
 REFRESH_GRANT = 'refresh_token'
 
-# A non-positive expires_in is non-conformant; treat it as "unknown".
-_DEFAULT_EXPIRES_IN = 3600
+# Clamp the token lifetime (access/id-token TTL) the same way as the Java
+# client. An absent or non-positive expires_in is non-conformant; fall back to a
+# short, conservative lifetime so a token with no stated lifetime is refreshed
+# promptly. A very long (or hostile) IdP-stated lifetime is capped so a cached
+# token is re-validated at least hourly.
+_DEFAULT_EXPIRES_IN = 300   # token TTL fallback (absent/invalid/<=0)
+_MAX_EXPIRES_IN = 3600      # cap on the token TTL
 
 # Clamp the device-authorization timing fields (RFC 8628): a hostile/buggy
 # response must not time the flow out before its first poll, pin the polling
@@ -516,6 +521,9 @@ class OidcDeviceAuth:
             # A non-positive lifetime marks a just-issued token as expired,
             # causing refresh/re-prompt churn. Treat it as unknown.
             expires_in = _DEFAULT_EXPIRES_IN
+        # Cap a long (or hostile) IdP-stated lifetime so a cached token is
+        # re-validated at least hourly (matches the Java client).
+        expires_in = min(expires_in, _MAX_EXPIRES_IN)
         claims = (_decode_jwt_claims(body.get('id_token'))
                   or _decode_jwt_claims(body.get('access_token')))
         now = self._now()

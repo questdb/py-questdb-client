@@ -667,6 +667,28 @@ class TestDeviceFlow(AuthTestBase):
         self.assertEqual(auth.token(), ID_TOKEN)
         self.assertTrue(auth._tokens.is_valid(self._clock.now()))
 
+    def test_missing_expires_in_defaults_to_short_ttl(self):
+        # When the IdP omits expires_in, fall back to a short, conservative TTL
+        # (300s) so the token is refreshed promptly, matching the Java client.
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'token_type': 'Bearer'})]  # no expires_in
+        auth = self.make_auth()
+        auth.token()
+        t = auth._tokens
+        self.assertEqual(round(t.expires_at - t.issued_at), 300)
+
+    def test_oversized_token_expires_in_is_capped(self):
+        # A very long (or hostile) token lifetime is capped at 3600s so a cached
+        # token is re-validated at least hourly, matching the Java client.
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'token_type': 'Bearer', 'expires_in': 10 ** 9})]
+        auth = self.make_auth()
+        auth.token()
+        t = auth._tokens
+        self.assertEqual(round(t.expires_at - t.issued_at), 3600)
+
     def test_overflow_device_timing_fields_do_not_crash(self):
         # Non-finite interval / expires_in in the device-auth response (JSON
         # Infinity) must be treated as unknown, not raise OverflowError. See M1.
