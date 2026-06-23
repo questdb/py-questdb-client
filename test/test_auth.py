@@ -2065,6 +2065,42 @@ class TestTransportSecurity(unittest.TestCase):
                 post_form(raw + '/token', {'grant_type': 'x'})
         self.assertEqual(cm.exception.status, 503)
 
+    def test_incomplete_error_body_maps_to_network_error(self):
+        # A 4xx/5xx with a truncated CHUNKED body (the server announces a chunk,
+        # sends fewer bytes, then closes) makes the error-body read raise
+        # http.client.IncompleteRead — an HTTPException, NOT an OSError. The poll
+        # loop drives many 4xx during sign-in, so this must map to a typed
+        # OidcNetworkError, not escape raw (mirrors the success path's handler).
+        # See M3.
+        import http.client
+        from questdb.auth import _http
+        self.assertFalse(issubclass(http.client.IncompleteRead, OSError))
+
+        class _ChunkedTrunc(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'  # chunked transfer needs HTTP/1.1
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(400)
+                self.send_header('Transfer-Encoding', 'chunked')
+                self.end_headers()
+                self.wfile.write(b'64\r\n')   # announce a 0x64 = 100-byte chunk
+                self.wfile.write(b'short')     # send only 5 of them, then close
+                self.wfile.flush()
+                self.close_connection = True
+
+        srv = http.server.HTTPServer(('127.0.0.1', 0), _ChunkedTrunc)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(OidcNetworkError):
+                _http.request(
+                    'GET', f'http://127.0.0.1:{srv.server_port}/x', timeout=5)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
     def test_insecure_does_not_downgrade_idp(self):
         # insecure=True must NOT permit plaintext to a non-loopback IdP: the
         # device code / refresh token must never traverse the network in clear.

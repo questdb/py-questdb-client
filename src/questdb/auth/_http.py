@@ -254,7 +254,12 @@ def request(
         try:
             body = _read_body(e, max_bytes=_MAX_RESPONSE_BYTES,
                               deadline=_monotonic() + timeout)
-        except (TimeoutError, OSError) as read_err:
+        except (TimeoutError, OSError, http.client.HTTPException) as read_err:
+            # Mirror the success path's handler: a mid-body read failure such as
+            # http.client.IncompleteRead (an HTTPException, NOT an OSError) when
+            # the server resets the connection mid-error-body must map to a typed
+            # network error, not escape raw. (_read_body's own OidcNetworkError
+            # for the size/deadline cap is already typed and propagates here.)
             raise OidcNetworkError(
                 f'Failed to read response from {url}: {read_err}') from read_err
         finally:
