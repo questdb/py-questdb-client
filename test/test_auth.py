@@ -965,6 +965,25 @@ class TestDiscovery(AuthTestBase):
         self.assertFalse(auth.config.groups_in_token)
         self.assertEqual(auth.token(), ACCESS_TOKEN)
 
+    def test_settings_path_only_endpoints_not_assembled(self):
+        # We do NOT assemble endpoint URLs from acl.oidc.host / port /
+        # tls.enabled (matching the Java client). A path-only endpoint reads as
+        # absent, so with no issuer to drive .well-known discovery, from_questdb
+        # fails with a clear OidcConfigError instead of building a URL from the
+        # host/port/tls building blocks.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.host': 'idp.example.com',
+            'acl.oidc.port': 443,
+            'acl.oidc.tls.enabled': True,
+            'acl.oidc.token.endpoint': '/oauth/token',
+            'acl.oidc.device.authorization.endpoint': '/oauth/device',
+        }}
+        with self.assertRaises(OidcConfigError):
+            OidcDeviceAuth.from_questdb(
+                self.base, insecure=True, renderer=Renderer())
+
     def test_user_writable_preferences_cannot_override_config(self):
         # A user-writable "preferences" sibling in /settings must never override
         # the trusted "config" object during discovery: end-to-end, the resolved
@@ -1609,21 +1628,24 @@ class TestConfigHelpers(unittest.TestCase):
         self.assertIsNone(_as_bool(None))
         self.assertIs(_as_bool(None, default=True), True)
 
-    def test_resolve_endpoint_relative_path(self):
+    def test_resolve_endpoint_accepts_only_absolute_url(self):
+        # Matching the Java client, a /settings endpoint is trusted only as a
+        # complete http(s) URL. A path-only value is NOT assembled from
+        # acl.oidc.host / port / tls.enabled (no longer read) — it reads as
+        # absent so resolution falls back to .well-known discovery.
         from questdb.auth._discovery import _resolve_endpoint
-        cfg = {'acl.oidc.host': 'idp.example.com',
-               'acl.oidc.tls.enabled': True, 'acl.oidc.port': 443}
-        self.assertEqual(_resolve_endpoint('/as/token.oauth2', cfg),
-                         'https://idp.example.com:443/as/token.oauth2')
-        self.assertEqual(_resolve_endpoint('https://idp/x', cfg),
-                         'https://idp/x')  # absolute is kept verbatim
+        self.assertEqual(_resolve_endpoint('https://idp/x'), 'https://idp/x')
+        self.assertEqual(_resolve_endpoint('http://idp:9000/x'),
+                         'http://idp:9000/x')
+        self.assertIsNone(_resolve_endpoint('/as/token.oauth2'))
+        self.assertIsNone(_resolve_endpoint(''))
 
     def test_resolve_endpoint_ignores_non_string(self):
         # A non-string endpoint from /settings (e.g. a JSON number) must be
         # treated as absent, not raise AttributeError from .startswith(). M3.
         from questdb.auth._discovery import _resolve_endpoint
-        self.assertIsNone(_resolve_endpoint(8080, {}))
-        self.assertIsNone(_resolve_endpoint(True, {}))
+        self.assertIsNone(_resolve_endpoint(8080))
+        self.assertIsNone(_resolve_endpoint(True))
 
     def test_str_setting_ignores_non_string(self):
         # A non-empty string passes through; anything else (a JSON list /
@@ -1699,32 +1721,6 @@ class TestConfigHelpers(unittest.TestCase):
             discovery_url='https://idp.example.com/.well-known/openid-configuration')
         self.assertIsNone(auth.config.issuer)
         self.assertTrue(auth.cache_key)
-
-    def test_resolve_endpoint_relative_path_without_host_is_none(self):
-        # A path-only endpoint with no acl.oidc.host can't be resolved; it must
-        # be treated as absent (None) so resolution fails with a clear "could
-        # not resolve the ... endpoint" error rather than a scheme-less "/path"
-        # that later surfaces as a confusing "insecure/malformed URL".
-        from questdb.auth._discovery import _resolve_endpoint
-        self.assertIsNone(_resolve_endpoint('/as/token.oauth2', {}))
-        self.assertIsNone(  # port present but host missing -> still unresolved
-            _resolve_endpoint('/as/token.oauth2', {'acl.oidc.port': 443}))
-
-    def test_resolve_endpoint_ignores_non_string_host(self):
-        # A non-string acl.oidc.host (a JSON number/list from a buggy or hostile
-        # /settings) must not be interpolated raw into the netloc (e.g.
-        # https://12345:9000/path); treat it as absent so a path-only endpoint
-        # reads as unresolvable, mirroring how endpoint values are coerced.
-        from questdb.auth._discovery import _resolve_endpoint
-        for bad_host in (12345, ['idp'], {'h': 'idp'}, True):
-            self.assertIsNone(
-                _resolve_endpoint('/as/token', {'acl.oidc.host': bad_host}))
-        # A non-numeric port is dropped rather than corrupting the netloc.
-        self.assertEqual(
-            _resolve_endpoint('/as/token', {
-                'acl.oidc.host': 'idp', 'acl.oidc.tls.enabled': True,
-                'acl.oidc.port': ['x']}),
-            'https://idp/as/token')
 
     def test_settings_config_nesting(self):
         from questdb.auth._discovery import settings_config

@@ -52,9 +52,6 @@ _K_AUTHORIZATION_ENDPOINT = 'acl.oidc.authorization.endpoint'
 _K_DEVICE_ENDPOINT = 'acl.oidc.device.authorization.endpoint'  # design §7 (new)
 _K_GROUPS_IN_TOKEN = 'acl.oidc.groups.encoded.in.token'
 _K_AUDIENCE = 'acl.oidc.audience'
-_K_HOST = 'acl.oidc.host'
-_K_PORT = 'acl.oidc.port'
-_K_TLS_ENABLED = 'acl.oidc.tls.enabled'
 
 
 @dataclass
@@ -267,43 +264,22 @@ def validate_endpoint_origins(
                     'issuer.')
 
 
-def _resolve_endpoint(value: Optional[str], cfg: Dict[str, Any]) -> Optional[str]:
+def _resolve_endpoint(value: Any) -> Optional[str]:
     """
-    Turn a possibly-relative endpoint into a full URL.
+    A ``/settings`` endpoint, trusted only as a complete ``http(s)`` URL.
 
-    QuestDB usually exports fully-resolved URLs, but some deployments store
-    only the path (e.g. ``/as/token.oauth2``) alongside ``acl.oidc.host``.
+    Mirroring the Java client, a QuestDB-advertised endpoint is taken verbatim
+    and only as an absolute URL. A path-only (or otherwise non-absolute, or
+    non-string) value is treated as absent, so resolution falls back to the IdP
+    ``.well-known`` document — which requires an issuer / ``discovery_url`` pin.
+    We deliberately do **not** assemble a URL from ``acl.oidc.host`` /
+    ``acl.oidc.port`` / ``acl.oidc.tls.enabled``: those are server building
+    blocks, not a credential-routing source the client should trust.
     """
-    if not value:
-        return None
-    if not isinstance(value, str):
-        # Non-string endpoint (e.g. a JSON number): treat as absent so resolution
-        # yields a clear OidcConfigError instead of an AttributeError from
-        # .startswith() escaping the typed-error contract.
-        return None
-    if value.startswith('http://') or value.startswith('https://'):
+    value = _str_setting(value)
+    if value and (value.startswith('https://') or value.startswith('http://')):
         return value
-    if value.startswith('/'):
-        # _str_setting drops a non-string acl.oidc.host so it can't be
-        # interpolated raw into the netloc (e.g. https://12345:9000/path).
-        host = _str_setting(cfg.get(_K_HOST))
-        if not host:
-            # Path-only endpoint with no host to resolve against: treat as absent
-            # for the clear "could not resolve" error, rather than passing a
-            # scheme-less "/path" on to a confusing "malformed URL" downstream.
-            return None
-        tls = _as_bool(cfg.get(_K_TLS_ENABLED), default=True)
-        scheme = 'https' if tls else 'http'
-        # A usable port is an int or digit string; anything else would corrupt
-        # the netloc, so drop it and resolve host-only.
-        port = cfg.get(_K_PORT)
-        if isinstance(port, bool) or not (
-                isinstance(port, int)
-                or (isinstance(port, str) and port.isdigit())):
-            port = None
-        netloc = f'{host}:{port}' if port else host
-        return f'{scheme}://{netloc}{value}'
-    return value
+    return None
 
 
 def well_known_url(issuer: str) -> str:
@@ -394,13 +370,13 @@ def resolve_config(
     explicit_device_endpoint = device_authorization_endpoint is not None
 
     token_endpoint = (
-        token_endpoint or _resolve_endpoint(cfg.get(_K_TOKEN_ENDPOINT), cfg))
+        token_endpoint or _resolve_endpoint(cfg.get(_K_TOKEN_ENDPOINT)))
     authorization_endpoint = (
         authorization_endpoint
-        or _resolve_endpoint(cfg.get(_K_AUTHORIZATION_ENDPOINT), cfg))
+        or _resolve_endpoint(cfg.get(_K_AUTHORIZATION_ENDPOINT)))
     device_authorization_endpoint = (
         device_authorization_endpoint
-        or _resolve_endpoint(cfg.get(_K_DEVICE_ENDPOINT), cfg))
+        or _resolve_endpoint(cfg.get(_K_DEVICE_ENDPOINT)))
 
     # Over a plaintext-http /settings channel (insecure=True, non-loopback), a
     # tampered response can advertise BOTH credential endpoints at one attacker
