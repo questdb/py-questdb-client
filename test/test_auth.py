@@ -53,25 +53,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from questdb.auth import (  # noqa: E402
     OidcDeviceAuth,
-    QuestDB,
-    connect,
     OidcError,
     OidcConfigError,
     OidcDeviceFlowError,
     OidcTimeoutError,
     OidcInteractionRequired,
-    OidcAuthError,
     OidcNetworkError,
     TokenSet,
+    sqlalchemy_engine,
+    psycopg_connect,
 )
 from questdb.auth._cache import (  # noqa: E402
     MemoryCache, _MEMORY_GENERATION, _MEMORY_STORE)
 from questdb.auth._render import Renderer  # noqa: E402
-
-try:
-    import pandas as pd
-except ImportError:
-    pd = None
+from questdb.auth._adapters import _require_host  # noqa: E402
 
 _HAS_PG_DRIVER = (
     importlib.util.find_spec('psycopg') is not None
@@ -692,9 +687,9 @@ class TestDeviceFlow(AuthTestBase):
             all(t == 3 for t in seen),
             f'IdP POSTs did not all use the configured timeout: {seen}')
 
-    def test_connect_lazy_defers_signin(self):
-        # eager=False must return a session WITHOUT running the device flow; the
-        # first token-needing call then triggers exactly one sign-in. See M4.
+    def test_from_questdb_defers_signin(self):
+        # from_questdb() must return WITHOUT running the device flow; the first
+        # token-needing call then triggers exactly one sign-in.
         self.state.settings = {'config': {
             'acl.oidc.enabled': True,
             'acl.oidc.client.id': 'questdb',
@@ -702,10 +697,11 @@ class TestDeviceFlow(AuthTestBase):
             'acl.oidc.groups.encoded.in.token': True,
             'acl.oidc.token.endpoint': self.base + '/token',
             'acl.oidc.device.authorization.endpoint': self.base + '/device'}}
-        qdb = connect(self.base, insecure=True, eager=False,
-                      renderer=Renderer(), interactive=True, _clock=FakeClock())
+        auth = OidcDeviceAuth.from_questdb(
+            self.base, insecure=True, renderer=Renderer(),
+            interactive=True, _clock=FakeClock())
         self.assertEqual(self.state.device_requests, 0)  # deferred
-        self.assertEqual(qdb.token(), ID_TOKEN)           # first use signs in
+        self.assertEqual(auth.token(), ID_TOKEN)          # first use signs in
         self.assertEqual(self.state.device_requests, 1)
 
     def test_open_browser_rejects_dangerous_scheme(self):
@@ -1191,17 +1187,18 @@ class TestDiscovery(AuthTestBase):
             OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
                                         insecure=True)
 
-    def test_connect_forwards_default_interval(self):
-        # M5: connect(**opts) routes through from_questdb; default_interval must
-        # be accepted (it previously raised TypeError) and reach the auth.
+    def test_from_questdb_forwards_default_interval(self):
+        # from_questdb(**opts) must accept default_interval (it previously
+        # raised TypeError) and reach the auth.
         self.state.settings = {'config': {
             'acl.oidc.enabled': True,
             'acl.oidc.client.id': 'questdb',
             'acl.oidc.token.endpoint': self.base + '/token',
             'acl.oidc.device.authorization.endpoint': self.base + '/device'}}
-        qdb = connect(self.base, insecure=True, eager=False, default_interval=9,
-                      renderer=Renderer(), interactive=True, _clock=FakeClock())
-        self.assertEqual(qdb.auth._default_interval, 9)
+        auth = OidcDeviceAuth.from_questdb(
+            self.base, insecure=True, default_interval=9,
+            renderer=Renderer(), interactive=True, _clock=FakeClock())
+        self.assertEqual(auth._default_interval, 9)
 
 
 class TestInsecureSettingsGuard(unittest.TestCase):
@@ -1338,154 +1335,6 @@ class TestInsecureSettingsGuard(unittest.TestCase):
             self.assertIn('issuer', str(cm.exception).lower())
 
 
-@unittest.skipIf(pd is None, 'pandas not installed')
-class TestRestAdapter(AuthTestBase):
-    def _connected(self):
-        self.state.settings = {'config': {
-            'acl.oidc.enabled': True,
-            'acl.oidc.client.id': 'questdb',
-            'acl.oidc.scope': 'openid groups',
-            'acl.oidc.groups.encoded.in.token': True,
-            'acl.oidc.token.endpoint': self.base + '/token',
-            'acl.oidc.device.authorization.endpoint': self.base + '/device',
-        }}
-        self.state.expected_bearer = ID_TOKEN
-        return connect(self.base, insecure=True, renderer=Renderer(),
-                       interactive=True, _clock=FakeClock())
-
-    def test_sql_returns_dataframe(self):
-        qdb = self._connected()
-        df = qdb.sql('SELECT * FROM trades')
-        self.assertEqual(list(df.columns), ['ts', 'price'])
-        self.assertEqual(len(df), 2)
-        self.assertEqual(df['price'].tolist(), [1.5, 2.5])
-        # TIMESTAMP column coerced to datetime.
-        self.assertTrue(str(df['ts'].dtype).startswith('datetime64'))
-
-    def test_sql_unauthorized_maps_to_auth_error(self):
-        qdb = self._connected()
-        self.state.expected_bearer = 'something-else'  # force 401
-        with self.assertRaises(OidcAuthError):
-            qdb.sql('SELECT 1')
-
-    def test_connect_is_eager(self):
-        qdb = self._connected()
-        self.assertIsInstance(qdb, QuestDB)
-        # Sign-in already happened during connect().
-        self.assertEqual(self.state.device_requests, 1)
-
-    def test_sql_query_error_maps_to_oidc_error(self):
-        qdb = self._connected()
-        self.state.exec_status = 400
-        self.state.exec_response = {'error': 'unexpected token', 'position': 5}
-        with self.assertRaises(OidcError) as cm:
-            qdb.sql('SELEKT 1')
-        self.assertIn('unexpected token', str(cm.exception))
-        self.assertNotIsInstance(cm.exception, OidcAuthError)
-
-    def test_sql_passes_limit(self):
-        qdb = self._connected()
-        qdb.sql('SELECT * FROM trades', limit='1,10')
-        self.assertTrue(any('limit=1' in p for p in self.state.exec_requests))
-
-    def test_sql_handles_empty_dataset(self):
-        qdb = self._connected()
-        self.state.exec_response = {'ddl': 'OK'}  # no columns / dataset
-        df = qdb.sql('CREATE TABLE x (a INT)')
-        self.assertEqual(len(df), 0)
-
-    def test_sql_malformed_shape_raises_oidc_error(self):
-        qdb = self._connected()
-        self.state.exec_response = {  # rows shorter than the column list
-            'columns': [{'name': 'a', 'type': 'LONG'},
-                        {'name': 'b', 'type': 'LONG'}],
-            'dataset': [[1]]}
-        with self.assertRaises(OidcError):
-            qdb.sql('SELECT a, b FROM t')
-
-    def test_sql_non_json_2xx_raises_oidc_error(self):
-        # A 2xx body that isn't JSON (e.g. an HTML page from a reverse proxy)
-        # must raise a clean OidcError, not a raw JSONDecodeError. See M3.
-        qdb = self._connected()
-        self.state.exec_raw = (200, 'text/html', b'<html>proxy</html>')
-        with self.assertRaises(OidcError) as cm:
-            qdb.sql('SELECT 1')
-        self.assertNotIsInstance(cm.exception, OidcAuthError)
-
-    def test_sql_non_dict_json_raises_oidc_error(self):
-        # A valid-JSON-but-not-an-object 2xx body (e.g. a bare list) must raise
-        # OidcError, not AttributeError from .get(). See M3.
-        qdb = self._connected()
-        self.state.exec_response = ['not', 'an', 'object']
-        with self.assertRaises(OidcError) as cm:
-            qdb.sql('SELECT 1')
-        self.assertNotIsInstance(cm.exception, OidcAuthError)
-
-    def test_sql_non_dict_columns_raises_oidc_error(self):
-        # A /exec body whose "columns" entries aren't objects must raise a clean
-        # OidcError, not an AttributeError from .get() on the column. See M3.
-        qdb = self._connected()
-        self.state.exec_response = {'columns': [None], 'dataset': [[1]]}
-        with self.assertRaises(OidcError) as cm:
-            qdb.sql('SELECT 1')
-        self.assertNotIsInstance(cm.exception, OidcAuthError)
-
-    def test_sql_non_string_column_name_raises_oidc_error(self):
-        # M2: a column descriptor with a non-hashable name (a JSON list/object)
-        # and a TIMESTAMP/DATE type must raise a clean OidcError, not a raw
-        # TypeError ("unhashable type") from `name in df.columns` during the
-        # timestamp coercion.
-        qdb = self._connected()
-        self.state.exec_response = {
-            'columns': [{'name': ['evil'], 'type': 'TIMESTAMP'},
-                        {'name': 'b', 'type': 'LONG'}],
-            'dataset': [['2021-01-01T00:00:00.000000Z', 2]]}
-        with self.assertRaises(OidcError) as cm:
-            qdb.sql('SELECT 1')
-        self.assertNotIsInstance(cm.exception, OidcAuthError)
-
-
-class TestRestAdapterAuthErrors(AuthTestBase):
-    """QuestDB.sql maps 401/403 to OidcAuthError BEFORE it builds a DataFrame,
-    so the mapping is testable without a real pandas. Kept out of the
-    pandas-gated TestRestAdapter so this security-relevant mapping runs on EVERY
-    CI leg, not just the ones where pandas is installed. M5."""
-
-    def _connected(self):
-        self.state.settings = {'config': {
-            'acl.oidc.enabled': True,
-            'acl.oidc.client.id': 'questdb',
-            'acl.oidc.scope': 'openid groups',
-            'acl.oidc.groups.encoded.in.token': True,
-            'acl.oidc.token.endpoint': self.base + '/token',
-            'acl.oidc.device.authorization.endpoint': self.base + '/device',
-        }}
-        self.state.expected_bearer = ID_TOKEN
-        return connect(self.base, insecure=True, renderer=Renderer(),
-                       interactive=True, _clock=FakeClock())
-
-    @staticmethod
-    def _stub_pandas():
-        # sql() reaches the 401/403 check before it touches pandas, so a bare
-        # stub module is enough to exercise the mapping without the real
-        # (possibly absent) dependency.
-        return mock.patch.dict(
-            sys.modules, {'pandas': types.ModuleType('pandas')})
-
-    def test_sql_401_maps_to_auth_error_without_pandas(self):
-        qdb = self._connected()
-        self.state.expected_bearer = 'something-else'  # force 401
-        with self._stub_pandas(), self.assertRaises(OidcAuthError):
-            qdb.sql('SELECT 1')
-
-    def test_sql_403_maps_to_auth_error_without_pandas(self):
-        qdb = self._connected()
-        self.state.exec_status = 403            # bearer matches; server forbids
-        self.state.exec_response = {'error': 'forbidden'}
-        with self._stub_pandas(), self.assertRaises(OidcAuthError):
-            qdb.sql('SELECT 1')
-
-
 class TestConcurrency(AuthTestBase):
     def test_valid_cached_token_does_not_block_during_signin(self):
         # A caller with a valid cached token must NOT block behind another
@@ -1598,50 +1447,11 @@ class TestConcurrency(AuthTestBase):
 
 
 class TestAdapters(unittest.TestCase):
-    """Connection adapters: tested via injected fake modules (the real
-    sqlalchemy / psycopg / questdb.ingress need not be installed)."""
+    """PG-wire connection adapters: tested via injected fake modules (the real
+    sqlalchemy / psycopg need not be installed)."""
 
-    def _qdb(self, url='http://db.example.com:9000', token='TKN'):
-        return QuestDB(url, _FakeAuth(token), insecure=True)
-
-    def test_sender_builds_conf_with_token(self):
-        qdb = self._qdb('http://db.example.com:9000', token='TKN')
-        captured = {}
-
-        fake = types.ModuleType('questdb.ingress')
-
-        class Sender:
-            @staticmethod
-            def from_conf(conf, *, token=None, **kw):
-                captured.update(conf=conf, token=token, kw=kw)
-                return 'SENDER'
-
-        fake.Sender = Sender
-        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
-            sender = qdb.sender(auto_flush=False)
-        self.assertEqual(sender, 'SENDER')
-        self.assertEqual(captured['conf'], 'http::addr=db.example.com:9000;')
-        self.assertEqual(captured['token'], 'TKN')
-        self.assertEqual(captured['kw'], {'auto_flush': False})
-
-    def test_sender_https_defaults_to_443(self):
-        qdb = self._qdb('https://db.example.com')  # no explicit port
-        captured = {}
-        fake = types.ModuleType('questdb.ingress')
-
-        class Sender:
-            @staticmethod
-            def from_conf(conf, *, token=None, **kw):
-                captured['conf'] = conf
-                return 'S'
-
-        fake.Sender = Sender
-        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
-            qdb.sender()
-        self.assertEqual(captured['conf'], 'https::addr=db.example.com:443;')
-
-    def test_psycopg_connects_as_sso_with_token(self):
-        qdb = self._qdb('http://db.example.com:9000', token='TKN')
+    def test_psycopg_connect_as_sso_with_token(self):
+        auth = _FakeAuth('TKN')
         captured = {}
         fake = types.ModuleType('psycopg')
 
@@ -1651,7 +1461,8 @@ class TestAdapters(unittest.TestCase):
 
         fake.connect = connect
         with mock.patch.dict(sys.modules, {'psycopg': fake}):
-            conn = qdb.psycopg(connect_timeout=3)
+            conn = psycopg_connect(
+                auth, 'http://db.example.com:9000', connect_timeout=3)
         self.assertEqual(conn, 'CONN')
         self.assertEqual(captured['user'], '_sso')
         self.assertEqual(captured['password'], 'TKN')
@@ -1660,11 +1471,25 @@ class TestAdapters(unittest.TestCase):
         self.assertEqual(captured['dbname'], 'qdb')
         self.assertEqual(captured['connect_timeout'], 3)
         # The token is fetched at connect time (fresh per connection).
-        self.assertEqual(qdb.auth.calls, 1)
+        self.assertEqual(auth.calls, 1)
+
+    def test_psycopg_connect_uses_bare_ipv6_host(self):
+        # psycopg takes host and port separately, so the IPv6 host is passed
+        # WITHOUT brackets.
+        captured = {}
+        fake = types.ModuleType('psycopg')
+
+        def connect(**kw):
+            captured.update(kw)
+            return 'CONN'
+
+        fake.connect = connect
+        with mock.patch.dict(sys.modules, {'psycopg': fake}):
+            psycopg_connect(_FakeAuth(), 'http://[::1]:9000')
+        self.assertEqual(captured['host'], '::1')
 
     def test_sqlalchemy_engine_injects_fresh_token_per_connect(self):
         auth = _FakeAuth('TKN')
-        qdb = QuestDB('http://db.example.com:9000', auth, insecure=True)
         created = {}
         events = {}
         engine_obj = object()
@@ -1702,7 +1527,8 @@ class TestAdapters(unittest.TestCase):
                 'sqlalchemy': fake_sa,
                 'sqlalchemy.engine': fake_eng,
                 'psycopg': fake_pg}):
-            engine = qdb.sqlalchemy_engine(pool_pre_ping=True)
+            engine = sqlalchemy_engine(
+                auth, 'http://db.example.com:9000', pool_pre_ping=True)
 
         self.assertIs(engine, engine_obj)
         self.assertEqual(created['drivername'], 'postgresql+psycopg')
@@ -1721,189 +1547,63 @@ class TestAdapters(unittest.TestCase):
             self.assertEqual(cparams['password'], 'TKN')
         self.assertEqual(auth.calls - before, 2)
 
-    def test_sender_brackets_ipv6_addr(self):
-        # An IPv6 literal must be bracketed in the ILP addr=host:port conf,
-        # else "::1:9000" is ambiguous to the conf parser. See M5.
-        qdb = self._qdb('https://[::1]:9000')
-        captured = {}
-        fake = types.ModuleType('questdb.ingress')
-
-        class Sender:
-            @staticmethod
-            def from_conf(conf, *, token=None, **kw):
-                captured['conf'] = conf
-                return 'S'
-
-        fake.Sender = Sender
-        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
-            qdb.sender()
-        self.assertEqual(captured['conf'], 'https::addr=[::1]:9000;')
-
-    def test_sender_forwards_ca_bundle_as_tls_roots(self):
-        # M2: an https Sender must inherit the private CA bundle (as tls_roots)
-        # so it trusts the same roots as the REST/IdP paths; http does not, and
-        # an explicit tls_roots= is never overridden.
-        import tempfile
-
-        def captured_conf_kwargs(url, *, ca_bundle, **sender_kwargs):
-            auth = _FakeAuth('TKN')
-            auth._ca_bundle = ca_bundle
-            qdb = QuestDB(url, auth, insecure=True)
-            captured = {}
-            fake = types.ModuleType('questdb.ingress')
-
-            class Sender:
-                @staticmethod
-                def from_conf(conf, *, token=None, **kw):
-                    captured['kw'] = kw
-                    return 'S'
-
-            fake.Sender = Sender
-            with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
-                qdb.sender(**sender_kwargs)
-            return captured['kw']
-
-        with tempfile.NamedTemporaryFile('w', suffix='.pem', delete=False) as f:
-            f.write('-----dummy-----')
-            ca = f.name
-        try:
-            # https + a real CA file -> forwarded as tls_roots.
-            self.assertEqual(
-                captured_conf_kwargs('https://db.example.com:9000',
-                                     ca_bundle=ca).get('tls_roots'), ca)
-            # http -> never forwarded (TLS roots are irrelevant).
-            self.assertNotIn(
-                'tls_roots',
-                captured_conf_kwargs('http://db.example.com:9000',
-                                     ca_bundle=ca))
-            # An explicit tls_roots= wins over the inherited bundle.
-            self.assertEqual(
-                captured_conf_kwargs('https://db.example.com:9000',
-                                     ca_bundle=ca,
-                                     tls_roots='/other/ca.pem').get('tls_roots'),
-                '/other/ca.pem')
-        finally:
-            os.unlink(ca)
-
-    def test_psycopg_uses_bare_ipv6_host(self):
-        # psycopg takes host and port separately, so the IPv6 host is passed
-        # WITHOUT brackets (unlike the ILP addr= form). See M5.
-        qdb = self._qdb('http://[::1]:9000')
-        captured = {}
-        fake = types.ModuleType('psycopg')
-
-        def connect(**kw):
-            captured.update(kw)
-            return 'CONN'
-
-        fake.connect = connect
-        with mock.patch.dict(sys.modules, {'psycopg': fake}):
-            qdb.psycopg()
-        self.assertEqual(captured['host'], '::1')
-
     def test_require_host_rejects_hostless_url(self):
         # A URL with no extractable host must raise, not pass None to a driver;
-        # an explicit host= override still resolves. See M5.
+        # an explicit host= override still resolves.
         for bad in ('localhost', 'questdb:9000'):
             with self.subTest(url=bad):
                 with self.assertRaises(OidcConfigError):
-                    QuestDB(bad, _FakeAuth(), insecure=True)._require_host()
-        self.assertEqual(
-            QuestDB('localhost', _FakeAuth())._require_host('h.example'),
-            'h.example')
+                    _require_host(bad)
+        self.assertEqual(_require_host('localhost', 'h.example'), 'h.example')
 
-    def test_malformed_port_url_raises_config_error(self):
-        # A QuestDB URL with a non-integer port must raise OidcConfigError at
-        # construction, not a bare ValueError when an adapter reads .port. M3.
+    def test_require_host_malformed_port_raises_config_error(self):
+        # A QuestDB URL with a non-integer port must raise OidcConfigError (via
+        # safe_urlparse), not a bare ValueError.
         with self.assertRaises(OidcConfigError):
-            QuestDB('https://questdb.example.com:notaport', _FakeAuth(),
-                    insecure=True)
+            _require_host('https://questdb.example.com:notaport')
 
-    def test_host_with_conf_metachars_rejected(self):
-        # C1: a host containing the ILP conf delimiters (';' / '=') or
-        # whitespace must be rejected, never spliced into the
-        # `addr=host:port;` conf string. Otherwise a crafted/tampered URL host
-        # injects extra conf params — e.g. `tls_verify=unsafe_off`, which
-        # silently disables the sender's TLS certificate verification, or
-        # `auto_flush=off` (data loss). urlparse() keeps ';'/'=' in .hostname.
-        for bad in ('https://realhost;tls_verify=unsafe_off;x=',
-                    'https://a=b'):
+    def test_require_host_with_conf_metachars_rejected(self):
+        # A host containing connection-string delimiters (';' / '=') or
+        # whitespace must be rejected, never spliced into PG connection
+        # parameters (psycopg builds a libpq conninfo string from its kwargs).
+        # urlparse() keeps ';'/'=' in .hostname.
+        for bad in ('https://realhost;sslmode=disable;x=', 'https://a=b'):
             with self.subTest(url=bad):
                 with self.assertRaises(OidcConfigError):
-                    self._qdb(bad)._require_host()
+                    _require_host(bad)
         # An explicit host= override goes through the same guard (incl.
         # whitespace, which is never valid in a host).
-        for bad_host in ('evil;tls_verify=unsafe_off', 'a=b', 'h ost'):
+        for bad_host in ('evil;sslmode=disable', 'a=b', 'h ost'):
             with self.subTest(host=bad_host):
                 with self.assertRaises(OidcConfigError):
-                    self._qdb()._require_host(bad_host)
+                    _require_host('https://db.example.com:9000', bad_host)
         # A legitimate host (incl. an IPv6 literal, which contains ':') is
         # still accepted — the guard must not over-reject.
-        self.assertEqual(self._qdb()._require_host('::1'), '::1')
         self.assertEqual(
-            self._qdb()._require_host('questdb.example.com'),
+            _require_host('https://db.example.com:9000', '::1'), '::1')
+        self.assertEqual(
+            _require_host('https://db.example.com:9000', 'questdb.example.com'),
             'questdb.example.com')
-        # The guard fires through the adapter (sender), before the conf string
-        # is built and handed to Sender.from_conf.
-        qdb = self._qdb('https://realhost;tls_verify=unsafe_off:9000')
-        fake = types.ModuleType('questdb.ingress')
-        fake.Sender = object()  # import must succeed so we reach the guard
-        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
-            with self.assertRaises(OidcConfigError):
-                qdb.sender()
-
-    def test_sender_hostless_url_raises(self):
-        # The guard propagates through an adapter (not just the helper):
-        # sender() on a host-less URL raises OidcConfigError. See M5.
-        qdb = self._qdb('questdb:9000')
-        fake = types.ModuleType('questdb.ingress')
-        fake.Sender = object()  # import must succeed so we reach the guard
-        with mock.patch.dict(sys.modules, {'questdb.ingress': fake}):
-            with self.assertRaises(OidcConfigError):
-                qdb.sender()
-
-    def test_sql_missing_pandas_raises(self):
-        qdb = self._qdb()
-        with mock.patch.dict(sys.modules, {'pandas': None}):
-            with self.assertRaises(ImportError):
-                qdb.sql('SELECT 1')
 
     @unittest.skipIf(importlib.util.find_spec('sqlalchemy') is not None,
                      'sqlalchemy installed')
     def test_sqlalchemy_engine_missing_dep_raises(self):
         with self.assertRaises(ImportError):
-            self._qdb().sqlalchemy_engine()
+            sqlalchemy_engine(_FakeAuth(), 'https://db.example.com:9000')
 
     @unittest.skipIf(_HAS_PG_DRIVER, 'a PostgreSQL driver is installed')
     def test_psycopg_missing_dep_raises(self):
         with self.assertRaises(ImportError):
-            self._qdb().psycopg()
+            psycopg_connect(_FakeAuth(), 'https://db.example.com:9000')
 
     @unittest.skipIf(_HAS_PG_DRIVER, 'a PostgreSQL driver is installed')
     def test_pg_module_missing_chains_cause(self):
         # The "no PG driver" ImportError chains the underlying import failure
         # (raise ... from e) so the traceback preserves the real cause.
-        from questdb.auth._questdb import _pg_module
+        from questdb.auth._adapters import _pg_module
         with self.assertRaises(ImportError) as cm:
             _pg_module()
         self.assertIsInstance(cm.exception.__cause__, ImportError)
-
-    @unittest.skipIf(importlib.util.find_spec('questdb.ingress') is not None,
-                     'questdb.ingress extension is built')
-    def test_sender_missing_extension_raises(self):
-        with self.assertRaises(ImportError):
-            self._qdb().sender()
-
-    def test_sender_rejects_non_integer_port(self):
-        # A non-integer port kwarg must be rejected before it can be
-        # interpolated into the addr= conf string, where ";tls_verify=
-        # unsafe_off" would silently disable TLS verification — the same
-        # injection _require_host() blocks for the host. The coercion runs
-        # before the extension import, so this fails cleanly even without it.
-        qdb = self._qdb('https://db.example.com:9000')
-        for bad in ('9000;tls_verify=unsafe_off', 'notaport', ['9000']):
-            with self.assertRaises(OidcConfigError):
-                qdb.sender(port=bad)
 
 
 class TestConfigHelpers(unittest.TestCase):

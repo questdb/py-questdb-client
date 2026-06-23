@@ -79,11 +79,3 @@ class OidcDeviceFlowError(OidcError):
 
 class OidcTimeoutError(OidcDeviceFlowError):
     """The user did not authorize the device in time (the code expired)."""
-
-
-class OidcAuthError(OidcError):
-    """
-    QuestDB rejected the token (typically a ``401``/``403`` from the server);
-    the message hints at common causes (scope / ``groups.encoded.in.token`` /
-    ``audience`` mismatches).
-    """

@@ -30,26 +30,24 @@ presents the token to QuestDB (HTTP ``Bearer`` / PG-wire ``_sso``). Works on
 browserless local and remote kernels (JupyterHub, SageMaker, Colab,
 VS Code-remote): authorize in any browser, the kernel only calls the IdP.
 
-* **Just the token** — works with anything; no optional dependencies::
+**Get the token**, then present it however you like — no optional dependencies::
 
-      from questdb.auth import OidcDeviceAuth
+    from questdb.auth import OidcDeviceAuth
 
-      auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
-      token = auth.token()                      # device flow on first use
-      headers = auth.headers()                  # {"Authorization": "Bearer .."}
+    auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
+    token = auth.token()                      # device flow on first use
+    headers = auth.headers()                  # {"Authorization": "Bearer .."}
 
-* **The integrated session** — query to a DataFrame and feed adapters::
+For PG-wire there are two convenience adapters that wire the auto-refreshed
+token in as the ``_sso`` password::
 
-      from questdb.auth import connect
+    from questdb.auth import sqlalchemy_engine, psycopg_connect
 
-      qdb = connect("https://questdb.example.com:9000")
-      df = qdb.sql("SELECT * FROM trades LIMIT 10")
-      engine = qdb.sqlalchemy_engine()          # PG-wire, token as _sso password
-      with qdb.sender() as sender:              # ingestion (ILP/HTTP)
-          ...
+    engine = sqlalchemy_engine(auth, "https://questdb.example.com:9000")
+    conn = psycopg_connect(auth, "https://questdb.example.com:9000")
 
-Optional deps (``pandas``, ``sqlalchemy``/``psycopg``, ``qrcode``, ``IPython``)
-are imported lazily, only when used.
+Optional deps (``sqlalchemy``/``psycopg``, ``qrcode``, ``IPython``) are imported
+lazily, only when used.
 """
 
 from ._device import OidcDeviceAuth
@@ -62,14 +60,12 @@ from ._errors import (
     OidcInteractionRequired,
     OidcDeviceFlowError,
     OidcTimeoutError,
-    OidcAuthError,
 )
-from ._questdb import QuestDB, connect
+from ._adapters import sqlalchemy_engine, psycopg_connect
 
 __all__ = [
     'MemoryCache',
     'NullCache',
-    'OidcAuthError',
     'OidcConfig',
     'OidcConfigError',
     'OidcDeviceAuth',
@@ -78,8 +74,8 @@ __all__ = [
     'OidcInteractionRequired',
     'OidcNetworkError',
     'OidcTimeoutError',
-    'QuestDB',
     'TokenCache',
     'TokenSet',
-    'connect',
+    'psycopg_connect',
+    'sqlalchemy_engine',
 ]

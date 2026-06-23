@@ -25,15 +25,14 @@ QuestDB over the auth paths it already supports (HTTP ``Bearer`` / PG-wire
 
 .. code-block:: python
 
-    from questdb.auth import OidcDeviceAuth, connect
+    from questdb.auth import OidcDeviceAuth, sqlalchemy_engine
 
-    # Just the token (use it with PG-wire, HTTP, or any client):
+    # Sign in once and get a valid, auto-refreshed token:
     auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
-    token = auth.token()
+    token = auth.token()      # use it with PG-wire, HTTP, or any client
 
-    # Or the integrated session (query to a DataFrame, feed adapters):
-    qdb = connect("https://questdb.example.com:9000")
-    df = qdb.sql("SELECT * FROM trades LIMIT 10")
+    # Or wire it into PG-wire as the _sso password:
+    engine = sqlalchemy_engine(auth, "https://questdb.example.com:9000")
 
 Highlights:
 
@@ -41,11 +40,12 @@ Highlights:
   fallback to the IdP ``.well-known`` document.
 * In-process token cache with silent refresh (tokens are never written to
   disk).
-* Adapters for pandas (REST ``/exec``), SQLAlchemy, psycopg and the ingestion
-  ``Sender``.
+* Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
+  :func:`~questdb.auth.psycopg_connect`) that wire the auto-refreshed token into
+  PG-wire as the ``_sso`` password.
 * ``token()`` / ``headers()`` require no dependencies beyond the standard
-  library; ``pandas`` / ``sqlalchemy`` / ``psycopg`` / ``qrcode`` / ``IPython``
-  are imported lazily.
+  library; ``sqlalchemy`` / ``psycopg`` / ``qrcode`` / ``IPython`` are imported
+  lazily.
 
 See the :ref:`OIDC authentication guide <oidc_auth>` for details.
 

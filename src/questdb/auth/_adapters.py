@@ -1,0 +1,187 @@
+################################################################################
+##     ___                  _   ____  ____
+##    / _ \ _   _  ___  ___| |_|  _ \| __ )
+##   | | | | | | |/ _ \/ __| __| | | |  _ \
+##   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+##    \__\_\\__,_|\___||___/\__|____/|____/
+##
+##  Copyright (c) 2014-2019 Appsicle
+##  Copyright (c) 2019-2024 QuestDB
+##
+##  Licensed under the Apache License, Version 2.0 (the "License");
+##  you may not use this file except in compliance with the License.
+##  You may obtain a copy of the License at
+##
+##  http://www.apache.org/licenses/LICENSE-2.0
+##
+##  Unless required by applicable law or agreed to in writing, software
+##  distributed under the License is distributed on an "AS IS" BASIS,
+##  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+##  See the License for the specific language governing permissions and
+##  limitations under the License.
+##
+################################################################################
+
+"""
+PG-wire connection adapters.
+
+Feed an :class:`OidcDeviceAuth` token into SQLAlchemy / psycopg as the QuestDB
+``_sso`` password. These are thin conveniences over the token: for REST or the
+ingestion ``Sender``, take :meth:`OidcDeviceAuth.headers` / :meth:`token` and
+wire it up yourself.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Optional
+
+from ._device import OidcDeviceAuth
+from ._errors import OidcConfigError
+from ._http import safe_urlparse
+
+_DEFAULT_PG_PORT = 8812
+_DEFAULT_DATABASE = 'qdb'
+
+# Reject connection-string delimiters (';', '=') and whitespace/control chars in
+# the host: a real hostname/IP never has them, so their presence means a
+# tampered URL trying to inject PG connection parameters (psycopg turns its
+# kwargs into a libpq conninfo string). ':' is allowed — IPv6 literals contain
+# it, and the PG drivers take host and port separately.
+_ILLEGAL_HOST_CHARS = re.compile(r'[\x00-\x20\x7f;=]')
+
+
+def _pg_module():
+    try:
+        import psycopg  # type: ignore  # psycopg v3
+        return psycopg
+    except ImportError:
+        pass
+    try:
+        import psycopg2  # type: ignore
+        return psycopg2
+    except ImportError as e:
+        raise ImportError(
+            'A PostgreSQL driver is required: install `psycopg` (v3) or '
+            '`psycopg2-binary`.') from e
+
+
+def _require_host(url: str, host: Optional[str] = None) -> str:
+    """
+    Resolve the PG-wire host: an explicit ``host`` override, else the host from
+    the QuestDB ``url``. Raises (rather than passing a bare ``None`` to the
+    driver) when neither yields one, e.g. a URL with no authority such as
+    ``"localhost"`` or ``"questdb:9000"``.
+
+    The returned host is *unbracketed* — psycopg and SQLAlchemy take address and
+    port separately. ``safe_urlparse`` validates the port up-front, raising
+    ``OidcConfigError`` (not a bare ``ValueError``) for a malformed one.
+    """
+    parts, _ = safe_urlparse(url)
+    resolved = host or parts.hostname
+    if not resolved:
+        raise OidcConfigError(
+            f'The QuestDB URL {url!r} has no host. Use a URL with an explicit '
+            'host (e.g. "https://questdb.example.com:9000"), or pass host=... '
+            'to the adapter.')
+    if _ILLEGAL_HOST_CHARS.search(resolved):
+        raise OidcConfigError(
+            f'The QuestDB host {resolved!r} contains an illegal character '
+            "(';', '=', whitespace or a control character). A hostname or IP "
+            'address never does; this indicates a malformed or tampered URL. '
+            '(Such a host could otherwise inject PG connection parameters.)')
+    return resolved
+
+
+def sqlalchemy_engine(
+        auth: OidcDeviceAuth,
+        url: str,
+        *,
+        host: Optional[str] = None,
+        pg_port: int = _DEFAULT_PG_PORT,
+        database: str = _DEFAULT_DATABASE,
+        drivername: Optional[str] = None,
+        **engine_kwargs) -> 'sqlalchemy.engine.Engine':
+    """
+    Build a SQLAlchemy ``Engine`` for QuestDB's PG-wire endpoint, authenticated
+    with ``auth``.
+
+    Connects as user ``_sso``, injecting a **fresh** token as the password on
+    every new connection (via a ``do_connect`` listener) so pooled connections
+    always authenticate with a valid, auto-refreshed token. Requires
+    ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
+
+    Sign in once up front (``auth.token()``) before the pool opens connections,
+    so threads don't race the interactive prompt.
+
+    :param auth: An :class:`OidcDeviceAuth`, e.g. from
+        :meth:`OidcDeviceAuth.from_questdb`.
+    :param url: The QuestDB base URL; the PG host is derived from it unless
+        ``host=`` is given.
+    :param pg_port: PG-wire port (default ``8812``).
+    :param database: Database name (default ``"qdb"``).
+    :param drivername: SQLAlchemy driver; defaults to ``postgresql+psycopg``
+        (v3) or ``postgresql+psycopg2`` depending on what is installed.
+    :param engine_kwargs: Forwarded to ``create_engine``.
+    """
+    try:
+        from sqlalchemy import create_engine, event
+        from sqlalchemy.engine import URL
+    except ImportError as e:
+        raise ImportError(
+            'SQLAlchemy is required for questdb.auth.sqlalchemy_engine(); '
+            'install it with `pip install sqlalchemy`.') from e
+
+    if drivername is None:
+        mod = _pg_module()
+        drivername = (
+            'postgresql+psycopg'
+            if mod.__name__ == 'psycopg'
+            else 'postgresql+psycopg2')
+
+    engine = create_engine(
+        URL.create(
+            drivername=drivername,
+            username='_sso',
+            host=_require_host(url, host),
+            port=pg_port,
+            database=database),
+        **engine_kwargs)
+
+    @event.listens_for(engine, 'do_connect')
+    def _provide_token(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
+        cparams['password'] = auth.token()
+
+    return engine
+
+
+def psycopg_connect(
+        auth: OidcDeviceAuth,
+        url: str,
+        *,
+        host: Optional[str] = None,
+        pg_port: int = _DEFAULT_PG_PORT,
+        database: str = _DEFAULT_DATABASE,
+        **connect_kwargs) -> Any:
+    """
+    Open a raw psycopg (v3) or psycopg2 connection to QuestDB's PG-wire
+    endpoint, authenticating as ``_sso`` with the current token.
+
+    The token is captured at connect time; reconnect to pick up a refreshed
+    token. Requires ``acl.oidc.pg.token.as.password.enabled=true`` on the
+    server.
+
+    :param auth: An :class:`OidcDeviceAuth`, e.g. from
+        :meth:`OidcDeviceAuth.from_questdb`.
+    :param url: The QuestDB base URL; the PG host is derived from it unless
+        ``host=`` is given.
+    :param connect_kwargs: Forwarded to the driver's ``connect()``.
+    """
+    mod = _pg_module()
+    return mod.connect(
+        host=_require_host(url, host),
+        port=pg_port,
+        dbname=database,
+        user='_sso',
+        password=auth.token(),
+        **connect_kwargs)

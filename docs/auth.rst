@@ -34,8 +34,9 @@ it with your own tooling.
 Just the token (PG-wire / HTTP / anything)
 ------------------------------------------
 
-If you connect to QuestDB yourself — over PG-wire, raw HTTP, or any other
-client — you only need a valid token. This path has **no extra dependencies**.
+You sign in once and get a valid, auto-refreshed token; present it to QuestDB
+over PG-wire, raw HTTP, or any other client. This path has **no extra
+dependencies**.
 
 .. code-block:: python
 
@@ -47,36 +48,6 @@ client — you only need a valid token. This path has **no extra dependencies**.
     token = auth.token()        # runs the device flow on first use, else cached
     headers = auth.headers()    # {"Authorization": "Bearer <token>"}
 
-    # Use the token however you like, e.g. PG-wire via psycopg:
-    import psycopg
-    conn = psycopg.connect(
-        host="questdb.example.com", port=8812, dbname="qdb",
-        user="_sso", password=token)
-
-The integrated session
-----------------------
-
-The high-level :func:`questdb.auth.connect` returns a :class:`~questdb.auth.QuestDB`
-session that signs you in and adapts the token into the common Python access
-paths.
-
-.. code-block:: python
-
-    from questdb.auth import connect
-
-    qdb = connect("https://questdb.example.com:9000")   # interactive sign-in
-    df = qdb.sql("SELECT * FROM trades WHERE ts > dateadd('h', -1, now())")
-
-    # Bring-your-own client, same auto-refreshed token:
-    engine = qdb.sqlalchemy_engine()                    # PG-wire, token as _sso
-    with qdb.psycopg() as conn:                         # raw psycopg
-        ...
-
-    from questdb.ingress import TimestampNanos          # the compiled extension
-    with qdb.sender() as sender:                        # ingestion (ILP/HTTP)
-        sender.row("trades", columns={"price": 101.5},
-                   at=TimestampNanos.now())
-
 On first use you will see a sign-in prompt (rendered as a clickable link in
 Jupyter, plain text on a terminal)::
 
@@ -86,8 +57,43 @@ Jupyter, plain text on a terminal)::
        ⏳ waiting for authorization… (4:51 left)
     ✅ Signed in as alice@example.com — token cached, expires in 60 min
 
-Re-running any cell is silent — the token is cached and refreshed silently on
-the next use once it nears expiry.
+Re-running is silent — the token is cached and refreshed silently on the next
+use once it nears expiry.
+
+PG-wire adapters
+----------------
+
+For PG-wire there are two convenience adapters that inject the auto-refreshed
+token as the QuestDB ``_sso`` password (they require
+``acl.oidc.pg.token.as.password.enabled=true`` on the server):
+
+.. code-block:: python
+
+    from questdb.auth import OidcDeviceAuth, sqlalchemy_engine, psycopg_connect
+
+    url = "https://questdb.example.com:9000"
+    auth = OidcDeviceAuth.from_questdb(url)
+    auth.token()   # sign in once up front, before the pool opens connections
+
+    # SQLAlchemy: a fresh token is injected as the password on every new
+    # (pooled) connection, so the engine keeps working as the token rotates.
+    engine = sqlalchemy_engine(auth, url)
+
+    # Or a raw psycopg / psycopg2 connection:
+    conn = psycopg_connect(auth, url)
+
+For REST or ingestion, take ``auth.headers()`` / ``auth.token()`` and wire it
+into your HTTP client or the ingestion :class:`~questdb.ingress.Sender`
+yourself:
+
+.. code-block:: python
+
+    from questdb.ingress import Sender, TimestampNanos
+
+    with Sender.from_conf("https::addr=questdb.example.com:9000;",
+                          token=auth.token()) as sender:
+        sender.row("trades", columns={"price": 101.5},
+                   at=TimestampNanos.now())
 
 How it works
 ============
@@ -96,8 +102,7 @@ Configuration discovery
 ------------------------
 
 :meth:`OidcDeviceAuth.from_questdb <questdb.auth.OidcDeviceAuth.from_questdb>`
-(and :func:`~questdb.auth.connect`) resolve the OIDC configuration in this
-order:
+resolves the OIDC configuration in this order:
 
 1. ``GET {url}/settings`` (public, no auth) for the QuestDB-authoritative
    values: ``acl.oidc.client.id``, ``acl.oidc.scope``, ``acl.oidc.token.endpoint``,
@@ -171,23 +176,26 @@ authorize the device. The helper detects this and raises
 Connection adapters
 ===================
 
-* :meth:`QuestDB.sql <questdb.auth.QuestDB.sql>` — query over REST ``/exec`` to a
-  pandas DataFrame using ``Authorization: Bearer``. Recommended: there is no
-  token-length limit (a groups-encoded JWT can be several KB).
-* :meth:`QuestDB.sqlalchemy_engine <questdb.auth.QuestDB.sqlalchemy_engine>` —
-  PG-wire engine that injects a fresh token as the ``_sso`` password for every
-  new connection. Requires ``acl.oidc.pg.token.as.password.enabled=true``.
-* :meth:`QuestDB.psycopg <questdb.auth.QuestDB.psycopg>` — a raw psycopg /
-  psycopg2 connection.
-* :meth:`QuestDB.sender <questdb.auth.QuestDB.sender>` — a
-  :class:`~questdb.ingress.Sender` for ingestion (ILP over HTTP).
+Two helpers wire the auto-refreshed token into PG-wire as the ``_sso`` password
+(both require ``acl.oidc.pg.token.as.password.enabled=true``):
+
+* :func:`~questdb.auth.sqlalchemy_engine` — a SQLAlchemy ``Engine`` that injects
+  a fresh token for every new connection, so a pool keeps working as the token
+  rotates.
+* :func:`~questdb.auth.psycopg_connect` — a raw psycopg / psycopg2 connection
+  (token captured at connect time).
+
+For REST (``Authorization: Bearer``) and ingestion (the
+:class:`~questdb.ingress.Sender`), take
+:meth:`~questdb.auth.OidcDeviceAuth.headers` /
+:meth:`~questdb.auth.OidcDeviceAuth.token` and wire the token in yourself.
 
 .. note::
 
     QuestDB validates the token at **authentication** time, not per query. An
     already-open PG connection survives token expiry; only **new** connections
-    need a fresh token — which is why the PG-wire adapter supplies the token
-    per-connect.
+    need a fresh token — which is why :func:`~questdb.auth.sqlalchemy_engine`
+    supplies the token per-connect.
 
 .. _oidc_idp_requirements:
 
@@ -234,12 +242,8 @@ Security notes
   refuses to guess the discovery origin from the server-supplied token endpoint.
 * Adapters avoid logging the token / PG DSN. Avoid logging them yourself.
 * Standard proxy / CA settings (``HTTPS_PROXY``, ``REQUESTS_CA_BUNDLE``,
-  ``SSL_CERT_FILE``) are honoured; you can also pass ``ca_bundle=``. The same
-  private CA is forwarded to the ingestion :meth:`~questdb.auth.QuestDB.sender`
-  (as the ILP ``tls_roots``) for an ``https`` QuestDB, so REST queries and ILP
-  ingestion trust the same roots. (Only a PEM **file** is forwarded this way;
-  for a CA *directory*, or to override, pass ``tls_roots=``/``tls_ca=`` to
-  ``sender()``.)
+  ``SSL_CERT_FILE``) are honoured for the IdP / discovery transport; you can
+  also pass ``ca_bundle=``.
 
 Dependencies
 ===========
@@ -247,7 +251,6 @@ Dependencies
 ``token()`` / ``headers()`` need nothing beyond the standard library. The
 following are imported lazily, only when used:
 
-* ``pandas`` — for :meth:`QuestDB.sql`;
 * ``sqlalchemy`` and ``psycopg`` / ``psycopg2`` — for the PG-wire adapters;
 * ``qrcode`` — to render a QR code for phone-based authorization (``qr=True``);
 * ``IPython`` — for the rich Jupyter prompt (falls back to plain text).

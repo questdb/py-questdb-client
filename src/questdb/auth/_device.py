@@ -146,9 +146,8 @@ class OidcDeviceAuth:
     to the device-code lifetime, ~30 min): a caller with a *valid* cached token
     never blocks, but one whose token is missing/expired waits behind the
     signer. So when threads share an auth object (e.g. a SQLAlchemy/psycopg
-    pool), sign in once up front — :func:`questdb.auth.connect` does this via
-    ``eager=True`` (the default), running the flow once on the main thread before
-    the pool opens connections.
+    pool), sign in once up front — call :meth:`token` once on the main thread
+    before the pool opens connections.
 
     .. code-block:: python
 

@@ -12,56 +12,74 @@ loop), so it is not part of the automated example suite.
 
 import sys
 
-from questdb.auth import connect, OidcDeviceAuth, OidcError
+from questdb.auth import (
+    OidcDeviceAuth,
+    OidcError,
+    psycopg_connect,
+    sqlalchemy_engine,
+)
 
 
 QUESTDB_URL = 'https://questdb.example.com:9000'
 
 
-def integrated(url: str = QUESTDB_URL):
-    """The high-level path: sign in, then query / ingest with one object."""
-    # First call triggers the interactive device-flow sign-in; the token is
-    # cached, so re-running this is silent until it expires.
-    qdb = connect(url)
+def sign_in(url: str = QUESTDB_URL) -> OidcDeviceAuth:
+    """Discover config from QuestDB and sign in interactively (once)."""
+    auth = OidcDeviceAuth.from_questdb(url)
+    # The first token() triggers the interactive device-flow sign-in; the token
+    # is cached and refreshed silently, so re-running is silent until it
+    # expires. Sign in once up front, before any connection pool opens.
+    auth.token()
+    return auth
 
-    # Query straight to a pandas DataFrame over REST (Authorization: Bearer).
-    df = qdb.sql("SELECT * FROM trades WHERE ts > dateadd('h', -1, now())")
-    print(df)
 
-    # Feed the same auto-refreshed token into your existing tooling:
-    #   engine = qdb.sqlalchemy_engine()   # PG-wire, token as _sso password
-    #   with qdb.psycopg() as conn: ...    # raw psycopg
-    #
-    # questdb.ingress is the compiled extension; import it lazily (only the
-    # ingestion path needs it) so this module also loads for the pure-Python
-    # bring_your_own_client() path, which needs no extension.
-    from questdb.ingress import TimestampNanos
-    with qdb.sender() as sender:           # ingestion (ILP over HTTP)
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
-            at=TimestampNanos.now())
+def pg_wire(url: str = QUESTDB_URL):
+    """Query over PG-wire, with the token wired in as the ``_sso`` password.
+
+    Requires ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
+    """
+    auth = sign_in(url)
+
+    # SQLAlchemy: a fresh token is injected as the password on every new
+    # (pooled) connection, so the engine keeps working as the token rotates.
+    from sqlalchemy import text
+    engine = sqlalchemy_engine(auth, url)
+    with engine.connect() as conn:
+        for row in conn.execute(text('SELECT * FROM trades LIMIT 10')):
+            print(row)
+
+    # Or a raw psycopg / psycopg2 connection (token captured at connect time):
+    with psycopg_connect(auth, url) as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT count() FROM trades')
+            print(cur.fetchone())
 
 
 def bring_your_own_client(url: str = QUESTDB_URL):
-    """The low-level path: you just want the token (PG-wire / HTTP / anything)."""
+    """You just want the token (REST / ingestion / anything)."""
     auth = OidcDeviceAuth.from_questdb(url)
 
     token = auth.token()               # valid, auto-refreshed id/access token
     headers = auth.headers()           # {"Authorization": "Bearer <token>"}
     print('Authorization header ready:', 'Authorization' in headers)
 
-    # e.g. hand the token to psycopg yourself over PG-wire:
-    #   import psycopg
-    #   conn = psycopg.connect(host='questdb.example.com', port=8812,
-    #                          dbname='qdb', user='_sso', password=token)
+    # Ingestion: hand the token to the ILP Sender. questdb.ingress is the
+    # compiled extension; import it lazily so this module loads without it.
+    from questdb.ingress import Sender, TimestampNanos
+    with Sender.from_conf(
+            'https::addr=questdb.example.com:9000;', token=token) as sender:
+        sender.row(
+            'trades',
+            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+            columns={'price': 2615.54, 'amount': 0.00044},
+            at=TimestampNanos.now())
+
     return token
 
 
 def main():
     try:
-        integrated()
+        pg_wire()
     except OidcError as e:
         sys.stderr.write(f'OIDC sign-in failed: {e}\n')
 

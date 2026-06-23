@@ -73,17 +73,14 @@ questdb.auth
 
 See the :ref:`oidc_auth` guide for an overview.
 
-.. autofunction:: questdb.auth.connect
-
-.. autoclass:: questdb.auth.QuestDB
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 .. autoclass:: questdb.auth.OidcDeviceAuth
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. autofunction:: questdb.auth.sqlalchemy_engine
+
+.. autofunction:: questdb.auth.psycopg_connect
 
 .. autoclass:: questdb.auth.OidcConfig
    :members:
@@ -123,9 +120,6 @@ See the :ref:`oidc_auth` guide for an overview.
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcTimeoutError
-   :show-inheritance:
-
-.. autoexception:: questdb.auth.OidcAuthError
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcNetworkError
