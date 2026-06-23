@@ -1928,6 +1928,15 @@ class TestEndpointValidation(unittest.TestCase):
         self.assertFalse(under(iss + '/%252e%252e/EVIL/token', iss))   # 2x-enc
         self.assertFalse(under(iss + '/..\\EVIL/token', iss))          # backslash
         self.assertFalse(under(iss + '/token;..%2f..%2fEVIL', iss))    # ;params
+        # A ;-matrix param or trailing whitespace in a NON-last segment: urllib
+        # only splits the FINAL segment's ;params off .path, so an inner '..;' /
+        # '..\t' stays a literal segment. A proxy in the '..;/' traversal class
+        # (Tomcat/Undertow) strips the param / trims the segment before
+        # normalizing and resolves these to a DIFFERENT realm, so they must be
+        # rejected too (regression test for the inner-segment path-pin bypass).
+        self.assertFalse(under(iss + '/..;/EVIL/protocol/token', iss))  # ..;
+        self.assertFalse(under(iss + '/%2e%2e;/EVIL/token', iss))       # enc ..;
+        self.assertFalse(under(iss + '/..%09/EVIL/token', iss))         # ..<tab>
         # A legitimate sub-path with a (non-traversal) percent-escape or matrix
         # param is still accepted — only dot traversal is rejected.
         self.assertTrue(under(iss + '/some%20path/token', iss))

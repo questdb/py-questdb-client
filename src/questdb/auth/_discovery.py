@@ -182,6 +182,23 @@ def _decode_path_segments(path: str) -> list:
     return decoded.replace('\\', '/').split('/')
 
 
+def _strip_matrix_params(segment: str) -> str:
+    """
+    Reduce a decoded path segment to the form a server normalizes it to *before*
+    dot-segment removal: drop a ``;`` matrix-parameter suffix and trim
+    surrounding whitespace.
+
+    So ``..;`` (and ``..\t`` from ``..%09``, or any ``;``-hidden / whitespace-
+    padded dot segment) reduces to ``..`` and is caught by the traversal check —
+    in *any* segment, not just the last. ``urllib`` only splits the **final**
+    segment's ``;params`` off ``.path``; an inner ``;`` stays inside the segment,
+    so this must run per-segment. Defeats the well-known ``..;/`` proxy-traversal
+    class (Tomcat/Undertow & co. strip path parameters before normalizing the
+    path), which an origin check and a last-segment-only fold can't catch.
+    """
+    return segment.split(';', 1)[0].strip()
+
+
 def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     """
     True if ``endpoint``'s path is the issuer's path or a sub-path of it.
@@ -192,25 +209,29 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     on a path-based multi-tenant IdP (Keycloak issuers are
     ``https://host/realms/{realm}``), which an origin-only check can't catch.
 
-    Compared on fully *decoded* path segments, not the raw wire string. A ``.`` /
-    ``..`` segment is rejected outright: the server normalizes it, so
-    ``/realms/prod/../attacker/token`` passes a naive prefix test yet resolves to
-    a *different* realm. ``_decode_path_segments`` unmasks encoded dot segments,
-    and the last segment's ``;params`` (which urllib splits off ``.path``) is
-    folded back, so neither can hide a traversal. Legitimate paths have no dot
-    segments.
+    Compared on fully *decoded*, matrix-param-stripped path segments, not the raw
+    wire string. A ``.`` / ``..`` segment is rejected outright: the server
+    normalizes it, so ``/realms/prod/../attacker/token`` passes a naive prefix
+    test yet resolves to a *different* realm. ``_decode_path_segments`` unmasks
+    encoded dot segments (incl. an encoded slash / backslash), and
+    ``_strip_matrix_params`` reduces *every* segment the way a proxy does before
+    normalizing — dropping a ``;params`` suffix and surrounding whitespace — so a
+    ``..;`` / ``..%09`` hidden in any segment can't mask a traversal. (urllib
+    only splits the **final** segment's ``;params`` off ``.path``, hence both the
+    fold below and the per-segment pass.) Legitimate paths have no dot segments.
     """
     base = (safe_urlparse(issuer)[0].path or '').rstrip('/')
     if not base:
         return True
-    base_segs = _decode_path_segments(base)
+    base_segs = [_strip_matrix_params(s) for s in _decode_path_segments(base)]
     eparts = safe_urlparse(endpoint)[0]
-    # Fold the last segment's ;params back into the path so a traversal hidden
-    # there (…/token;..%2f..%2fEVIL) can't slip past the scan.
+    # Fold the final segment's ;params back into the path so a traversal hidden
+    # there (…/token;..%2f..%2fEVIL) is decoded and scanned; an inner-segment
+    # ;params stays in .path and is handled per-segment by _strip_matrix_params.
     ep_path = eparts.path or ''
     if eparts.params:
         ep_path = f'{ep_path};{eparts.params}'
-    ep_segs = _decode_path_segments(ep_path)
+    ep_segs = [_strip_matrix_params(s) for s in _decode_path_segments(ep_path)]
     if '.' in ep_segs or '..' in ep_segs:
         return False
     return ep_segs[:len(base_segs)] == base_segs
