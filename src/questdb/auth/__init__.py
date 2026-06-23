@@ -52,7 +52,7 @@ lazily, only when used.
 
 from ._device import OidcDeviceAuth
 from ._discovery import OidcConfig
-from ._cache import TokenCache, TokenSet, MemoryCache, NullCache
+from ._cache import TokenSet
 from ._errors import (
     OidcError,
     OidcConfigError,
@@ -64,8 +64,6 @@ from ._errors import (
 from ._adapters import sqlalchemy_engine, psycopg_connect
 
 __all__ = [
-    'MemoryCache',
-    'NullCache',
     'OidcConfig',
     'OidcConfigError',
     'OidcDeviceAuth',
@@ -74,7 +72,6 @@ __all__ = [
     'OidcInteractionRequired',
     'OidcNetworkError',
     'OidcTimeoutError',
-    'TokenCache',
     'TokenSet',
     'psycopg_connect',
     'sqlalchemy_engine',

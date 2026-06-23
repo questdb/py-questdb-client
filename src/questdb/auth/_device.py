@@ -35,7 +35,7 @@ import webbrowser
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
-from ._cache import TokenSet, make_cache
+from ._cache import MemoryCache, TokenSet
 from ._discovery import OidcConfig, resolve_config, validate_endpoint_origins
 from ._errors import (
     OidcConfigError,
@@ -171,8 +171,7 @@ class OidcDeviceAuth:
             token_endpoint="https://idp/.../token",
             scope="openid groups",
             groups_in_token=True,
-            audience="questdb",
-            cache="memory")
+            audience="questdb")
     """
 
     def __init__(
@@ -185,7 +184,6 @@ class OidcDeviceAuth:
             groups_in_token: bool = False,
             audience: Optional[str] = None,
             issuer: Optional[str] = None,
-            cache: Any = 'memory',
             insecure: bool = False,
             ca_bundle: Optional[str] = None,
             open_browser: bool = True,
@@ -238,7 +236,7 @@ class OidcDeviceAuth:
         # the IdP stalls; the total poll duration is separately capped by
         # _MAX_DEVICE_CODE_LIFETIME.
         self._timeout = timeout
-        self._cache = make_cache(cache)
+        self._cache = MemoryCache()
         self._ctx = build_ssl_context(ca_bundle)
         self._renderer = renderer if renderer is not None else make_renderer(qr=qr)
         # Serializes token *acquisition* (silent refresh or interactive sign-in)
@@ -269,7 +267,6 @@ class OidcDeviceAuth:
             discovery_url: Optional[str] = None,
             token_endpoint: Optional[str] = None,
             device_authorization_endpoint: Optional[str] = None,
-            cache: Any = 'memory',
             insecure: bool = False,
             ca_bundle: Optional[str] = None,
             open_browser: bool = True,
@@ -309,7 +306,6 @@ class OidcDeviceAuth:
             groups_in_token=cfg.groups_in_token,
             audience=cfg.audience,
             issuer=cfg.issuer,
-            cache=cache,
             insecure=insecure,
             ca_bundle=ca_bundle,
             open_browser=open_browser,
@@ -492,23 +488,15 @@ class OidcDeviceAuth:
     def _store(self, tokens: TokenSet, generation: int) -> None:
         # self._tokens is this instance's own view, so always set it (the caller
         # uses what it just acquired). The shared-cache write is conditional: a
-        # clear() (here or on another instance sharing the store) that bumped the
-        # generation drops the write, so clear() isn't silently undone. Backends
-        # without generation support (NullCache / custom TokenCache) store
-        # unconditionally.
+        # clear() (here or on another instance sharing the process-global store)
+        # that bumped the generation drops the write, so clear() isn't silently
+        # undone.
         self._tokens = tokens
-        store_if_current = getattr(self._cache, 'store_if_current', None)
-        if store_if_current is not None:
-            store_if_current(self.cache_key, tokens, generation)
-        else:
-            self._cache.store(self.cache_key, tokens)
+        self._cache.store_if_current(self.cache_key, tokens, generation)
 
     def _cache_generation(self) -> int:
-        # MemoryCache tracks a per-key clear()-generation for the cross-instance
-        # CAS in _store; other backends don't, so default to 0 (unconditional
-        # store).
-        generation = getattr(self._cache, 'generation', None)
-        return generation(self.cache_key) if generation is not None else 0
+        # Per-key clear()-generation for the cross-instance CAS in _store.
+        return self._cache.generation(self.cache_key)
 
     def _tokenset_from_response(self, body: Dict[str, Any]) -> TokenSet:
         try:

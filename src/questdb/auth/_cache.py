@@ -22,15 +22,13 @@
 ##
 ################################################################################
 
-"""Token state and cache backends for :mod:`questdb.auth`."""
+"""Token state and the in-memory token cache for :mod:`questdb.auth`."""
 
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field, replace
-from typing import Dict, Optional, Union
-
-from ._errors import OidcConfigError
+from typing import Dict, Optional
 
 # Refresh a little before the real expiry to absorb clock skew / latency.
 DEFAULT_SKEW_SECONDS = 30
@@ -70,19 +68,6 @@ class TokenSet:
         return now < (self.expires_at - skew)
 
 
-class TokenCache:
-    """Interface for token caches."""
-
-    def load(self, key: str) -> Optional[TokenSet]:  # pragma: no cover
-        raise NotImplementedError
-
-    def store(self, key: str, tokens: TokenSet) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def clear(self, key: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-
 # Module-global so a re-run notebook cell (fresh ``OidcDeviceAuth``) reuses the
 # acquired token instead of re-prompting.
 _MEMORY_STORE: Dict[str, TokenSet] = {}
@@ -94,12 +79,12 @@ _MEMORY_GENERATION: Dict[str, int] = {}
 _MEMORY_LOCK = threading.Lock()
 
 
-class MemoryCache(TokenCache):
+class MemoryCache:
     """
-    Process-global, in-memory cache (the default).
+    Process-global, in-memory token cache (always on).
 
-    Safest backend: nothing hits disk. Tokens live for the life of the process,
-    so re-running cells is silent; a kernel restart re-prompts once.
+    Nothing ever hits disk. Tokens live for the life of the process, so
+    re-running cells is silent; a kernel restart re-prompts once.
     """
 
     def load(self, key: str) -> Optional[TokenSet]:
@@ -142,32 +127,3 @@ class MemoryCache(TokenCache):
                 return False
             _MEMORY_STORE[key] = replace(tokens)
             return True
-
-
-class NullCache(TokenCache):
-    """Never persists anything; prompts every time."""
-
-    def load(self, key: str) -> Optional[TokenSet]:
-        return None
-
-    def store(self, key: str, tokens: TokenSet) -> None:
-        pass
-
-    def clear(self, key: str) -> None:
-        pass
-
-
-_CacheSpec = Union[str, None, TokenCache]
-
-
-def make_cache(spec: _CacheSpec) -> TokenCache:
-    """Resolve a cache spec (``"memory"`` / ``None`` / a TokenCache instance)."""
-    if isinstance(spec, TokenCache):
-        return spec
-    if spec is None or spec == 'none':
-        return NullCache()
-    if spec == 'memory':
-        return MemoryCache()
-    raise OidcConfigError(
-        f'Unknown cache backend {spec!r}; '
-        "expected 'memory', None, or a TokenCache instance.")

@@ -129,8 +129,7 @@ entirely:
         token_endpoint="https://idp/.../token",
         scope="openid groups",
         groups_in_token=True,     # send id_token (True) vs access_token (False)
-        audience="questdb",       # optional; some IdPs need it to set `aud`
-        cache="memory")
+        audience="questdb")       # optional; some IdPs need it to set `aud`
 
 Which token is sent
 -------------------
@@ -160,15 +159,10 @@ margin). When it nears expiry the helper silently refreshes it using the
 is raised instead, so you can retry without being needlessly re-prompted. A lock
 serializes refresh so parallel cells/threads don't double-prompt.
 
-Cache backends (``cache=`` argument):
-
-* ``"memory"`` *(default)* — process-global, nothing written to disk.
-  Re-running cells is silent; a kernel restart re-prompts once.
-* ``None`` — never persist; prompt every time.
-
-Tokens are deliberately never written to disk: a kernel restart re-prompts
-(an interactive sign-in is cheap relative to the risk of a refresh token
-sitting in a plaintext file at rest).
+The token is held in a process-global, in-memory cache, so re-running a cell
+reuses it instead of re-prompting; a kernel restart re-prompts once. Tokens are
+deliberately never written to disk: an interactive sign-in is cheap relative to
+the risk of a refresh token sitting in a plaintext file at rest.
 
 Non-interactive contexts
 -------------------------

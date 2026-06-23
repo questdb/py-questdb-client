@@ -331,7 +331,7 @@ class AuthTestBase(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=5)
 
-    def make_auth(self, *, clock=None, groups_in_token=True, cache='memory',
+    def make_auth(self, *, clock=None, groups_in_token=True,
                   interactive=True, **kw):
         clock = clock or FakeClock()
         self._clock = clock
@@ -341,7 +341,6 @@ class AuthTestBase(unittest.TestCase):
             token_endpoint=self.base + '/token',
             scope='openid groups',
             groups_in_token=groups_in_token,
-            cache=cache,
             insecure=True,
             interactive=interactive,
             renderer=Renderer(),
@@ -631,7 +630,7 @@ class TestDeviceFlow(AuthTestBase):
             device_authorization_endpoint=self.base + '/device',
             token_endpoint=self.base + '/token',
             scope='groups', groups_in_token=True,  # no 'openid'
-            cache='memory', insecure=True, renderer=Renderer())
+            insecure=True, renderer=Renderer())
         self.assertIn('openid', auth.config.scope.split())
 
     def test_zero_expires_in_is_treated_as_unknown(self):
@@ -942,7 +941,7 @@ class TestRefresh(AuthTestBase):
             client_id='questdb',
             device_authorization_endpoint='http://127.0.0.1:1/device',
             token_endpoint='http://127.0.0.1:1/token',  # connection refused
-            scope='openid groups', groups_in_token=True, cache='memory',
+            scope='openid groups', groups_in_token=True,
             insecure=True, interactive=True, renderer=Renderer(),
             _clock=clock)
         expired = TokenSet(
@@ -1849,18 +1848,6 @@ class TestConfigHelpers(unittest.TestCase):
         self.assertEqual(settings_config({'acl.oidc.client.id': 'q'}),
                          {'acl.oidc.client.id': 'q'})
 
-    def test_make_cache_variants(self):
-        # The cache factory resolves the documented specs and rejects an
-        # unknown one with a typed error. See M4.
-        from questdb.auth._cache import make_cache, MemoryCache, NullCache
-        self.assertIsInstance(make_cache('memory'), MemoryCache)
-        self.assertIsInstance(make_cache(None), NullCache)
-        self.assertIsInstance(make_cache('none'), NullCache)
-        custom = MemoryCache()
-        self.assertIs(make_cache(custom), custom)  # a TokenCache passes through
-        with self.assertRaises(OidcConfigError):
-            make_cache('disk')
-
 
 class TestEndpointValidation(unittest.TestCase):
     def setUp(self):
@@ -1953,7 +1940,7 @@ class TestCacheKey(unittest.TestCase):
             client_id='questdb',
             device_authorization_endpoint='https://idp.example.com/device',
             token_endpoint='https://idp.example.com/token',
-            scope='openid groups', groups_in_token=True, cache='memory',
+            scope='openid groups', groups_in_token=True,
             renderer=Renderer())
         opts.update(kw)
         return OidcDeviceAuth(**opts)
@@ -2046,7 +2033,7 @@ class TestTransportSecurity(unittest.TestCase):
             client_id='questdb',
             device_authorization_endpoint='http://idp.example.com/device',
             token_endpoint='http://idp.example.com/token',
-            scope='openid', groups_in_token=False, cache='memory',
+            scope='openid', groups_in_token=False,
             insecure=True, interactive=True, renderer=Renderer(),
             _clock=FakeClock())
         with self.assertRaises(OidcConfigError):
