@@ -1520,47 +1520,138 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
         col_chunks, symbol_categories, np, pd, col_masks)
 
 
-cdef object _polars_dataframe_with_fast_symbols(object table, object pl, object pa):
-    # Build a polars DataFrame from a pyarrow Table. Non-dictionary columns
-    # go through pl.from_arrow unchanged, so their polars dtypes are
-    # identical to today. SYMBOL (dictionary) columns are built from their
-    # codes + categories via a positional gather, avoiding pl.from_arrow's
-    # per-row Dictionary->Categorical remap; the result is still Categorical.
+cdef class _PolarsSymbolRegistry:
+    """A polars ``Categories`` shared by every SYMBOL column on the same
+    (append-only) connection dictionary — interned once and grown as the dict
+    grows, so a QWP code is its own physical categorical code and casts straight
+    into a ``Categorical`` with no per-row remap (the Rust ``SymbolRegistry``
+    analog). The interned dictionary is pinned in ``base`` to stop polars'
+    auto-GC mapping from dropping it between calls."""
+    cdef object pl
+    cdef object cats
+    cdef object base
+    cdef object pinned
+    cdef Py_ssize_t n
+
+    def __cinit__(self, object pl):
+        self.pl = pl
+        self.cats = pl.Categories.random('questdb_symbol', physical=pl.UInt32)
+        self.base = None
+        self.pinned = None
+        self.n = 0
+
+    def accepts(self, object cats_arrow):
+        # True if this registry's Categories maps `cats_arrow`'s codes
+        # correctly: the smaller of (pinned, cats_arrow) must be a prefix of the
+        # larger. The connection dict is append-only, so columns sharing it only
+        # ever differ by a growth suffix; a column-local dict fails the check and
+        # gets its own registry. `equals` short-circuits on the shared buffer.
+        cdef Py_ssize_t m
+        if self.pinned is None:
+            return True
+        m = len(cats_arrow)
+        if m <= self.n:
+            return self.pinned.slice(0, m).equals(cats_arrow)
+        return cats_arrow.slice(0, self.n).equals(self.pinned)
+
+    def column(self, object name, object codes, object cats_arrow):
+        cdef object pl = self.pl
+        if cats_arrow is not None and len(cats_arrow) > self.n:
+            self.base = pl.Series(
+                pl.from_arrow(cats_arrow), dtype=pl.Categorical(self.cats))
+            self.pinned = cats_arrow
+            self.n = len(cats_arrow)
+        return codes.cast(pl.UInt32).cast(pl.Categorical(self.cats)).alias(name)
+
+
+cdef tuple _polars_dict_codes_cats(object col, object pl):
+    # col: a pyarrow ChunkedArray of dictionary type, one (growing, append-only)
+    # dict per chunk. Returns (polars Series of the dict indices with nulls
+    # preserved via Arrow validity, the full dictionary values array). Codes are
+    # global QWP codes — stable across the query — so the largest chunk
+    # dictionary covers every code. The indices flow straight from Arrow to
+    # polars (no numpy round-trip, no -1 sentinel).
+    cdef object cats = None
+    cdef list parts = []
+    cdef object ch, d
+    for ch in col.chunks:
+        d = ch.dictionary
+        if cats is None or len(d) > len(cats):
+            cats = d
+        parts.append(pl.from_arrow(ch.indices))
+    if parts:
+        return (pl.concat(parts) if len(parts) > 1 else parts[0], cats)
+    return (pl.Series([], dtype=pl.UInt32), cats)
+
+
+cdef object _polars_dataframe_hybrid(
+        object table, object pl, object pa, dict registries):
+    # SYMBOL (dictionary) columns are built from codes + dict via a `Categories`
+    # registry (low CPU, no per-row remap); every other column keeps its exact
+    # `pl.from_arrow` dtype. One shared registry (key -1) serves every column on
+    # the connection dict — interned once, not per column — and falls back to a
+    # per-column registry for a column-local dict. `registries` persists across
+    # batches so a streaming `iter_polars` stitches via one `Categories`.
     cdef list types = table.schema.types
     cdef list is_dict = [pa.types.is_dictionary(t) for t in types]
     if not any(is_dict):
         return pl.from_arrow(table)
     cdef list names = table.column_names
+    cdef list nd_idx = [i for i in range(len(types)) if not is_dict[i]]
+    nd = pl.from_arrow(table.select(nd_idx)) if nd_idx else None
+    cdef list cols = []
     cdef Py_ssize_t i
-    cols = []
+    cdef object codes, cats, reg
+    cdef object shared = registries.get(-1)
     for i in range(len(types)):
         if is_dict[i]:
-            cols.append(
-                _polars_categorical_from_arrow_dict(
-                    table.column(i), names[i], pl))
+            codes, cats = _polars_dict_codes_cats(table.column(i), pl)
+            if shared is None:
+                shared = _PolarsSymbolRegistry(pl)
+                registries[-1] = shared
+            if shared.accepts(cats):
+                reg = shared
+            else:
+                reg = registries.get(i)
+                if reg is None:
+                    reg = _PolarsSymbolRegistry(pl)
+                    registries[i] = reg
+            cols.append(reg.column(names[i], codes, cats))
         else:
-            cols.append(pl.from_arrow(table.column(i)).alias(names[i]))
+            cols.append(nd.get_column(names[i]))
     return pl.DataFrame(cols)
 
 
-cdef object _polars_categorical_from_arrow_dict(object col, object name, object pl):
-    # col: a pyarrow ChunkedArray of dictionary type, one (batch-local) dict
-    # per chunk. Unify them into one shared category index space, then build
-    # the polars Categorical by positionally gathering the codes — gather is
-    # positional, so a code indexes the categories directly with no per-row
-    # intern. Uses only stable public polars/pyarrow API (cross-version).
-    if col.num_chunks == 0:
-        return pl.Series(name, [], dtype=pl.Categorical)
-    arr = col.unify_dictionaries().combine_chunks()
-    categories = arr.dictionary.to_pylist()
-    idx = pl.from_arrow(arr.indices)
-    if len(categories) == 0:
-        return pl.Series(name, [None] * len(idx), dtype=pl.Categorical)
-    base = pl.Series(name, categories, dtype=pl.Categorical)
-    gather = getattr(base, 'gather', None)
-    if gather is None:
-        gather = base.take
-    return gather(idx).alias(name)
+cdef class _PolarsBatchIter:
+    """Streaming `polars.DataFrame` per result batch. Holds the per-symbol
+    `Categories` registries so every batch's Categoricals share one identity
+    and `pl.concat` stitches cleanly."""
+    cdef object reader
+    cdef object pl
+    cdef object pa
+    cdef dict registries
+    cdef bint use_hybrid
+
+    def __cinit__(self, _CursorHandle handle, object pl, object pa):
+        self.reader = _build_record_batch_reader(handle)
+        self.pl = pl
+        self.pa = pa
+        self.registries = {}
+        self.use_hybrid = getattr(pl, 'Categories', None) is not None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        batch = next(self.reader)
+        table = self.pa.Table.from_batches([batch])
+        if not self.use_hybrid:
+            return self.pl.from_arrow(table)
+        try:
+            return _polars_dataframe_hybrid(
+                table, self.pl, self.pa, self.registries)
+        except Exception:
+            return self.pl.from_arrow(table)
 
 
 cdef class _NumpyBatchIter:
@@ -1811,10 +1902,12 @@ class QueryResult:
 
         Non-``SYMBOL`` columns keep their exact ``polars.from_arrow`` dtypes
         (tz-aware ``Datetime``, ``Decimal``, ``Binary``, ``List``/``Array``,
-        …). ``SYMBOL`` columns are built into a polars ``Categorical`` from
-        their codes + dictionary via a positional gather, avoiding the
-        per-row ``Dictionary -> Categorical`` remap ``polars.from_arrow``
-        performs.
+        …). ``SYMBOL`` columns are built into a polars ``Categorical`` directly
+        from their codes + dictionary through a persistent ``Categories``
+        registry — the wire code is its own physical categorical code, so
+        there is no per-row ``Dictionary -> Categorical`` remap. Falls back to
+        ``polars.from_arrow`` when polars' (unstable) ``Categories`` API is
+        unavailable.
 
         Materialise-whole: a mid-query failover replays the result
         transparently. This accumulates batches in-library (via pyarrow)
@@ -1840,7 +1933,12 @@ class QueryResult:
         if schema is None:
             return pl.from_arrow(pa.table({}))
         table = pa.Table.from_batches(batches, schema)
-        return _polars_dataframe_with_fast_symbols(table, pl, pa)
+        if getattr(pl, 'Categories', None) is None:
+            return pl.from_arrow(table)
+        try:
+            return _polars_dataframe_hybrid(table, pl, pa, {})
+        except Exception:
+            return pl.from_arrow(table)
 
     def _to_pandas_numpy(self):
         return _numpy_frame_from_cursor(self._take_cursor_handle())
@@ -1880,6 +1978,33 @@ class QueryResult:
         for batch in self.iter_arrow():
             table = _table_signed_dict_indices(pa.Table.from_batches([batch]))
             yield table.to_pandas(**kwargs)
+
+    def iter_polars(self):
+        """Iterate result batches as ``polars.DataFrame``.
+
+        Mirrors :meth:`to_polars` per batch (same ``Categorical`` SYMBOL
+        handling) for streaming / low-peak-memory consumption. Every batch's
+        SYMBOL Categoricals share one persistent ``Categories`` identity, so
+        ``polars.concat`` over the yielded frames stitches without a
+        categories-mismatch error.
+
+        Streaming: a mid-query failover after the first batch has been yielded
+        surfaces ``IngressErrorCode.FailoverWouldDuplicate``; re-issue the
+        query. Requires polars and pyarrow.
+        """
+        try:
+            import polars as pl
+        except ImportError as ie:
+            raise ImportError(
+                '`polars` is required for `iter_polars()`. '
+                'Install with `pip install polars`.') from ie
+        try:
+            import pyarrow as pa
+        except ImportError as ie:
+            raise ImportError(
+                '`pyarrow` is required for `iter_polars()`. '
+                'Install with `pip install pyarrow`.') from ie
+        return _PolarsBatchIter(self._take_cursor_handle(), pl, pa)
 
     def cancel(self):
         """Ask the server to stop streaming. Idempotent.

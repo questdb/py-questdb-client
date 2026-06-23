@@ -2149,6 +2149,54 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_to_polars_and_iter_polars_symbol_categorical(self):
+        """SYMBOL egresses as a polars ``Categorical`` (codes + dict via the
+        registry, no per-row remap), nulls preserved. ``iter_polars`` over a
+        multi-batch result stitches via ``pl.concat`` to the same frame —
+        every batch shares one ``Categories`` identity."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import numpy as np
+        n = 100000
+        table_name = 't_egress_iterpolars_' + uuid.uuid4().hex[:8]
+        exp = [None if i % 11 == 0 else f'sym_{i % 100}' for i in range(n)]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, sym SYMBOL, v LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            df = pd.DataFrame({
+                'ts': pd.to_datetime(np.arange(n), unit='s', utc=True),
+                'sym': pd.Series(exp, dtype='string[pyarrow]'),
+                'v': np.arange(n, dtype=np.int64),
+            })
+            with qi.Client.from_conf(self._conf()) as client:
+                client.dataframe(
+                    df, table_name=table_name, at='ts', symbols=['sym'])
+            self.qdb_plain.retry_check_table(table_name, min_rows=n)
+            sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+            with qi.Client.from_conf(self._conf()) as client:
+                full = client.query(sql).to_polars()
+            self.assertEqual(full.shape, (n, 2))
+            self.assertIsInstance(full.schema['sym'], pl.Categorical)
+            self.assertGreater(full['sym'].null_count(), 0)
+            self.assertEqual(full['v'].to_list(), list(range(n)))
+            self.assertEqual(full['sym'].cast(pl.Utf8).to_list(), exp)
+            with qi.Client.from_conf(self._conf()) as client:
+                frames = list(client.query(sql).iter_polars())
+            self.assertGreater(len(frames), 1)
+            stitched = pl.concat(frames, how='vertical')
+            self.assertIsInstance(stitched.schema['sym'], pl.Categorical)
+            self.assertEqual(stitched['v'].to_list(), list(range(n)))
+            self.assertEqual(stitched['sym'].cast(pl.Utf8).to_list(), exp)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def _make_table(self, table_name, rows):
         self._exec(
             f'CREATE TABLE {table_name} '

@@ -980,6 +980,12 @@ class QueryResult:
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""
 
+    def iter_polars(self) -> Iterator[Any]:
+        """Iterate result batches as ``polars.DataFrame`` (streaming /
+        low-peak-memory). Batches share one ``Categories`` identity so
+        ``polars.concat`` over them stitches cleanly. Requires polars and
+        pyarrow."""
+
     def iter_pandas(
         self,
         *,
