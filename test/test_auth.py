@@ -890,6 +890,39 @@ class TestRefresh(AuthTestBase):
         self.assertEqual(self.state.refresh_requests, 1)
         self.assertEqual(self.state.device_requests, 0)  # no re-prompt
 
+    def test_skew_window_triggers_proactive_refresh(self):
+        # The point of the cache+skew design: a token still within its lifetime
+        # but inside the 30s clock-skew margin is refreshed PROACTIVELY (silently
+        # via the refresh_token) so a fresh connection never races a mid-flight
+        # 401 — and with no device prompt. Every other refresh test seeds a
+        # fully-expired token (valid even at skew=0); this is the only end-to-end
+        # exercise of the skew window itself. See M4.
+        auth = self.make_auth()
+        now = self._clock.now()
+        seeded = TokenSet(
+            access_token='old-access', id_token='old-id',
+            refresh_token='REFRESH-1',
+            issued_at=now - 50,    # 65s lifetime, so the adaptive cap
+            expires_at=now + 15)   # (lifetime/2) doesn't bite -> full 30s skew
+        # Not actually expired (still valid at skew=0), but inside the real skew.
+        self.assertTrue(seeded.is_valid(now, skew=0))
+        self.assertFalse(seeded.is_valid(now))
+        self.assertLess(now, seeded.expires_at)
+        auth._cache.store(auth.cache_key, seeded)
+
+        token = auth.token()
+
+        self.assertEqual(token, ID_TOKEN)                 # groups mode -> id_token
+        self.assertEqual(self.state.refresh_requests, 1)  # refreshed once...
+        self.assertEqual(self.state.device_requests, 0)   # ...with NO prompt
+        self.assertEqual(
+            self.state.refresh_forms[0]['refresh_token'], 'REFRESH-1')
+        # The refreshed token is cached: a second call neither refreshes nor
+        # prompts (it is now far from expiry).
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(self.state.device_requests, 0)
+
     def test_refresh_failure_falls_back_to_device_flow(self):
         auth = self.make_auth()
         self._seed_expired(auth)
