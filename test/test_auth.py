@@ -513,6 +513,20 @@ class TestDeviceFlow(AuthTestBase):
         self.assertTrue(self._clock.sleeps)
         self.assertLessEqual(max(self._clock.sleeps), _MAX_POLL_INTERVAL)
 
+    def test_small_interval_clamped_to_min(self):
+        # A sub-5s advertised interval is raised to the RFC 8628 default (5s):
+        # we never poll faster than the spec baseline.
+        from questdb.auth._device import _MIN_POLL_INTERVAL
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'X',
+            'verification_uri': 'https://idp/device',
+            'expires_in': 600, 'interval': 1,
+        }
+        self.state.token_script = [(200, None)]
+        auth = self.make_auth()
+        auth.token()
+        self.assertEqual(self._clock.sleeps, [_MIN_POLL_INTERVAL])
+
     def test_oversized_expires_in_is_capped(self):
         # A hostile expires_in must not keep the poll loop (and the lock) alive
         # indefinitely; the lifetime is capped so a never-authorized flow still

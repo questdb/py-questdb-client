@@ -66,6 +66,7 @@ _DEFAULT_EXPIRES_IN = 3600
 # (and lock) alive indefinitely.
 _DEFAULT_DEVICE_CODE_LIFETIME = 600   # expires_in fallback (absent/invalid/<=0)
 _MAX_DEVICE_CODE_LIFETIME = 1800      # cap on how long we keep polling
+_MIN_POLL_INTERVAL = 5                # floor on the poll interval (RFC 8628 default)
 _MAX_POLL_INTERVAL = 60               # cap on the poll interval (incl. slow_down)
 
 
@@ -652,9 +653,10 @@ class OidcDeviceAuth:
             interval = int(resp.get('interval', self._default_interval))
         except (TypeError, ValueError, OverflowError):
             interval = self._default_interval
-        # At least 1s (RFC 8628 floor), capped so a hostile value can't pin the
-        # polling thread (which holds the lock) in one enormous sleep.
-        interval = min(_MAX_POLL_INTERVAL, max(1, interval))
+        # Floor at the RFC 8628 default (5s) so we never poll faster than the
+        # spec baseline; cap so a hostile value can't pin the polling thread
+        # (which holds the lock) in one enormous sleep.
+        interval = min(_MAX_POLL_INTERVAL, max(_MIN_POLL_INTERVAL, interval))
         try:
             expires_in = int(resp.get('expires_in', _DEFAULT_DEVICE_CODE_LIFETIME))
         except (TypeError, ValueError, OverflowError):
