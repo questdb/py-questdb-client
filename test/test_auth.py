@@ -1126,13 +1126,6 @@ class TestDiscovery(AuthTestBase):
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth.from_questdb(self.base, insecure=True)
 
-    def test_loopback_flow_not_implemented(self):
-        # Reserved-but-unimplemented flow raises an OidcError subclass so it's
-        # caught by `except OidcError` like other config problems.
-        with self.assertRaises(OidcConfigError):
-            OidcDeviceAuth.from_questdb(self.base, flow='loopback',
-                                        insecure=True)
-
     def test_endpoint_origin_mismatch_rejected(self):
         # /settings advertises the device endpoint on a different origin than
         # the token endpoint: refuse rather than POST credentials off-origin.

@@ -57,8 +57,6 @@ from ._render import (
 DEVICE_CODE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
 REFRESH_GRANT = 'refresh_token'
 
-_VALID_FLOWS = ('auto', 'device', 'loopback')
-
 # A non-positive expires_in is non-conformant; treat it as "unknown".
 _DEFAULT_EXPIRES_IN = 3600
 
@@ -265,7 +263,6 @@ class OidcDeviceAuth:
             discovery_url: Optional[str] = None,
             token_endpoint: Optional[str] = None,
             device_authorization_endpoint: Optional[str] = None,
-            flow: str = 'auto',
             cache: Any = 'memory',
             insecure: bool = False,
             ca_bundle: Optional[str] = None,
@@ -284,7 +281,6 @@ class OidcDeviceAuth:
         device-authorization endpoint when QuestDB doesn't advertise it. Any
         explicit keyword overrides discovery.
         """
-        _validate_flow(flow)
         ctx = build_ssl_context(ca_bundle)
         cfg = resolve_config(
             questdb_url=url,
@@ -783,17 +779,6 @@ class OidcDeviceAuth:
                 webbrowser.open(target)
             except Exception:
                 pass
-
-
-def _validate_flow(flow: str) -> None:
-    if flow not in _VALID_FLOWS:
-        raise OidcConfigError(
-            f'Unknown flow {flow!r}; expected one of {_VALID_FLOWS}.')
-    if flow == 'loopback':
-        raise OidcConfigError(
-            "The 'loopback' (Authorization Code + PKCE) flow is not yet "
-            "implemented. Use flow='device' (works on local and remote "
-            'kernels alike).')
 
 
 def _normalize_url(url: str) -> str:
