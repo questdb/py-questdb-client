@@ -85,14 +85,28 @@ class _SystemClock:
 _SYSTEM_CLOCK = _SystemClock()
 
 
+def _str_or_none(value: Any) -> Optional[str]:
+    """
+    A credential/token field from an untrusted JSON response as a ``str``, else
+    ``None``.
+
+    A non-string token (a JSON number/bool/object from a buggy or hostile IdP)
+    reads as absent so it is never stored, sent on a refresh, or emitted as
+    ``Bearer <non-str>`` — and can't crash the best-effort JWT decode. A missing
+    required kind then raises the clear terminal error rather than caching an
+    unusable token.
+    """
+    return value if isinstance(value, str) else None
+
+
 def _decode_jwt_claims(token: Optional[str]) -> Dict[str, Any]:
     """
     Best-effort decode of a JWT payload **without signature verification**.
 
     Used only to show a friendly identity in the sign-in message; QuestDB does
-    the real validation. Returns ``{}`` for opaque/invalid tokens.
+    the real validation. Returns ``{}`` for opaque/invalid or non-string tokens.
     """
-    if not token or token.count('.') < 2:
+    if not isinstance(token, str) or token.count('.') < 2:
         return {}
     try:
         payload = token.split('.')[1]
@@ -512,13 +526,21 @@ class OidcDeviceAuth:
         # Cap a long (or hostile) IdP-stated lifetime so a cached token is
         # re-validated at least hourly (matches the Java client).
         expires_in = min(expires_in, _MAX_EXPIRES_IN)
-        claims = (_decode_jwt_claims(body.get('id_token'))
-                  or _decode_jwt_claims(body.get('access_token')))
+        # Coerce the credential fields to str-or-None up front: a non-string
+        # token from a buggy/hostile IdP must read as absent rather than be
+        # stored, re-sent on a refresh, or emitted as ``Bearer <non-str>`` — and
+        # the best-effort JWT decode below must not see a non-string. A missing
+        # required kind then raises the clear terminal error (see _select).
+        access_token = _str_or_none(body.get('access_token'))
+        id_token = _str_or_none(body.get('id_token'))
+        refresh_token = _str_or_none(body.get('refresh_token'))
+        claims = (_decode_jwt_claims(id_token)
+                  or _decode_jwt_claims(access_token))
         now = self._now()
         return TokenSet(
-            access_token=body.get('access_token'),
-            id_token=body.get('id_token'),
-            refresh_token=body.get('refresh_token'),
+            access_token=access_token,
+            id_token=id_token,
+            refresh_token=refresh_token,
             expires_at=now + expires_in,
             issued_at=now,
             token_type=body.get('token_type', 'Bearer'),

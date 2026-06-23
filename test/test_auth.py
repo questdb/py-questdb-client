@@ -713,6 +713,36 @@ class TestDeviceFlow(AuthTestBase):
         auth = self.make_auth()
         self.assertEqual(auth.token(), nested)
 
+    def test_non_string_token_fields_do_not_crash(self):
+        # A buggy/hostile IdP returning a non-string access_token / id_token (a
+        # JSON number/bool/object) must not crash token() with a raw
+        # AttributeError from the best-effort JWT decode, nor be stored and
+        # emitted as ``Bearer <non-str>``. The non-string token reads as absent,
+        # so the grant fails with the clear terminal error and nothing is
+        # cached. See M2.
+        self.state.token_script = [(200, {
+            'access_token': 12345, 'id_token': {'not': 'a-jwt'},
+            'token_type': 'Bearer', 'expires_in': 3600})]
+        auth = self.make_auth()  # groups_in_token=False -> needs access_token
+        with self.assertRaises(OidcDeviceFlowError):
+            auth.token()
+        self.assertIsNone(auth._tokens)  # nothing was cached
+
+    def test_tokenset_from_response_coerces_non_string_credentials(self):
+        # _tokenset_from_response coerces every non-string credential field to
+        # None (treated as absent), and _decode_jwt_claims is total on any
+        # non-string input. See M2.
+        from questdb.auth._device import _decode_jwt_claims
+        auth = self.make_auth()
+        ts = auth._tokenset_from_response({
+            'access_token': 123, 'id_token': True,
+            'refresh_token': ['x'], 'expires_in': 3600})
+        self.assertIsNone(ts.access_token)
+        self.assertIsNone(ts.id_token)
+        self.assertIsNone(ts.refresh_token)
+        for bad in (123, 1.5, True, {'a': 1}, [1, 2], None, ''):
+            self.assertEqual(_decode_jwt_claims(bad), {})
+
     def test_idp_requests_use_configured_timeout(self):
         # The device-code / poll / refresh POSTs must use the configured
         # timeout, so a stalled IdP can't pin the acquisition lock for the
