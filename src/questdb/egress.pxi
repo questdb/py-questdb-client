@@ -1378,6 +1378,26 @@ cdef tuple _numpy_extract_meta(const reader_batch* batch):
     return (col_names, col_kinds, col_scales, col_precision, has_symbol)
 
 
+cdef object _FROM_CODES_HAS_VALIDATE = None
+
+
+cdef object _symbol_from_codes(object pd, object arr, object dtype):
+    # SYMBOL codes come straight off the QWP wire — every code is a valid index
+    # into the dict (or -1 for null) — so skip pandas' O(rows) bounds
+    # re-validation. `validate=` exists since pandas 1.1; older pandas keeps the
+    # checked path. `dtype=` reuses one cached category Index across columns and
+    # batches (vs `categories=`, which rebuilds it every call).
+    global _FROM_CODES_HAS_VALIDATE
+    if _FROM_CODES_HAS_VALIDATE is None:
+        import inspect
+        _FROM_CODES_HAS_VALIDATE = (
+            'validate' in inspect.signature(
+                pd.Categorical.from_codes).parameters)
+    if _FROM_CODES_HAS_VALIDATE:
+        return pd.Categorical.from_codes(arr, dtype=dtype, validate=False)
+    return pd.Categorical.from_codes(arr, dtype=dtype)
+
+
 cdef object _numpy_assemble_frame(
         list col_names, list col_kinds, list col_scales,
         list col_precision, list col_chunks, list symbol_categories,
@@ -1394,16 +1414,14 @@ cdef object _numpy_assemble_frame(
         else:
             arr = np.concatenate(chunks)
         if kind == reader_column_kind_symbol:
-            # Passing categories=<list> makes pandas rebuild the category
-            # Index on every call -- O(batches x cardinality) for the per-batch
-            # iterator on high-cardinality SYMBOLs. When the caller supplies a
-            # prebuilt (cached) CategoricalDtype, reuse it via dtype= so the
-            # Index is built once (see _NumpyBatchIter).
-            if symbol_dtype is not None:
-                arr = pd.Categorical.from_codes(arr, dtype=symbol_dtype)
-            else:
-                arr = pd.Categorical.from_codes(
-                    arr, categories=symbol_categories)
+            # Build the category Index once (here for fetch-all, or supplied
+            # pre-built by `_NumpyBatchIter` across batches) and reuse it via
+            # `dtype=` for every SYMBOL column, then build from the codes with no
+            # bounds re-validation. Avoids the O(columns/batches x cardinality)
+            # Index rebuild + validation the `categories=`/validate path costs.
+            if symbol_dtype is None:
+                symbol_dtype = pd.CategoricalDtype(symbol_categories)
+            arr = _symbol_from_codes(pd, arr, symbol_dtype)
         elif _is_hybrid_int(kind):
             mask = _combine_hybrid_mask(chunks, col_masks[col_idx], np)
             if mask is not None:
@@ -1584,6 +1602,30 @@ cdef tuple _polars_dict_codes_cats(object col, object pl):
     return (pl.Series([], dtype=pl.UInt32), cats)
 
 
+cdef object _polars_nonsymbol_frame(
+        object table, list nd_idx, object pl, object pa):
+    # `pl.from_arrow` for the non-SYMBOL columns. Utf8 / LargeUtf8 columns are
+    # first cast to Arrow `string_view` (when pyarrow exposes it) so polars
+    # adopts the byte/view buffers zero-copy — its `String` dtype *is* the view
+    # ("German strings") layout — instead of rebuilding the view from the offset
+    # layout. Fixed-width columns are already adopted zero-copy.
+    if not nd_idx:
+        return None
+    cdef object tbl = table.select(nd_idx)
+    cdef object types = tbl.schema.types
+    cdef object sv = getattr(pa, 'string_view', None)
+    cdef Py_ssize_t j
+    if sv is not None and any(
+            pa.types.is_string(t) or pa.types.is_large_string(t) for t in types):
+        import pyarrow.compute as pc
+        for j in range(len(types)):
+            if pa.types.is_string(types[j]) or pa.types.is_large_string(types[j]):
+                tbl = tbl.set_column(
+                    j, tbl.schema.field(j).with_type(sv()),
+                    pc.cast(tbl.column(j), sv()))
+    return pl.from_arrow(tbl)
+
+
 cdef object _polars_dataframe_hybrid(
         object table, object pl, object pa, dict registries):
     # SYMBOL (dictionary) columns are built from codes + dict via a `Categories`
@@ -1598,7 +1640,7 @@ cdef object _polars_dataframe_hybrid(
         return pl.from_arrow(table)
     cdef list names = table.column_names
     cdef list nd_idx = [i for i in range(len(types)) if not is_dict[i]]
-    nd = pl.from_arrow(table.select(nd_idx)) if nd_idx else None
+    nd = _polars_nonsymbol_frame(table, nd_idx, pl, pa)
     cdef list cols = []
     cdef Py_ssize_t i
     cdef object codes, cats, reg
