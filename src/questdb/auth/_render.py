@@ -33,8 +33,8 @@ falling back to plain text on a terminal. Not required for ``token()`` /
 from __future__ import annotations
 
 import html
-import re
 import sys
+import unicodedata
 import urllib.parse
 from typing import Any, Dict, Optional, TextIO
 
@@ -120,13 +120,21 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
             f'rel="noopener noreferrer">{label}</a>')
 
 
-# Strips C0/C1/ESC, bidi overrides, zero-width and line/paragraph separators
-# — all can spoof the prompt (e.g. U+202E reverses a URL's host). Applied to
-# untrusted device-response fields on both paths; html.escape would not catch
-# these.
-_CONTROL_CHARS = re.compile(
-    r'[\x00-\x1f\x7f-\x9f\u00ad\u061c\u115f\u180e\u200b-\u200f'
-    r'\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb]')
+# Untrusted device-response fields are echoed to a TTY / notebook DOM, where a
+# control, bidi-override (e.g. U+202E reverses a URL's host) or zero-width char
+# could spoof the prompt or hide the real sign-in URL (html.escape guards
+# markup, not these). Strip by Unicode general category so a newly-assigned
+# format codepoint is covered automatically, rather than an enumerated regex
+# that silently misses additions: control (Cc), format (Cf: bidi / zero-width /
+# soft hyphen / tag chars / the deprecated U+206x), unassigned (Cn),
+# private-use (Co), surrogates (Cs) and line/paragraph separators (Zl/Zp).
+# Spaces (Zs) and combining marks (Mn, e.g. accents) are kept so a legitimate
+# URL/identity still renders.
+_STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Zl', 'Zp'})
+# Invisible characters Unicode classifies as letters (category Lo), so the rule
+# above won't catch them, but they render as nothing and are used to hide/spoof
+# text: the Hangul fillers. Stripped explicitly.
+_STRIP_EXTRA = frozenset('\u115f\u1160\u3164\uffa0')
 
 
 def _strip_control(text: Optional[str]) -> str:
@@ -140,7 +148,10 @@ def _strip_control(text: Optional[str]) -> str:
     """
     if not text:
         return ''
-    return _CONTROL_CHARS.sub('', text)
+    return ''.join(
+        ch for ch in text
+        if ch not in _STRIP_EXTRA
+        and unicodedata.category(ch) not in _STRIP_CATEGORIES)
 
 
 def format_prompt(resp: Dict[str, Any]) -> str:

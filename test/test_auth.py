@@ -2667,7 +2667,12 @@ class TestRendererSecurity(unittest.TestCase):
         for cp in (0x202e, 0x202d, 0x2066, 0x2069, 0x200b, 0x200f,
                    0x2028, 0x2029, 0xfeff,
                    # also the format/bidi code points added for M3:
-                   0x00ad, 0x061c, 0x115f, 0x180e, 0x2060, 0x2064, 0xfff9):
+                   0x00ad, 0x061c, 0x115f, 0x180e, 0x2060, 0x2064, 0xfff9,
+                   # the category-based strip also covers the deprecated U+206x
+                   # format chars, the Tags block, unassigned code points,
+                   # Arabic format marks and the other invisible Hangul fillers:
+                   0x206a, 0x206f, 0x2065, 0xe0001, 0xe007f, 0x0600,
+                   0x1160, 0x3164, 0xffa0):
             self.assertEqual(_strip_control('a' + chr(cp) + 'b'), 'ab',
                              f'U+{cp:04X} not stripped')
         # Legitimate text (incl. accents / CJK / printable ASCII) is preserved.
