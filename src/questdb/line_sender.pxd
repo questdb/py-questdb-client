@@ -1052,6 +1052,11 @@ cdef extern from "questdb/egress/reader.h":
         reader_error** err_out
         ) noexcept nogil
 
+    void reader_query_set_reset_symbol_dict(
+        reader_query* query,
+        cbool reset
+        ) noexcept nogil
+
     reader_cursor* reader_execute(
         reader* reader,
         line_sender_utf8 sql,
