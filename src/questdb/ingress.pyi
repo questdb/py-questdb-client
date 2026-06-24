@@ -934,9 +934,17 @@ class Client:
           exporters, wrapped into a one-batch ``pa.Table``).
         """
 
-    def query(self, sql: str) -> QueryResult:
+    def query(self, sql: str, *, reset_symbol_dict: bool = True) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
+
+        When ``reset_symbol_dict`` is ``True`` (the default), the server resets
+        the connection's SYMBOL dictionary before this query (query-scoped
+        dict), so it never inherits symbols from earlier queries on the pooled
+        connection — avoiding cross-query dictionary bloat in ``to_polars()`` /
+        ``to_pandas()``. Set ``False`` to keep the dictionary warm across
+        repeated identical queries. No-op against servers that predate the
+        capability.
         """
 
     def reap_idle(self) -> int:

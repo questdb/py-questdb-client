@@ -339,7 +339,8 @@ cdef void _failover_reset_trampoline(
     (<int*>user_data)[0] += 1
 
 
-cdef _CursorHandle _execute_query(_ReaderHandle reader_handle, str sql):
+cdef _CursorHandle _execute_query(
+        _ReaderHandle reader_handle, str sql, bint reset_symbol_dict=True):
     """Execute a SQL query and return a _CursorHandle.
 
     The query is prepared with an ``on_failover_reset`` trampoline that
@@ -376,6 +377,8 @@ cdef _CursorHandle _execute_query(_ReaderHandle reader_handle, str sql):
                 IngressErrorCode.ServerFlushError,
                 'reader_prepare returned NULL without setting err')
         raise _reader_err_to_py(err)
+
+    reader_query_set_reset_symbol_dict(query, reset_symbol_dict)
 
     reader_query_on_failover_reset(
         query, _failover_reset_trampoline, <void*>&handle._reset_seq)

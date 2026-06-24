@@ -5422,7 +5422,7 @@ cdef class Client:
             dataframe_plan_release(plan)
             plan[0] = dataframe_plan_blank()
 
-    def query(self, str sql) -> QueryResult:
+    def query(self, str sql, *, bint reset_symbol_dict=True) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
 
@@ -5434,6 +5434,14 @@ cdef class Client:
         settings apply to both directions.
 
         :param sql: SQL text to execute. Forwarded verbatim to QuestDB.
+
+        :param reset_symbol_dict: When ``True`` (the default), the server
+            resets the connection's SYMBOL dictionary before this query so it
+            never inherits symbols from earlier queries on the pooled
+            connection (query-scoped dict), avoiding cross-query dictionary
+            bloat in ``to_polars()`` / ``to_pandas()``. Set ``False`` to keep
+            the dictionary warm across repeated identical queries. No-op
+            against servers that predate the capability.
 
         :return: A :class:`QueryResult`. Materialise it via
             ``to_pandas()``, ``to_arrow()``, ``iter_arrow()``,
@@ -5459,7 +5467,7 @@ cdef class Client:
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
-            cursor_handle = _execute_query(reader_handle, sql)
+            cursor_handle = _execute_query(reader_handle, sql, reset_symbol_dict)
         finally:
             self._end_db_use()
         return QueryResult(cursor_handle)
