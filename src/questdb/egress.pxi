@@ -144,7 +144,8 @@ cdef class _CursorHandle:
         self._free()
 
 
-cdef object _fetch_one_batch(_CursorHandle handle, object pa_module):
+cdef object _fetch_one_batch(
+        _CursorHandle handle, object pa_module, bint compact=False):
     """Pull one batch via reader_cursor_next_arrow_batch.
 
     Returns:
@@ -165,8 +166,12 @@ cdef object _fetch_one_batch(_CursorHandle handle, object pa_module):
                 IngressErrorCode.InvalidApiCall,
                 'cursor is closed')
         with nogil:
-            result = reader_cursor_next_arrow_batch(
-                cursor, &array, &schema, &err)
+            if compact:
+                result = reader_cursor_next_arrow_batch_compact(
+                    cursor, &array, &schema, &err)
+            else:
+                result = reader_cursor_next_arrow_batch(
+                    cursor, &array, &schema, &err)
 
     if result == reader_arrow_batch_ok:
         # Hand ownership of the array + schema buffers to pyarrow.
@@ -194,7 +199,8 @@ cdef object _fetch_one_batch(_CursorHandle handle, object pa_module):
     raise _reader_err_to_py(err)
 
 
-cdef tuple _fetch_all_record_batches(_CursorHandle handle, object pa_module):
+cdef tuple _fetch_all_record_batches(
+        _CursorHandle handle, object pa_module, bint compact=False):
     """Drain the cursor into a list of ``pyarrow.RecordBatch`` we own.
 
     The materialise-whole entry points install the failover-reset
@@ -212,7 +218,7 @@ cdef tuple _fetch_all_record_batches(_CursorHandle handle, object pa_module):
     cdef object batch
     try:
         while True:
-            batch = _fetch_one_batch(handle, pa_module)
+            batch = _fetch_one_batch(handle, pa_module, compact)
             if handle._reset_seq != seen_seq:
                 # Mid-query failover replayed from batch-0: drop the
                 # pre-failover accumulation and re-pin the schema.
@@ -232,7 +238,8 @@ cdef tuple _fetch_all_record_batches(_CursorHandle handle, object pa_module):
     return (schema, batches)
 
 
-cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
+cdef object _build_record_batch_reader(
+        _CursorHandle cursor_handle, bint compact=False):
     """Construct a pyarrow.RecordBatchReader over the cursor.
 
     Peeks the first batch to capture the stream schema, then yields
@@ -244,7 +251,7 @@ cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
     import pyarrow as pa
 
     cdef int seen_seq = cursor_handle._reset_seq
-    first = _fetch_one_batch(cursor_handle, pa)
+    first = _fetch_one_batch(cursor_handle, pa, compact)
     if first is None:
         # Empty result: cursor already reached terminal cleanly.
         # Safe to return the reader to its pool.
@@ -259,7 +266,7 @@ cdef object _build_record_batch_reader(_CursorHandle cursor_handle):
         try:
             yield first
             while True:
-                nxt = _fetch_one_batch(cursor_handle, pa)
+                nxt = _fetch_one_batch(cursor_handle, pa, compact)
                 if cursor_handle._reset_seq != seen_seq:
                     # Mid-query failover after batches were already
                     # yielded: the replayed batch-0 would duplicate what
@@ -578,7 +585,7 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
             prod.exhausted = True
             return -1
         with nogil:
-            result = reader_cursor_next_arrow_batch(
+            result = reader_cursor_next_arrow_batch_compact(
                 cursor, &local_array, &local_schema, &err)
     if result == reader_arrow_batch_ok:
         if prod.cursor_handle._reset_seq != prod.seen_seq:
@@ -780,28 +787,56 @@ cdef object _numpy_nullable_mapping():
     return _NUMPY_NULLABLE_CACHE
 
 
-cdef object _table_signed_dict_indices(object table):
-    """Recast dictionary columns whose index type is unsigned to int32.
+cdef object _table_shared_symbol_dict(object table):
+    """Collapse every dictionary (SYMBOL) column so all chunks share ONE
+    dictionary, and recast its index to signed int32.
 
-    QuestDB SYMBOL egresses as ``dictionary(uint32, utf8)`` and pandas
-    rejects unsigned dictionary indices; symbol cardinality fits int32.
-    Returns the table unchanged when no column needs it.
+    QuestDB SYMBOL egresses as ``dictionary(uint32, utf8)``, one chunk per wire
+    batch, each carrying the full append-only connection dict with global,
+    query-stable codes — so the last chunk's dictionary is the largest and
+    covers every code (same invariant as ``_polars_dict_codes_cats``). A generic
+    consumer (``Table.to_pandas`` / a foreign Arrow reader) otherwise re-unifies
+    the per-batch dictionaries — ``O(batches × cardinality)``, which dominates
+    high-cardinality SYMBOL egress. Re-pointing every chunk at that one shared
+    dictionary makes the unify a no-op (codes are already valid against the
+    superset). The index is also recast to int32 because pandas rejects unsigned
+    dictionary indices (symbol cardinality fits int32). Returns the table
+    unchanged when no column is a dictionary.
     """
     import pyarrow as pa
-    schema = table.schema
-    cdef list fields = []
+    cdef object schema = table.schema
     cdef bint changed = False
-    for field in schema:
+    cdef list cols = []
+    cdef list fields = []
+    cdef object field, ty, col, shared, signed_ty
+    cdef Py_ssize_t i, j, n
+    for i in range(table.num_columns):
+        field = schema.field(i)
         ty = field.type
-        if (pa.types.is_dictionary(ty)
-                and pa.types.is_unsigned_integer(ty.index_type)):
-            field = field.with_type(
-                pa.dictionary(pa.int32(), ty.value_type, ty.ordered))
-            changed = True
-        fields.append(field)
+        if not pa.types.is_dictionary(ty):
+            cols.append(table.column(i))
+            fields.append(field)
+            continue
+        changed = True
+        col = table.column(i)
+        signed_ty = pa.dictionary(pa.int32(), ty.value_type, ty.ordered)
+        n = col.num_chunks
+        if n == 0:
+            cols.append(col.cast(signed_ty))
+        else:
+            # Append-only => the last chunk's dict is the superset; rebase every
+            # chunk's (int32-recast) codes onto it so they share one dictionary.
+            shared = col.chunk(n - 1).dictionary
+            cols.append(pa.chunked_array(
+                [pa.DictionaryArray.from_arrays(
+                    col.chunk(j).indices.cast(pa.int32()), shared)
+                 for j in range(n)],
+                type=signed_ty))
+        fields.append(field.with_type(signed_ty))
     if not changed:
         return table
-    return table.cast(pa.schema(fields, metadata=schema.metadata))
+    return pa.Table.from_arrays(
+        cols, schema=pa.schema(fields, metadata=schema.metadata))
 
 
 cdef dict _KIND_NAMES = {
@@ -1885,6 +1920,15 @@ class QueryResult:
     ``iter_arrow`` / ``iter_pandas`` are convenience wrappers that
     do require pyarrow.
 
+    **SYMBOL columns**: ``to_polars`` / ``to_pandas`` build the Categorical
+    directly, interning the connection dictionary once (no per-row remap).
+    ``to_arrow`` / ``iter_arrow`` / ``__arrow_c_stream__`` emit a generic Arrow
+    form whose per-batch SYMBOL dictionary is compacted to the values each
+    batch uses, which a generic consumer reconciles. So when the target is a
+    polars / pandas frame, the dedicated methods avoid the re-reconciliation
+    that ``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+    SYMBOL-heavy results.
+
     Example::
 
         with client.query('SELECT * FROM trades WHERE ts > $1') as result:
@@ -1912,6 +1956,11 @@ class QueryResult:
         return handle
 
     def __arrow_c_stream__(self, requested_schema=None):
+        """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
+        columns arrive compact — each batch's dictionary holds only the values
+        it references — so a consumer that unifies per-batch dictionaries
+        (e.g. ``polars.from_arrow``) reconciles them.
+        """
         if requested_schema is not None:
             raise NotImplementedError(
                 'requested_schema is not supported; consume the stream '
@@ -1934,7 +1983,7 @@ class QueryResult:
         """
         import pyarrow as pa
         handle = self._take_cursor_handle()
-        schema, batches = _fetch_all_record_batches(handle, pa)
+        schema, batches = _fetch_all_record_batches(handle, pa, True)
         if schema is None:
             return pa.table({})
         return pa.Table.from_batches(batches, schema)
@@ -1942,8 +1991,8 @@ class QueryResult:
     def to_pandas(self, *, dtype_backend=None, types_mapper=None):
         """Read the full result into a ``pandas.DataFrame``.
 
-        The default is a native (no pyarrow), DuckDB-style hybrid built
-        straight from the QWP column buffers: a nullable integer column
+        The default is a native (no pyarrow) hybrid built straight from
+        the QWP column buffers: a nullable integer column
         with nulls becomes a pandas nullable ``Int*`` (``pd.NA``); without
         nulls it stays plain numpy. ``double``/``float`` stay numpy with
         ``NaN``; ``SYMBOL`` → ``Categorical``; ``TIMESTAMP`` →
@@ -1962,7 +2011,12 @@ class QueryResult:
                 'pass at most one of dtype_backend, types_mapper')
         if dtype_backend is None and types_mapper is None:
             return self._to_pandas_numpy()
-        table = _table_signed_dict_indices(self.to_arrow())
+        import pyarrow as pa
+        handle = self._take_cursor_handle()
+        schema, batches = _fetch_all_record_batches(handle, pa)
+        table = (pa.table({}) if schema is None
+                 else _table_shared_symbol_dict(
+                     pa.Table.from_batches(batches, schema)))
         return table.to_pandas(
             **_resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper))
 
@@ -2023,7 +2077,7 @@ class QueryResult:
         garbage-collection cycle; call :meth:`close` (or use the context-
         manager) for deterministic release.
         """
-        reader = _build_record_batch_reader(self._take_cursor_handle())
+        reader = _build_record_batch_reader(self._take_cursor_handle(), True)
         for batch in reader:
             yield batch
 
@@ -2045,8 +2099,9 @@ class QueryResult:
     def _iter_pandas_arrow(self, dtype_backend, types_mapper):
         import pyarrow as pa
         kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
-        for batch in self.iter_arrow():
-            table = _table_signed_dict_indices(pa.Table.from_batches([batch]))
+        reader = _build_record_batch_reader(self._take_cursor_handle())
+        for batch in reader:
+            table = _table_shared_symbol_dict(pa.Table.from_batches([batch]))
             yield table.to_pandas(**kwargs)
 
     def iter_polars(self):

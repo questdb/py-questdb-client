@@ -947,6 +947,15 @@ are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
 Each result is consumed once; call :func:`QueryResult.cancel` to ask the server
 to stop streaming and :func:`QueryResult.close` to release resources.
 
+``SYMBOL`` columns: ``to_polars`` / ``to_pandas`` build the categorical directly
+(connection dictionary interned once, no per-row remap). ``to_arrow`` /
+``iter_arrow`` / ``__arrow_c_stream__`` emit a generic Arrow form whose
+per-batch ``SYMBOL`` dictionary is compacted to the values each batch uses,
+which a generic consumer reconciles. So when the target is a polars / pandas
+frame, the dedicated methods avoid the re-reconciliation that
+``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+``SYMBOL``-heavy results.
+
 The same :class:`Client` can ingest dataframes through the pooled columnar QWP
 path with :func:`Client.dataframe`. Adding ``sf_dir=...`` to
 :func:`Client.from_conf` opts dataframe ingestion into the Rust

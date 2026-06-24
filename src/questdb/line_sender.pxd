@@ -1129,6 +1129,13 @@ cdef extern from "questdb/egress/reader.h":
         reader_error** err_out
         ) noexcept nogil
 
+    reader_arrow_batch_result reader_cursor_next_arrow_batch_compact(
+        reader_cursor* cursor,
+        ArrowArray* out_array,
+        ArrowSchema* out_schema,
+        reader_error** err_out
+        ) noexcept nogil
+
     cdef enum reader_column_kind:
         reader_column_kind_boolean = 0x01
         reader_column_kind_byte = 0x02

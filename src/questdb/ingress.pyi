@@ -956,9 +956,21 @@ class QueryResult:
     """
     Result of :meth:`Client.query`. Single-use: each materialisation
     method consumes the underlying cursor.
+
+    SYMBOL columns: :meth:`to_polars` / :meth:`to_pandas` build the
+    Categorical directly, interning the connection dictionary once;
+    :meth:`to_arrow` / :meth:`iter_arrow` / :meth:`__arrow_c_stream__` give a
+    generic compact-dictionary Arrow form a consumer reconciles. When the
+    target is a polars / pandas frame, the dedicated methods avoid the
+    re-reconciliation that ``polars.from_arrow(result)`` /
+    ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
     """
 
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any: ...
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
+        columns arrive compact — each batch's dictionary holds only the values
+        it references — so a consumer that unifies per-batch dictionaries
+        (e.g. ``polars.from_arrow``) reconciles them."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
