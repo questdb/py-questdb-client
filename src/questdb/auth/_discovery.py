@@ -48,7 +48,6 @@ _K_ENABLED = 'acl.oidc.enabled'
 _K_CLIENT_ID = 'acl.oidc.client.id'
 _K_SCOPE = 'acl.oidc.scope'
 _K_TOKEN_ENDPOINT = 'acl.oidc.token.endpoint'
-_K_AUTHORIZATION_ENDPOINT = 'acl.oidc.authorization.endpoint'
 _K_DEVICE_ENDPOINT = 'acl.oidc.device.authorization.endpoint'  # design §7 (new)
 _K_GROUPS_IN_TOKEN = 'acl.oidc.groups.encoded.in.token'
 _K_AUDIENCE = 'acl.oidc.audience'
@@ -65,7 +64,6 @@ class OidcConfig:
     groups_in_token: bool = False
     audience: Optional[str] = None
     issuer: Optional[str] = None
-    authorization_endpoint: Optional[str] = None
 
 
 def _as_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:
@@ -352,7 +350,6 @@ def resolve_config(
         groups_in_token: Optional[bool] = None,
         token_endpoint: Optional[str] = None,
         device_authorization_endpoint: Optional[str] = None,
-        authorization_endpoint: Optional[str] = None,
         issuer: Optional[str] = None,
         discovery_url: Optional[str] = None,
         ctx: Optional[ssl.SSLContext] = None,
@@ -398,9 +395,6 @@ def resolve_config(
 
     token_endpoint = (
         token_endpoint or _resolve_endpoint(cfg.get(_K_TOKEN_ENDPOINT)))
-    authorization_endpoint = (
-        authorization_endpoint
-        or _resolve_endpoint(cfg.get(_K_AUTHORIZATION_ENDPOINT)))
     device_authorization_endpoint = (
         device_authorization_endpoint
         or _resolve_endpoint(cfg.get(_K_DEVICE_ENDPOINT)))
@@ -484,9 +478,6 @@ def resolve_config(
             or _str_setting(doc.get('device_authorization_endpoint')))
         token_endpoint = (
             token_endpoint or _str_setting(doc.get('token_endpoint')))
-        authorization_endpoint = (
-            authorization_endpoint
-            or _str_setting(doc.get('authorization_endpoint')))
         # OIDC Discovery §4.3 / RFC 8414 §3: when pinned ONLY by discovery_url,
         # the document's self-declared issuer (the anchor
         # validate_endpoint_origins would use) comes from that same untrusted
@@ -535,5 +526,4 @@ def resolve_config(
         scope=scope,
         groups_in_token=bool(groups_in_token),
         audience=audience,
-        issuer=issuer,
-        authorization_endpoint=authorization_endpoint)
+        issuer=issuer)

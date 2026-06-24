@@ -263,6 +263,12 @@ class OidcDeviceAuth:
             raise OidcConfigError('scope must be a string')
         if audience is not None and not isinstance(audience, str):
             raise OidcConfigError('audience must be a string or None')
+        # Normalize an empty audience to None so it is omitted consistently:
+        # _request_device_code skips a falsy audience, but _refresh puts it in
+        # the form unconditionally and post_form drops only None — so an empty
+        # string would be sent as `audience=` on refresh yet not on device-auth.
+        if not audience:
+            audience = None
         if issuer is not None and not isinstance(issuer, str):
             raise OidcConfigError('issuer must be a string or None')
         # default_interval feeds the poll-interval clamp and timeout every IdP

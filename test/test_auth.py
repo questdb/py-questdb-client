@@ -180,16 +180,11 @@ class MockState:
         self.refresh_response = None       # (status, body) or None
         self.device_response = None        # override device-auth response body
         self.device_status = 200
-        self.expected_bearer = None        # for /exec auth check
-        self.exec_response = None
-        self.exec_status = 200
-        self.exec_raw = None               # (status, content_type, bytes) override
         # Recording.
         self.device_requests = 0
         self.token_requests = []
         self.refresh_requests = 0
         self.refresh_forms = []
-        self.exec_requests = []
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -222,32 +217,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(404, {'error': 'not found'})
             else:
                 self._send_json(200, self.state.well_known)
-        elif path == '/exec':
-            auth = self.headers.get('Authorization')
-            if self.state.expected_bearer and auth != (
-                    'Bearer ' + self.state.expected_bearer):
-                self._send_json(401, {'error': 'unauthorized'})
-                return
-            self.state.exec_requests.append(self.path)
-            if self.state.exec_raw is not None:
-                status, ctype, raw = self.state.exec_raw
-                self.send_response(status)
-                self.send_header('Content-Type', ctype)
-                self.send_header('Content-Length', str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
-                return
-            self._send_json(self.state.exec_status, self.state.exec_response or {
-                'columns': [
-                    {'name': 'ts', 'type': 'TIMESTAMP'},
-                    {'name': 'price', 'type': 'DOUBLE'},
-                ],
-                'dataset': [
-                    ['2021-01-01T00:00:00.000000Z', 1.5],
-                    ['2021-01-02T00:00:00.000000Z', 2.5],
-                ],
-                'count': 2,
-            })
         else:
             self._send_json(404, {'error': 'not found'})
 
@@ -1001,6 +970,31 @@ class TestDeviceFlow(AuthTestBase):
                 {'verification_uri': 'https://idp.example.com/device'})
         self.mock_browser_open.assert_not_called()
 
+    def test_maybe_open_browser_swallows_open_error(self):
+        # webbrowser.open raising (no browser / a bad $BROWSER) must not break
+        # sign-in: opening is best-effort, the prompt is already shown.
+        auth = self.make_auth(open_browser=True)
+        with mock.patch('webbrowser.open', side_effect=RuntimeError('boom')):
+            auth._maybe_open_browser(  # must not raise
+                {'verification_uri': 'https://idp.example.com/device'})
+
+    def test_identity_from_claims_precedence(self):
+        # The sign-in success message picks an identity in a fixed precedence:
+        # email > preferred_username > upn > name > sub.
+        from questdb.auth._device import _identity_from_claims
+        self.assertEqual(_identity_from_claims({
+            'email': 'a@x', 'preferred_username': 'pu', 'upn': 'u',
+            'name': 'N', 'sub': 's'}), 'a@x')
+        self.assertEqual(_identity_from_claims({
+            'preferred_username': 'pu', 'upn': 'u', 'name': 'N',
+            'sub': 's'}), 'pu')
+        self.assertEqual(_identity_from_claims({'upn': 'u', 'sub': 's'}), 'u')
+        self.assertEqual(_identity_from_claims({'name': 'N', 'sub': 's'}), 'N')
+        self.assertEqual(_identity_from_claims({'sub': 's'}), 's')
+        self.assertEqual(_identity_from_claims({'sub': 123}), '123')  # stringified
+        self.assertIsNone(_identity_from_claims({}))
+        self.assertIsNone(_identity_from_claims({'email': ''}))  # empty skipped
+
     def test_memory_cache_returns_independent_copy(self):
         cache = MemoryCache()
         stored = TokenSet(access_token='a', refresh_token='r', expires_at=1.0)
@@ -1237,6 +1231,19 @@ class TestRefresh(AuthTestBase):
         auth2 = self.make_auth()  # no audience
         self._seed_expired(auth2)
         auth2.token()
+        self.assertNotIn('audience', self.state.refresh_forms[-1])
+
+    def test_empty_audience_normalized_and_not_sent_on_refresh(self):
+        # An empty-string audience is normalized to None in __init__, so it is
+        # omitted on refresh too (it was previously sent as `audience=` on
+        # refresh only, never on device-auth).
+        _MEMORY_STORE.clear()
+        _MEMORY_GENERATION.clear()
+        auth = self.make_auth(audience='')
+        self.assertIsNone(auth.config.audience)
+        self._seed_expired(auth)
+        auth.token()
+        self.assertEqual(self.state.refresh_requests, 1)
         self.assertNotIn('audience', self.state.refresh_forms[-1])
 
     def test_refresh_transient_5xx_non_interactive_does_not_hard_fail(self):
@@ -1883,6 +1890,39 @@ class TestAdapters(unittest.TestCase):
             self.assertEqual(cparams['password'], 'TKN')
         self.assertEqual(auth.calls - before, 2)
 
+    def test_sqlalchemy_engine_uses_psycopg2_drivername(self):
+        # When only psycopg2 (v2) is importable, the SQLAlchemy driver name is
+        # postgresql+psycopg2, not +psycopg (the v3 branch).
+        created = {}
+        fake_sa = types.ModuleType('sqlalchemy')
+        fake_sa.__path__ = []
+        fake_sa.create_engine = lambda url, **kw: object()
+
+        class _Event:
+            @staticmethod
+            def listens_for(target, name):
+                return lambda fn: fn
+
+        fake_sa.event = _Event
+        fake_eng = types.ModuleType('sqlalchemy.engine')
+
+        class _URL:
+            @staticmethod
+            def create(**kw):
+                created.update(kw)
+                return 'URL'
+
+        fake_eng.URL = _URL
+        fake_pg2 = types.ModuleType('psycopg2')
+
+        with mock.patch.dict(sys.modules, {
+                'sqlalchemy': fake_sa,
+                'sqlalchemy.engine': fake_eng,
+                'psycopg': None,        # force the psycopg2 fallback in _pg_module
+                'psycopg2': fake_pg2}):
+            sqlalchemy_engine(_FakeAuth(), 'http://db.example.com:9000')
+        self.assertEqual(created['drivername'], 'postgresql+psycopg2')
+
     def test_require_host_rejects_hostless_url(self):
         # A URL with no extractable host must raise, not pass None to a driver;
         # an explicit host= override still resolves.
@@ -1951,6 +1991,12 @@ class TestConfigHelpers(unittest.TestCase):
             self.assertIs(_as_bool(v), False)
         self.assertIsNone(_as_bool(None))
         self.assertIs(_as_bool(None, default=True), True)
+        # A non-0/1 number coerces via bool(); an unrecognized string / type
+        # falls back to the default rather than guessing True/False.
+        self.assertIs(_as_bool(2), True)
+        self.assertIs(_as_bool(0.0), False)
+        self.assertIsNone(_as_bool('maybe'))
+        self.assertIs(_as_bool('maybe', default=False), False)
 
     def test_resolve_endpoint_accepts_only_absolute_url(self):
         # Matching the Java client, a /settings endpoint is trusted only as a
@@ -1963,6 +2009,8 @@ class TestConfigHelpers(unittest.TestCase):
                          'http://idp:9000/x')
         self.assertIsNone(_resolve_endpoint('/as/token.oauth2'))
         self.assertIsNone(_resolve_endpoint(''))
+        self.assertIsNone(_resolve_endpoint('//idp/x'))     # scheme-relative
+        self.assertIsNone(_resolve_endpoint('ftp://idp/x'))  # non-http scheme
 
     def test_resolve_endpoint_ignores_non_string(self):
         # A non-string endpoint from /settings (e.g. a JSON number) must be
@@ -2616,6 +2664,51 @@ class TestRendererSecurity(unittest.TestCase):
         })
         self.assertIn('<a href="https://idp.example.com/device"',
                       captured['html'])
+
+    def test_jupyter_qr_suppressed_for_dangerous_url(self):
+        # With qr=True, a dangerous (javascript:/data:) verification URL must NOT
+        # produce a QR <img>: the data-URI is gated on _safe_link_url before
+        # qrcode is ever called. Holds whether or not the optional qrcode dep is
+        # installed (a dangerous URL never reaches the encoder).
+        from questdb.auth._render import JupyterRenderer
+        captured = {}
+
+        class _Capturing(JupyterRenderer):
+            def _display(self, html_str):
+                captured['html'] = html_str
+
+        _Capturing(qr=True).on_prompt({
+            'user_code': 'X', 'verification_uri': 'javascript:alert(1)',
+            'expires_in': 600, 'interval': 5})
+        self.assertNotIn('<img', captured['html'].lower())
+
+    def test_fmt_mmss(self):
+        from questdb.auth._render import _fmt_mmss
+        self.assertEqual(_fmt_mmss(0), '0:00')
+        self.assertEqual(_fmt_mmss(5), '0:05')
+        self.assertEqual(_fmt_mmss(65), '1:05')
+        self.assertEqual(_fmt_mmss(600), '10:00')
+        self.assertEqual(_fmt_mmss(-5), '0:00')      # clamped, never negative
+        self.assertEqual(_fmt_mmss(125.9), '2:05')   # truncates seconds
+
+    def test_detect_interactive_requires_tty(self):
+        # Outside a notebook kernel, interactivity requires both stdin AND stdout
+        # to be a TTY (guards against hanging in papermill / cron / CI).
+        from questdb.auth import _render
+        with mock.patch.object(_render, 'in_ipython_kernel', return_value=False):
+            with mock.patch.object(sys, 'stdin') as si, \
+                    mock.patch.object(sys, 'stdout') as so:
+                si.isatty.return_value = True
+                so.isatty.return_value = True
+                self.assertTrue(_render.detect_interactive())
+                so.isatty.return_value = False  # stdout not a tty
+                self.assertFalse(_render.detect_interactive())
+
+    def test_in_ipython_kernel_false_without_ipython(self):
+        # When IPython can't be imported (plain CPython), it's not a kernel.
+        from questdb.auth import _render
+        with mock.patch.dict(sys.modules, {'IPython': None}):
+            self.assertFalse(_render.in_ipython_kernel())
 
     def test_jupyter_prompt_strips_control_and_bidi_chars(self):
         # M3: the Jupyter path must ALSO strip control / bidi / zero-width chars

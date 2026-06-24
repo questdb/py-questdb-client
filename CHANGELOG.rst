@@ -52,7 +52,9 @@ See the :ref:`OIDC authentication guide <oidc_auth>` for details.
 Python Version Support
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-* Raised the minimum supported Python version to 3.10.
+* Corrected the minimum supported Python declared in ``setup.py`` to 3.10,
+  matching the floor already adopted in 4.1.0 (which dropped Python 3.9).
+  Installs on Python 3.8 / 3.9 are now correctly rejected.
 
 4.1.0 (2025-11-28)
 ------------------
