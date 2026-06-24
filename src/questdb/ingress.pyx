@@ -5232,8 +5232,8 @@ cdef class Client:
           ``pa.uint{8,16,32,64}`` are accepted by the Rust Arrow batch route
           when the frame uses a fixed table name and a designated timestamp
           column name. Unsigned Arrow values follow the
-          Rust Arrow policy: ``UInt8`` widens to ``SHORT``, ``UInt16`` to
-          ``INT``, ``UInt32`` to ``LONG``, and ``UInt64`` values up to
+          Rust Arrow policy: ``UInt8`` and ``UInt16`` widen to ``INT``,
+          ``UInt32`` to ``LONG``, and ``UInt64`` values up to
           ``i64::MAX`` are accepted as ``LONG``. Larger ``UInt64`` values are
           rejected because QuestDB QWP-WS encodes integers as signed ``i64``.
         - **String / Symbol**: object-dtype ``str``, ``pa.string()``,

@@ -4121,12 +4121,14 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             with self.assertRaises(qi.IngressError):
                 sender.dataframe(df, table_name='dummy', at='ts')
 
-    def test_pa_uint8_round_trip_as_short(self):
-        """Plain ``pa.uint8()`` widens to SHORT on Client.dataframe."""
+    def test_pa_uint8_auto_creates_as_int(self):
+        """``pa.uint8()`` widens to INT. Auto-create (no ``_create_table``)
+        pins the wire type; a pre-created SHORT column would mask it via
+        server coercion. Order by ``v``: auto-create renames ``ts`` to
+        ``timestamp``."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
-        self._create_table(table, 'v SHORT')
         values = pa.array([0, 1, 255], type=pa.uint8())
         df = self._make_df_with_ts('v', values, 3)
         with qi.Client.from_conf(self._conf()) as client:
@@ -4134,9 +4136,27 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.qdb_plain.retry_check_table(table, min_rows=3)
         with qi.Client.from_conf(self._conf()) as client:
             got = client.query(
-                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        self.assertEqual(got.column('v').type, pa.int16())
+                f'SELECT v FROM {table} ORDER BY v').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int32())
         self.assertEqual(got.column('v').to_pylist(), [0, 1, 255])
+
+    def test_pa_uint16_auto_creates_as_int(self):
+        """``pa.uint16()`` widens to INT (CHAR only with
+        ``questdb.column_type=char`` metadata, which pandas drops). Like the
+        uint8 case, auto-create pins the wire type."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        values = pa.array([0, 1, 65535], type=pa.uint16())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY v').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int32())
+        self.assertEqual(got.column('v').to_pylist(), [0, 1, 65535])
 
 
 class TestColumnIngressFailover(unittest.TestCase):
