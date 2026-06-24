@@ -499,6 +499,23 @@ class TestDeviceFlow(AuthTestBase):
         self.assertIn('device_code', msg)
         self.assertEqual(self.state.token_requests, [])  # never polled
 
+    def test_device_200_with_nonstring_codes_is_rejected_clearly(self):
+        # A 200 whose device_code/user_code is a non-string (a JSON number/list
+        # from a buggy/hostile IdP) must be treated as missing — coerced via
+        # _str_or_none so it can't be stringified into the poll request — and
+        # raise the same clear error rather than polling with a bogus code.
+        self.state.device_status = 200
+        self.state.device_response = {
+            'device_code': 12345, 'user_code': ['X'],
+            'verification_uri': 'https://idp/device'}
+        auth = self.make_auth()
+        with self.assertRaises(OidcDeviceFlowError) as cm:
+            auth.token()
+        msg = str(cm.exception)
+        self.assertNotIn('HTTP 200', msg)
+        self.assertIn('device_code', msg)
+        self.assertEqual(self.state.token_requests, [])  # never polled
+
     def test_timeout_when_never_authorized(self):
         self.state.device_response = {
             'device_code': 'DEV-CODE', 'user_code': 'X',
@@ -723,6 +740,29 @@ class TestDeviceFlow(AuthTestBase):
         auth.token()
         self.assertTrue(auth._tokens.is_valid(self._clock.now()))
 
+    def test_bool_expires_in_treated_as_unknown(self):
+        # A JSON bool expires_in must NOT be read as int(True) == 1 (a 1-second
+        # token that churns refreshes / re-prompts); treat it as unknown so the
+        # just-issued token is valid.
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'token_type': 'Bearer', 'expires_in': True})]
+        auth = self.make_auth()
+        auth.token()
+        self.assertTrue(auth._tokens.is_valid(self._clock.now()))
+
+    def test_int_or_default_rejects_bool_and_nonnumeric(self):
+        # _int_or_default underpins expires_in / interval parsing on both the
+        # token and device-authorization responses: a JSON bool maps to the
+        # default (not int(True) == 1), and non-numeric / NaN / Infinity /
+        # missing fall back too, while a real number (or numeric string) passes.
+        from questdb.auth._device import _int_or_default
+        for bad in (True, False, 'abc', None, float('nan'), float('inf'), [1]):
+            self.assertEqual(_int_or_default(bad, 300), 300, repr(bad))
+        self.assertEqual(_int_or_default(600, 300), 600)
+        self.assertEqual(_int_or_default('600', 300), 600)
+        self.assertEqual(_int_or_default(1.9, 300), 1)  # truncates, like int()
+
     def test_short_lived_token_valid_at_issue(self):
         # A small positive expires_in (< 2*skew) must not read as expired the
         # instant it is issued (adaptive skew = min(skew, lifetime/2)).
@@ -858,6 +898,19 @@ class TestDeviceFlow(AuthTestBase):
         self.assertIsNone(ts.access_token)
         self.assertIsNone(ts.id_token)
         self.assertIsNone(ts.refresh_token)
+        # token_type / scope are coerced too: a non-string falls back to the
+        # default ('Bearer' / the configured scope) instead of landing raw in
+        # the frozen dataclass; a valid string passes through unchanged.
+        ts_bad = auth._tokenset_from_response({
+            'access_token': ACCESS_TOKEN, 'token_type': ['x'],
+            'scope': 123, 'expires_in': 3600})
+        self.assertEqual(ts_bad.token_type, 'Bearer')
+        self.assertEqual(ts_bad.scope, auth.config.scope)
+        ts_ok = auth._tokenset_from_response({
+            'access_token': ACCESS_TOKEN, 'token_type': 'DPoP',
+            'scope': 'openid email', 'expires_in': 3600})
+        self.assertEqual(ts_ok.token_type, 'DPoP')
+        self.assertEqual(ts_ok.scope, 'openid email')
         for bad in (123, 1.5, True, {'a': 1}, [1, 2], None, ''):
             self.assertEqual(_decode_jwt_claims(bad), {})
 
@@ -2121,6 +2174,12 @@ class TestEndpointValidation(unittest.TestCase):
         self.assertFalse(under(iss + '/..;/EVIL/protocol/token', iss))  # ..;
         self.assertFalse(under(iss + '/%2e%2e;/EVIL/token', iss))       # enc ..;
         self.assertFalse(under(iss + '/..%09/EVIL/token', iss))         # ..<tab>
+        # A dot segment wrapped in MORE encoding layers than the bounded decode
+        # loop peels leaves a residual '%'; a server that decodes it further
+        # would resolve to a DIFFERENT realm, so a segment that did not fully
+        # decode is rejected (fail closed).
+        enc_dot = '%' + '25' * 11 + '2e'      # a single '.' wrapped in 12 layers
+        self.assertFalse(under(f'{iss}/{enc_dot}{enc_dot}/EVIL/token', iss))
         # A legitimate sub-path with a (non-traversal) percent-escape or matrix
         # param is still accepted — only dot traversal is rejected.
         self.assertTrue(under(iss + '/some%20path/token', iss))

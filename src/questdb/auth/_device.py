@@ -99,6 +99,26 @@ def _str_or_none(value: Any) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    """
+    ``int(value)`` for an untrusted numeric field (``expires_in`` / ``interval``),
+    else ``default``.
+
+    ``bool`` is an ``int`` subclass, but a JSON ``true``/``false`` is never a
+    meaningful duration: ``int(True) == 1`` would mint a 1-second lifetime and
+    churn refreshes, so map a bool to the default. A missing key (``None``), a
+    non-numeric string, or a JSON ``Infinity``/``NaN`` (``json.loads`` accepts
+    both) raises ``TypeError``/``ValueError``/``OverflowError`` from ``int()``
+    and falls back too, keeping the typed contract.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _decode_jwt_claims(token: Optional[str]) -> Dict[str, Any]:
     """
     Best-effort decode of a JWT payload **without signature verification**.
@@ -557,12 +577,8 @@ class OidcDeviceAuth:
         return self._cache.generation(self.cache_key)
 
     def _tokenset_from_response(self, body: Dict[str, Any]) -> TokenSet:
-        try:
-            expires_in = int(body.get('expires_in', _DEFAULT_EXPIRES_IN))
-        except (TypeError, ValueError, OverflowError):
-            # OverflowError: a JSON Infinity (json.loads accepts it) → int(inf)
-            # isn't a ValueError, so list it to keep the typed contract.
-            expires_in = _DEFAULT_EXPIRES_IN
+        expires_in = _int_or_default(
+            body.get('expires_in'), _DEFAULT_EXPIRES_IN)
         if expires_in <= 0:
             # A non-positive lifetime marks a just-issued token as expired,
             # causing refresh/re-prompt churn. Treat it as unknown.
@@ -587,8 +603,11 @@ class OidcDeviceAuth:
             refresh_token=refresh_token,
             expires_at=now + expires_in,
             issued_at=now,
-            token_type=body.get('token_type', 'Bearer'),
-            scope=body.get('scope', self.config.scope),
+            # Coerce like the credential fields: a non-string token_type/scope
+            # from a buggy/hostile IdP falls back to the default rather than
+            # landing in the dataclass as a raw object.
+            token_type=_str_or_none(body.get('token_type')) or 'Bearer',
+            scope=_str_or_none(body.get('scope')) or self.config.scope,
             # Coerce like the credential fields: a non-string sub from a hostile
             # JWT reads as absent rather than landing in an Optional[str] field.
             sub=_str_or_none(claims.get('sub')))
@@ -681,11 +700,14 @@ class OidcDeviceAuth:
             form['audience'] = self.config.audience
         status, body = self._idp_post(
             self.config.device_authorization_endpoint, form)
-        if status == 200 and body.get('device_code') and body.get('user_code'):
+        if (status == 200 and _str_or_none(body.get('device_code'))
+                and _str_or_none(body.get('user_code'))):
             return body
         error = body.get('error')
         if status == 200:
-            # 200 but the guard above failed: device_code/user_code missing.
+            # 200 but the guard above failed: device_code/user_code missing or
+            # non-string (coerced via _str_or_none, so a JSON number/list reads
+            # as absent instead of being stringified into the poll request).
             # A non-conformant body, not an HTTP failure — say so plainly rather
             # than a contradictory "failed (HTTP 200)".
             raise OidcDeviceFlowError(
@@ -713,18 +735,14 @@ class OidcDeviceAuth:
 
     def _poll_for_token(self, resp: Dict[str, Any]) -> TokenSet:
         device_code = resp['device_code']
-        try:
-            interval = int(resp.get('interval', self._default_interval))
-        except (TypeError, ValueError, OverflowError):
-            interval = self._default_interval
+        interval = _int_or_default(
+            resp.get('interval'), self._default_interval)
         # Floor at the RFC 8628 default (5s) so we never poll faster than the
         # spec baseline; cap so a hostile value can't pin the polling thread
         # (which holds the lock) in one enormous sleep.
         interval = min(_MAX_POLL_INTERVAL, max(_MIN_POLL_INTERVAL, interval))
-        try:
-            expires_in = int(resp.get('expires_in', _DEFAULT_DEVICE_CODE_LIFETIME))
-        except (TypeError, ValueError, OverflowError):
-            expires_in = _DEFAULT_DEVICE_CODE_LIFETIME
+        expires_in = _int_or_default(
+            resp.get('expires_in'), _DEFAULT_DEVICE_CODE_LIFETIME)
         # A non-positive lifetime would time out before the first poll (the code
         # is already shown); treat it as unknown. Cap the upper end so a hostile
         # value can't keep the loop — and the lock — alive indefinitely.

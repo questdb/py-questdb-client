@@ -232,7 +232,13 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     if eparts.params:
         ep_path = f'{ep_path};{eparts.params}'
     ep_segs = [_strip_matrix_params(s) for s in _decode_path_segments(ep_path)]
-    if '.' in ep_segs or '..' in ep_segs:
+    # A residual '%' means the path did not fully decode within the bounded loop
+    # (an over-deeply multiply-encoded escape) or is a malformed escape; a server
+    # may yet decode it further to a dot-segment, so fail closed rather than
+    # prefix-match a value that could still resolve to a different path.
+    # Legitimate credential-endpoint paths are plain ASCII with no encoding.
+    if ('.' in ep_segs or '..' in ep_segs
+            or any('%' in s for s in ep_segs)):
         return False
     return ep_segs[:len(base_segs)] == base_segs
 
