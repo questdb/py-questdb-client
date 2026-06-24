@@ -104,6 +104,21 @@ class MemoryCache:
             _MEMORY_STORE.pop(key, None)
             _MEMORY_GENERATION[key] = _MEMORY_GENERATION.get(key, 0) + 1
 
+    def evict(self, key: str) -> None:
+        """
+        Drop ``key`` WITHOUT bumping the clear()-generation.
+
+        For an in-flight acquisition that found the cached token unusable (its
+        refresh_token can't yield the required kind) and is about to replace it.
+        Unlike :meth:`clear` (a user-facing "forget this"), this must NOT bump
+        the generation: the same acquisition's :meth:`store_if_current` would
+        otherwise mistake its own eviction for a concurrent ``clear()`` and drop
+        the fresh token it is about to store. A genuine concurrent ``clear()``
+        still bumps the generation and is still honored.
+        """
+        with _MEMORY_LOCK:
+            _MEMORY_STORE.pop(key, None)
+
     def generation(self, key: str) -> int:
         """
         Current clear()-generation for ``key``.

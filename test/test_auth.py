@@ -579,6 +579,30 @@ class TestDeviceFlow(AuthTestBase):
         self.assertEqual(cm.exception.error, 'access_denied')
         self.assertIn('user said no', str(cm.exception))
 
+    def test_hostile_error_fields_sanitized_in_exception(self):
+        # A hostile/MITM'd IdP error/error_description must not smuggle terminal
+        # escapes or a bidi override into the raised exception: an uncaught
+        # traceback is a display sink (a terminal and Jupyter both interpret
+        # ANSI) that the renderer's own sanitization never sees. OidcError
+        # strips them centrally, so the message and the exposed attributes are
+        # clean while the human-readable text still survives. (M2)
+        self.state.token_script = [
+            (400, {'error': 'access_denied\x1b[31m',
+                   'error_description':
+                       'denied \x1b[2J\x1b[1;1H\u202eevil.example\x07'}),
+        ]
+        auth = self.make_auth()
+        with self.assertRaises(OidcDeviceFlowError) as cm:
+            auth.token()
+        for s in (str(cm.exception),
+                  cm.exception.error or '',
+                  cm.exception.error_description or ''):
+            self.assertNotIn('\x1b', s)        # ESC stripped
+            self.assertNotIn('\x07', s)        # BEL stripped
+            self.assertNotIn('\u202e', s)      # bidi override stripped
+        self.assertIn('denied', str(cm.exception))
+        self.assertIn('evil.example', cm.exception.error_description)
+
     def test_device_endpoint_rejects_grant(self):
         self.state.device_status = 400
         self.state.device_response = {'error': 'invalid_client'}
@@ -1139,14 +1163,22 @@ class TestRefresh(AuthTestBase):
 
     def test_refresh_without_id_token_non_interactive_does_not_loop(self):
         # Same situation but non-interactive: surface a clear error rather than
-        # repeatedly re-running a refresh that can never satisfy _select.
+        # repeatedly re-running a refresh that can never satisfy _select. The
+        # doomed refresh_token must be evicted on the first failure so a later
+        # call goes straight to the (failing) device flow instead of re-issuing
+        # the same fruitless refresh on every token() call. Calling token()
+        # several times must therefore not climb the refresh count.
         auth = self.make_auth(groups_in_token=True, interactive=False)
         self._seed_expired(auth)
         self.state.refresh_response = (200, {
             'access_token': ACCESS_TOKEN, 'token_type': 'Bearer',
             'expires_in': 3600})  # no id_token
-        with self.assertRaises(OidcInteractionRequired):
-            auth.token()
+        for _ in range(3):
+            with self.assertRaises(OidcInteractionRequired):
+                auth.token()
+        # Exactly one refresh across all three calls (without the eviction the
+        # stale token would be reloaded and re-refreshed every call).
+        self.assertEqual(self.state.refresh_requests, 1)
         self.assertEqual(self.state.device_requests, 0)
 
     def test_cached_token_missing_required_kind_is_refreshed(self):
@@ -2834,6 +2866,29 @@ class TestRendererSecurity(unittest.TestCase):
             'verification_uri': 'https://idp.example.com/' + chr(0x202e)})
         self.assertNotIn(chr(0x202e), text)
         self.assertIn('idp.example.com', text)
+
+    def test_oidc_error_sanitizes_message_and_fields(self):
+        # OidcError strips control/bidi chars from its message centrally, so no
+        # raise site can leak an ANSI/bidi sequence into an uncaught traceback (a
+        # display sink the renderer never sees). The device-flow subclass strips
+        # its untrusted error / error_description attributes too. See M2.
+        e = OidcError('boom ' + chr(0x1b) + '[31m' + chr(0x202e)
+                      + 'hidden' + chr(0x07) + ' done')
+        self.assertEqual(str(e), 'boom [31mhidden done')
+        self.assertEqual(OidcError('x', status=503).status, 503)  # status kept
+        d = OidcDeviceFlowError(
+            'failed ' + chr(0x1b) + '[2Jx',
+            error='bad' + chr(0x1b) + ']0;t' + chr(0x07),
+            error_description='why ' + chr(0x202e) + 'flip' + chr(0x1b) + '[0m')
+        for s in (str(d), d.error, d.error_description):
+            self.assertNotIn(chr(0x1b), s)
+            self.assertNotIn(chr(0x07), s)
+            self.assertNotIn(chr(0x202e), s)
+        self.assertIn('flip', d.error_description)  # readable text survives
+        # Absent error / error_description stay None (not coerced to '').
+        d2 = OidcDeviceFlowError('x')
+        self.assertIsNone(d2.error)
+        self.assertIsNone(d2.error_description)
 
     def test_qr_helpers_degrade_without_qrcode(self):
         # The QR helpers must degrade gracefully (return None), never raise,

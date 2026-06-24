@@ -564,6 +564,17 @@ class OidcDeviceAuth:
                 if self._has_required_token(refreshed):
                     self._store(refreshed, generation)
                     return refreshed
+            # The refresh path is exhausted: the refresh_token is proven useless
+            # (rejected, or the IdP won't re-issue the required kind), so the
+            # device flow below is the only way forward. Drop the stale token —
+            # from this instance AND the shared cache — before the flow, so that
+            # if it then FAILS (non-interactive, user cancels, IdP rejects the
+            # device request) the doomed token isn't left cached to be reloaded
+            # and re-refreshed fruitlessly on every later token() call. evict()
+            # doesn't bump the clear()-generation, so the _store below still
+            # lands `fresh` (unless a genuine concurrent clear() intervenes).
+            self._tokens = None
+            self._cache.evict(self.cache_key)
 
         fresh = self._run_device_flow()
         self._store(fresh, generation)
