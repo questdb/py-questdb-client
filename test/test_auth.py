@@ -453,6 +453,38 @@ class TestDeviceFlow(AuthTestBase):
         self.assertNotIsInstance(cm.exception, OidcTimeoutError)
         self.assertLessEqual(len(self._clock.sleeps), 1)
 
+    def test_non_json_3xx_during_poll_is_terminal(self):
+        # A non-JSON 3xx (an HTML redirect from a reverse proxy in front of the
+        # token endpoint) must fail fast too: these endpoints never legitimately
+        # redirect, _NoRedirect refuses to follow one, and post_form surfaces it
+        # as OidcError(status=3xx). Without classifying 3xx as terminal the loop
+        # would poll on to a misleading "code expired".
+        auth = self.make_auth()
+        with _raw_response_server(
+                302, 'text/html', b'<html>see /login</html>') as raw:
+            auth.config.token_endpoint = raw + '/token'  # post-construction
+            with self.assertRaises(OidcDeviceFlowError) as cm:
+                auth.token()
+        self.assertNotIsInstance(cm.exception, OidcTimeoutError)
+        self.assertLessEqual(len(self._clock.sleeps), 1)
+
+    def test_http_status_terminal_vs_transient_classifier(self):
+        # The poll classifier: 3xx (a redirect these endpoints never return) and
+        # a non-conformant 2xx are terminal alongside 4xx, so a non-JSON such
+        # response fails fast; only 5xx/429 (and a status-less network error) are
+        # transient and retried to the deadline. The two are mutually exclusive
+        # over any real status.
+        from questdb.auth._device import (
+            _http_status_is_terminal, _http_status_is_transient)
+        for s in (200, 204, 301, 302, 307, 308, 400, 403, 404):
+            self.assertTrue(_http_status_is_terminal(s), s)
+            self.assertFalse(_http_status_is_transient(s), s)
+        for s in (500, 502, 503, 429):
+            self.assertFalse(_http_status_is_terminal(s), s)
+            self.assertTrue(_http_status_is_transient(s), s)
+        self.assertFalse(_http_status_is_terminal(None))   # network error
+        self.assertFalse(_http_status_is_transient(None))
+
     def test_device_200_without_codes_is_rejected_clearly(self):
         # A 200 device-authorization response missing device_code/user_code is
         # a non-conformant body, not an HTTP failure: the error must say so
@@ -2349,6 +2381,29 @@ class TestCacheKey(unittest.TestCase):
             self._auth(token_endpoint='https://idp.example.com/token').cache_key,
             self._auth(
                 token_endpoint='https://idp.example.com:443/token').cache_key)
+
+    def test_issuer_trailing_slash_and_case_do_not_change_key(self):
+        # A discovered issuer often carries a trailing slash ("https://idp/")
+        # while an explicit one does not ("https://idp"); case and a default :443
+        # likewise vary. None of these change the security context, so they must
+        # not split the cache key and force an avoidable re-prompt.
+        base = self._auth(issuer='https://idp.example.com')
+        for variant in ('https://idp.example.com/',
+                        'https://IDP.example.com',
+                        'https://idp.example.com:443',
+                        'https://idp.example.com:443/'):
+            self.assertEqual(base.cache_key,
+                             self._auth(issuer=variant).cache_key, variant)
+
+    def test_issuer_realm_path_distinguishes_key(self):
+        # A different realm PATH on the same host is a different issuer and must
+        # stay a distinct key — origin-only normalization would wrongly collide
+        # them.
+        self.assertNotEqual(
+            self._auth(
+                issuer='https://idp.example.com/realms/prod').cache_key,
+            self._auth(
+                issuer='https://idp.example.com/realms/staging').cache_key)
 
     def test_groups_in_token_distinguishes_key(self):
         # groups_in_token selects which token kind _select returns, so two

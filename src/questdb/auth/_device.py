@@ -149,16 +149,23 @@ def _identity_from_claims(claims: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _http_status_is_terminal_4xx(status: Optional[int]) -> bool:
+def _http_status_is_terminal(status: Optional[int]) -> bool:
     """
-    True for a 4xx that is a definitive rejection.
+    True for an HTTP status that is a definitive rejection, not a transient poll
+    state worth retrying.
 
-    A non-JSON body with such a status (e.g. an HTML ``403`` from a WAF/proxy or
-    non-conformant IdP) is never an ``authorization_pending`` / ``slow_down``
-    (those are always JSON), so the poll must fail fast rather than retry to a
-    misleading "code expired". ``429`` is excluded — it's a transient rate-limit.
+    A conformant token-endpoint poll reply is JSON (a 200 success body, or a 4xx
+    whose JSON body carries ``authorization_pending`` / ``slow_down``). A NON-JSON
+    body — which makes ``post_form`` raise with the status attached — therefore
+    means a proxy / WAF / non-conformant IdP, never a poll state. Any such status
+    that is not a transient 5xx/429 (and not a bare network error, which carries
+    no status) is terminal, so the poll fails fast instead of retrying to a
+    misleading "code expired". This covers a non-JSON ``3xx`` redirect (these
+    endpoints never legitimately redirect, and ``_NoRedirect`` refuses to follow
+    one) and a non-conformant non-JSON ``2xx``, as well as a non-JSON ``4xx``;
+    ``429`` stays transient.
     """
-    return status is not None and 400 <= status < 500 and status != 429
+    return status is not None and status < 500 and status != 429
 
 
 def _http_status_is_transient(status: Optional[int]) -> bool:
@@ -435,8 +442,14 @@ class OidcDeviceAuth:
         """
         c = self.config
         scope = ' '.join(sorted(c.scope.split())) if c.scope else ''
+        # Normalize the issuer like the token endpoint (lower-case scheme/host,
+        # drop a default port) and strip a trailing slash, so a discovered
+        # "https://idp/" and an explicit "https://idp" — or a stray :443 / case
+        # difference — don't yield different keys and force an avoidable
+        # re-prompt. The realm path is kept (multi-tenant issuers differ by it).
+        issuer = _normalize_url(c.issuer).rstrip('/') if c.issuer else ''
         return '\x1f'.join([
-            c.issuer or '',
+            issuer,
             _normalize_url(c.token_endpoint),
             c.client_id,
             scope,
@@ -790,11 +803,14 @@ class OidcDeviceAuth:
                         'client_id': self.config.client_id,
                     })
             except OidcError as e:
-                # A non-JSON 4xx is a terminal rejection (e.g. an HTML error page
-                # from a WAF/proxy, or a non-conformant IdP): a conformant OAuth
-                # error is JSON, so it can never be authorization_pending /
-                # slow_down. Fail fast instead of polling on to "code expired".
-                if _http_status_is_terminal_4xx(getattr(e, 'status', None)):
+                # A non-JSON, non-transient status is a terminal rejection (an
+                # HTML error page or a redirect from a WAF/proxy, or a non-
+                # conformant IdP): a conformant OAuth poll reply is JSON, so it
+                # can never be authorization_pending / slow_down. Fail fast —
+                # including on a 3xx, which these endpoints never legitimately
+                # return and _NoRedirect won't follow — instead of polling on to
+                # a misleading "code expired".
+                if _http_status_is_terminal(getattr(e, 'status', None)):
                     self._renderer.on_failure(
                         'Sign-in failed: the identity provider rejected the '
                         'request.')
