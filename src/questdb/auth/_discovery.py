@@ -446,6 +446,34 @@ def resolve_config(
                     'them explicitly (token_endpoint=..., '
                     'device_authorization_endpoint=...).')
 
+    # Same scoping for a discovery_url-only pin (no issuer): require each
+    # /settings credential endpoint on the pinned discovery origin. The plaintext
+    # guard above accepts discovery_url= as a sufficient pin, but the only other
+    # discovery_url enforcement lives in the IdP-discovery block below, which is
+    # SKIPPED when /settings already advertises both endpoints — so without this
+    # a tampered plaintext /settings could route the device code and refresh
+    # token to an attacker origin the pin was meant to forbid. When discovery
+    # DOES run, that block additionally pins the discovered endpoint(s) to this
+    # origin. Caller-explicit endpoints are authoritative and skip this.
+    if discovery_url and not issuer:
+        discovery_origin = _normalized_origin(discovery_url)
+        for label, url, from_settings in (
+                ('token endpoint', token_endpoint,
+                 not explicit_token_endpoint),
+                ('device-authorization endpoint',
+                 device_authorization_endpoint, not explicit_device_endpoint)):
+            if (url and from_settings
+                    and _normalized_origin(url) != discovery_origin):
+                raise OidcConfigError(
+                    f'The OIDC {label} advertised by QuestDB /settings '
+                    f'({url!r}) is not on the pinned discovery_url origin '
+                    f'({_origin_str(discovery_url)}); refusing to send '
+                    'credentials to an endpoint off the pinned IdP origin. If '
+                    'your IdP serves discovery and tokens from different '
+                    'origins, pin with issuer=... or pass the endpoints '
+                    'explicitly (token_endpoint=..., '
+                    'device_authorization_endpoint=...).')
+
     # Fall back to IdP discovery when QuestDB doesn't advertise the device
     # (and/or token) endpoint. This contacts the IdP, so it is held to
     # https/loopback (insecure=False) regardless of the QuestDB flag.

@@ -1646,6 +1646,37 @@ class TestInsecureSettingsGuard(unittest.TestCase):
                             insecure=True, issuer='https://evil.example.com')
         self.assertEqual(cfg.token_endpoint, 'https://evil.example.com/token')
 
+    def test_discovery_url_pin_scopes_settings_endpoints(self):
+        # C1: the plaintext guard accepts discovery_url= as a sufficient pin, but
+        # when /settings advertises BOTH credential endpoints the IdP-discovery
+        # block (the only other discovery_url enforcement) is skipped. A
+        # discovery_url pin must still constrain settings-supplied endpoints to
+        # its origin, else a tampered plaintext /settings routes credentials to
+        # an attacker the pin was meant to forbid. IdP discovery must NOT run.
+        with self.assertRaises(OidcConfigError) as cm:
+            self._resolve(
+                self._TAMPERED,  # both endpoints on evil.example.com
+                questdb_url='http://qdb.internal.example:9000', insecure=True,
+                discovery_url='https://idp.example.com/.well-known/'
+                              'openid-configuration')
+        self.assertIn('discovery_url', str(cm.exception))
+
+    def test_discovery_url_pin_accepts_on_origin_settings_endpoints(self):
+        # The legitimate case: /settings endpoints on the pinned discovery_url
+        # origin are accepted (origin-level, so a different path is fine), with
+        # no IdP round-trip since both endpoints are present.
+        good = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': 'https://idp.example.com/oauth/token',
+            'acl.oidc.device.authorization.endpoint':
+                'https://idp.example.com/oauth/device'}
+        cfg = self._resolve(
+            good, questdb_url='http://qdb.internal.example:9000', insecure=True,
+            discovery_url='https://idp.example.com/.well-known/'
+                          'openid-configuration')
+        self.assertEqual(cfg.token_endpoint,
+                         'https://idp.example.com/oauth/token')
+
     def test_issuer_path_scopes_settings_endpoints(self):
         # M1: a tampered /settings advertising a DIFFERENT realm's endpoints on
         # the SAME host (Keycloak path-based multi-tenancy) is rejected when the
