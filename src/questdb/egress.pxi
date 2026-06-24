@@ -262,7 +262,7 @@ cdef object _build_record_batch_reader(
 
     schema = first.schema
 
-    def _gen():
+    def _gen(compact):
         try:
             yield first
             while True:
@@ -284,7 +284,7 @@ cdef object _build_record_batch_reader(
         finally:
             cursor_handle._free()
 
-    return pa.RecordBatchReader.from_batches(schema, _gen())
+    return pa.RecordBatchReader.from_batches(schema, _gen(compact))
 
 
 cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
