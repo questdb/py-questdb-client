@@ -190,6 +190,15 @@ def _read_body(resp: Any, *, max_bytes: int, deadline: float) -> bytes:
     past the caller's timeout (urllib's timeout is per-socket-read, not a
     whole-read bound) nor exhaust memory with an unbounded body.
     """
+    # Read via read1(): it returns after a SINGLE underlying socket read, so the
+    # deadline check below actually runs between reads. resp.read(n) on an
+    # http.client response instead blocks until it has buffered the full n bytes
+    # (or hits EOF), so a server dribbling one byte per socket-timeout window
+    # would keep one read(_READ_CHUNK) blocked indefinitely — the per-socket
+    # timeout keeps resetting and the deadline is never reached. read1 is
+    # provided by http.client.HTTPResponse and (by delegation) urllib's
+    # HTTPError; fall back to read() for any stream that lacks it.
+    read = getattr(resp, 'read1', None) or resp.read
     chunks = []
     total = 0
     while True:
@@ -197,7 +206,7 @@ def _read_body(resp: Any, *, max_bytes: int, deadline: float) -> bytes:
             raise OidcNetworkError(
                 'Timed out reading the response body; the server is too slow '
                 'or is dribbling data.')
-        chunk = resp.read(_READ_CHUNK)
+        chunk = read(_READ_CHUNK)
         if not chunk:
             return b''.join(chunks)
         total += len(chunk)

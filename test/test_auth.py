@@ -2358,6 +2358,77 @@ class TestTransportSecurity(unittest.TestCase):
             with self.assertRaises(OidcNetworkError):
                 _http._read_body(body, max_bytes=10 ** 9, deadline=1.0)
 
+    def test_read_body_aborts_real_socket_dribble(self):
+        # Regression for M1, against the REAL socket stack (the _ChunkStream
+        # unit test above cannot catch this — the mock defines read() itself).
+        # A real http.client response's read(n) blocks until n bytes are
+        # buffered, so a server dribbling one byte per socket-timeout window
+        # would keep a single read(_READ_CHUNK) blocked forever and the
+        # wall-clock deadline (checked only between reads) would never fire.
+        # _read_body must read via read1() so each read returns after one
+        # socket read and the deadline is honored; this would hang the calling
+        # thread (which holds the acquisition lock) before the fix.
+        import socket
+        from questdb.auth import _http
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def serve():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(65536)  # consume the request line/headers
+                # Announce a large body, then dribble it one byte at a time,
+                # each well inside the per-socket timeout window so urllib's
+                # per-read timeout never fires.
+                conn.sendall(
+                    b'HTTP/1.1 200 OK\r\n'
+                    b'Content-Type: application/json\r\n'
+                    b'Content-Length: 1000000\r\n\r\n')
+                while not stop.is_set():
+                    try:
+                        conn.sendall(b'a')
+                    except OSError:
+                        break
+                    stop.wait(0.1)
+            finally:
+                conn.close()
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+
+        result = {}
+
+        def call():
+            try:
+                _http.request(
+                    'GET', f'http://127.0.0.1:{port}/x', timeout=1.0)
+                result['returned'] = True
+            except Exception as e:  # noqa: BLE001 - record for the assert below
+                result['error'] = e
+
+        t = threading.Thread(target=call, daemon=True)
+        t.start()
+        t.join(8.0)
+        hung = t.is_alive()            # capture before cleanup unblocks it
+        stop.set()
+        srv.close()
+        server_thread.join(2.0)
+
+        self.assertFalse(
+            hung,
+            'request() hung on a dribbling server: the whole-read wall-clock '
+            'deadline never fired (M1 regression — _read_body must read via '
+            'read1()).')
+        self.assertIsInstance(result.get('error'), OidcNetworkError)
+
     def test_bad_ca_bundle_raises_config_error(self):
         # A missing or invalid CA bundle path (explicit or via env) must surface
         # as OidcConfigError, not a raw FileNotFoundError / ssl.SSLError. See M1.
