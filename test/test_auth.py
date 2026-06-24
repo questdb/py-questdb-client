@@ -651,9 +651,29 @@ class TestDeviceFlow(AuthTestBase):
                 {'token_endpoint': 123}, {'token_endpoint': ''},
                 {'scope': None}, {'scope': 123},
                 {'scope': None, 'groups_in_token': True},  # the scope.split() case
-                {'audience': 123}, {'issuer': 123}):
+                {'audience': 123}, {'issuer': 123},
+                # default_interval / timeout feed the poll-interval clamp and
+                # urllib socket calls; a non-numeric/non-positive/NaN value must
+                # raise the typed error, not a bare TypeError later. bool is an
+                # int subclass, so it's rejected explicitly.
+                {'default_interval': 'soon'}, {'default_interval': 0},
+                {'default_interval': -1}, {'default_interval': True},
+                {'default_interval': float('nan')},
+                {'timeout': 'slow'}, {'timeout': 0}, {'timeout': -5},
+                {'timeout': True}, {'timeout': float('nan')}):
             with self.assertRaises(OidcConfigError):
                 OidcDeviceAuth(**{**good, **bad})
+        # A float interval/timeout is fine (clamped / passed to the socket).
+        OidcDeviceAuth(**{**good, 'default_interval': 7.5, 'timeout': 12.0})
+        # from_questdb consumes `timeout` before the constructor runs, so it
+        # validates up front too — and before any network call, so a bad value
+        # fails fast without reaching the (unreachable) server.
+        with self.assertRaises(OidcConfigError):
+            OidcDeviceAuth.from_questdb(
+                'https://db.example.com:9000', timeout='slow')
+        with self.assertRaises(OidcConfigError):
+            OidcDeviceAuth.from_questdb(
+                'https://db.example.com:9000', default_interval=-1)
 
     def test_zero_expires_in_is_treated_as_unknown(self):
         # A non-positive expires_in must not mark the just-issued token expired.

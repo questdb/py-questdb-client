@@ -146,6 +146,23 @@ def _http_status_is_transient(status: Optional[int]) -> bool:
     return status is not None and (status >= 500 or status == 429)
 
 
+def _validate_positive_number(value: Any, name: str) -> None:
+    """
+    Require a duration argument to be a positive, finite number of seconds.
+
+    Mirrors the constructor's other up-front type checks: a non-numeric value
+    would otherwise surface later as a bare TypeError from the poll-interval
+    clamp (``max(_MIN_POLL_INTERVAL, default_interval)``) or a urllib socket
+    call (``timeout``), escaping the module's typed-error contract. ``bool`` is
+    an ``int`` subclass, so reject it explicitly; ``NaN`` fails ``> 0`` and is
+    rejected too (``<= 0`` would let it through).
+    """
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not value > 0):
+        raise OidcConfigError(
+            f'{name} must be a positive number of seconds, got {value!r}')
+
+
 class OidcDeviceAuth:
     """
     Acquire and refresh an OIDC token via the device authorization grant.
@@ -228,6 +245,11 @@ class OidcDeviceAuth:
             raise OidcConfigError('audience must be a string or None')
         if issuer is not None and not isinstance(issuer, str):
             raise OidcConfigError('issuer must be a string or None')
+        # default_interval feeds the poll-interval clamp and timeout every IdP
+        # socket call; a non-numeric value would otherwise escape as a bare
+        # TypeError rather than the typed error this block exists to raise.
+        _validate_positive_number(default_interval, 'default_interval')
+        _validate_positive_number(timeout, 'timeout')
 
         # Sending the id_token requires the ``openid`` scope.
         if groups_in_token and 'openid' not in scope.split():
@@ -313,6 +335,12 @@ class OidcDeviceAuth:
         device-authorization endpoint when QuestDB doesn't advertise it. Any
         explicit keyword overrides discovery.
         """
+        # Validate before resolve_config consumes `timeout` on its /settings and
+        # discovery HTTP calls (which run before cls() would validate it), so a
+        # bad timeout fails fast with the typed error rather than a bare
+        # TypeError from urllib.
+        _validate_positive_number(default_interval, 'default_interval')
+        _validate_positive_number(timeout, 'timeout')
         ctx = build_ssl_context(ca_bundle)
         cfg = resolve_config(
             questdb_url=url,
