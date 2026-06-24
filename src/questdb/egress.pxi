@@ -1048,11 +1048,11 @@ cdef object _numpy_symbol_codes_chunk(
     return out
 
 
-cdef list _symbol_categories_from_dict(const reader_symbol_dict* sd):
+cdef void _symbol_categories_extend(
+        list cats, const reader_symbol_dict* sd, size_t start):
     cdef size_t i
     cdef const reader_symbol_entry* e
-    cdef list cats = []
-    for i in range(sd.entry_count):
+    for i in range(start, sd.entry_count):
         e = &sd.entries[i]
         if <uint64_t>e.offset + <uint64_t>e.length > <uint64_t>sd.heap_len:
             raise IngressError(
@@ -1061,7 +1061,6 @@ cdef list _symbol_categories_from_dict(const reader_symbol_dict* sd):
         cats.append(
             PyUnicode_FromStringAndSize(
                 <const char*>(sd.heap + e.offset), <Py_ssize_t>e.length))
-    return cats
 
 
 cdef object _numpy_geohash_chunk(
@@ -1552,7 +1551,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                     reader_batch_symbol_dict(batch, &sd, &err), err,
                     'reader_batch_symbol_dict')
                 if sd.entry_count > prev_dict_n:
-                    symbol_categories = _symbol_categories_from_dict(&sd)
+                    _symbol_categories_extend(symbol_categories, &sd, prev_dict_n)
                     prev_dict_n = sd.entry_count
             batch_chunks, batch_masks = _numpy_batch_columns(
                 batch, col_kinds, n_cols, row_count, np)
@@ -1840,10 +1839,8 @@ cdef class _NumpyBatchIter:
                     reader_batch_symbol_dict(batch, &sd, &err), err,
                     'reader_batch_symbol_dict')
                 if sd.entry_count > self.prev_dict_n:
-                    self.symbol_categories = _symbol_categories_from_dict(&sd)
-                    # Cache the dtype so each batch's from_codes reuses the
-                    # category Index instead of rebuilding it per batch
-                    # (1056x faster on high-cardinality SYMBOLs).
+                    _symbol_categories_extend(
+                        self.symbol_categories, &sd, self.prev_dict_n)
                     self.symbol_dtype = self.pd.CategoricalDtype(
                         self.symbol_categories)
                     self.prev_dict_n = sd.entry_count
