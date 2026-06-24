@@ -199,7 +199,7 @@ For REST (``Authorization: Bearer``) and ingestion (the
 .. _oidc_idp_requirements:
 
 IdP requirements
-===============
+================
 
 The OIDC client referenced by ``acl.oidc.client.id`` must:
 
@@ -212,7 +212,7 @@ The OIDC client referenced by ``acl.oidc.client.id`` must:
   or expose it via the **userinfo** endpoint (``false``), matching the server.
 
 Security notes
-=============
+==============
 
 * No IdP passwords are ever entered in the notebook; MFA/SSO happen at the IdP.
 * ``https`` is required. Plaintext ``http`` to a **loopback** address
@@ -245,7 +245,7 @@ Security notes
   also pass ``ca_bundle=``.
 
 Dependencies
-===========
+============
 
 ``token()`` / ``headers()`` need nothing beyond the standard library. The
 following are imported lazily, only when used:

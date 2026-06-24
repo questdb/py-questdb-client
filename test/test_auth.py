@@ -435,6 +435,34 @@ class TestDeviceFlow(AuthTestBase):
         # 503 polled at the base interval; 429 bumps the interval by 5.
         self.assertEqual(self._clock.sleeps, [5, 5, 10])
 
+    def test_non_json_5xx_and_429_during_poll_keep_polling(self):
+        # A non-JSON 5xx/429 from a proxy in front of the token endpoint makes
+        # post_form RAISE a bare OidcError(status=...) — it can't return a JSON
+        # body like the case above. The poll loop must treat it as transient and
+        # keep polling, exercising the `except OidcError` transient arm and its
+        # 429 back-off (distinct from the status-based arm). Review m6.
+        self.state.token_script = [(200, None)]  # success once actually polled
+        auth = self.make_auth()
+        real_idp_post = auth._idp_post
+        polls = {'n': 0}
+
+        def flaky(url, form):
+            if url == auth.config.token_endpoint:
+                polls['n'] += 1
+                if polls['n'] == 1:
+                    raise OidcError('proxy <html>503</html>', status=503)
+                if polls['n'] == 2:
+                    raise OidcError('rate limited', status=429)
+            return real_idp_post(url, form)
+
+        auth._idp_post = flaky
+        self.assertEqual(auth.token(), ID_TOKEN)
+        # 503 retried at the base interval; 429 retried with a +5 bump; the 3rd
+        # poll reached the IdP and succeeded.
+        self.assertEqual(polls['n'], 3)
+        self.assertEqual(len(self.state.token_requests), 1)
+        self.assertEqual(self._clock.sleeps, [5, 5, 10])
+
     def test_non_json_4xx_during_poll_is_terminal(self):
         # A non-JSON 4xx during polling (an HTML/plain error page from a WAF or
         # reverse proxy in front of the IdP, or a non-conformant IdP) is a
@@ -684,6 +712,17 @@ class TestDeviceFlow(AuthTestBase):
         auth.token()
         self.assertTrue(auth._tokens.is_valid(self._clock.now()))
 
+    def test_negative_expires_in_treated_as_unknown(self):
+        # A negative expires_in (like zero) must be treated as unknown, not mark
+        # the just-issued token expired — guards the `<= 0` check against an
+        # `== 0` regression. Review m6.
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'token_type': 'Bearer', 'expires_in': -100})]
+        auth = self.make_auth()
+        auth.token()
+        self.assertTrue(auth._tokens.is_valid(self._clock.now()))
+
     def test_short_lived_token_valid_at_issue(self):
         # A small positive expires_in (< 2*skew) must not read as expired the
         # instant it is issued (adaptive skew = min(skew, lifetime/2)).
@@ -697,6 +736,19 @@ class TestDeviceFlow(AuthTestBase):
         self.assertTrue(t.is_valid(t.issued_at))    # usable right after issue
         self.assertFalse(t.is_valid(t.expires_at))  # but still does expire
 
+    def test_is_valid_caps_skew_when_issued_at_unknown(self):
+        # issued_at == 0 means "unknown issue time": a short-lived token that
+        # arrives without one must still be usable at issue (skew capped to half
+        # the remaining lifetime), not read as expired immediately. (Before the
+        # cap applied for issued_at == 0, is_valid(now) returned False here.) Not
+        # reachable via _tokenset_from_response, which always sets issued_at — a
+        # guard for a future caller or a token restored without one. Review m3.
+        now = 1_000_000.0
+        short = TokenSet(access_token='a', expires_at=now + 20, issued_at=0.0)
+        self.assertTrue(short.is_valid(now))         # usable right at issue
+        self.assertFalse(short.is_valid(now + 20))   # but still expires
+        self.assertFalse(short.is_valid(now + 100))  # and stays expired after
+
     def test_overflow_expires_in_treated_as_unknown(self):
         # A non-finite expires_in (JSON Infinity, which json.loads accepts and
         # int(inf) turns into an OverflowError — not a ValueError) must not
@@ -704,6 +756,18 @@ class TestDeviceFlow(AuthTestBase):
         self.state.token_script = [(200, {
             'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
             'token_type': 'Bearer', 'expires_in': float('inf')})]
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertTrue(auth._tokens.is_valid(self._clock.now()))
+
+    def test_nan_expires_in_treated_as_unknown(self):
+        # A NaN token expires_in: int(nan) raises ValueError — a DIFFERENT
+        # exception type from the OverflowError that inf raises above — so it
+        # exercises a separate except arm. Must be treated as unknown so the
+        # token stays usable, not crash. Review m6.
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'token_type': 'Bearer', 'expires_in': float('nan')})]
         auth = self.make_auth()
         self.assertEqual(auth.token(), ID_TOKEN)
         self.assertTrue(auth._tokens.is_valid(self._clock.now()))
@@ -737,6 +801,18 @@ class TestDeviceFlow(AuthTestBase):
             'device_code': 'DEV-CODE', 'user_code': 'X',
             'verification_uri': 'https://idp/device',
             'expires_in': float('inf'), 'interval': float('inf')}
+        self.state.token_script = [(200, None)]  # success on the first poll
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), ID_TOKEN)
+
+    def test_nan_device_timing_fields_do_not_crash(self):
+        # NaN interval / expires_in in the device-auth response: int(nan) raises
+        # ValueError, not the OverflowError that inf raises above — a different
+        # except arm. Must be treated as unknown, not crash. Review m6.
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'X',
+            'verification_uri': 'https://idp/device',
+            'expires_in': float('nan'), 'interval': float('nan')}
         self.state.token_script = [(200, None)]  # success on the first poll
         auth = self.make_auth()
         self.assertEqual(auth.token(), ID_TOKEN)
@@ -2327,12 +2403,19 @@ class TestTransportSecurity(unittest.TestCase):
                 _http.post_form(b + '/token', {'a': 'b'}, timeout=5)
 
     def test_post_form_non_dict_json_raises_oidc_error(self):
-        # A 2xx JSON array (valid JSON but not an object) from the token
-        # endpoint must surface as OidcError. See M4.
+        # A JSON array (valid JSON but not an object) from the token endpoint
+        # must surface as OidcError WITH the HTTP status attached, so the poll
+        # loop can tell a terminal 4xx from a transient/2xx instead of polling on
+        # to a misleading "code expired". See M4 / review m1.
         from questdb.auth import _http
         with _raw_response_server(200, 'application/json', b'[1, 2, 3]') as b:
-            with self.assertRaises(OidcError):
+            with self.assertRaises(OidcError) as cm:
                 _http.post_form(b + '/token', {'a': 'b'}, timeout=5)
+            self.assertEqual(cm.exception.status, 200)
+        with _raw_response_server(400, 'application/json', b'["nope"]') as b:
+            with self.assertRaises(OidcError) as cm:
+                _http.post_form(b + '/token', {'a': 'b'}, timeout=5)
+            self.assertEqual(cm.exception.status, 400)
 
     def test_get_json_non_2xx_raises_oidc_error(self):
         # A non-2xx /settings or discovery response must surface as OidcError.

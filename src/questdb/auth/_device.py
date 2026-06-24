@@ -277,8 +277,9 @@ class OidcDeviceAuth:
         # device code / refresh token are never sent in cleartext even when set.
         self.insecure = insecure
         self.open_browser = open_browser
-        # Kept so adapters with their own transport (QuestDB.sender's ILP Sender)
-        # can forward the same private CA as _ctx rather than the default roots.
+        # Kept so a caller wiring the token into their own transport (e.g. the
+        # ingestion Sender) can forward the same private CA as _ctx rather than
+        # the default roots.
         self._ca_bundle = ca_bundle
         self._interactive = interactive
         self._default_interval = default_interval
@@ -588,7 +589,9 @@ class OidcDeviceAuth:
             issued_at=now,
             token_type=body.get('token_type', 'Bearer'),
             scope=body.get('scope', self.config.scope),
-            sub=claims.get('sub'))
+            # Coerce like the credential fields: a non-string sub from a hostile
+            # JWT reads as absent rather than landing in an Optional[str] field.
+            sub=_str_or_none(claims.get('sub')))
 
     def _idp_post(self, url: str, form: Dict[str, Any]):
         # IdP POSTs carry the device code / refresh token, so always https

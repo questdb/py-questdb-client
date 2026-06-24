@@ -329,5 +329,9 @@ def post_form(
             f'HTTP {resp.status} from {url}: {resp.text()[:200]}',
             status=resp.status)
     if not isinstance(parsed, dict):
-        raise OidcError(f'Unexpected JSON shape from {url}: {parsed!r}')
+        # Attach the status (mirroring the non-JSON branches) so a non-object
+        # body on a terminal 4xx — e.g. a JSON array from a non-conformant IdP
+        # — fails the poll loop fast instead of polling on to "code expired".
+        raise OidcError(
+            f'Unexpected JSON shape from {url}: {parsed!r}', status=resp.status)
     return resp.status, parsed

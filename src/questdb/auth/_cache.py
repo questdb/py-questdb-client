@@ -61,11 +61,12 @@ class TokenSet:
         if self.expires_at <= 0:
             return False
         # Cap skew at half the token lifetime, so a short-lived (< 2*skew)
-        # token isn't reported expired the instant it's issued.
-        if self.issued_at:
-            lifetime = self.expires_at - self.issued_at
-            if lifetime > 0:
-                skew = min(skew, lifetime / 2)
+        # token isn't reported expired the instant it's issued. issued_at == 0
+        # means the issue time is unknown; treat it as `now` so the cap still
+        # applies to a short-lived token that arrives without one.
+        lifetime = self.expires_at - (self.issued_at or now)
+        if lifetime > 0:
+            skew = min(skew, lifetime / 2)
         return now < (self.expires_at - skew)
 
 
