@@ -417,30 +417,6 @@ def resolve_config(
             'explicitly (token_endpoint=..., device_authorization_endpoint=...), '
             'or connect to QuestDB over https so /settings is authenticated.')
 
-    # For /settings endpoints with an out-of-band issuer, require each under the
-    # issuer's PATH, not just its origin: path-based IdPs share one origin per
-    # tenant (Keycloak https://host/realms/{realm}), so the origin check alone
-    # can't stop a tampered /settings steering credentials to a different realm.
-    # The out-of-band issuer can't be forged. Caller-explicit endpoints and those
-    # from IdP discovery are authoritative and skip this — some IdPs (e.g. Azure
-    # AD) legitimately place endpoints outside the issuer path.
-    if issuer:
-        for label, url, from_settings in (
-                ('token endpoint', token_endpoint,
-                 not explicit_token_endpoint),
-                ('device-authorization endpoint',
-                 device_authorization_endpoint, not explicit_device_endpoint)):
-            if url and from_settings and not _endpoint_path_under_issuer(
-                    url, issuer):
-                raise OidcConfigError(
-                    f'The OIDC {label} advertised by QuestDB /settings '
-                    f'({url!r}) is not under the pinned issuer ({issuer!r}); '
-                    'refusing to send credentials to an endpoint outside the '
-                    'trusted issuer (e.g. a different realm on the same host). '
-                    'If your IdP places endpoints outside the issuer path, pass '
-                    'them explicitly (token_endpoint=..., '
-                    'device_authorization_endpoint=...).')
-
     # Fall back to IdP discovery when QuestDB doesn't advertise the device
     # (and/or token) endpoint. This contacts the IdP, so it is held to
     # https/loopback (insecure=False) regardless of the QuestDB flag.
@@ -488,17 +464,28 @@ def resolve_config(
             'device grant, or pass device_authorization_endpoint=... '
             'explicitly.')
 
-    # Pin /settings-sourced credential endpoints to the out-of-band issuer's
-    # ORIGIN. /settings is untrusted (a tampered or MITM'd response can advertise
-    # an attacker endpoint), so an endpoint it supplies must resolve to the
-    # pinned issuer's origin — UNLESS the IdP's own (authoritative, TLS-fetched)
-    # discovery document advertised that very URL, which independently confirms
-    # it. Caller-explicit and IdP-discovered endpoints are authoritative and skip
-    # this: the issuer is an OIDC *identifier*, not necessarily the endpoints'
-    # host (Google issues from accounts.google.com but serves tokens from
-    # oauth2.googleapis.com), so pinning them to the issuer origin would reject a
-    # legitimate cross-origin IdP. The issuer-PATH check above and the
-    # co-location check in OidcDeviceAuth.__init__ still apply.
+    # Pin /settings-sourced credential endpoints to the out-of-band issuer.
+    # /settings is untrusted (a tampered or MITM'd response can advertise an
+    # attacker endpoint), so an endpoint it supplies must sit BOTH on the pinned
+    # issuer's ORIGIN and — for a path-based multi-tenant IdP (Keycloak
+    # https://host/realms/{realm}, where every tenant shares one origin) — under
+    # the issuer's PATH; the origin check alone can't stop a tampered /settings
+    # steering credentials to a different realm on the same host.
+    #
+    # Both checks are waived for an endpoint the IdP's OWN (authoritative,
+    # TLS-fetched) discovery document advertised verbatim (url == confirmed_by_idp):
+    # that confirms it independently of /settings, exactly as trustworthy as the
+    # pinned IdP. So this runs AFTER discovery — a /settings endpoint the IdP
+    # confirms is accepted consistently under BOTH pins (the issuer-PATH check
+    # used to run before discovery and lacked this exemption, so it wrongly
+    # rejected a discovery-confirmed endpoint sitting off the path of an issuer
+    # that carries one, e.g. Azure AD's `.../{tenant}/v2.0` issuer).
+    # Caller-explicit and IdP-discovered endpoints are authoritative and skip
+    # this entirely (from_settings is False): the issuer is an OIDC *identifier*,
+    # not necessarily the endpoints' host (Google issues from accounts.google.com
+    # but serves tokens from oauth2.googleapis.com; Azure AD places endpoints
+    # outside the issuer path), so pinning them would reject a legitimate IdP.
+    # The co-location check in OidcDeviceAuth.__init__ still applies on top.
     if issuer:
         issuer_origin = _normalized_origin(issuer)
         for label, url, from_settings, confirmed_by_idp in (
@@ -507,9 +494,10 @@ def resolve_config(
                 ('device-authorization endpoint',
                  device_authorization_endpoint, device_from_settings,
                  doc_device_endpoint)):
-            if (from_settings
-                    and _normalized_origin(url) != issuer_origin
-                    and url != confirmed_by_idp):
+            if not from_settings or url == confirmed_by_idp:
+                # Caller-explicit / IdP-discovered / discovery-confirmed: trusted.
+                continue
+            if _normalized_origin(url) != issuer_origin:
                 raise OidcConfigError(
                     f'The OIDC {label} advertised by QuestDB /settings '
                     f'({url!r}) is not on the pinned issuer origin '
@@ -521,6 +509,16 @@ def resolve_config(
                     'device_authorization_endpoint=...), or omit them from '
                     '/settings so they are taken from authoritative IdP '
                     'discovery.')
+            if not _endpoint_path_under_issuer(url, issuer):
+                raise OidcConfigError(
+                    f'The OIDC {label} advertised by QuestDB /settings '
+                    f'({url!r}) is not under the pinned issuer ({issuer!r}) and '
+                    'was not confirmed by the IdP discovery document; refusing '
+                    'to send credentials to an endpoint outside the trusted '
+                    'issuer (e.g. a different realm on the same host). If your '
+                    'IdP places endpoints outside the issuer path, pass them '
+                    'explicitly (token_endpoint=..., '
+                    'device_authorization_endpoint=...).')
 
     # The credential-endpoint CO-LOCATION check (validate_endpoint_origins) is
     # enforced centrally in OidcDeviceAuth.__init__, which every path goes

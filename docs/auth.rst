@@ -238,8 +238,8 @@ Security notes
   endpoints' host — e.g. Google issues from ``accounts.google.com`` but serves
   tokens from ``oauth2.googleapis.com``, and some IdPs such as Azure AD place
   endpoints outside the issuer path. A ``/settings`` endpoint that sits off the
-  issuer origin is still accepted when the IdP's own discovery document confirms
-  the same URL.) When the server does not advertise the device-
+  issuer origin **or path** is still accepted when the IdP's own discovery
+  document confirms the same URL.) When the server does not advertise the device-
   authorization endpoint (so it must be discovered from the IdP), ``issuer=`` is
   **required** for exactly this reason — the helper refuses to guess the
   discovery origin from the server-supplied token endpoint.

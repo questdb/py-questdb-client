@@ -1323,6 +1323,52 @@ class TestRefresh(AuthTestBase):
             auth.token()
         self.assertEqual(self.state.device_requests, 0)
 
+    def test_refresh_non_json_5xx_kept_for_retry(self):
+        # A NON-JSON 5xx during a silent refresh (an HTML error page from a proxy
+        # in front of the token endpoint) makes post_form RAISE OidcError(status=)
+        # rather than return a JSON body — exercising _refresh's `except OidcError`
+        # transient arm, distinct from the status-based arm a JSON 5xx hits (the
+        # poll loop has the analogous non-JSON coverage; the refresh path did not).
+        # It must surface as a retryable OidcNetworkError with the refresh token
+        # kept, NOT re-prompt. M2.
+        from questdb.auth._device import REFRESH_GRANT
+        auth = self.make_auth()
+        self._seed_expired(auth)
+        real_idp_post = auth._idp_post
+
+        def flaky(url, form):
+            if form.get('grant_type') == REFRESH_GRANT:
+                raise OidcError('proxy <html>503</html>', status=503)
+            return real_idp_post(url, form)
+
+        auth._idp_post = flaky
+        with self.assertRaises(OidcNetworkError):
+            auth.token()
+        self.assertEqual(self.state.device_requests, 0)            # NOT re-prompted
+        self.assertEqual(auth._tokens.refresh_token, 'REFRESH-1')  # kept
+
+    def test_refresh_non_json_4xx_falls_back_to_device_flow(self):
+        # A NON-JSON 4xx during a silent refresh (an HTML/plain rejection from a
+        # WAF/proxy) is terminal, not transient: post_form RAISES OidcError(status=)
+        # and _refresh's `except OidcError` non-transient arm re-raises, so
+        # _acquire falls through to a fresh interactive sign-in rather than keeping
+        # the rejected refresh token. The device-code POST and the subsequent poll
+        # go through the real (JSON) mock IdP, so the flow completes. M2.
+        from questdb.auth._device import REFRESH_GRANT
+        auth = self.make_auth()
+        self._seed_expired(auth)
+        real_idp_post = auth._idp_post
+
+        def flaky(url, form):
+            if form.get('grant_type') == REFRESH_GRANT:
+                raise OidcError('proxy <html>forbidden</html>', status=403)
+            return real_idp_post(url, form)
+
+        auth._idp_post = flaky
+        token = auth.token()
+        self.assertEqual(token, ID_TOKEN)                 # from the device flow
+        self.assertEqual(self.state.device_requests, 1)   # fell back / re-prompted
+
 
 class TestDiscovery(AuthTestBase):
     def test_from_questdb_reads_settings(self):
@@ -1597,6 +1643,65 @@ class TestDiscovery(AuthTestBase):
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
                                         insecure=True)
+
+    def test_settings_endpoint_off_issuer_path_confirmed_by_discovery(self):
+        # Regression: a path-bearing issuer (Azure-AD-style `.../{tenant}/v2.0`)
+        # whose token endpoint sits OFF the issuer PATH but on its origin,
+        # advertised by /settings and CONFIRMED verbatim by the IdP's own
+        # (TLS-fetched) discovery document, must be ACCEPTED — the issuer-PATH
+        # pin shares the same discovery-confirmation exemption as the issuer-
+        # ORIGIN pin, and both now run AFTER discovery. The device endpoint is
+        # absent from /settings, so it is discovered. Before the fix the PATH
+        # check ran before discovery with no exemption and wrongly rejected this.
+        from questdb.auth import _discovery
+        issuer = 'https://idp.example.com/tenant/v2.0'
+        settings = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            # off the issuer PATH (/tenant/v2.0), but on the issuer ORIGIN:
+            'acl.oidc.token.endpoint':
+                'https://idp.example.com/tenant/oauth2/v2.0/token'}
+        well_known = {
+            'issuer': issuer,
+            'token_endpoint':
+                'https://idp.example.com/tenant/oauth2/v2.0/token',
+            'device_authorization_endpoint':
+                'https://idp.example.com/tenant/oauth2/v2.0/devicecode'}
+        with mock.patch.object(_discovery, 'fetch_settings',
+                               return_value=settings), \
+             mock.patch.object(_discovery, 'discover_device_endpoint_from_idp',
+                               return_value=well_known):
+            cfg = _discovery.resolve_config(
+                questdb_url='https://qdb.example.com:9000', issuer=issuer)
+        self.assertEqual(cfg.token_endpoint,
+                         'https://idp.example.com/tenant/oauth2/v2.0/token')
+        self.assertEqual(cfg.device_authorization_endpoint,
+                         'https://idp.example.com/tenant/oauth2/v2.0/devicecode')
+
+    def test_settings_endpoint_off_issuer_path_not_confirmed_rejected(self):
+        # The flip side: an off-issuer-PATH /settings token endpoint (a tampered
+        # /settings steering credentials to a different realm on the same host)
+        # that the IdP discovery document does NOT confirm stays REJECTED — the
+        # exemption only lifts the pin for the exact URL the IdP itself advertised.
+        from questdb.auth import _discovery
+        issuer = 'https://idp.example.com/realms/prod'
+        settings = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint':
+                'https://idp.example.com/realms/EVIL/token'}
+        well_known = {
+            'issuer': issuer,
+            'token_endpoint':  # the IdP advertises a DIFFERENT token endpoint
+                'https://idp.example.com/realms/prod/token',
+            'device_authorization_endpoint':
+                'https://idp.example.com/realms/prod/device'}
+        with mock.patch.object(_discovery, 'fetch_settings',
+                               return_value=settings), \
+             mock.patch.object(_discovery, 'discover_device_endpoint_from_idp',
+                               return_value=well_known):
+            with self.assertRaises(OidcConfigError) as cm:
+                _discovery.resolve_config(
+                    questdb_url='https://qdb.example.com:9000', issuer=issuer)
+        self.assertIn('issuer', str(cm.exception).lower())
 
     def test_well_known_404_raises_oidc_error(self):
         # issuer pinned (so the IdP fallback is allowed), but the .well-known
