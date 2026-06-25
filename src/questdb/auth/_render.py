@@ -144,16 +144,76 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     return url
 
 
+def _safe_target(value: Optional[str]) -> Optional[str]:
+    """
+    The single control-stripped, scheme/userinfo/host-vetted URL to click, open
+    in a browser, or encode as a QR — or ``None`` if it can't be trusted.
+
+    One value feeds the displayed link's ``href``, :func:`webbrowser.open` and
+    both QR encoders, so a control / zero-width char stripped from the on-screen
+    link can never survive into the URL actually opened or scanned: the displayed
+    link and the real target cannot diverge. (Earlier the browser/QR paths vetted
+    the *raw* response value while the display was control-stripped.)
+    """
+    return _safe_link_url(_strip_control(value))
+
+
+def _display_url(url: Optional[str]) -> str:
+    """
+    A verification URL rendered safe to *show* as text.
+
+    Control / bidi / zero-width chars are stripped, then the host is rebuilt in
+    its IDNA / punycode (ASCII) form and any userinfo is dropped, so neither a
+    homoglyph host (e.g. a fullwidth ``U+FF0E`` that IDNA folds to a real ``.``,
+    making the true registrable domain ``evil.com``) nor a ``user@host`` trick
+    can visually masquerade as a trusted host in the prompt — the user reads the
+    host the browser would actually resolve. Clickability is decided
+    independently by :func:`_safe_target` (which rejects a non-ASCII host
+    outright); this governs only the visible text. A non-``http(s)`` / hostless
+    value is returned control-stripped but otherwise unchanged.
+    """
+    text = _strip_control(url)
+    if not text:
+        return ''
+    try:
+        parts = urllib.parse.urlparse(text)
+        scheme = (parts.scheme or '').lower()
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return text
+    if scheme not in ('http', 'https') or not host:
+        return text  # nothing host-like to normalize (opaque / relative)
+    if host.isascii():
+        ascii_host = host
+    else:
+        try:
+            # The stdlib idna codec splits on the homoglyph dots too
+            # (``. 。 ． ｡``) and ToASCII-encodes each label, so a fullwidth-dot
+            # host resolves to its real ASCII registrable domain here.
+            ascii_host = host.encode('idna').decode('ascii')
+        except (UnicodeError, ValueError):
+            # IDNA can't encode it (an illegal label); make the bytes visible
+            # rather than let an invisible homoglyph through unchanged.
+            ascii_host = host.encode('ascii', 'backslashreplace').decode('ascii')
+    host_part = f'[{ascii_host}]' if ':' in ascii_host else ascii_host  # IPv6
+    netloc = f'{host_part}:{port}' if port is not None else host_part
+    return urllib.parse.urlunparse(parts._replace(netloc=netloc))
+
+
 def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
     """
     Render ``url`` as a clickable link, or as inert escaped text if its scheme
     is not ``http(s)``.
 
-    The label defaults to the URL itself. A rejected URL is shown as escaped
-    plain text (still visible/copyable) but never made clickable.
+    The label defaults to the URL with its host shown in IDNA/punycode form
+    (:func:`_display_url`) so a homoglyph / userinfo host can't masquerade as a
+    trusted one; a rejected URL is shown as that escaped plain text (still
+    visible/copyable) but never made clickable. The ``href`` is the single vetted
+    target (:func:`_safe_target`), so the link points exactly where it reads.
     """
-    safe = _safe_link_url(url)
-    label = html.escape(text if text is not None else (url or ''))
+    safe = _safe_target(url)
+    label = html.escape(text if text is not None else _display_url(url))
     if safe is None:
         return label
     return (f'<a href="{html.escape(safe)}" target="_blank" '
@@ -204,9 +264,11 @@ def _strip_control(text: Optional[str]) -> str:
 
 def format_prompt(resp: Dict[str, Any]) -> str:
     """Plain-text sign-in prompt (also used as the notebook fallback)."""
-    uri = _strip_control(_verification_uri(resp))
+    # _display_url shows the IDNA/punycode host (and drops userinfo) so a
+    # homoglyph / user@host can't spoof the host in the plain-text prompt either.
+    uri = _display_url(_verification_uri(resp))
     code = _strip_control(str(resp.get('user_code', '')))
-    complete = _strip_control(_verification_uri_complete(resp))
+    complete = _display_url(_verification_uri_complete(resp))
     lines = [
         '🔐 Sign in to QuestDB',
         f'   Open {uri}  and enter code:  {code}',
@@ -269,11 +331,12 @@ class TerminalRenderer(Renderer):
     def on_prompt(self, resp: Dict[str, Any]) -> None:
         self._write(format_prompt(resp) + '\n')
         if self._qr:
-            # Scheme-vet the target before encoding it, mirroring the Jupyter QR
-            # (_qr_img): never turn a javascript:/data: verification_uri from a
-            # hostile device response into a scannable QR.
-            target = (_safe_link_url(_verification_uri_complete(resp))
-                      or _safe_link_url(_verification_uri(resp)))
+            # Encode the SAME _strip_control'd, vetted target the prompt displays
+            # (via _safe_target), not the raw response value — so a char stripped
+            # from the on-screen URL can't survive into the scanned QR, and a
+            # javascript:/data: scheme is never encoded.
+            target = (_safe_target(_verification_uri_complete(resp))
+                      or _safe_target(_verification_uri(resp)))
             art = _qr_ascii(target) if target else None
             if art:
                 self._write(art + '\n')
@@ -335,27 +398,29 @@ class JupyterRenderer(Renderer):
         URL. Returns ``(body, uri, complete)``.
         """
         resp = self._resp
-        uri = _strip_control(_verification_uri(resp))
+        # _render_link / _safe_target / _qr_img each strip + vet internally, so
+        # pass the raw fields and let the single canonical target drive the href,
+        # the QR and the displayed (IDNA-normalized) label uniformly.
+        raw_uri = _verification_uri(resp)
+        raw_complete = _verification_uri_complete(resp)
         code = html.escape(_strip_control(str(resp.get('user_code', ''))))
-        complete = _verification_uri_complete(resp)
-        complete = _strip_control(complete) if complete else None
         body = [
             '<div style="font-size:1.05em;font-weight:600;margin-bottom:6px">'
             '🔐 Sign in to QuestDB</div>',
-            f'<div>Open {_render_link(uri)} and enter code:</div>',
+            f'<div>Open {_render_link(raw_uri)} and enter code:</div>',
             f'<div style="font-size:1.6em;font-family:monospace;'
             f'letter-spacing:2px;margin:6px 0">{code}</div>',
         ]
-        if _safe_link_url(complete):
+        if _safe_target(raw_complete):
             body.append(
                 '<div>' + _render_link(
-                    complete, text='Click here to authorize directly →')
+                    raw_complete, text='Click here to authorize directly →')
                 + '</div>')
         if self._qr:
-            qr_html = self._qr_img(complete, uri)
+            qr_html = self._qr_img(raw_complete, raw_uri)
             if qr_html:
                 body.append(qr_html)
-        return body, uri, complete
+        return body, raw_uri, raw_complete
 
     def _qr_img(self, complete: Optional[str], uri: str) -> str:
         """The QR ``<img>`` for the verification URL, built once and cached.
@@ -365,7 +430,7 @@ class JupyterRenderer(Renderer):
         the countdown re-renders neither drop the QR nor regenerate the PNG.
         """
         if self._qr_html is None:
-            target = _safe_link_url(complete) or _safe_link_url(uri)
+            target = _safe_target(complete) or _safe_target(uri)
             data_uri = _qr_data_uri(target) if target else None
             self._qr_html = (
                 f'<img alt="QR code" src="{data_uri}" '

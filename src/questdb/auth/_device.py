@@ -48,7 +48,7 @@ from ._errors import (
 from ._http import build_ssl_context, post_form, safe_urlparse
 from ._render import (
     Renderer,
-    _safe_link_url,
+    _safe_target,
     detect_interactive,
     in_ipython_kernel,
     make_renderer,
@@ -906,9 +906,11 @@ class OidcDeviceAuth:
         # kernel host isn't the user's machine. Suppress with open_browser=False.
         if not self.open_browser or in_ipython_kernel():
             return
-        # Only http(s) — never a javascript:/data: scheme from a malicious or
-        # MITM'd device response.
-        target = _safe_link_url(
+        # Open the SAME _strip_control'd, vetted target the prompt shows (via
+        # _safe_target) — not the raw response value — so a char stripped from the
+        # on-screen link can't survive into the opened URL, and a javascript:/
+        # data: scheme (or userinfo / non-ASCII host) is never opened.
+        target = _safe_target(
             resp.get('verification_uri_complete')
             or resp.get('verification_uri')
             or resp.get('verification_url'))

@@ -3525,6 +3525,59 @@ class TestRendererSecurity(unittest.TestCase):
                 {'verification_uri': 'https://idp.example.com/device'})
             wb.assert_called_once_with('https://idp.example.com/device')
 
+    def test_homoglyph_host_revealed_not_clickable(self):
+        # A homoglyph "dot" in the host — fullwidth U+FF0E / one-dot-leader
+        # U+2024 / ideographic U+3002 — IDNA-folds to a real '.', so the true
+        # registrable domain is evil.com, visually masquerading as a trusted
+        # host. It must be (a) never clickable / opened (the host-allowlist
+        # rejects a non-ASCII host) and (b) shown IDNA-normalized, not echoed
+        # raw, so the real host is legible.
+        from questdb.auth._render import (
+            _safe_link_url, _safe_target, _display_url, _render_link)
+        for cp in (0xFF0E, 0x2024, 0x3002):
+            raw = f'https://idp.example.com{chr(cp)}evil.com/device'
+            self.assertIsNone(_safe_link_url(raw), f'U+{cp:04X} clickable')
+            self.assertIsNone(_safe_target(raw))
+            shown = _display_url(raw)
+            self.assertNotIn(chr(cp), shown)                  # not echoed raw
+            self.assertIn('idp.example.com.evil.com', shown)  # real host shown
+            link = _render_link(raw)
+            self.assertNotIn('<a ', link)                     # inert, no link
+            self.assertNotIn(chr(cp), link)
+        # The @-userinfo trick is likewise revealed (real host shown, no '@').
+        self.assertEqual(
+            _display_url('https://login.questdb.io@evil.example/device'),
+            'https://evil.example/device')
+        # A legitimate URL is shown unchanged and stays clickable.
+        self.assertEqual(_display_url('https://idp.example.com/device'),
+                         'https://idp.example.com/device')
+        self.assertIn('<a href="https://idp.example.com/device"',
+                      _render_link('https://idp.example.com/device'))
+
+    def test_displayed_and_opened_target_do_not_diverge(self):
+        # A control / zero-width char stripped from the on-screen link must NOT
+        # survive into the URL actually opened or QR-encoded: the display, the
+        # browser target and both QR encoders all use one _strip_control'd,
+        # vetted value (_safe_target), so they cannot diverge.
+        from questdb.auth._render import _safe_target, _display_url
+        zwsp = chr(0x200b)
+        raw = f'https://idp.example.com/de{zwsp}vice'   # zero-width space in path
+        clean = 'https://idp.example.com/device'
+        self.assertEqual(_safe_target(raw), clean)
+        self.assertEqual(_display_url(raw), clean)
+        self.assertNotIn(zwsp, _safe_target(raw))
+        # End-to-end: the browser opens the stripped target, not the raw value.
+        auth = OidcDeviceAuth(
+            client_id='c',
+            device_authorization_endpoint='https://idp.example.com/device',
+            token_endpoint='https://idp.example.com/token',
+            open_browser=True)
+        with mock.patch('webbrowser.open') as wb, \
+                mock.patch('questdb.auth._device.in_ipython_kernel',
+                           return_value=False):
+            auth._maybe_open_browser({'verification_uri': raw})
+            wb.assert_called_once_with(clean)
+
     def test_qr_helpers_degrade_without_qrcode(self):
         # The QR helpers must degrade gracefully (return None), never raise,
         # when `qrcode` is absent or the data is empty. See M4.
