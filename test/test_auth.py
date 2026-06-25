@@ -2386,6 +2386,16 @@ class TestEndpointValidation(unittest.TestCase):
         # https default (443) vs explicit :443 normalize to the same origin.
         self._validate('https://idp/token', 'https://idp:443/device')
 
+    def test_normalized_origin_keeps_explicit_zero_port(self):
+        # m6: an explicit :0 must not collapse to the default port (0 is falsy
+        # but a real, distinct port value), so it stays a distinct origin rather
+        # than aliasing the default. Not exploitable (:0 isn't connectable) — a
+        # normalization tidy.
+        from questdb.auth._discovery import _normalized_origin
+        self.assertEqual(_normalized_origin('https://h:0/x'), ('https', 'h', 0))
+        self.assertNotEqual(_normalized_origin('https://h:0/x'),
+                            _normalized_origin('https://h/x'))
+
     def test_ipv6_same_origin_accepted(self):
         self._validate('https://[::1]/token', 'https://[::1]/device')
 
@@ -2494,6 +2504,17 @@ class TestEndpointValidation(unittest.TestCase):
         # param is still accepted — only dot traversal is rejected.
         self.assertTrue(under(iss + '/some%20path/token', iss))
         self.assertTrue(under(iss + '/token;jsessionid=abc', iss))
+        # A NUL (or any other C0 control / DEL) in a segment is rejected (m7):
+        # it survives _strip_matrix_params (str.strip trims only whitespace
+        # controls), so "..%00" decodes to '..\x00' (not literally '..') and
+        # would slip the dot-check — but a NUL-truncating or control-stripping
+        # proxy/server resolves it back to '..' and reaches a different realm.
+        self.assertFalse(under(iss + '/..%00/EVIL/token', iss))      # ..NUL
+        self.assertFalse(under(iss + '/%2e%2e%00/EVIL/token', iss))  # enc ..NUL
+        self.assertFalse(under(iss + '/..%01/EVIL/token', iss))      # ..C0
+        self.assertFalse(under(iss + '/..%7f/EVIL/token', iss))      # ..DEL
+        # A printable-ASCII segment with an internal space (%20) is still fine.
+        self.assertTrue(under(iss + '/ok%20name/token', iss))
 
 
 class TestCacheKey(unittest.TestCase):

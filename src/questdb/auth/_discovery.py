@@ -149,7 +149,11 @@ def _normalized_origin(url: str) -> tuple:
     parts, explicit_port = safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
     host = (parts.hostname or '').lower()
-    port = explicit_port or _DEFAULT_PORTS.get(scheme)
+    # `explicit_port or default` would collapse an explicit :0 (falsy) to the
+    # default port; compare against None so :0 stays a distinct (if
+    # unconnectable) origin rather than aliasing the default.
+    port = (explicit_port if explicit_port is not None
+            else _DEFAULT_PORTS.get(scheme))
     return (scheme, host, port)
 
 
@@ -207,6 +211,21 @@ def _strip_matrix_params(segment: str) -> str:
     return segment.split(';', 1)[0].strip()
 
 
+def _has_control_char(segment: str) -> bool:
+    """
+    True if ``segment`` carries a C0 control character (including NUL) or DEL.
+
+    Such a char survives :func:`_strip_matrix_params` (``str.strip`` trims only
+    the whitespace controls, and only at the ends), so a percent-encoded
+    ``..%00`` decodes to a segment that is not literally ``..`` and would slip
+    the dot-segment check below — yet a NUL-truncating or control-stripping
+    proxy/server can resolve it back to ``..`` and reach a different path.
+    Legitimate credential-endpoint segments are plain printable ASCII, so any
+    control char is rejected (fail closed).
+    """
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in segment)
+
+
 def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     """
     True if ``endpoint``'s path is the issuer's path or a sub-path of it.
@@ -246,7 +265,8 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     # prefix-match a value that could still resolve to a different path.
     # Legitimate credential-endpoint paths are plain ASCII with no encoding.
     if ('.' in ep_segs or '..' in ep_segs
-            or any('%' in s for s in ep_segs)):
+            or any('%' in s for s in ep_segs)
+            or any(_has_control_char(s) for s in ep_segs)):
         return False
     return ep_segs[:len(base_segs)] == base_segs
 
