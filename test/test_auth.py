@@ -168,6 +168,35 @@ class FakeClock:
         return self.wall
 
 
+class _ConcurrentClock:
+    """Like FakeClock but safe under real thread contention; sleep is instant.
+
+    The deterministic FakeClock mutates plain attributes, which races when many
+    threads drive the flow at once (and tears on a free-threaded build). This
+    guards every read/write with a lock so a multi-thread stress test gets
+    instant, non-racing time. Only the lock-holding acquirer ever sleeps (the
+    lock-free fast path never does), so contention on this lock stays low.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.mono = 0.0
+        self.wall = 1_000_000.0
+
+    def sleep(self, dt):
+        with self._lock:
+            self.mono += dt
+            self.wall += dt
+
+    def monotonic(self):
+        with self._lock:
+            return self.mono
+
+    def now(self):
+        with self._lock:
+            return self.wall
+
+
 class MockState:
     """Scriptable behaviour shared with the request handler."""
 
@@ -538,6 +567,18 @@ class TestDeviceFlow(AuthTestBase):
         with self.assertRaises(OidcTimeoutError) as cm:
             auth.token()
         self.assertEqual(cm.exception.error, 'expired_token')
+
+    def test_non_string_poll_error_field_raises_typed_error(self):
+        # M1 (end-to-end): a non-conformant/hostile IdP can answer the token poll
+        # with a non-string error / error_description (a JSON object/array).
+        # Building the terminal OidcDeviceFlowError from it must surface as a
+        # TYPED OidcError, never a raw TypeError that escapes token().
+        self.state.token_script = [
+            (400, {'error': {'nested': 'obj'},
+                   'error_description': ['a', 'list']})]
+        auth = self.make_auth()
+        with self.assertRaises(OidcError):   # typed, not TypeError
+            auth.token()
 
     def test_nonpositive_expires_in_still_polls(self):
         # A non-positive expires_in in the device-auth response must be treated
@@ -1156,6 +1197,20 @@ class TestRefresh(AuthTestBase):
         self.assertEqual(token, ID_TOKEN)
         self.assertEqual(self.state.refresh_requests, 1)
         self.assertEqual(self.state.device_requests, 1)  # re-prompted
+
+    def test_non_string_refresh_error_falls_back_not_crashes(self):
+        # M1 (end-to-end): a refresh rejected with a NON-STRING error must still
+        # fall back to a fresh device flow, not crash. The terminal
+        # OidcDeviceFlowError _refresh raises is caught by _acquire's
+        # 'except OidcError'; before the fix a raw TypeError raised DURING that
+        # exception's construction slipped past the handler and aborted token().
+        auth = self.make_auth()
+        self._seed_expired(auth)
+        self.state.refresh_response = (400, {'error': {'obj': 'denied'}})
+        token = auth.token()                              # must not raise
+        self.assertEqual(token, ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(self.state.device_requests, 1)   # fell back to sign-in
 
     def test_refresh_token_preserved_when_not_rotated(self):
         auth = self.make_auth()
@@ -2015,6 +2070,74 @@ class TestConcurrency(AuthTestBase):
         self.assertNotIn(a.cache_key, _MEMORY_STORE)        # A's store dropped
         self.assertNotIn(a.cache_key, _MEMORY_GENERATION)   # reclaimed on release
         self.assertNotIn(a.cache_key, _MEMORY_INFLIGHT)
+
+    def test_token_clear_stress(self):
+        # M3: drive the lock-free fast path and the generation/inflight CAS under
+        # REAL thread contention. The other concurrency tests exercise the CAS
+        # sequentially or via a same-thread synchronous clear(); this races many
+        # token() readers against a thread that periodically clear()s, the closest
+        # analogue to a SQLAlchemy/psycopg pool opening connections as the token is
+        # cycled. Asserts: no thread sees an exception (torn read / CAS bug / the
+        # M1 non-string crash would surface here), none deadlocks, the cache keeps
+        # serving so prompts stay far below the token() call count, and the
+        # process-global in-flight bookkeeping doesn't leak.
+        #
+        # Runs on a free-threaded (no-GIL) build too — that is where the lock-free
+        # fast-path read of self._tokens is genuinely concurrent with the locked
+        # writers, so the _ConcurrentClock (not the racy FakeClock) is used.
+        clock = _ConcurrentClock()
+        auth = self.make_auth(clock=clock, open_browser=False)
+        # Seed a valid token so the steady state is the lock-free fast path; a
+        # device flow then runs ONLY when a clear() has just emptied the cache.
+        seed = TokenSet(
+            access_token='a', id_token=ID_TOKEN, refresh_token='r',
+            issued_at=clock.now(), expires_at=clock.now() + 3600)
+        auth._cache.store(auth.cache_key, seed)
+
+        n_workers = 7
+        iters = 200
+        n_clears = 40
+        errors = []
+        start = threading.Barrier(n_workers + 1 + 1)  # workers + clearer + main
+
+        def worker():
+            start.wait()
+            try:
+                for _ in range(iters):
+                    if auth.token() != ID_TOKEN:
+                        errors.append('wrong token kind served')
+                        return
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        def clearer():
+            start.wait()
+            try:
+                for _ in range(n_clears):
+                    auth.clear()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_workers)]
+        threads.append(threading.Thread(target=clearer))
+        for t in threads:
+            t.start()
+        start.wait()  # release everyone at once for maximum contention
+        for t in threads:
+            t.join(30)
+        for t in threads:
+            self.assertFalse(t.is_alive(), 'a thread deadlocked under contention')
+        self.assertEqual(errors, [], f'errors under contention: {errors[:3]}')
+        # A device flow runs only after a clear() empties the cache (the lock
+        # serializes the re-acquisition, so racing readers reuse it) — never per
+        # call. So prompts are bounded by the clears, far below n_workers*iters.
+        self.assertLessEqual(self.state.device_requests, n_clears + 1)
+        self.assertGreater(n_workers * iters,
+                           max(1, self.state.device_requests) * 10)
+        # No leaked in-flight bookkeeping once the storm settles.
+        self.assertEqual(_MEMORY_INFLIGHT.get(auth.cache_key, 0), 0)
+        # The auth is still usable afterwards.
+        self.assertEqual(auth.token(), ID_TOKEN)
 
 
 class TestAdapters(unittest.TestCase):
@@ -2932,6 +3055,33 @@ class TestRendererSecurity(unittest.TestCase):
                     'vbscript:x', 'file:///etc/passwd', '', None):
             self.assertIsNone(_safe_link_url(bad))
 
+    def test_safe_link_url_rejects_userinfo_and_confusable_host(self):
+        # M2: an http(s) URL that could MISREPRESENT its destination host must
+        # not be made clickable / auto-opened — embedded userinfo (reads as the
+        # trusted host, connects past the '@'), or a non-ASCII confusable /
+        # control char in the authority. Such a URL is shown as inert text
+        # instead. Defeating a host-spoof the scheme allowlist alone misses.
+        from questdb.auth._render import _safe_link_url
+        spoofs = [
+            'https://login.questdb.io@evil.example/device',     # userinfo
+            'https://idp.example.com@evil/device?user_code=X',  # userinfo
+            'https://evil.example／login.questdb.io/auth',  # fullwidth solidus
+            'https://qоestdb.io/device',                   # Cyrillic homograph
+            'https://idp.example.com\x00/device',               # NUL in authority
+        ]
+        for url in spoofs:
+            self.assertIsNone(_safe_link_url(url), f'should reject {url!r}')
+        # Legitimate targets (DNS, explicit port, loopback, IPv6, punycode IDN)
+        # still pass — the host gate must not over-block the happy path.
+        for url in (
+                'https://idp.example.com/device',
+                'https://idp.example.com:8443/device?user_code=WDJB-MJHT',
+                'http://127.0.0.1:9000/device',
+                'https://[::1]:8080/device',
+                'https://xn--nxasmm1c.example/device',
+                'https://accounts.google.com/o/oauth2/device/code'):
+            self.assertEqual(_safe_link_url(url), url, f'should accept {url!r}')
+
     def test_render_link_inert_for_dangerous_scheme(self):
         from questdb.auth._render import _render_link
         safe = _render_link('https://idp/x')
@@ -3314,6 +3464,58 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertNotIn(chr(0x202e), str(e))
         self.assertIn('boom', str(e))
         self.assertIn('spoof', str(e))
+
+    def test_oidc_device_flow_error_tolerates_non_string_fields(self):
+        # M1: a hostile/non-conformant IdP can put a non-string into the
+        # error / error_description of a token or device-auth response. Building
+        # OidcDeviceFlowError from it must NOT raise a raw TypeError — that would
+        # escape the typed-error contract and, on the refresh path, slip past the
+        # 'except OidcError' fallback (the TypeError would be raised DURING the
+        # exception's construction, so it isn't an OidcError). The field is
+        # coerced through str() and sanitized, mirroring OidcError's args.
+        for bad in ({'code': 'denied'}, 12345, ['a', 'bb'], True):
+            e = OidcDeviceFlowError('failed', error=bad, error_description=bad)
+            self.assertIsInstance(e, OidcError)
+            self.assertIsInstance(e.error, str)
+            self.assertIsInstance(e.error_description, str)
+
+        # A non-string whose text representation embeds an ANSI/bidi sequence is
+        # still stripped (same traceback-sink concern as OidcError's message).
+        class _Evil:
+            def __str__(self):
+                return 'denied \x1b[31m' + chr(0x202e) + 'spoof'
+        e = OidcDeviceFlowError('failed', error=_Evil(),
+                                error_description=_Evil())
+        for s in (e.error, e.error_description):
+            self.assertNotIn('\x1b', s)
+            self.assertNotIn(chr(0x202e), s)
+            self.assertIn('spoof', s)
+        # Absent stays None (not coerced to '' or 'None').
+        self.assertIsNone(OidcDeviceFlowError('x').error)
+        self.assertIsNone(OidcDeviceFlowError('x').error_description)
+
+    def test_userinfo_verification_url_not_auto_opened(self):
+        # M2: a tampered device response whose verification URL embeds userinfo
+        # (https://trusted@evil/) must NOT be auto-opened in the browser — it
+        # would navigate to `evil` while reading as `trusted`. The same
+        # _safe_link_url gate that makes it inert in the notebook also blocks the
+        # browser auto-open on a terminal.
+        auth = OidcDeviceAuth(
+            client_id='c',
+            device_authorization_endpoint='https://idp.example.com/device',
+            token_endpoint='https://idp.example.com/token',
+            open_browser=True)
+        with mock.patch('webbrowser.open') as wb, \
+                mock.patch('questdb.auth._device.in_ipython_kernel',
+                           return_value=False):
+            auth._maybe_open_browser({
+                'verification_uri':
+                    'https://login.questdb.io@evil.example/device'})
+            wb.assert_not_called()
+            # A legitimate URL is still opened.
+            auth._maybe_open_browser(
+                {'verification_uri': 'https://idp.example.com/device'})
+            wb.assert_called_once_with('https://idp.example.com/device')
 
     def test_qr_helpers_degrade_without_qrcode(self):
         # The QR helpers must degrade gracefully (return None), never raise,

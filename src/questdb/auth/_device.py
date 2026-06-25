@@ -556,6 +556,15 @@ class OidcDeviceAuth:
         # Read-only: reads the published field, falling back to the shared cache
         # backend. Never writes self._tokens (that's lock-only), so it's safe on
         # the lock-free fast path.
+        #
+        # PRECONDITION for that lock-free safety (preserve both if refactoring):
+        #  (a) TokenSet is frozen, so a concurrently-published reference is never
+        #      mutated under the reader (no torn read); and
+        #  (b) self.config / self.cache_key are set once in __init__ and never
+        #      reassigned, so a token published by another thread is always for
+        #      THIS instance's security context (never a wrong-context token).
+        # If either is broken, this read must move under self._lock. Exercised
+        # under real contention by TestConcurrency.test_token_clear_stress.
         tokens = self._tokens
         if tokens is None:
             tokens = self._cache.load(self.cache_key)

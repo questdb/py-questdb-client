@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import html
 import math
+import re
 import sys
 import unicodedata
 import urllib.parse
@@ -86,23 +87,56 @@ def _verification_uri_complete(resp: Dict[str, Any]) -> Optional[str]:
     return uri if isinstance(uri, str) else None
 
 
+# A host safe to make clickable / auto-open: plain ASCII letters-digits-hyphen
+# (a DNS name or punycode ``xn--`` label), dots, and the ``:``/``%`` an IPv6
+# literal carries once urlparse has stripped its brackets. Anything else — a
+# non-ASCII confusable (e.g. a Cyrillic look-alike, or the fullwidth solidus
+# ``U+FF0F``) or a stray control char in the authority — can misrepresent the
+# real destination host, so such a URL is never made clickable/auto-opened.
+_SAFE_HOST_RE = re.compile(r'\A[a-z0-9._%:-]+\Z')
+
+
 def _safe_link_url(url: Optional[str]) -> Optional[str]:
     """
-    Return ``url`` only if it uses an ``http(s)`` scheme, else ``None``.
+    Return ``url`` only if it is safe to make clickable / auto-open, else
+    ``None``.
 
     The verification URL is untrusted (from the IdP's device-authorization
-    response); the scheme allowlist blocks a ``javascript:`` / ``data:`` href
-    from executing in the notebook DOM (``html.escape`` guards markup, not the
-    scheme).
+    response). Three checks, all of which a tampered/MITM'd response could
+    otherwise abuse to send the user somewhere other than the prompt suggests
+    (``html.escape`` guards markup, not any of these):
+
+    * **scheme** — only ``http(s)``, so a ``javascript:`` / ``data:`` href can't
+      execute in the notebook DOM;
+    * **no userinfo** — ``https://login.questdb.io@evil.example/`` connects to
+      ``evil.example`` while *reading* as the trusted host; the device-flow
+      verification URL never legitimately carries credentials;
+    * **plain host** — a host with non-ASCII/confusable or control characters
+      (a homograph, a fullwidth solidus) can spoof the destination.
+
+    A URL that fails these is still shown as inert, escaped text (visible and
+    copyable) — it is just never turned into a live link, opened in a browser,
+    or encoded into a QR.
     """
     if not url or not isinstance(url, str):
         # A non-string has no scheme to vet and would make urlparse raise.
         return None
     try:
-        scheme = urllib.parse.urlparse(url).scheme.lower()
+        parts = urllib.parse.urlparse(url)
+        scheme = (parts.scheme or '').lower()
+        # `.username`/`.password`/`.hostname` parse the authority; `.port` (read
+        # indirectly via a malformed netloc) can raise ValueError — catch it.
+        userinfo = parts.username is not None or parts.password is not None
+        host = parts.hostname
     except (ValueError, TypeError):
         return None
-    return url if scheme in ('http', 'https') else None
+    if scheme not in ('http', 'https'):
+        return None
+    if userinfo:
+        return None
+    if not host or not _SAFE_HOST_RE.match(host):
+        return None
+    return url
 
 
 def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
@@ -146,9 +180,17 @@ def _strip_control(text: Optional[str]) -> str:
     ANSI escapes or bidi/zero-width/line-separator chars could spoof the prompt
     or hide the real sign-in URL. Needed on both paths — ``html.escape`` does
     not catch bidi/zero-width spoofing.
+
+    Total by design: a truthy non-``str`` (e.g. a JSON object/number a hostile
+    IdP put in an ``error`` field) is coerced through ``str()`` rather than
+    raising. This sanitizer runs on untrusted input from several sites and must
+    never raise — a ``TypeError`` here would escape the module's typed-error
+    contract (see :class:`~questdb.auth._errors.OidcDeviceFlowError`).
     """
     if not text:
         return ''
+    if not isinstance(text, str):
+        text = str(text)
     return ''.join(
         ch for ch in text
         if ch not in _STRIP_EXTRA

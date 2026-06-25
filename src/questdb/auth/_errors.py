@@ -91,11 +91,19 @@ class OidcDeviceFlowError(OidcError):
         super().__init__(message)
         # error / error_description come straight from the untrusted IdP
         # response and are exposed as attributes (a caller may re-display them),
-        # so strip them too — same rationale as the message in OidcError. None is
-        # kept as None (not coerced to '') so "absent" stays distinguishable.
-        self.error = _strip_control(error) if error is not None else None
+        # so strip them too — same rationale as the message in OidcError. Coerce
+        # a non-string (a JSON object/number/array from a buggy or hostile IdP)
+        # through str() first, exactly as OidcError does for its message args, so
+        # a non-string field can't crash the strip with a TypeError and escape
+        # the typed-error contract. None is kept as None (not coerced to '') so
+        # "absent" stays distinguishable.
+        self.error = (
+            _strip_control(error if isinstance(error, str) else str(error))
+            if error is not None else None)
         self.error_description = (
-            _strip_control(error_description)
+            _strip_control(
+                error_description if isinstance(error_description, str)
+                else str(error_description))
             if error_description is not None else None)
 
 
