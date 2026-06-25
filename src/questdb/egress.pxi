@@ -521,6 +521,7 @@ cdef class _QueryStreamProducer:
     cdef bint has_cached_schema
     cdef bint has_cached_array
     cdef bint exhausted
+    cdef bint delivered
     cdef char* last_error
     cdef int seen_seq
 
@@ -529,6 +530,7 @@ cdef class _QueryStreamProducer:
         self.has_cached_schema = False
         self.has_cached_array = False
         self.exhausted = False
+        self.delivered = False
         self.last_error = NULL
         self.seen_seq = 0
         memset(&self.cached_schema, 0, sizeof(ArrowSchema))
@@ -592,21 +594,26 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
                 cursor, &local_array, &local_schema, &err)
     if result == reader_arrow_batch_ok:
         if prod.cursor_handle._reset_seq != prod.seen_seq:
-            # Mid-query failover replayed from batch-0 after batches were
-            # already handed to the consumer; this one would duplicate
-            # them. Streaming can't discard it — surface a clean error
-            # (tagged like other capsule errors) and stop.
-            if local_array.release != NULL:
-                local_array.release(&local_array)
-            if local_schema.release != NULL:
-                local_schema.release(&local_schema)
-            full = (
-                '[' + QuestDBErrorCode.FailoverWouldDuplicate.name + '] '
-                'mid-query failover would duplicate already-delivered '
-                'batches; re-issue the query').encode('utf-8')
-            _qs_set_error(prod, full, <size_t>len(full))
-            prod.exhausted = True
-            return -1
+            if prod.delivered:
+                # Mid-query failover replayed from batch-0 after batches
+                # were already handed to the consumer; this one would
+                # duplicate them. Streaming can't discard it — surface a
+                # clean error (tagged like other capsule errors) and stop.
+                if local_array.release != NULL:
+                    local_array.release(&local_array)
+                if local_schema.release != NULL:
+                    local_schema.release(&local_schema)
+                full = (
+                    '[' + QuestDBErrorCode.FailoverWouldDuplicate.name + '] '
+                    'mid-query failover would duplicate already-delivered '
+                    'batches; re-issue the query').encode('utf-8')
+                _qs_set_error(prod, full, <size_t>len(full))
+                prod.exhausted = True
+                return -1
+            # Pre-delivery failover: nothing reached the consumer yet, so
+            # re-pin to the replayed stream and restart from this batch-0.
+            prod.seen_seq = prod.cursor_handle._reset_seq
+            prod._free_cached()
         if not prod.has_cached_schema:
             memcpy(&prod.cached_schema, &local_schema, sizeof(ArrowSchema))
             prod.has_cached_schema = True
@@ -696,6 +703,7 @@ cdef int _qs_get_next(ArrowArrayStream* stream, ArrowArray* out) noexcept with g
         memcpy(out, &prod.cached_array, sizeof(ArrowArray))
         memset(&prod.cached_array, 0, sizeof(ArrowArray))
         prod.has_cached_array = False
+        prod.delivered = True
         return 0
     return 0
 
@@ -1939,6 +1947,7 @@ class QueryResult:
 
     def __init__(self, _CursorHandle cursor_handle):
         self._cursor_handle = cursor_handle
+        self._cancel_handle = cursor_handle
         self._consumed = False
 
     def _take_cursor_handle(self):
@@ -2140,7 +2149,7 @@ class QueryResult:
         pull after ``cancel`` typically surfaces
         ``QuestDBErrorCode.Cancelled``.
         """
-        cdef _CursorHandle handle = self._cursor_handle
+        cdef _CursorHandle handle = self._cancel_handle
         cdef reader_error* err = NULL
         cdef bint ok
         cdef reader_cursor* cursor
@@ -2171,6 +2180,7 @@ class QueryResult:
         """
         cdef _CursorHandle handle = self._cursor_handle
         self._cursor_handle = None
+        self._cancel_handle = None
         self._consumed = True
         if handle is not None:
             handle._free()

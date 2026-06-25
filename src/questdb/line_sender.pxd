@@ -998,17 +998,17 @@ cdef extern from "questdb/egress/reader.h":
         reader_error_protocol_error = 9
         reader_error_invalid_utf8 = 10
         reader_error_invalid_bind = 11
-        reader_error_server_schema_mismatch = 14
-        reader_error_server_parse_error = 15
-        reader_error_server_internal_error = 16
-        reader_error_server_security_error = 17
-        reader_error_limit_exceeded = 18
-        reader_error_server_limit_exceeded = 19
-        reader_error_cancelled = 20
-        reader_error_failover_would_duplicate = 21
-        reader_error_schema_drift = 22
-        reader_error_no_schema = 23
-        reader_error_arrow_export = 24
+        reader_error_server_schema_mismatch = 12
+        reader_error_server_parse_error = 13
+        reader_error_server_internal_error = 14
+        reader_error_server_security_error = 15
+        reader_error_limit_exceeded = 16
+        reader_error_server_limit_exceeded = 17
+        reader_error_cancelled = 18
+        reader_error_failover_would_duplicate = 19
+        reader_error_schema_drift = 20
+        reader_error_no_schema = 21
+        reader_error_arrow_export = 22
 
     cdef enum reader_arrow_batch_result:
         reader_arrow_batch_ok = 0

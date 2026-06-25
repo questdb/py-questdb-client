@@ -600,6 +600,36 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 9009,
                 qwp_ws_progress=qi.QwpWsProgress.Manual)
 
+    def test_qwpws_progress_rejects_invalid_value(self):
+        with self.assertRaisesRegex(
+                qi.QuestDBError, '"qwp_ws_progress" has invalid value'):
+            qi.Sender(
+                qi.Protocol.QwpWs, '127.0.0.1', 9000,
+                qwp_ws_progress='bogus')
+
+    def test_max_datagram_size_bounds(self):
+        for bad in (0, -1, 65508):
+            with self.assertRaisesRegex(
+                    ValueError,
+                    '"max_datagram_size" must be an int between 1 and 65507'):
+                qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+                          max_datagram_size=bad)
+        with self.assertRaisesRegex(
+                TypeError, '"max_datagram_size" must be a positive int'):
+            qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+                      max_datagram_size=True)
+
+    def test_multicast_ttl_bounds(self):
+        for bad in (-1, 256):
+            with self.assertRaisesRegex(
+                    ValueError, '"multicast_ttl" must be an int'):
+                qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+                          multicast_ttl=bad)
+        with self.assertRaisesRegex(
+                TypeError, '"multicast_ttl" must be an int'):
+            qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+                      multicast_ttl=True)
+
     def test_qwpws_error_handler_can_be_registered(self):
         sender = qi.Sender(
             qi.Protocol.QwpWs,

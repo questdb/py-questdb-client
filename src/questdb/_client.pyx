@@ -43,6 +43,7 @@ __all__ = [
     'QwpWsErrorCategory',
     'QwpWsErrorPolicy',
     'QwpWsProgress',
+    'SenderTransaction',
     'ServerTimestamp',
     'ServerTimestampType',
     'TimestampMicros',
@@ -3527,8 +3528,8 @@ cdef void_int _dataframe_columnar_append_field(
                     NULL,
                     &err)
         elif col.setup.source == col_source_t.col_source_f32_numpy:
-            # Rust emits FLOAT wire for numpy f32; server widens to DOUBLE
-            # column if needed.
+            # numpy f32 widens to a DOUBLE column on the wire; the 4-byte
+            # source stride is what the FFI reads per row.
             numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_f32
             element_size = 4
             with nogil:
@@ -5260,6 +5261,12 @@ cdef class Client:
         UUIDs landing in a UUID column are parsed server-side; narrow ints
         landing in a wider column are widened). Failures surface as
         ``QuestDBError`` from the ``flush()``.
+
+        ``schema_overrides`` reclassifies columns by name, mapping each to
+        ``'symbol'``, ``'ipv4'``, ``'char'``, or ``'geohash'`` (e.g.
+        ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
+        rejected. ``max_rows_per_batch`` bounds the rows sent per columnar
+        batch.
         """
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
@@ -5606,6 +5613,7 @@ cdef class Sender:
         cdef uint64_t c_retry_max_backoff
         cdef uint64_t c_request_min_throughput
         cdef uint64_t c_request_timeout
+        cdef size_t c_max_name_len
         cdef size_t c_max_datagram_size = 0
         cdef uint32_t c_multicast_ttl = 0
         cdef line_sender_qwpws_progress c_qwp_ws_progress
@@ -5652,7 +5660,12 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if qwp_ws_progress is not None:
-            c_qwp_ws_progress = QwpWsProgress.parse(qwp_ws_progress).c_value
+            try:
+                c_qwp_ws_progress = QwpWsProgress.parse(qwp_ws_progress).c_value
+            except ValueError:
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
+                    f'"qwp_ws_progress" has invalid value: {qwp_ws_progress!r}')
             if not line_sender_opts_qwpws_progress(
                     self._opts, c_qwp_ws_progress, &err):
                 raise c_err_to_py(err)
@@ -6206,7 +6219,11 @@ cdef class Sender:
         Make a new configured buffer.
 
         The buffer is set up with the configured `init_buf_size` and
-        `max_name_len`.
+        `max_name_len`, and matches the sender's protocol.
+
+        Must be called after :func:`Sender.establish` and before
+        :func:`Sender.close`; otherwise raises
+        :class:`QuestDBError` (``InvalidApiCall``).
         """
         if self._impl == NULL:
             if self._opts == NULL:
@@ -6325,7 +6342,12 @@ cdef class Sender:
             raise c_err_to_py(err)
 
         if self._buffer is None:
-            self._buffer = self._new_buffer_for_sender()
+            try:
+                self._buffer = self._new_buffer_for_sender()
+            except:
+                line_sender_close(self._impl)
+                self._impl = NULL
+                raise
 
         line_sender_opts_free(self._opts)
         self._opts = NULL

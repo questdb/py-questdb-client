@@ -35,6 +35,7 @@ __all__ = [
     "QwpWsErrorCategory",
     "QwpWsErrorPolicy",
     "QwpWsProgress",
+    "SenderTransaction",
     "ServerTimestamp",
     "ServerTimestampType",
     "TimestampMicros",
@@ -1052,8 +1053,8 @@ class Sender:
         tls_roots=None,
         tls_roots_password: Optional[str] = None,
         max_buf_size: int = 104857600,
-        retry_timeout: int = 10000,
-        retry_max_backoff: int = 1000,
+        retry_timeout: Union[int, timedelta] = 10000,
+        retry_max_backoff: Union[int, timedelta] = 1000,
         request_min_throughput: int = 102400,
         request_timeout=None,
         auto_flush: bool = True,
@@ -1084,8 +1085,8 @@ class Sender:
         tls_roots=None,
         tls_roots_password: Optional[str] = None,
         max_buf_size: int = 104857600,
-        retry_timeout: int = 10000,
-        retry_max_backoff: int = 1000,
+        retry_timeout: Union[int, timedelta] = 10000,
+        retry_max_backoff: Union[int, timedelta] = 1000,
         request_min_throughput: int = 102400,
         request_timeout=None,
         auto_flush: bool = True,
@@ -1126,8 +1127,8 @@ class Sender:
         tls_roots=None,
         tls_roots_password: Optional[str] = None,
         max_buf_size: int = 104857600,
-        retry_timeout: int = 10000,
-        retry_max_backoff: int = 1000,
+        retry_timeout: Union[int, timedelta] = 10000,
+        retry_max_backoff: Union[int, timedelta] = 1000,
         request_min_throughput: int = 102400,
         request_timeout=None,
         auto_flush: bool = True,
@@ -1160,7 +1161,11 @@ class Sender:
         Make a new configured buffer.
 
         The buffer is set up with the configured `init_buf_size` and
-        `max_name_len`.
+        `max_name_len`, and matches the sender's protocol.
+
+        Must be called after :func:`Sender.establish` and before
+        :func:`Sender.close`; otherwise raises
+        :class:`QuestDBError` (``InvalidApiCall``).
         """
 
     @property

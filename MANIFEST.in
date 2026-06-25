@@ -9,12 +9,14 @@ include proj
 recursive-include src *.html
 recursive-include src *.pxd
 recursive-include src *.pyx
+recursive-include src *.pyi
 recursive-include src *.h
 recursive-include src *.inc
 recursive-include src *.py
 recursive-include src *.md
 recursive-include src *.pxi
 recursive-include src *.c
+recursive-include src py.typed
 graft rpyutils
 graft c-questdb-client
 prune c-questdb-client/src/tests/json_tests.rs

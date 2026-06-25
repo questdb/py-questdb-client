@@ -618,6 +618,9 @@ cdef void col_t_release(col_t* col) noexcept:
     cdef size_t chunk_index
     cdef ArrowArray* chunk
 
+    if col.setup == NULL:
+        return
+
     if Py_buffer_obj_is_set(&col.setup.pybuf):
         PyBuffer_Release(&col.setup.pybuf)  # Note: Sets `.pybuf.obj` to NULL.
 
@@ -696,10 +699,19 @@ cdef col_t_arr col_t_arr_blank() noexcept nogil:
 cdef col_t_arr col_t_arr_new(size_t size) noexcept nogil:
     cdef col_t_arr arr
     cdef size_t index
+    cdef size_t freed
     arr.size = size
     arr.d = <col_t*>calloc(size, sizeof(col_t))
+    if arr.d == NULL:
+        arr.size = 0
+        return arr
     for index in range(size):
         arr.d[index].setup = <col_setup_t*>calloc(1, sizeof(col_setup_t))
+        if arr.d[index].setup == NULL:
+            for freed in range(index):
+                free(arr.d[freed].setup)
+            free(arr.d)
+            return col_t_arr_blank()
     return arr
 
 
@@ -1240,6 +1252,8 @@ cdef void_int _dataframe_series_as_pybuf(
     mapped.n_buffers = 2
     mapped.n_children = 0
     mapped.buffers = <const void**>calloc(2, sizeof(const void*))
+    if mapped.buffers == NULL:
+        raise MemoryError()
     mapped.buffers[0] = NULL
     mapped.buffers[1] = <const void*>col.setup.pybuf.buf
     mapped.children = NULL
@@ -1754,6 +1768,8 @@ cdef void_int _dataframe_plan_build(
     plan.col_count = len(df.columns)
     qdb_pystr_buf_clear(b)
     plan.cols = col_t_arr_new(plan.col_count)
+    if plan.cols.d == NULL:
+        raise MemoryError()
     _dataframe_resolve_args(
         df,
         table_name,

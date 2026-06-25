@@ -1098,10 +1098,14 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_auto_flush_bytes_triggers(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender(
-                max_datagram_size=200,
-                auto_flush_rows=False,
-                auto_flush_interval=False) as sender:
+        # Close with flush=False so only auto-flushed rows reach the server;
+        # a broken byte trigger leaves rows buffered and the check fails.
+        sender = self._mk_qwpudp_sender(
+            max_datagram_size=200,
+            auto_flush_rows=False,
+            auto_flush_interval=False)
+        sender.establish()
+        try:
             self.assertEqual(sender.auto_flush_bytes, 200)
             for i in range(20):
                 sender.row(
@@ -1109,21 +1113,29 @@ class TestWithDatabase(unittest.TestCase):
                     symbols={'tag': f'v_{i}'},
                     columns={'value': i},
                     at=qi.TimestampNanos.now())
+        finally:
+            sender.close(flush=False)
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=10)
         self.assertGreaterEqual(resp['count'], 10)
 
     def test_qwp_udp_auto_flush_rows_triggers(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender(
-                auto_flush_rows=5,
-                auto_flush_bytes=False,
-                auto_flush_interval=False) as sender:
+        # Close with flush=False so only auto-flushed rows reach the server;
+        # a broken row trigger leaves rows buffered and the check fails.
+        sender = self._mk_qwpudp_sender(
+            auto_flush_rows=5,
+            auto_flush_bytes=False,
+            auto_flush_interval=False)
+        sender.establish()
+        try:
             for i in range(10):
                 sender.row(
                     table_name,
                     columns={'value': i},
                     at=qi.TimestampNanos.now())
+        finally:
+            sender.close(flush=False)
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=10)
         self.assertEqual(resp['count'], 10)
 
@@ -1400,10 +1412,14 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         import time as _time
-        with self._mk_qwpudp_sender(
-                auto_flush_rows=False,
-                auto_flush_bytes=False,
-                auto_flush_interval=500) as sender:
+        # Close with flush=False so arrival reflects only the interval
+        # trigger firing on the second row, not the context-manager close.
+        sender = self._mk_qwpudp_sender(
+            auto_flush_rows=False,
+            auto_flush_bytes=False,
+            auto_flush_interval=500)
+        sender.establish()
+        try:
             sender.row(
                 table_name, columns={'seq': 1},
                 at=qi.TimestampNanos.now())
@@ -1412,8 +1428,10 @@ class TestWithDatabase(unittest.TestCase):
             sender.row(
                 table_name, columns={'seq': 2},
                 at=qi.TimestampNanos.now())
-        resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
-        self.assertEqual(resp['count'], 2)
+        finally:
+            sender.close(flush=False)
+        resp = self.qdb_plain.retry_check_table(table_name, min_rows=1)
+        self.assertGreaterEqual(resp['count'], 1)
 
     def test_qwp_udp_datagram_splitting(self):
         self._require_qwp_udp()
@@ -1650,11 +1668,18 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         n = 2000
-        with self._mk_qwpudp_sender() as sender:
+        # Close with flush=False so arrival reflects continuous auto-flush,
+        # not a single context-manager close flushing the whole buffer. The
+        # unflushed residual is one datagram (<< 10% of n).
+        sender = self._mk_qwpudp_sender()
+        sender.establish()
+        try:
             for i in range(n):
                 sender.row(
                     table_name, columns={'seq': i},
                     at=qi.TimestampNanos.now())
+        finally:
+            sender.close(flush=False)
         import time
         time.sleep(3)
         resp = self.qdb_plain.retry_check_table(

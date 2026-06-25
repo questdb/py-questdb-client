@@ -76,13 +76,15 @@ def command(fn):
 
 @command
 def build():
-    _run('python3', 'setup.py', 'build_ext', '--inplace')
+    _run('python3', 'setup.py', 'build_ext', '--inplace',
+        env={'QUESTDB_INSECURE_SKIP_VERIFY': '1'})
 
 
 @command
 def build_fuzzing():
     _run('python3', 'setup.py', 'build_ext', '--inplace',
-        env={'TEST_QUESTDB_FUZZING': '1'})
+        env={'TEST_QUESTDB_FUZZING': '1',
+             'QUESTDB_INSECURE_SKIP_VERIFY': '1'})
 
 
 @command
