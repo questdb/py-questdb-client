@@ -183,7 +183,7 @@ def rr_test(*args):
                 
             Then re-run inside GDB, running up to a specific event:
                 $ rr replay -g $EVENT_ID
-                (rr) break ingress.c:9999
+                (rr) break _client.c:9999
                 (rr) continue  # or step, next, etc.{reset}\n\n''')
     
 

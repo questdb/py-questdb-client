@@ -22,7 +22,7 @@ except ImportError:
     import pytz
     _TZ = pytz.timezone('America/New_York')
 
-import questdb.ingress as qi
+import questdb as qi
 import pandas as pd
 import numpy as np
 import pyarrow as pa
@@ -165,12 +165,12 @@ class TestPandasBase:
             buf.row(table_name="test_mandatory_at_row", at=qi.ServerTimestamp)
 
         def test_bad_dataframe(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Expected pandas'):
                 _dataframe(self.version, [], at=qi.ServerTimestamp)
 
         def test_no_table_name(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Must specify at least one of'):
                 _dataframe(self.version, DF1, at=qi.ServerTimestamp)
 
@@ -179,63 +179,63 @@ class TestPandasBase:
                 _dataframe(self.version, DF1, table_name=1.5, at=qi.ServerTimestamp)
 
         def test_invalid_table_name(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name`: Bad string "."'):
                 _dataframe(self.version, DF1, table_name='.', at=qi.ServerTimestamp)
 
         def test_invalid_column_dtype(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: Bad dtype'):
                 _dataframe(self.version, DF1, table_name_col='B', at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: Bad dtype'):
                 _dataframe(self.version, DF1, table_name_col=1, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: Bad dtype'):
                 _dataframe(self.version, DF1, table_name_col=-3, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: -5 index'):
                 _dataframe(self.version, DF1, table_name_col=-5, at=qi.ServerTimestamp)
 
         def test_bad_str_obj_col(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
                 _dataframe(self.version, DF1, table_name_col='D', at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
                 _dataframe(self.version, DF1, table_name_col=3, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
                 _dataframe(self.version, DF1, table_name_col=-1, at=qi.ServerTimestamp)
 
         def test_bad_symbol(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`symbols`.*bool.*tuple.*list'):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=0, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`symbols`.*bool.*tuple.*list'):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols={}, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`symbols`.*bool.*tuple.*list'):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=None, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`symbols`: Bad dtype `float64`.*'A'.*Must.*strings col"):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=(0,), at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`symbols`: Bad dtype `int64`.*'B'.*Must be a strings column."):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=[1], at=qi.ServerTimestamp)
 
         def test_bad_at(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*2018.*not found in the'):
                 _dataframe(self.version, DF1, table_name='tbl1', at='2018-03-10T00:00:00Z')
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*float64.*be a datetime'):
                 _dataframe(self.version, DF1, table_name='tbl1', at='A')
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*int64.*be a datetime'):
                 _dataframe(self.version, DF1, table_name='tbl1', at=1)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*object.*be a datetime'):
                 _dataframe(self.version, DF1, table_name='tbl1', at=-1)
 
@@ -310,7 +310,7 @@ class TestPandasBase:
                 b'c a=3i\n')
 
             df.index.name = 42  # bad type, not str
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Bad dataframe index name as table.*: Expected str, not.*int.'):
                 _dataframe(self.version, df, at=qi.ServerTimestamp)
 
@@ -320,7 +320,7 @@ class TestPandasBase:
                 'a': [1, 2, 3],
                 'b': ['a', 'b', 'c']})
             df.index.name = 'test_at_good'
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Bad argument `at`: Column .2018-03.* not found .* dataframe.'):
                 _dataframe(self.version, df, at='2018-03-10T00:00:00Z')
 
@@ -350,7 +350,7 @@ class TestPandasBase:
             n3 = dt.datetime(1965, 1, 1, 0, 0, 0)
             neg_timestamps = [n1, n2, n3]
             for ts in neg_timestamps:
-                with self.assertRaisesRegex(qi.IngressError,
+                with self.assertRaisesRegex(qi.QuestDBError,
                         'Bad.*`at`: Cannot .* before the Unix epoch .1970-01-01.*'):
                     _dataframe(self.version, DF2, at=ts, table_name='test_at_neg')
 
@@ -383,14 +383,14 @@ class TestPandasBase:
 
         def test_single_at_col(self):
             df = pd.DataFrame({'timestamp': pd.to_datetime(['2023-01-01'])})
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Bad dataframe row at index 0: All values are nulls.'):
                 _dataframe(self.version, df, table_name='tbl1', at='timestamp')
 
         def test_row_of_nulls(self):
             df = pd.DataFrame({'a': ['a1', None, 'a3']})
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Bad dataframe row.*1: All values are nulls.'):
+                    qi.QuestDBError, 'Bad dataframe row.*1: All values are nulls.'):
                 _dataframe(self.version, df, table_name='tbl1', symbols=['a'], at=qi.ServerTimestamp)
 
         def test_planning_error_keeps_existing_buffer(self):
@@ -402,7 +402,7 @@ class TestPandasBase:
             before = bytes(buf)
 
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     "`symbols`: Bad dtype `int64`.*'a'.*Must be a strings column."):
                 buf.dataframe(
                     pd.DataFrame({'a': [1]}),
@@ -488,7 +488,7 @@ class TestPandasBase:
         def test_debug_dataframe_plan_reuses_row_path_validation(self):
             df = pd.DataFrame({'a': [1]})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     "`symbols`: Bad dtype `int64`.*'a'.*Must be a strings column."):
                 qi._debug_dataframe_plan(
                     df,
@@ -1121,7 +1121,7 @@ class TestPandasBase:
                     9223372036854775808],  # i64 max + 1
                 dtype='uint64')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.* serialize .* column .a. .* 4 .*9223372036854775808.*int64.*'):
                 buf.dataframe(df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -1232,7 +1232,7 @@ class TestPandasBase:
             ]
             if self.version < 3:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'does not support the decimal datatype'):
                     _dataframe(self.version, pd.DataFrame({'dec': [Decimal('123')]}), table_name='tbl', at=qi.ServerTimestamp)
                 return
@@ -1269,7 +1269,7 @@ class TestPandasBase:
             try:
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
                 self.fail("special values shouldn't be encoded")
-            except qi.IngressError:
+            except qi.QuestDBError:
                 pass
 
         def test_decimal_pyobj_overflow(self):
@@ -1278,7 +1278,7 @@ class TestPandasBase:
             df = pd.DataFrame({'dec': [Decimal('57896044618658097711785492504343953926634992332820282019728792003956564819968')]})
 
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.*Decimal mantissa too large; maximum supported size is 32 bytes.*'):
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
 
@@ -1288,7 +1288,7 @@ class TestPandasBase:
             df = pd.DataFrame({'dec': [Decimal('1.2e-100')]})
 
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.*exceeds the maximum supported scale of 76.*'):
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
 
@@ -1299,7 +1299,7 @@ class TestPandasBase:
                     dtype=pd.ArrowDtype(pa.decimal128(10, 2)))
                 df = pd.DataFrame({'dec': arr, 'count': [0]})
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'does not support the decimal datatype'):
                     _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
                 return
@@ -1482,7 +1482,7 @@ class TestPandasBase:
                     9223372036854775808],  # i64 max + 1
                 dtype=pd.UInt64Dtype())})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.* serialize .* column .a. .* 4 .*9223372036854775808.*int64.*'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -1600,7 +1600,7 @@ class TestPandasBase:
                     None, True, False],
                 dtype='boolean')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Failed.*at row index 3 .*<NA>.: .*insert null .*boolean col'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -1623,7 +1623,7 @@ class TestPandasBase:
                     True, False, 'false'],
                 dtype='object')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'serialize .* column .a. .* 2 .*false.*bool'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -1631,7 +1631,7 @@ class TestPandasBase:
                     None, True, False],
                 dtype='object')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'serialize.*\\(None\\): Cannot insert null.*boolean column'):
                 _dataframe(self.version, df3, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -1894,7 +1894,7 @@ class TestPandasBase:
                     dtype=_NS_TZ_DTYPE),
                 'b': ['sym1']})
             with self.assertRaisesRegex(
-                    qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
+                    qi.QuestDBError, "Failed.*'a'.*-220897.* is neg"):
                 _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at='a')
 
         def test_datetime64_tz_arrow_micros_at(self):
@@ -1930,7 +1930,7 @@ class TestPandasBase:
                     dtype=_US_TZ_DTYPE),
                 'b': ['sym1']})
             with self.assertRaisesRegex(
-                    qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
+                    qi.QuestDBError, "Failed.*'a'.*-220897.* is neg"):
                 _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at='a')
 
         def _test_pyobjstr_table(self, dtype):
@@ -1954,13 +1954,13 @@ class TestPandasBase:
                 '💩🦞 b=5i\n').encode("utf-8"))
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Too long"):
+                    qi.QuestDBError, "Too long"):
                 _dataframe(self.version,
                     pd.DataFrame({'a': pd.Series(['b' * 128], dtype=dtype)}),
                     table_name_col='a', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
+                    qi.QuestDBError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', None], dtype=dtype),
@@ -1968,7 +1968,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
+                    qi.QuestDBError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', float('nan')], dtype=dtype),
@@ -1976,7 +1976,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
+                    qi.QuestDBError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', pd.NA], dtype=dtype),
@@ -1984,7 +1984,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "''.*must have a non-zero length"):
+                    qi.QuestDBError, "''.*must have a non-zero length"):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '/': pd.Series([''], dtype=dtype),
@@ -1992,7 +1992,7 @@ class TestPandasBase:
                     table_name_col='/', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
+                    qi.QuestDBError, "'tab..1'.*invalid dot `\\.` at position 4"):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '/': pd.Series(['tab..1'], dtype=dtype),
@@ -2003,7 +2003,7 @@ class TestPandasBase:
             self._test_pyobjstr_table('object')
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'table name .*got an object of type int'):
+                    qi.QuestDBError, 'table name .*got an object of type int'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', 42], dtype='object'),
@@ -2060,7 +2060,7 @@ class TestPandasBase:
             self._test_pyobjstr_numpy_symbol('object')
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Expected a string, got an .* type int'):
+                    qi.QuestDBError, 'Expected a string, got an .* type int'):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -2124,7 +2124,7 @@ class TestPandasBase:
                 '💩🦞 b=5i\n').encode("utf-8"))
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Too long"):
+                    qi.QuestDBError, "Too long"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -2132,7 +2132,7 @@ class TestPandasBase:
                     table_name_col='a', at = qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Failed .*<NA>.*Table name cannot be null"):
+                    qi.QuestDBError, "Failed .*<NA>.*Table name cannot be null"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -2141,7 +2141,7 @@ class TestPandasBase:
                     table_name_col='.', at = qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "''.*must have a non-zero length"):
+                    qi.QuestDBError, "''.*must have a non-zero length"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -2149,7 +2149,7 @@ class TestPandasBase:
                     table_name_col='/', at = qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
+                    qi.QuestDBError, "'tab..1'.*invalid dot `\\.` at position 4"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -2236,7 +2236,7 @@ class TestPandasBase:
                 'tbl1 a=' + str(int64_max) + 'i,b=10i\n').encode('utf-8'))
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\\."):
+                    qi.QuestDBError, "1 \\('STRING'\\): .*type int, got.*str\\."):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -2247,7 +2247,7 @@ class TestPandasBase:
             out_of_range = [int64_min - 1, int64_max + 1]
             for num in out_of_range:
                 with self.assertRaisesRegex(
-                        qi.IngressError, "index 1 .*922337203685477.*int too big"):
+                        qi.QuestDBError, "index 1 .*922337203685477.*int too big"):
                     _dataframe(
                         self.version,
                         pd.DataFrame({
@@ -2274,7 +2274,7 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(7.0, self.version == 1) + b',b=7i\n')
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\\."):
+                    qi.QuestDBError, "1 \\('STRING'\\): .*type float, got.*str\\."):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -2287,7 +2287,7 @@ class TestPandasBase:
             # (unless anyone asks for additional ones).
             # We want to test others are rejected.
             with self.assertRaisesRegex(
-                    qi.IngressError, "Bad column 'a'.*got a category of .*int64"):
+                    qi.QuestDBError, "Bad column 'a'.*got a category of .*int64"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({'a': pd.Series([1, 2, 3, 2], dtype='category')}),
@@ -2311,7 +2311,7 @@ class TestPandasBase:
                 'a': pd.Series(slist, dtype='category'),
                 'b': list(range(len(slist)))})
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Table name cannot be null'):
+                    qi.QuestDBError, 'Table name cannot be null'):
                 _dataframe(self.version, df2, table_name_col=0, at = qi.ServerTimestamp)
 
         def test_cat_i8_table(self):
@@ -2449,7 +2449,7 @@ class TestPandasBase:
             df.columns = ['a']
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Bad column 'a': .*not.*contiguous"):
+                    qi.QuestDBError, "Bad column 'a': .*not.*contiguous"):
                 _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
 
         def test_serializing_in_chunks(self):
@@ -2474,7 +2474,7 @@ class TestPandasBase:
 
             df = pd.DataFrame(zip(x, y), columns=header)
 
-            with self.assertRaisesRegex(qi.IngressError, 'Could not flush buffer: Buffer size of 21780 exceeds maximum configured allowed size of 1024 bytes'):
+            with self.assertRaisesRegex(qi.QuestDBError, 'Could not flush buffer: Buffer size of 21780 exceeds maximum configured allowed size of 1024 bytes'):
                 with qi.Sender.from_conf("http::addr=localhost:9000;auto_flush_rows=1000;max_buf_size=1024;protocol_version=2;") as sender:
                     sender.dataframe(df, table_name='test_df', at=qi.ServerTimestamp)
                     sender.flush()
@@ -2612,7 +2612,7 @@ class TestPandasBase:
 
             if self.version == 1:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         "Protocol version v1 does not support array datatype"):
                     _ = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             else:

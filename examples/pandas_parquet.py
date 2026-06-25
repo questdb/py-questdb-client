@@ -1,4 +1,4 @@
-from questdb.ingress import Client, Sender
+from questdb import Client, Sender
 import pandas as pd
 
 

@@ -23,7 +23,7 @@ except ImportError:
     pa = None
 
 import patch_path
-import questdb.ingress as qi
+import questdb as qi
 from qwp_ws_ack_server import QwpAckServer
 
 

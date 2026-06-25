@@ -33,9 +33,9 @@ Infrequent Flushing
 -------------------
 
 You may not see data appear in a timely manner because you're not calling
-:func:`flush <questdb.ingress.Sender.flush>` often enough.
+:func:`flush <questdb.Sender.flush>` often enough.
 
-You might be having issues with the :class:`Sender <questdb.ingress.Sender>`'s
+You might be having issues with the :class:`Sender <questdb.Sender>`'s
 :ref:`auto-flush <sender_auto_flush>` feature.
 
 .. _troubleshooting-flushing:

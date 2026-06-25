@@ -9,34 +9,34 @@
 
 cdef inline object _reader_err_code_to_py(reader_error_code code):
     if code == reader_error_could_not_resolve_addr:
-        return IngressErrorCode.CouldNotResolveAddr
+        return QuestDBErrorCode.CouldNotResolveAddr
     if code == reader_error_config_error:
-        return IngressErrorCode.ConfigError
+        return QuestDBErrorCode.ConfigError
     if code == reader_error_invalid_api_call:
-        return IngressErrorCode.InvalidApiCall
+        return QuestDBErrorCode.InvalidApiCall
     if code == reader_error_socket_error:
-        return IngressErrorCode.SocketError
+        return QuestDBErrorCode.SocketError
     if code == reader_error_tls_error:
-        return IngressErrorCode.TlsError
+        return QuestDBErrorCode.TlsError
     if code == reader_error_auth_error:
-        return IngressErrorCode.AuthError
+        return QuestDBErrorCode.AuthError
     if code == reader_error_invalid_utf8:
-        return IngressErrorCode.InvalidUtf8
+        return QuestDBErrorCode.InvalidUtf8
     if code == reader_error_cancelled:
-        return IngressErrorCode.Cancelled
+        return QuestDBErrorCode.Cancelled
     if code == reader_error_failover_would_duplicate:
-        return IngressErrorCode.FailoverWouldDuplicate
+        return QuestDBErrorCode.FailoverWouldDuplicate
     if code == reader_error_role_mismatch:
-        return IngressErrorCode.RoleMismatch
+        return QuestDBErrorCode.RoleMismatch
     # Map every other reader-specific code (handshake, protocol, invalid
     # bind, schema drift, no schema, server-side errors, etc.) to
     # ServerFlushError as a broad bucket. Refine later as users surface
     # concrete distinctions.
-    return IngressErrorCode.ServerFlushError
+    return QuestDBErrorCode.ServerFlushError
 
 
 cdef inline object _reader_err_to_py(reader_error* err):
-    """Construct an ``IngressError`` from a ``reader_error*`` and free it."""
+    """Construct an ``QuestDBError`` from a ``reader_error*`` and free it."""
     cdef reader_error_code code = reader_error_get_code(err)
     cdef size_t c_len = 0
     cdef const char* c_msg = reader_error_msg(err, &c_len)
@@ -45,7 +45,7 @@ cdef inline object _reader_err_to_py(reader_error* err):
     try:
         py_code = _reader_err_code_to_py(code)
         py_msg = PyUnicode_FromStringAndSize(c_msg, <Py_ssize_t>c_len)
-        return IngressError(py_code, py_msg)
+        return QuestDBError(py_code, py_msg)
     finally:
         reader_error_free(err)
 
@@ -151,7 +151,7 @@ cdef object _fetch_one_batch(
     Returns:
       - None on clean end-of-stream.
       - A pyarrow.RecordBatch on success.
-    Raises IngressError on FFI error.
+    Raises QuestDBError on FFI error.
     """
     cdef ArrowArray array
     cdef ArrowSchema schema
@@ -162,8 +162,8 @@ cdef object _fetch_one_batch(
     with handle._lock:
         cursor = handle._cursor
         if cursor == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'cursor is closed')
         with nogil:
             if compact:
@@ -192,8 +192,8 @@ cdef object _fetch_one_batch(
 
     # Error path.
     if err == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'reader_cursor_next_arrow_batch returned error '
             'without setting err_out')
     raise _reader_err_to_py(err)
@@ -272,8 +272,8 @@ cdef object _build_record_batch_reader(
                     # yielded: the replayed batch-0 would duplicate what
                     # the consumer holds. Streaming can't discard it, so
                     # surface a clean, catchable error.
-                    raise IngressError(
-                        IngressErrorCode.FailoverWouldDuplicate,
+                    raise QuestDBError(
+                        QuestDBErrorCode.FailoverWouldDuplicate,
                         'mid-query failover would duplicate already-'
                         'delivered batches; re-issue the query')
                 if nxt is None:
@@ -315,8 +315,8 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
         reader = questdb_db_borrow_reader(db, &err)
     if reader == NULL:
         if err == NULL:
-            raise IngressError(
-                IngressErrorCode.ServerFlushError,
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
                 'questdb_db_borrow_reader returned NULL without setting err')
         raise _reader_err_to_py(err)
     cdef _ReaderHandle handle = _ReaderHandle()
@@ -373,8 +373,8 @@ cdef _CursorHandle _execute_query(
 
     if query == NULL:
         if err == NULL:
-            raise IngressError(
-                IngressErrorCode.ServerFlushError,
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
                 'reader_prepare returned NULL without setting err')
         raise _reader_err_to_py(err)
 
@@ -391,8 +391,8 @@ cdef _CursorHandle _execute_query(
         # defensive free is a no-op on the consumed handle.
         reader_query_free(query)
         if err == NULL:
-            raise IngressError(
-                IngressErrorCode.ServerFlushError,
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
                 'reader_query_execute returned NULL without setting err')
         raise _reader_err_to_py(err)
 
@@ -601,7 +601,7 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
             if local_schema.release != NULL:
                 local_schema.release(&local_schema)
             full = (
-                '[' + IngressErrorCode.FailoverWouldDuplicate.name + '] '
+                '[' + QuestDBErrorCode.FailoverWouldDuplicate.name + '] '
                 'mid-query failover would duplicate already-delivered '
                 'batches; re-issue the query').encode('utf-8')
             _qs_set_error(prod, full, <size_t>len(full))
@@ -894,8 +894,8 @@ cdef int _reader_check(bint ok, reader_error* err, str what) except -1:
         return 0
     if err != NULL:
         raise _reader_err_to_py(err)
-    raise IngressError(
-        IngressErrorCode.ServerFlushError,
+    raise QuestDBError(
+        QuestDBErrorCode.ServerFlushError,
         what + ' returned false without err_out')
 
 
@@ -940,8 +940,8 @@ cdef object _numpy_fixed_chunk(
     cdef Py_ssize_t nbytes
     cdef unsigned char* src
     if dtype is None:
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidApiCall,
             'numpy egress does not support column kind 0x{:02X} yet'.format(
                 <int>kind))
     _reader_check(
@@ -949,15 +949,15 @@ cdef object _numpy_fixed_chunk(
         'reader_batch_column_data')
     itemsize = dtype.itemsize
     if cd.value_stride != itemsize:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'column kind 0x{:02X} wire stride {} != numpy itemsize {}'.format(
                 <int>kind, cd.value_stride, itemsize))
     if row_count == 0:
         return np.empty(0, dtype=dtype)
     if cd.values == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'column kind 0x{:02X} has {} rows but no values buffer'.format(
                 <int>kind, row_count))
     nbytes = <Py_ssize_t>(row_count * cd.value_stride)
@@ -989,8 +989,8 @@ cdef object _numpy_varlen_chunk(
     if row_count == 0:
         return out
     if cd.var_offsets == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'column kind 0x{:02X} has {} rows but no offset table'.format(
                 <int>kind, row_count))
     offsets = cd.var_offsets
@@ -1003,8 +1003,8 @@ cdef object _numpy_varlen_chunk(
         start = offsets[r]
         end = offsets[r + 1]
         if end < start or end > cd.var_data_len:
-            raise IngressError(
-                IngressErrorCode.ServerFlushError,
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
                 'corrupt varlen offsets in column kind 0x{:02X}'.format(
                     <int>kind))
         if end > start:
@@ -1037,8 +1037,8 @@ cdef object _numpy_symbol_codes_chunk(
     if row_count == 0:
         return out
     if cd.symbol_codes == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'symbol column has {} rows but no codes buffer'.format(row_count))
     codes = cd.symbol_codes
     validity = cd.validity
@@ -1058,8 +1058,8 @@ cdef void _symbol_categories_extend(
     for i in range(start, sd.entry_count):
         e = &sd.entries[i]
         if <uint64_t>e.offset + <uint64_t>e.length > <uint64_t>sd.heap_len:
-            raise IngressError(
-                IngressErrorCode.ServerFlushError,
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
                 'corrupt symbol dictionary heap offsets')
         cats.append(
             PyUnicode_FromStringAndSize(
@@ -1095,14 +1095,14 @@ cdef object _numpy_geohash_chunk(
         dtype = np.dtype(np.int64)
         target = 8
     else:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'unexpected geohash byte width {}'.format(stride))
     if row_count == 0:
         return np.empty(0, dtype=dtype)
     if cd.values == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'geohash column has {} rows but no values buffer'.format(row_count))
     nbytes = <Py_ssize_t>(row_count * stride)
     src = <unsigned char*>cd.values
@@ -1136,8 +1136,8 @@ cdef object _numpy_uuid_chunk(
     if row_count == 0:
         return out
     if cd.values == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'uuid column has {} rows but no values buffer'.format(row_count))
     validity = cd.validity
     values = <const uint8_t*>cd.values
@@ -1168,8 +1168,8 @@ cdef object _numpy_long256_chunk(
     if row_count == 0:
         return out
     if cd.values == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'long256 column has {} rows but no values buffer'.format(row_count))
     validity = cd.validity
     values = <const uint8_t*>cd.values
@@ -1203,8 +1203,8 @@ cdef object _numpy_decimal_chunk(
     if row_count == 0:
         return out
     if cd.values == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'decimal column has {} rows but no values buffer'.format(row_count))
     validity = cd.validity
     values = <const uint8_t*>cd.values
@@ -1244,8 +1244,8 @@ cdef object _numpy_array_chunk(
     cdef uint32_t send
     cdef Py_ssize_t blen
     if kind != reader_column_kind_double_array:
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidApiCall,
             'numpy egress supports only double arrays (kind 0x{:02X})'.format(
                 <int>kind))
     _reader_check(
@@ -1255,8 +1255,8 @@ cdef object _numpy_array_chunk(
     if row_count == 0:
         return out
     if ad.data_offsets == NULL or ad.shape_offsets == NULL:
-        raise IngressError(
-            IngressErrorCode.ServerFlushError,
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
             'array column has {} rows but no offset tables'.format(row_count))
     validity = ad.validity
     data = ad.data
@@ -1511,7 +1511,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     cdef int seen_seq
 
     if handle is None or handle._cursor == NULL:
-        raise IngressError(IngressErrorCode.InvalidApiCall, 'cursor is closed')
+        raise QuestDBError(QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
     cursor = handle._cursor
     seen_seq = handle._reset_seq
 
@@ -1816,8 +1816,8 @@ cdef class _NumpyBatchIter:
             # discard it, so surface a clean, catchable error.
             self.done = True
             self.handle._free()
-            raise IngressError(
-                IngressErrorCode.FailoverWouldDuplicate,
+            raise QuestDBError(
+                QuestDBErrorCode.FailoverWouldDuplicate,
                 'mid-query failover would duplicate already-delivered '
                 'batches; re-issue the query')
         if batch == NULL:
@@ -1911,7 +1911,7 @@ class QueryResult:
     materialisation method (``to_pandas``, ``to_arrow``, ``iter_arrow``,
     ``iter_pandas``, or the ``__arrow_c_stream__`` PyCapsule protocol)
     consumes the underlying cursor; the second consumption raises
-    ``IngressError``.
+    ``QuestDBError``.
 
     ``__arrow_c_stream__`` is native — the cursor's record batches are
     exposed directly through the Arrow C Data Interface, so polars /
@@ -1943,12 +1943,12 @@ class QueryResult:
 
     def _take_cursor_handle(self):
         if self._consumed:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'QueryResult already consumed')
         if self._cursor_handle is None:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'QueryResult cursor was closed')
         self._consumed = True
         handle = self._cursor_handle
@@ -2071,7 +2071,7 @@ class QueryResult:
         """Iterate result batches as ``pyarrow.RecordBatch``.
 
         Streaming: a mid-query failover after the first batch has been
-        yielded surfaces ``IngressErrorCode.FailoverWouldDuplicate`` (the
+        yielded surfaces ``QuestDBErrorCode.FailoverWouldDuplicate`` (the
         already-yielded batches cannot be discarded); re-issue the query.
         If the iterator is abandoned partway, cleanup runs at the next
         garbage-collection cycle; call :meth:`close` (or use the context-
@@ -2114,7 +2114,7 @@ class QueryResult:
         categories-mismatch error.
 
         Streaming: a mid-query failover after the first batch has been yielded
-        surfaces ``IngressErrorCode.FailoverWouldDuplicate``; re-issue the
+        surfaces ``QuestDBErrorCode.FailoverWouldDuplicate``; re-issue the
         query. Requires polars and pyarrow.
         """
         try:
@@ -2138,7 +2138,7 @@ class QueryResult:
         frame to QuestDB so the server can drop in-flight work;
         ``close`` only releases local resources. A subsequent batch
         pull after ``cancel`` typically surfaces
-        ``IngressErrorCode.Cancelled``.
+        ``QuestDBErrorCode.Cancelled``.
         """
         cdef _CursorHandle handle = self._cursor_handle
         cdef reader_error* err = NULL
@@ -2155,8 +2155,8 @@ class QueryResult:
         if not ok:
             if err != NULL:
                 raise _reader_err_to_py(err)
-            raise IngressError(
-                IngressErrorCode.ServerFlushError,
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
                 'reader_cursor_cancel returned false '
                 'without setting err_out')
 
@@ -2167,7 +2167,7 @@ class QueryResult:
         you need the server to stop work. After ``close``, any
         previously-returned iterator that hasn't been exhausted will
         fail on its next pump with
-        ``IngressErrorCode.InvalidApiCall``.
+        ``QuestDBErrorCode.InvalidApiCall``.
         """
         cdef _CursorHandle handle = self._cursor_handle
         self._cursor_handle = None

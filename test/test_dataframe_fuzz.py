@@ -19,7 +19,7 @@ import atheris
 
 
 with atheris.instrument_imports():
-    import questdb.ingress as qi
+    import questdb as qi
 
 
 @atheris.instrument_func
@@ -159,7 +159,7 @@ def test_dataframe(input_bytes):
                 symbols=symbols,
                 at=at)
         except Exception as e:
-            if isinstance(e, (qi.IngressError)):
+            if isinstance(e, (qi.QuestDBError)):
                 msg = str(e)
                 if 'Bad argument `table_name`' in msg:
                     return

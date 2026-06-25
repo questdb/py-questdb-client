@@ -10,7 +10,7 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
 import patch_path
-import questdb.ingress as qi
+import questdb as qi
 
 
 def _tp(buf, t0, t1):

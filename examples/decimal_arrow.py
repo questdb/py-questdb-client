@@ -1,4 +1,4 @@
-from questdb.ingress import Sender, TimestampNanos
+from questdb import Sender, TimestampNanos
 import pandas as pd
 import pyarrow as pa
 

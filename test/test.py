@@ -29,7 +29,7 @@ from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 from qwp_ws_ack_server import QwpAckServer
 
-import questdb.ingress as qi
+import questdb as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import (
@@ -85,7 +85,7 @@ elif pd is None:
         def test_no_pandas(self):
             buf = qi.Buffer(protocol_version=2)
             exp = 'Missing.*`pandas`.*`numpy`.*readthedocs.*installation.html.'
-            with self.assertRaisesRegex(qi.IngressError, exp):
+            with self.assertRaisesRegex(qi.QuestDBError, exp):
                 buf.dataframe(None, at=qi.ServerTimestamp)
 
 
@@ -116,8 +116,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QwpWsProgress.Manual)
 
     def test_ingress_error_can_carry_qwpws_diagnostic(self):
-        err = qi.IngressError(
-            qi.IngressErrorCode.SocketError,
+        err = qi.QuestDBError(
+            qi.QuestDBErrorCode.SocketError,
             'sender halted',
             (
                 qi.QwpWsErrorCategory.ParseError.c_value,
@@ -141,8 +141,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(err.qwp_ws_error, diagnostic)
 
     def test_server_rejection_error_is_specific_subclass(self):
-        err = qi.IngressServerRejectionError(
-            qi.IngressErrorCode.ServerRejection,
+        err = qi.QuestDBServerRejectionError(
+            qi.QuestDBErrorCode.ServerRejection,
             'sender halted',
             (
                 qi.QwpWsErrorCategory.ParseError.c_value,
@@ -154,12 +154,12 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 6,
             ))
 
-        self.assertIsInstance(err, qi.IngressError)
-        self.assertEqual(err.code, qi.IngressErrorCode.ServerRejection)
+        self.assertIsInstance(err, qi.QuestDBError)
+        self.assertEqual(err.code, qi.QuestDBErrorCode.ServerRejection)
         self.assertEqual(err.qwp_ws_error.category, qi.QwpWsErrorCategory.ParseError)
 
     def test_python_only_error_codes_do_not_overlap_ffi_codes(self):
-        code_values = [code.value for code in qi.IngressErrorCode]
+        code_values = [code.value for code in qi.QuestDBErrorCode]
 
         self.assertEqual(len(code_values), len(set(code_values)))
         # Iterating the enum skips aliases, so the check above passes even
@@ -168,49 +168,49 @@ class TestQwpWebSocketApi(unittest.TestCase):
         # count proves no member collided onto another's value -- e.g. a new
         # FFI code landing on a synthetic ``failover_retry + N`` sentinel.
         self.assertEqual(
-            len(qi.IngressErrorCode.__members__),
-            len(list(qi.IngressErrorCode)),
-            'IngressErrorCode has aliased members (value collision)')
+            len(qi.QuestDBErrorCode.__members__),
+            len(list(qi.QuestDBErrorCode)),
+            'QuestDBErrorCode has aliased members (value collision)')
         # RoleMismatch mirrors its FFI code; the synthetic Python-only codes
         # sit strictly above it.
         self.assertGreater(
-            qi.IngressErrorCode.BadDataFrame.value,
-            qi.IngressErrorCode.RoleMismatch.value)
+            qi.QuestDBErrorCode.BadDataFrame.value,
+            qi.QuestDBErrorCode.RoleMismatch.value)
         self.assertGreater(
-            qi.IngressErrorCode.BadDataFrame.value,
-            qi.IngressErrorCode.ArrowIngest.value)
+            qi.QuestDBErrorCode.BadDataFrame.value,
+            qi.QuestDBErrorCode.ArrowIngest.value)
         self.assertGreater(
-            qi.IngressErrorCode.Cancelled.value,
-            qi.IngressErrorCode.ArrowIngest.value)
+            qi.QuestDBErrorCode.Cancelled.value,
+            qi.QuestDBErrorCode.ArrowIngest.value)
         # FailoverRetry mirrors the FFI ingress code (17); the synthetic
         # Python-only codes sit above it and stay distinct.
         self.assertGreater(
-            qi.IngressErrorCode.FailoverRetry.value,
-            qi.IngressErrorCode.ArrowIngest.value)
+            qi.QuestDBErrorCode.FailoverRetry.value,
+            qi.QuestDBErrorCode.ArrowIngest.value)
         self.assertGreater(
-            qi.IngressErrorCode.FailoverWouldDuplicate.value,
-            qi.IngressErrorCode.FailoverRetry.value)
+            qi.QuestDBErrorCode.FailoverWouldDuplicate.value,
+            qi.QuestDBErrorCode.FailoverRetry.value)
 
     def test_unsupported_dataframe_shape_error_carries_failures(self):
         err = qi.UnsupportedDataFrameShapeError(
             'unsupported frame',
             [{'column': 'active', 'reason': 'bool_requires_packing'}])
 
-        self.assertIsInstance(err, qi.IngressError)
-        self.assertEqual(err.code, qi.IngressErrorCode.BadDataFrame)
+        self.assertIsInstance(err, qi.QuestDBError)
+        self.assertEqual(err.code, qi.QuestDBErrorCode.BadDataFrame)
         self.assertEqual(
             err.column_failures,
             ({'column': 'active', 'reason': 'bool_requires_packing'},))
 
     def test_client_from_conf_rejects_non_qwp_websocket(self):
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'requires a QWP/WebSocket configuration string'):
             qi.Client.from_conf('tcp::addr=localhost:9009;')
 
     def test_client_from_conf_requires_addr(self):
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'Missing "addr" parameter'):
             qi.Client.from_conf('qwpws::pool_size=1;')
 
@@ -223,16 +223,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
         client = qi.Client.__new__(qi.Client)
 
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 "__enter__\\(\\) can't be called: Client is closed"):
             with client:
                 pass
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 "reap_idle\\(\\) can't be called: Client is closed"):
             client.reap_idle()
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 "dataframe\\(\\) can't be called: Client is closed"):
             client.dataframe([], table_name='tbl', at=qi.ServerTimestamp)
 
@@ -381,7 +381,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertGreater(close_elapsed, 0.05)
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 "reap_idle\\(\\) can't be called: Client is closed"):
             client.reap_idle()
 
@@ -410,7 +410,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             client = qi.Client.from_conf(conf)
             try:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'exceeds max_buf_size'):
                     client.dataframe(df, table_name='trades', at='ts')
             finally:
@@ -513,7 +513,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             'qwpws::addr=localhost:9000;qwp_ws_progress=manual;')
         try:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     r'drive_once\(\) can\'t be called: Sender is closed'):
                 sender.drive_once()
         finally:
@@ -521,7 +521,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_from_conf_preserves_c_only_qwpws_keys(self):
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'invalid sf_max_bytes'):
             qi.Sender.from_conf('qwpws::addr=localhost:9000;sf_max_bytes=64mi;')
 
@@ -539,7 +539,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_tls_roots_password_rejects_non_qwp_websocket(self):
         with tempfile.NamedTemporaryFile() as roots:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'only supported for QWP/WebSocket'):
                 qi.Sender.from_conf(
                     'tcps::addr=localhost:9009;'
@@ -548,14 +548,14 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_from_conf_preserves_http_retry_max_backoff(self):
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'retry_max_backoff_millis.*at least 10'):
             qi.Sender.from_conf(
                 'http::addr=localhost:9000;retry_max_backoff_millis=3;')
 
     def test_retry_max_backoff_rejects_non_http_protocol(self):
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'retry_max_backoff_millis is supported only in ILP over HTTP'):
             qi.Sender(
                 qi.Protocol.Tcp,
@@ -592,7 +592,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_qwpws_progress_rejects_non_websocket_protocol(self):
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'only supported for QWP/WebSocket'):
             qi.Sender(
                 qi.Protocol.QwpUdp,
@@ -613,7 +613,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_qwpws_error_handler_rejects_non_websocket_protocol(self):
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'only supported for QWP/WebSocket'):
             qi.Sender(
                 qi.Protocol.QwpUdp,
@@ -629,11 +629,11 @@ class TestQwpWebSocketApi(unittest.TestCase):
         try:
             sender.establish()
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'only supported for QWP/WebSocket'):
                 sender.flush_and_get_fsn()
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'only supported for QWP/WebSocket'):
                 sender.flush_and_keep_and_get_fsn()
         finally:
@@ -676,7 +676,7 @@ class TestBases:
 
         def test_buffer_row_at_disallows_none(self):
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'must be of type TimestampNanos, datetime, or ServerTimestamp'):
                 buffer = qi.Buffer(protocol_version=self.version)
                 buffer.row('tbl1', symbols={'sym1': 'val1'}, at=None)
@@ -689,7 +689,7 @@ class TestBases:
         @unittest.skipIf(not pd, 'pandas not installed')
         def test_buffer_dataframe_at_disallows_none(self):
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'must be of type TimestampNanos, datetime, or ServerTimestamp'):
                 buffer = qi.Buffer(protocol_version=self.version)
                 buffer.dataframe(pd.DataFrame(), at=None)
@@ -713,11 +713,11 @@ class TestBases:
         def test_bad_table(self):
             buf = qi.Buffer(protocol_version=self.version)
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Table names must have a non-zero length'):
                 buf.row('', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Bad string "x..y": Found invalid dot `.` at position 2.'):
                 buf.row('x..y', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
 
@@ -729,11 +729,11 @@ class TestBases:
         def test_bad_symbol_column_name(self):
             buf = qi.Buffer(protocol_version=self.version)
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Column names must have a non-zero length.'):
                 buf.row('tbl1', symbols={'': 'val1'}, at=qi.ServerTimestamp)
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Bad string "sym.bol": '
                     'Column names can\'t contain a \'.\' character, '
                     'which was found at byte position 3.'):
@@ -818,7 +818,7 @@ class TestBases:
 
             # A bad char in Python.
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.*codepoint 0xd800 in string .*'):
                 buf.row('tbl1', symbols={'questdb1': 'a\ud800'}, at=qi.ServerTimestamp)
 
@@ -870,13 +870,13 @@ class TestBases:
             self.assertEqual(bytes(buf), reversed_expected)
 
             # zero dimensional array
-            with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
+            with self.assertRaisesRegex(qi.QuestDBError, "Zero-dimensional arrays are not supported"):
                 scalar_arr = np.array(42.0, dtype=np.float64)
                 buf = qi.Buffer(protocol_version=self.version)
                 buf.row('scalar_table', columns={'col': scalar_arr}, at=qi.ServerTimestamp)
 
             # not f64 dtype array
-            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy arrays are supported, got dtype: complex64"):
+            with self.assertRaisesRegex(qi.QuestDBError, "Only float64 numpy arrays are supported, got dtype: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 buf.row('invalid_table', columns={'col': complex_arr}, at=qi.ServerTimestamp)
 
@@ -908,7 +908,7 @@ class TestBases:
         def test_transaction_row_at_disallows_none(self):
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
                     with sender.transaction("foo") as txn:
                         txn.row(symbols={'sym1': 'val1'}, at=None)
@@ -922,7 +922,7 @@ class TestBases:
         def test_transaction_dataframe_at_disallows_none(self):
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
                     with sender.transaction("foo") as txn:
                         txn.dataframe(pd.DataFrame(), at=None)
@@ -935,7 +935,7 @@ class TestBases:
         def test_sender_row_at_disallows_none(self):
             with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=None)
                 with self.assertRaisesRegex(
@@ -947,7 +947,7 @@ class TestBases:
         def test_sender_dataframe_at_disallows_none(self):
             with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'must be of type TimestampNanos, datetime, or ServerTimestamp'):
                     sender.dataframe(pd.DataFrame(), at=None)
                 with self.assertRaisesRegex(
@@ -1005,7 +1005,7 @@ class TestBases:
 
             for version in bad_versions:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         '"protocol_version" must be None, "auto", 1-3'):
                     self.builder('tcp', '127.0.0.1', 12345, protocol_version=version)
                     self.fail('Should not have reached here - constructing sender')
@@ -1016,10 +1016,10 @@ class TestBases:
                     qi.Buffer(protocol_version=version)
                     self.fail('Should not have reached here - constructing buffer')
 
-                self.assertIn(type(capture.exception), (qi.IngressError, TypeError))
+                self.assertIn(type(capture.exception), (qi.QuestDBError, TypeError))
 
-                if isinstance(capture.exception, qi.IngressError):
-                    self.assertEqual(capture.exception.code, qi.IngressErrorCode.ProtocolVersionError)
+                if isinstance(capture.exception, qi.QuestDBError):
+                    self.assertEqual(capture.exception.code, qi.QuestDBErrorCode.ProtocolVersionError)
                     self.assertIn('Invalid protocol version', str(capture.exception))
 
         def test_connect_close(self):
@@ -1040,7 +1040,7 @@ class TestBases:
         def test_row_before_connect(self):
             try:
                 sender = self.builder('tcp', '127.0.0.1', 12345)
-                with self.assertRaisesRegex(qi.IngressError, 'Sender is closed'):
+                with self.assertRaisesRegex(qi.QuestDBError, 'Sender is closed'):
                     sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
             finally:
                 sender.close()
@@ -1049,7 +1049,7 @@ class TestBases:
             with Server() as server:
                 with self.builder('tcp', '127.0.0.1', server.port) as sender:
                     server.accept()
-                    with self.assertRaisesRegex(qi.IngressError, 'Column names'):
+                    with self.assertRaisesRegex(qi.QuestDBError, 'Column names'):
                         sender.row('tbl1', symbols={'...bad name..': 'val1'}, at=qi.ServerTimestamp)
                     self.assertEqual(bytes(sender), b'')
                     sender.flush()
@@ -1064,14 +1064,14 @@ class TestBases:
                     server.close()
 
                     # We enter a bad state where we can't flush again.
-                    with self.assertRaises(qi.IngressError):
+                    with self.assertRaises(qi.QuestDBError):
                         for _ in range(1000):
                             time.sleep(0.01)
                             sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                             sender.flush()
 
                     # We should still be in a bad state.
-                    with self.assertRaises(qi.IngressError):
+                    with self.assertRaises(qi.QuestDBError):
                         sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
                         sender.flush()
 
@@ -1082,7 +1082,7 @@ class TestBases:
             # Same as test_flush_2, but we catch the exception _outside_ the
             # sender's `with` block, to ensure no exceptions get trapped.
             with Server() as server:
-                with self.assertRaises(qi.IngressError):
+                with self.assertRaises(qi.QuestDBError):
                     with self.builder('tcp', '127.0.0.1', server.port) as sender:
                         server.accept()
                         server.close()
@@ -1225,7 +1225,7 @@ class TestBases:
                     server.accept()
                     server.close()
                     exp_err = 'Could not flush buffer.* - See https'
-                    with self.assertRaisesRegex(qi.IngressError, exp_err):
+                    with self.assertRaisesRegex(qi.QuestDBError, exp_err):
                         for _ in range(1000):
                             time.sleep(0.01)
                             sender.row('tbl1', symbols={'a': 'b'}, at=qi.ServerTimestamp)
@@ -1310,7 +1310,7 @@ class TestBases:
                     server.close()
 
                     exp_err = 'Could not flush buffer.* - See https'
-                    with self.assertRaisesRegex(qi.IngressError, exp_err):
+                    with self.assertRaisesRegex(qi.QuestDBError, exp_err):
                         for _ in range(1000):
                             time.sleep(0.01)
                             sender.dataframe(df.head(1), table_name='tbl1', at=qi.ServerTimestamp)
@@ -1334,7 +1334,7 @@ class TestBases:
                 server.accept()
                 sender.row('tbl1', symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                 sender.close()
-                with self.assertRaises(qi.IngressError):
+                with self.assertRaises(qi.QuestDBError):
                     sender.establish()
 
         def test_bad_init_args(self):
@@ -1351,7 +1351,7 @@ class TestBases:
             with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                 server.accept()
                 self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Transactions are only supported for ILP/HTTP.',
                     sender.transaction, 'table_name')
 
@@ -1436,7 +1436,7 @@ class TestBases:
             with HttpServer() as server, self.builder('http', '127.0.0.1', server.port, auto_flush=False) as sender:
                 self.assertIs(sender.row('tbl1', symbols={'sym1': 'val1'}, at=ts), sender)
                 self.assertIs(sender.row('tbl1', symbols={'sym2': 'val2'}, at=ts), sender)
-                with self.assertRaisesRegex(qi.IngressError, exp_err):
+                with self.assertRaisesRegex(qi.QuestDBError, exp_err):
                     with sender.transaction('tbl2') as _txn:
                         pass
 
@@ -1487,23 +1487,23 @@ class TestBases:
                     txn.row(symbols={'sym1': 'val1'}, at=qi.ServerTimestamp)
                     txn.row(symbols={'sym2': 'val2'}, at=qi.ServerTimestamp)
 
-                    with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
+                    with self.assertRaisesRegex(qi.QuestDBError, 'Cannot append rows explicitly inside a transaction'):
                         sender.row('tbl2', symbols={'sym3': 'val3'}, at=qi.ServerTimestamp)
 
-                    with self.assertRaisesRegex(qi.IngressError, 'Cannot append rows explicitly inside a transaction'):
+                    with self.assertRaisesRegex(qi.QuestDBError, 'Cannot append rows explicitly inside a transaction'):
                         sender.dataframe(None, at=qi.ServerTimestamp)
 
-                    with self.assertRaisesRegex(qi.IngressError, 'Cannot flush explicitly inside a transaction'):
+                    with self.assertRaisesRegex(qi.QuestDBError, 'Cannot flush explicitly inside a transaction'):
                         sender.flush()
 
-                    with self.assertRaisesRegex(qi.IngressError, 'Already inside a transaction, can\'t start another.'):
+                    with self.assertRaisesRegex(qi.QuestDBError, 'Already inside a transaction, can\'t start another.'):
                         with sender.transaction('tbl2') as _txn2:
                             pass
 
                     txn.commit()
-                    with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t commit'):
+                    with self.assertRaisesRegex(qi.QuestDBError, 'Transaction already completed, can\'t commit'):
                         txn.commit()
-                    with self.assertRaisesRegex(qi.IngressError, 'Transaction already completed, can\'t rollback.'):
+                    with self.assertRaisesRegex(qi.QuestDBError, 'Transaction already completed, can\'t rollback.'):
                         txn.rollback()
                 self.assertEqual(len(server.requests), 1)
 
@@ -1625,7 +1625,7 @@ class TestBases:
                                                       auto_flush=False) as sender:
                 while len(sender) < 1024:
                     sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                with self.assertRaisesRegex(qi.IngressError, 'Could not flush .*exceeds maximum'):
+                with self.assertRaisesRegex(qi.QuestDBError, 'Could not flush .*exceeds maximum'):
                     sender.flush()
 
         def test_http_err(self):
@@ -1635,7 +1635,7 @@ class TestBases:
                     server.port,
                     retry_timeout=datetime.timedelta(milliseconds=1)) as sender:
                 server.responses.append((0, 500, 'text/plain', b'Internal Server Error'))
-                with self.assertRaisesRegex(qi.IngressError, 'Could not flush.*: Internal Server'):
+                with self.assertRaisesRegex(qi.QuestDBError, 'Could not flush.*: Internal Server'):
                     sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
                     sender.flush()
                 self.assertEqual(len(sender), 0)  # buffer is still cleared after error.
@@ -1689,7 +1689,7 @@ class TestBases:
                 buffer.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
 
                 # wait 50ms in the server to simulate a slow response
-                with self.assertRaisesRegex(qi.IngressError, 'timeout: per call') as cm:
+                with self.assertRaisesRegex(qi.QuestDBError, 'timeout: per call') as cm:
                     for _ in range(10):
                         server.responses.append((500, 200, 'text/plain', b'OK'))
                         # We retry in case the network thread gets descheduled
@@ -1709,11 +1709,11 @@ class TestBases:
                 # time out at 50ms, well before the response arrives.
                 server.responses.append((500, 200, 'text/plain', b'OK'))
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                with self.assertRaisesRegex(qi.IngressError, 'timeout: per call'):
+                with self.assertRaisesRegex(qi.QuestDBError, 'timeout: per call'):
                     sender.flush()
 
         def test_http_server_not_serve(self):
-            with self.assertRaisesRegex(qi.IngressError, 'Could not detect server\'s line protocol version, settings url: http://127.0.0.1:1234/settings'):
+            with self.assertRaisesRegex(qi.QuestDBError, 'Could not detect server\'s line protocol version, settings url: http://127.0.0.1:1234/settings'):
                 with self.builder(
                     'http',
                     '127.0.0.1',
@@ -1751,7 +1751,7 @@ class TestBases:
                 self.assertEqual(server.requests[0], exp)
 
         def test_http_auto_protocol_version_unsupported_client(self):
-            with self.assertRaisesRegex(qi.IngressError, r'Server does not support any of the client protocol versions.*'):
+            with self.assertRaisesRegex(qi.QuestDBError, r'Server does not support any of the client protocol versions.*'):
                 with HttpServer(SETTINGS_WITH_PROTOCOL_VERSION_V4) as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row('tbl1', columns={'x': 42})
 
@@ -1854,7 +1854,7 @@ class TestBases:
 
         def test_array_error_cases(self):
             # zero dimensional array
-            with self.assertRaisesRegex(qi.IngressError, "Zero-dimensional arrays are not supported"):
+            with self.assertRaisesRegex(qi.QuestDBError, "Zero-dimensional arrays are not supported"):
                 scalar_arr = np.array(42.0, dtype=np.float64)
                 with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row(
@@ -1863,7 +1863,7 @@ class TestBases:
                         at=qi.TimestampNanos(11111))
 
             # not f64 dtype array
-            with self.assertRaisesRegex(qi.IngressError, "Only float64 numpy arrays are supported, got dtype: complex64"):
+            with self.assertRaisesRegex(qi.QuestDBError, "Only float64 numpy arrays are supported, got dtype: complex64"):
                 complex_arr = np.array([1 + 2j], dtype=np.complex64)
                 with HttpServer() as server, self.builder('http', '127.0.0.1', server.port) as sender:
                     sender.row(
@@ -1874,7 +1874,7 @@ class TestBases:
             # max dims
             if NUMPY_VERSION >= (2,):
                 # Note: Older numpy versions don't support more than 32 dimensions.
-                with self.assertRaisesRegex(qi.IngressError, "Array dimension mismatch: expected at most 32 dimensions, but got 33"):
+                with self.assertRaisesRegex(qi.QuestDBError, "Array dimension mismatch: expected at most 32 dimensions, but got 33"):
                     dims = (1,) * 33
                     array = np.empty(dims, dtype=np.float64)
                     with Server() as server, self.builder('tcp', '127.0.0.1', server.port, protocol_version="2") as sender:
@@ -1884,7 +1884,7 @@ class TestBases:
                             at=qi.TimestampNanos(11111))
 
             # default protocol version is v1, which does not support array datatype.
-            with self.assertRaisesRegex(qi.IngressError, "Protocol version v1 does not support array datatype"):
+            with self.assertRaisesRegex(qi.QuestDBError, "Protocol version v1 does not support array datatype"):
                 array = np.zeros([1,2], dtype=np.float64)
                 with Server() as server, self.builder('tcp', '127.0.0.1', server.port) as sender:
                     sender.row(
@@ -2077,40 +2077,40 @@ class TestUninitializedBuffer(unittest.TestCase):
         return qi.Buffer.__new__(qi.Buffer)
 
     def test_len(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             len(self._make_uninit())
 
     def test_bytes(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             bytes(self._make_uninit())
 
     def test_capacity(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             self._make_uninit().capacity()
 
     def test_clear(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             self._make_uninit().clear()
 
     def test_reserve(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             self._make_uninit().reserve(1)
 
     def test_row(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             self._make_uninit().row('t', columns={'x': 1}, at=qi.ServerTimestamp)
 
     @unittest.skipIf(not pd, 'pandas not installed')
     def test_dataframe(self):
         import pandas as _pd
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             self._make_uninit().dataframe(
                 _pd.DataFrame({'x': [1]}),
                 table_name='t',
                 at=qi.ServerTimestamp)
 
     def test_flush(self):
-        with self.assertRaisesRegex(qi.IngressError, 'Buffer is not initialized'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Buffer is not initialized'):
             with Server() as server, \
                     qi.Sender(qi.Protocol.Tcp, '127.0.0.1', server.port) as sender:
                 server.accept()
@@ -2131,10 +2131,10 @@ class TestBufferFactory(unittest.TestCase):
 
     def test_ilp_invalid_version(self):
         for bad in (0, 4):
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 qi.Buffer.ilp(bad)
             self.assertEqual(
-                cm.exception.code, qi.IngressErrorCode.ProtocolVersionError)
+                cm.exception.code, qi.QuestDBErrorCode.ProtocolVersionError)
 
     def test_qwp_factory(self):
         buf = qi.Buffer.qwp()

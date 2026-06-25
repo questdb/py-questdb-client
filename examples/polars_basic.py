@@ -6,7 +6,7 @@ riding the Arrow PyCapsule Interface (`__arrow_c_stream__`) straight into
 results as a polars `DataFrame` with `QueryResult.to_polars()`.
 """
 
-from questdb.ingress import Client, IngressError
+from questdb import Client, QuestDBError
 import datetime
 import sys
 
@@ -47,7 +47,7 @@ def example(host: str = 'localhost', port: int = 9000):
                     "FROM long_sequence(3)") as result:
                 queried = result.to_polars()
             print(queried)
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 
@@ -77,7 +77,7 @@ def schema_overrides_example(host: str = 'localhost', port: int = 9000):
                 table_name='ipv4_log',
                 at='ts',
                 schema_overrides={'addr': 'ipv4'})
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 

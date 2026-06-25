@@ -35,7 +35,7 @@ The most common way to insert data is from a Pandas dataframe.
 .. code-block:: python
 
     import pandas as pd
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     df = pd.DataFrame({
         'symbol': pd.Categorical(['ETH-USD', 'BTC-USD']),
@@ -62,7 +62,7 @@ You can also send individual rows. This only requires a more minimal installatio
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
 
     conf = f'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:

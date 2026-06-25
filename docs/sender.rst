@@ -7,7 +7,7 @@ Sending Data over ILP
 Overview
 ========
 
-The :class:`Sender <questdb.ingress.Sender>` class is a client that inserts
+The :class:`Sender <questdb.Sender>` class is a client that inserts
 rows into QuestDB via the
 `ILP protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_ (TCP
 and HTTP) or via QWP/UDP for fire-and-forget, lowest-latency ingestion.
@@ -15,7 +15,7 @@ The sender also supports TLS and authentication (ILP only).
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
     import pandas as pd
 
     conf = 'http::addr=localhost:9000;'
@@ -56,7 +56,7 @@ The ``Sender`` class is generally initialized from a
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
@@ -73,13 +73,13 @@ You can also initialize the sender from an environment variable::
 
 The content of the environment variable is the same
 :ref:`configuration string <sender_conf>` as taken by the
-:func:`Sender.from_conf <questdb.ingress.Sender.from_conf>` method,
+:func:`Sender.from_conf <questdb.Sender.from_conf>` method,
 but moving it to an environment variable is more secure and allows you to avoid
 hardcoding sensitive information such as passwords and tokens in your code.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     with Sender.from_env() as sender:
         ...
@@ -99,8 +99,8 @@ Appending Rows
 --------------
 
 You can append as many rows as you like by calling the
-:func:`Sender.row <questdb.ingress.Sender.row>` method. The full method arguments are
-documented in the :func:`Buffer.row <questdb.ingress.Buffer.row>` method.
+:func:`Sender.row <questdb.Sender.row>` method. The full method arguments are
+documented in the :func:`Buffer.row <questdb.Buffer.row>` method.
 
 Appending Pandas Dataframes
 ---------------------------
@@ -113,9 +113,9 @@ faster than appending rows one by one.
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python
 
-For more details see :func:`Sender.dataframe <questdb.ingress.Sender.dataframe>`
+For more details see :func:`Sender.dataframe <questdb.Sender.dataframe>`
 and for full argument options see
-:func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>`.
+:func:`Buffer.dataframe <questdb.Buffer.dataframe>`.
 
 String vs Symbol Columns
 ------------------------
@@ -133,7 +133,7 @@ Here is an example of sending a row with a symbol and a string:
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
     import datetime
 
     conf = 'http::addr=localhost:9000;'
@@ -169,7 +169,7 @@ To send decimal values, use Python's :class:`decimal.Decimal` type in the
 .. code-block:: python
 
     from decimal import Decimal
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
     import pandas as pd
 
     # CREATE TABLE prices (
@@ -218,8 +218,8 @@ is stored as rows and is used for
 Set by client
 ~~~~~~~~~~~~~
 
-It can be either a :class:`TimestampNanos <questdb.ingress.TimestampNanos>`
-object, a :class:`TimestampMicros <questdb.ingress.TimestampMicros>` object or a
+It can be either a :class:`TimestampNanos <questdb.TimestampNanos>`
+object, a :class:`TimestampMicros <questdb.TimestampMicros>` object or a
 `datetime.datetime <https://docs.python.org/3/library/datetime.html>`_ object.
 
 In case of dataframes you can also specify the timestamp column name or index.
@@ -246,7 +246,7 @@ received by the server.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, ServerTimestamp
+    from questdb import Sender, ServerTimestamp
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
@@ -268,7 +268,7 @@ Flushing
 ========
 
 The sender accumulates data into an internal buffer. Calling
-:func:`Sender.flush <questdb.ingress.Sender.flush>` will send the buffered data
+:func:`Sender.flush <questdb.Sender.flush>` will send the buffered data
 to QuestDB, and clear the buffer.
 
 Flushing can be done explicitly or automatically.
@@ -276,7 +276,7 @@ Flushing can be done explicitly or automatically.
 Explicit Flushing
 -----------------
 
-An explicit call to :func:`Sender.flush <questdb.ingress.Sender.flush>` will
+An explicit call to :func:`Sender.flush <questdb.Sender.flush>` will
 send any pending data immediately.
 
 .. code-block:: python
@@ -341,7 +341,7 @@ server.
 
 When using the HTTP protocol, the server will send back an error message if
 the data is invalid or if there is a problem with the server. This will be
-raised as an :class:`IngressError <questdb.ingress.IngressError>` exception.
+raised as an :class:`QuestDBError <questdb.QuestDBError>` exception.
 
 The HTTP layer will also attempt retries, configurable via the
 :ref:`retry_timeout <sender_conf_request>` parameter.`
@@ -391,8 +391,8 @@ of the ``with`` block.
   the exception is propagated.
 
 You can also terminate a transaction explicity by calling the
-:func:`commit <questdb.ingress.SenderTransaction.commit>` or the
-:func:`rollback <questdb.ingress.SenderTransaction.rollback>` methods.
+:func:`commit <questdb.SenderTransaction.commit>` or the
+:func:`rollback <questdb.SenderTransaction.rollback>` methods.
 
 While transactions that span multiple tables are not supported by QuestDB, you
 can reuse the same sender for mutliple tables.
@@ -477,7 +477,7 @@ sender object and reuse it across multiple requests.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
@@ -506,9 +506,9 @@ Tune for Performance
 If you need better performance:
 
 * Tune for larger batches of rows. Tweak the auto-flush settings, or
-  call :func:`Sender.flush <questdb.ingress.Sender.flush>` less frequently.
+  call :func:`Sender.flush <questdb.Sender.flush>` less frequently.
 
-* Use the :func:`Sender.dataframe <questdb.ingress.Sender.dataframe>` method To
+* Use the :func:`Sender.dataframe <questdb.Sender.dataframe>` method To
   send dataframes instead of appending rows one by one.
 
 * Try multi-threading: The ``Sender`` logic is designed to release the Python
@@ -548,7 +548,7 @@ sender's protocol.
 
 .. code-block:: python
 
-    from questdb.ingress import Buffer, Sender, TimestampNanos
+    from questdb import Buffer, Sender, TimestampNanos
 
     buf = Buffer.ilp(protocol_version=2)
     buf.row(
@@ -580,7 +580,7 @@ databases via the ``.flush(buf, clear=False)`` option.
 
 .. code-block:: python
 
-    from questdb.ingress import Buffer, Sender, TimestampNanos
+    from questdb import Buffer, Sender, TimestampNanos
 
     buf = Buffer.ilp(protocol_version=2)
     buf.row(
@@ -639,7 +639,7 @@ sender objects in parallel.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
     import pandas as pd
     from concurrent.futures import ThreadPoolExecutor
     import datetime
@@ -687,7 +687,7 @@ control the lifetime of the sender object.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     conf = 'http::addr=localhost:9000;'
     sender = Sender.from_conf(conf)
@@ -695,8 +695,8 @@ control the lifetime of the sender object.
     # ...
     sender.close()
 
-The :func:`establish <questdb.ingress.Sender.establish>` method is needs to be
-called exactly once, but the :func:`close <questdb.ingress.Sender.close>` method
+The :func:`establish <questdb.Sender.establish>` method is needs to be
+called exactly once, but the :func:`close <questdb.Sender.close>` method
 is idempotent and can be called multiple times.
 
 
@@ -745,7 +745,7 @@ You can also specify the configuration parameters programmatically:
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, Protocol
+    from questdb import Sender, Protocol
     from datetime import timedelta
 
     with Sender(Protocol.Tcp, 'localhost', 9009,
@@ -791,7 +791,7 @@ auto-flush interval::
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, Protocol
+    from questdb import Sender, Protocol
     from datetime import timedelta
 
     with Sender.from_env(auto_flush_interval=timedelta(seconds=10)) as sender:
@@ -882,7 +882,7 @@ Key differences from ILP:
   datagram's worth of data. Rows and interval thresholds work the same as ILP.
 
 * **Datagram size limit.** A single row that exceeds ``max_datagram_size`` will
-  raise :class:`IngressError` at flush time. Configure ``max_datagram_size`` via
+  raise :class:`QuestDBError` at flush time. Configure ``max_datagram_size`` via
   the constructor or :ref:`configuration string <sender_conf>`.
 
 * **No protocol version.** QWP has its own versioning. The ``protocol_version``
@@ -916,7 +916,7 @@ it durably applies them, so the client can confirm delivery.
   :func:`Sender.poll_qwp_ws_error` as :class:`QwpWsError` values
   (:func:`Sender.qwp_ws_errors_dropped` reports how many were dropped when no
   handler kept up). A diagnostic with a ``halt`` policy is terminal: the next
-  sender call raises :class:`IngressServerRejectionError`.
+  sender call raises :class:`QuestDBServerRejectionError`.
 
 * **Draining on close.** :func:`Sender.close_drain` waits for outstanding
   frames to be acknowledged before closing.

@@ -20,7 +20,7 @@ _limit_malloc_arenas()
 
 import patch_path
 
-import questdb.ingress as qi
+import questdb as qi
 
 try:
     import numpy as np

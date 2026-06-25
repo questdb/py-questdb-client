@@ -31,7 +31,7 @@ if os.environ.get('TEST_QUESTDB_FUZZING') == '1':
     os.environ['CXX'] = "clang++"
 
 
-def ingress_extension():
+def client_extension():
     lib_prefix = ''
     lib_suffix = ''
     lib_paths = []
@@ -81,8 +81,8 @@ def ingress_extension():
     depends = list(extra_objects)
 
     return Extension(
-        "questdb.ingress",
-        ["src/questdb/ingress.pyx"],
+        "questdb._client",
+        ["src/questdb/_client.pyx"],
         include_dirs=[
             "c-questdb-client/include",
             "rpyutils/include",
@@ -180,7 +180,7 @@ setup(
     platforms=['any'],
     python_requires='>=3.10',
     install_requires=['numpy>=1.21.0'],
-    ext_modules = cythonize([ingress_extension()], annotate=True),
+    ext_modules = cythonize([client_extension()], annotate=True),
     cmdclass={'build_ext': questdb_build_ext},
     zip_safe = False,
     package_dir={'': 'src'},

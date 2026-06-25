@@ -1,4 +1,4 @@
-from questdb.ingress import Client, Sender, IngressError
+from questdb import Client, Sender, QuestDBError
 
 import sys
 import pandas as pd
@@ -29,7 +29,7 @@ def example(host: str = 'localhost', port: int = 9000):
                 queried = result.to_pandas()
             print(queried)
 
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 

@@ -1,4 +1,4 @@
-from questdb.ingress import Sender, Protocol, IngressError, TimestampNanos
+from questdb import Sender, Protocol, QuestDBError, TimestampNanos
 import sys
 
 
@@ -27,7 +27,7 @@ def example(
             # Flush manually here to send the row immediately.
             sender.flush()
 
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 

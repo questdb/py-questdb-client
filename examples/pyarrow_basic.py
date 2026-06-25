@@ -8,7 +8,7 @@ dispatch, no chunk lifecycle. `Client.query()` can materialise query
 results as a pyarrow `Table` with `QueryResult.to_arrow()`.
 """
 
-from questdb.ingress import Client, IngressError
+from questdb import Client, QuestDBError
 import sys
 
 
@@ -45,7 +45,7 @@ def example(host: str = 'localhost', port: int = 9000):
                     "FROM long_sequence(3)") as result:
                 queried = result.to_arrow()
             print(queried)
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 
@@ -74,7 +74,7 @@ def schema_metadata_example(host: str = 'localhost', port: int = 9000):
         conf = f'qwpws::addr={host}:{port};'
         with Client.from_conf(conf) as client:
             client.dataframe(table, table_name='locations', at='ts')
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 

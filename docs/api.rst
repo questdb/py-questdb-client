@@ -2,108 +2,108 @@
 API Reference
 =============
 
-questdb.ingress
+questdb
 ===============
 
 .. testsetup::
 
-    from questdb.ingress import *
+    from questdb import *
 
-.. autoclass:: questdb.ingress.Sender
+.. autoclass:: questdb.Sender
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.Buffer
+.. autoclass:: questdb.Buffer
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.SenderTransaction
+.. autoclass:: questdb.SenderTransaction
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.Client
+.. autoclass:: questdb.Client
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.QueryResult
+.. autoclass:: questdb.QueryResult
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.IngressError
+.. autoclass:: questdb.QuestDBError
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.IngressServerRejectionError
+.. autoclass:: questdb.QuestDBServerRejectionError
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.UnsupportedDataFrameShapeError
+.. autoclass:: questdb.UnsupportedDataFrameShapeError
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.IngressErrorCode
+.. autoclass:: questdb.QuestDBErrorCode
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.QwpWsError
+.. autoclass:: questdb.QwpWsError
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.QwpWsErrorCategory
+.. autoclass:: questdb.QwpWsErrorCategory
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.QwpWsErrorPolicy
+.. autoclass:: questdb.QwpWsErrorPolicy
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.QwpWsProgress
+.. autoclass:: questdb.QwpWsProgress
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.Protocol
+.. autoclass:: questdb.Protocol
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.TimestampMicros
+.. autoclass:: questdb.TimestampMicros
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.TimestampNanos
+.. autoclass:: questdb.TimestampNanos
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.TlsCa
+.. autoclass:: questdb.TlsCa
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.ingress.ServerTimestampType
+.. autoclass:: questdb.ServerTimestampType
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autodata:: questdb.ingress.ServerTimestamp
+.. autodata:: questdb.ServerTimestamp
     :annotation:
     :no-value:
 
-.. autoclass:: questdb.ingress.TaggedEnum
+.. autoclass:: questdb.TaggedEnum
    :members:
    :undoc-members:
    :show-inheritance:

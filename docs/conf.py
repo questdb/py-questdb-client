@@ -3,7 +3,7 @@ from __future__ import unicode_literals
 
 import os
 
-from questdb.ingress import *
+from questdb import *
 
 autodoc_mock_imports = ["_cython"]
 autodoc_type_aliases = {

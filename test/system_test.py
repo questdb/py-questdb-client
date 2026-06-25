@@ -32,7 +32,7 @@ except ImportError:
     pyarrow = None
 
 
-import questdb.ingress as qi
+import questdb as qi
 
 
 QUESTDB_VERSION = '9.4.3'
@@ -309,7 +309,7 @@ class TestWithDatabase(unittest.TestCase):
 
             if self.qdb_plain.version <= (7, 3, 7):
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         r'.*HTTP endpoint does not support ILP.*'):
                     sender.flush()
                 return
@@ -853,7 +853,7 @@ class TestWithDatabase(unittest.TestCase):
         sender = self._mk_qwpudp_sender()
         try:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     r"new_buffer\(\) can't be called before establish\(\)"):
                 sender.new_buffer()
         finally:
@@ -864,7 +864,7 @@ class TestWithDatabase(unittest.TestCase):
         sender = self._mk_qwpudp_sender()
         sender.close(flush=False)
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 r"new_buffer\(\) can't be called: Sender is closed"):
             sender.new_buffer()
 
@@ -872,7 +872,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         with self._mk_qwpudp_sender() as sender:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Transactions are only supported for ILP/HTTP'):
                 sender.transaction('trades')
 
@@ -880,7 +880,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         with self._mk_qwpudp_sender() as sender:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'protocol_version is not applicable for QWP/UDP senders'):
                 sender.protocol_version
 
@@ -1003,7 +1003,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_mixed_timestamp_precisions_rejected(self):
         self._require_qwp_udp()
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'designated timestamp changes type within a batched table'):
             with self._mk_qwpudp_sender() as sender:
                 sender.row(
@@ -1017,7 +1017,7 @@ class TestWithDatabase(unittest.TestCase):
                 sender.flush()
 
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'column "event_ts" changes type within a batched table'):
             with self._mk_qwpudp_sender() as sender:
                 sender.row(
@@ -1377,7 +1377,7 @@ class TestWithDatabase(unittest.TestCase):
             self.assertGreater(len(buf), 0)
 
             buf2 = sender.new_buffer()
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 buf2.row('t', columns={'a' * 21: 1}, at=qi.ServerTimestamp)
 
     def test_qwp_udp_standalone_buffer_reuse(self):
@@ -1561,7 +1561,7 @@ class TestWithDatabase(unittest.TestCase):
             self.assertEqual(buf.max_name_len, 32)
             buf.row('t', columns={'a' * 32: 1}, at=qi.ServerTimestamp)
             self.assertGreater(len(buf), 0)
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 buf.row('t', columns={'a' * 33: 1}, at=qi.ServerTimestamp)
 
     def test_qwp_udp_ilp_buffer_rejected(self):
@@ -1570,7 +1570,7 @@ class TestWithDatabase(unittest.TestCase):
         buf.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
         with self._mk_qwpudp_sender() as sender:
             with self.assertRaisesRegex(
-                    qi.IngressError, 'QWP/UDP sender requires a QWP buffer'):
+                    qi.QuestDBError, 'QWP/UDP sender requires a QWP buffer'):
                 sender.flush(buf)
 
     def test_qwp_udp_buffer_rejected_by_http(self):
@@ -1581,7 +1581,7 @@ class TestWithDatabase(unittest.TestCase):
                 qi.Protocol.Http, self.qdb_plain.host,
                 self.qdb_plain.http_server_port) as sender:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'ILP sender requires an ILP buffer'):
                 sender.flush(buf)
 
@@ -1597,7 +1597,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_unresolvable_host(self):
         """Unresolvable host fails at establish()."""
         self._require_qwp_udp()
-        with self.assertRaisesRegex(qi.IngressError, 'Could not resolve'):
+        with self.assertRaisesRegex(qi.QuestDBError, 'Could not resolve'):
             with qi.Sender(
                     qi.Protocol.QwpUdp,
                     'this.host.does.not.exist.invalid', 9007) as sender:
@@ -1641,7 +1641,7 @@ class TestWithDatabase(unittest.TestCase):
                 max_datagram_size=1, auto_flush=False) as sender:
             sender.row('t', columns={'x': 1}, at=qi.TimestampNanos.now())
             with self.assertRaisesRegex(
-                    qi.IngressError, 'exceeds maximum datagram size'):
+                    qi.QuestDBError, 'exceeds maximum datagram size'):
                 sender.flush()
 
     def test_qwp_udp_rapid_fire_auto_flush(self):
@@ -1665,7 +1665,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         conf = self._mk_qwpudp_conf(protocol_version=2)
         with self.assertRaisesRegex(
-                qi.IngressError,
+                qi.QuestDBError,
                 'protocol_version.*not supported.*QWP'):
             qi.Sender.from_conf(conf)
 
@@ -1704,7 +1704,7 @@ class TestWithDatabase(unittest.TestCase):
         sender.establish()
         try:
             with self.assertRaisesRegex(
-                    qi.IngressError, "establish.*can't be called"):
+                    qi.QuestDBError, "establish.*can't be called"):
                 sender.establish()
         finally:
             sender.close(flush=False)
@@ -1715,7 +1715,7 @@ class TestWithDatabase(unittest.TestCase):
         sender.establish()
         sender.close(flush=False)
         with self.assertRaisesRegex(
-                qi.IngressError, "establish.*can't be called"):
+                qi.QuestDBError, "establish.*can't be called"):
             sender.establish()
 
     def test_qwp_udp_decimal_zero_and_negative(self):
@@ -1776,11 +1776,11 @@ class TestWithDatabase(unittest.TestCase):
             f'(val DECIMAL(18,3), timestamp TIMESTAMP) '
             f'TIMESTAMP(timestamp) PARTITION BY DAY;')
         with self._mk_qwpudp_sender() as sender:
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 sender.row(table_name,
                            columns={'val': decimal.Decimal('NaN')},
                            at=qi.TimestampNanos.now())
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 sender.row(table_name,
                            columns={'val': decimal.Decimal('Inf')},
                            at=qi.TimestampNanos.now())
@@ -2220,14 +2220,14 @@ class TestEgressWithDatabase(unittest.TestCase):
             with qi.Client.from_conf(self._conf()) as client:
                 result = client.query(sql)
                 result.to_arrow()
-                with self.assertRaises(qi.IngressError) as cm:
+                with self.assertRaises(qi.QuestDBError) as cm:
                     result.to_arrow()
                 self.assertEqual(
-                    cm.exception.code, qi.IngressErrorCode.InvalidApiCall)
+                    cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
 
                 closed = client.query(sql)
                 closed.close()
-                with self.assertRaises(qi.IngressError):
+                with self.assertRaises(qi.QuestDBError):
                     closed.to_pandas()
 
                 stream = client.query(sql)
@@ -2302,10 +2302,10 @@ class TestEgressWithDatabase(unittest.TestCase):
                     pass
 
     def test_bad_sql_raises_ingress_error(self):
-        """Server-side parse error surfaces as an ``IngressError`` from
+        """Server-side parse error surfaces as an ``QuestDBError`` from
         ``client.query`` with a usable message."""
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 client.query(
                     'SELECT * FROM nonexistent_table_xyz_abc_123'
                 ).to_arrow()
@@ -2993,7 +2993,7 @@ class TestEgressPool(unittest.TestCase):
         """When the pool is at ``pool_max`` and a second borrow is
         attempted, the Rust side returns
         ``InvalidApiCall("Reader pool exhausted")``. Verify it
-        surfaces as an ``IngressError``, not a hang or generic
+        surfaces as an ``QuestDBError``, not a hang or generic
         socket error."""
         table = self._seed_table(n_rows=64)
         conf = self._conf(pool_size='1', pool_max='1')
@@ -3012,7 +3012,7 @@ class TestEgressPool(unittest.TestCase):
                     f'got in_use={in_use}')
 
                 # Second borrow must error, not block.
-                with self.assertRaises(qi.IngressError) as cm:
+                with self.assertRaises(qi.QuestDBError) as cm:
                     client.query(
                         f'SELECT count() FROM {table}').to_arrow()
                 msg = str(cm.exception).lower()
@@ -3632,7 +3632,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
 
     def test_invalid_uuid_string_is_rejected_by_server(self):
         """Bad UUID strings written into a UUID target surface as
-        an IngressError (server rejection), not a silent corruption
+        an QuestDBError (server rejection), not a silent corruption
         or a connection poisoning. Verification item #4 from the
         design doc."""
         import pyarrow as pa
@@ -3643,7 +3643,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             ['not-a-uuid', 'also-not'], type=pa.string())
         df = self._make_df_with_ts('v', values, 2)
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
     def test_fsb16_rejected_by_row_ilp(self):
@@ -3663,7 +3663,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             f'tcp::addr={self.qdb_plain.host}:'
             f'{self.qdb_plain.line_tcp_port};')
         with qi.Sender.from_conf(conf) as sender:
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 sender.dataframe(df, table_name='dummy', at='ts')
 
     def test_fsb_other_size_rejected(self):
@@ -3677,7 +3677,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             [b'\x00' * 8, b'\xff' * 8], type=pa.binary(8))
         df = self._make_df_with_ts('v', values, 2)
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
     # ---------- UInt32 / IPV4 policy ----------
@@ -3781,7 +3781,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         df = self._make_df_with_ts('v', values, 2)
         with qi.Client.from_conf(self._conf()) as client:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     r'UInt64 value 9223372036854775808 .* does not fit QuestDB LONG'):
                 client.dataframe(df, table_name=table, at='ts')
         self._assert_table_empty(table)
@@ -3800,7 +3800,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'v': self._arrow_series([1, 2], pa.int64()),
         })
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
         self.assertIn('null', str(cm.exception).lower())
         self._assert_table_empty(table)
@@ -3816,7 +3816,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'v': self._arrow_series([1, 2], pa.int64()),
         })
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
         self.assertIn('unix epoch', str(cm.exception).lower())
         self._assert_table_empty(table)
@@ -3890,7 +3890,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'v': self._arrow_series([1, 2], pa.int64()),
         })
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
         self.assertIn('event_ts', str(cm.exception))
         self.assertIn('null', str(cm.exception).lower())
@@ -3910,7 +3910,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'v': self._arrow_series([1, 2], pa.int64()),
         })
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
         self.assertIn('event_ts', str(cm.exception))
         self.assertIn('unix epoch', str(cm.exception).lower())
@@ -4013,7 +4013,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(ips, type=pa.string())
         df = self._make_df_with_ts('v', values, 3)
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
             self.assertIn('ipv4', str(cm.exception).lower())
 
@@ -4026,7 +4026,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             ['not-an-ip', '999.999.999.999'], type=pa.string())
         df = self._make_df_with_ts('v', values, 2)
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
     def test_pa_uint32_is_routed_to_long_not_ipv4(self):
@@ -4040,7 +4040,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array([1, 2, 3], type=pa.uint32())
         df = self._make_df_with_ts('v', values, 3)
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
     # ---------- LONG256 (Category C — FixedSizeBinary(32)) ----------
@@ -4118,7 +4118,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             f'tcp::addr={self.qdb_plain.host}:'
             f'{self.qdb_plain.line_tcp_port};')
         with qi.Sender.from_conf(conf) as sender:
-            with self.assertRaises(qi.IngressError):
+            with self.assertRaises(qi.QuestDBError):
                 sender.dataframe(df, table_name='dummy', at='ts')
 
     def test_pa_uint8_auto_creates_as_int(self):
@@ -4373,7 +4373,7 @@ class TestColumnIngressFailover(unittest.TestCase):
                     self._sfa_conf(sender_id, sf_dir)) as client:
                 client.dataframe(valid1, table_name=table, at='ts')
                 with self.assertRaises(
-                        qi.IngressServerRejectionError) as raised:
+                        qi.QuestDBServerRejectionError) as raised:
                     client.dataframe(rejected, table_name=table, at='ts')
                 diagnostic = raised.exception.qwp_ws_error
                 self.assertIsNotNone(diagnostic)
@@ -4664,12 +4664,12 @@ class TestEgressFailover(unittest.TestCase):
             # First batch delivered; bounce so the next pull fails over.
             self.qdb_plain.stop()
             self.qdb_plain.start()
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 for _ in it:
                     pass
             self.assertEqual(
                 cm.exception.code,
-                qi.IngressErrorCode.FailoverWouldDuplicate)
+                qi.QuestDBErrorCode.FailoverWouldDuplicate)
 
     def test_iter_pandas_surfaces_failover_would_duplicate(self):
         """Same contract for the numpy streaming ``iter_pandas``."""
@@ -4683,12 +4683,12 @@ class TestEgressFailover(unittest.TestCase):
             self.assertGreater(len(first), 0)
             self.qdb_plain.stop()
             self.qdb_plain.start()
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 for _ in it:
                     pass
             self.assertEqual(
                 cm.exception.code,
-                qi.IngressErrorCode.FailoverWouldDuplicate)
+                qi.QuestDBErrorCode.FailoverWouldDuplicate)
 
 
 class _FakeStatusServer:
@@ -4788,9 +4788,9 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [replica, auth],
             auth_timeout_ms=2000, failover='off', target='any')
-        with self.assertRaises(qi.IngressError) as cm:
+        with self.assertRaises(qi.QuestDBError) as cm:
             qi.Client.from_conf(conf)
-        self.assertEqual(cm.exception.code, qi.IngressErrorCode.AuthError)
+        self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.AuthError)
         self.assertIn('401', str(cm.exception))
         self.assertGreaterEqual(replica.connections, 1)
         self.assertGreaterEqual(auth.connections, 1)
@@ -4808,9 +4808,9 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2],
             auth_timeout_ms=2000, failover='off', target='any')
-        with self.assertRaises(qi.IngressError) as cm:
+        with self.assertRaises(qi.QuestDBError) as cm:
             qi.Client.from_conf(conf)
-        self.assertEqual(cm.exception.code, qi.IngressErrorCode.RoleMismatch)
+        self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.RoleMismatch)
         self.assertIn('REPLICA', str(cm.exception))
         self.assertGreaterEqual(r1.connections, 1)
         self.assertGreaterEqual(r2.connections, 1)
@@ -4825,9 +4825,9 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2, r3],
             auth_timeout_ms=2000, failover='off', target='any')
-        with self.assertRaises(qi.IngressError) as cm:
+        with self.assertRaises(qi.QuestDBError) as cm:
             qi.Client.from_conf(conf)
-        self.assertEqual(cm.exception.code, qi.IngressErrorCode.RoleMismatch)
+        self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.RoleMismatch)
         self.assertEqual(r1.connections, 1)
         self.assertEqual(r2.connections, 1)
         self.assertEqual(r3.connections, 1)

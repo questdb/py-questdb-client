@@ -8,6 +8,19 @@ Changelog
 Unreleased
 ----------
 
+Breaking changes
+~~~~~~~~~~~~~~~~~
+
+- The public API now lives at the top level of the ``questdb`` package:
+  ``from questdb import Sender, Buffer, Client, QueryResult, ...``. The
+  ``questdb.ingress`` module has been removed (the compiled module is now the
+  private ``questdb._client``); update imports from ``questdb.ingress`` to
+  ``questdb``.
+- ``IngressError`` is renamed to :class:`QuestDBError`, ``IngressErrorCode`` to
+  :class:`QuestDBErrorCode`, and ``IngressServerRejectionError`` to
+  :class:`QuestDBServerRejectionError` (the names now also cover the query
+  egress path, which raises the same types).
+
 Features
 ~~~~~~~~
 
@@ -27,7 +40,7 @@ ILP transports.
   ``poll_qwp_ws_error``, ``qwp_ws_errors_dropped`` and ``close_drain``.
   Server diagnostics are reported through a ``qwp_ws_error_handler``
   callback or polled as :class:`QwpWsError` values; terminal server
-  rejections raise :class:`IngressServerRejectionError`.
+  rejections raise :class:`QuestDBServerRejectionError`.
 
 Additional configuration keys ``tls_roots_password``,
 ``retry_max_backoff_millis`` and ``qwp_ws_progress`` are also accepted.
@@ -94,9 +107,9 @@ Errors
 
 Adds :class:`UnsupportedDataFrameShapeError` (raised when a DataFrame
 cannot be expressed on the QWP columnar path) and the
-:class:`IngressErrorCode` members ``ServerRejection``,
+:class:`QuestDBErrorCode` members ``ServerRejection``,
 ``ArrowUnsupportedColumnKind``, ``ArrowIngest`` and ``Cancelled``.
-:class:`IngressError` gains a ``qwp_ws_error`` property exposing the
+:class:`QuestDBError` gains a ``qwp_ws_error`` property exposing the
 structured :class:`QwpWsError` view on a server-side QWP/WebSocket
 rejection.
 
@@ -166,7 +179,7 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
 .. code-block:: python
 
     from decimal import Decimal
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
     
     # First, create the table with DECIMAL column via SQL:
     # CREATE TABLE trades (
@@ -356,7 +369,7 @@ additionally:
 
   .. code-block:: python
 
-    import questdb.ingress as qi
+    import questdb as qi
     qi.WARN_HIGH_RECONNECTS = False
 
 * Fixed ILP/TCP connection shutdown on Windows where some rows could be
@@ -514,7 +527,7 @@ Features
         sender.row(...)
         sender.dataframe(...)
 
-        # Will raise `IngressError` if there is an error from the server.
+        # Will raise `QuestDBError` if there is an error from the server.
         sender.flush()
 
 * New configuration string construction. The sender can now be also constructed
@@ -577,8 +590,8 @@ Breaking Changes
       - 64512
       - off
 
-* The ``at=..`` argument of :func:`row <questdb.ingress.Sender.row>` and
-  :func:`dataframe <questdb.ingress.Sender.dataframe>` methods is now mandatory.
+* The ``at=..`` argument of :func:`row <questdb.Sender.row>` and
+  :func:`dataframe <questdb.Sender.dataframe>` methods is now mandatory.
   Omitting it would previously use a server-generated timestamp for the row.
   Now if you want a server generated timestamp, you can pass the :ref:`ServerTimestamp <sender_server_timestamp>`
   singleton to this parameter. _The ``ServerTimestamp`` behaviour is considered legacy._
@@ -601,7 +614,7 @@ The following example shows how to migrate to the new API.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     auth = (
         'testUser1', 
@@ -618,7 +631,7 @@ The following example shows how to migrate to the new API.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, Protocol, ServerTimestamp
+    from questdb import Sender, Protocol, ServerTimestamp
 
     sender = Sender(
         Protocol.Tcps,
@@ -642,7 +655,7 @@ The following example shows how to migrate to the new API.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     conf = (
         'tcp::addr=localhost:9009;' +

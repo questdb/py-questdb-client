@@ -33,9 +33,9 @@ API for fast data ingestion into QuestDB.
 __all__ = [
     'Buffer',
     'Client',
-    'IngressError',
-    'IngressErrorCode',
-    'IngressServerRejectionError',
+    'QuestDBError',
+    'QuestDBErrorCode',
+    'QuestDBServerRejectionError',
     'Protocol',
     'QueryResult',
     'Sender',
@@ -82,7 +82,7 @@ from .rpyutils cimport *
 from .conf_str cimport *
 from .arrow_c_data_interface cimport *
 from .extra_cpython cimport *
-from .ingress_helper cimport *
+from ._client_helper cimport *
 
 # An int we use only for error reporting.
 #  0 is success.
@@ -156,7 +156,7 @@ cdef void _ensure_has_gil(PyThreadState** gs):
         gs[0] = NULL
 
 
-class IngressErrorCode(Enum):
+class QuestDBErrorCode(Enum):
     """Category of Error."""
     CouldNotResolveAddr = line_sender_error_could_not_resolve_addr
     InvalidApiCall = line_sender_error_invalid_api_call
@@ -192,7 +192,7 @@ class IngressErrorCode(Enum):
         return self.name
 
 
-class IngressError(Exception):
+class QuestDBError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
     def __init__(self, code, msg, qwp_ws_error=None):
         super().__init__(msg)
@@ -200,7 +200,7 @@ class IngressError(Exception):
         self._qwp_ws_error = qwp_ws_error
 
     @property
-    def code(self) -> IngressErrorCode:
+    def code(self) -> QuestDBErrorCode:
         """Return the error code."""
         return self._code
 
@@ -215,16 +215,16 @@ class IngressError(Exception):
         return self._qwp_ws_error
 
 
-class IngressServerRejectionError(IngressError):
+class QuestDBServerRejectionError(QuestDBError):
     """
     A terminal QWP/WebSocket server rejection.
 
     The structured server payload is available through
-    :attr:`IngressError.qwp_ws_error`.
+    :attr:`QuestDBError.qwp_ws_error`.
     """
 
 
-class UnsupportedDataFrameShapeError(IngressError):
+class UnsupportedDataFrameShapeError(QuestDBError):
     """
     A DataFrame shape is not supported by the optimized columnar client path.
 
@@ -233,49 +233,49 @@ class UnsupportedDataFrameShapeError(IngressError):
     where available.
     """
     def __init__(self, msg, column_failures=None):
-        super().__init__(IngressErrorCode.BadDataFrame, msg)
+        super().__init__(QuestDBErrorCode.BadDataFrame, msg)
         self.column_failures = tuple(column_failures or ())
 
 
 cdef inline object c_err_code_to_py(line_sender_error_code code):
     if code == line_sender_error_could_not_resolve_addr:
-        return IngressErrorCode.CouldNotResolveAddr
+        return QuestDBErrorCode.CouldNotResolveAddr
     elif code == line_sender_error_invalid_api_call:
-        return IngressErrorCode.InvalidApiCall
+        return QuestDBErrorCode.InvalidApiCall
     elif code == line_sender_error_socket_error:
-        return IngressErrorCode.SocketError
+        return QuestDBErrorCode.SocketError
     elif code == line_sender_error_invalid_utf8:
-        return IngressErrorCode.InvalidUtf8
+        return QuestDBErrorCode.InvalidUtf8
     elif code == line_sender_error_invalid_name:
-        return IngressErrorCode.InvalidName
+        return QuestDBErrorCode.InvalidName
     elif code == line_sender_error_invalid_timestamp:
-        return IngressErrorCode.InvalidTimestamp
+        return QuestDBErrorCode.InvalidTimestamp
     elif code == line_sender_error_auth_error:
-        return IngressErrorCode.AuthError
+        return QuestDBErrorCode.AuthError
     elif code == line_sender_error_tls_error:
-        return IngressErrorCode.TlsError
+        return QuestDBErrorCode.TlsError
     elif code == line_sender_error_http_not_supported:
-        return IngressErrorCode.HttpNotSupported
+        return QuestDBErrorCode.HttpNotSupported
     elif code == line_sender_error_server_flush_error:
-        return IngressErrorCode.ServerFlushError
+        return QuestDBErrorCode.ServerFlushError
     elif code == line_sender_error_server_rejection:
-        return IngressErrorCode.ServerRejection
+        return QuestDBErrorCode.ServerRejection
     elif code == line_sender_error_role_mismatch:
-        return IngressErrorCode.RoleMismatch
+        return QuestDBErrorCode.RoleMismatch
     elif code == line_sender_error_config_error:
-        return IngressErrorCode.ConfigError
+        return QuestDBErrorCode.ConfigError
     elif code == line_sender_error_array_error:
-        return IngressErrorCode.ArrayError
+        return QuestDBErrorCode.ArrayError
     elif code == line_sender_error_protocol_version_error:
-        return IngressErrorCode.ProtocolVersionError
+        return QuestDBErrorCode.ProtocolVersionError
     elif code == line_sender_error_invalid_decimal:
-        return IngressErrorCode.DecimalError
+        return QuestDBErrorCode.DecimalError
     elif code == line_sender_error_arrow_unsupported_column_kind:
-        return IngressErrorCode.ArrowUnsupportedColumnKind
+        return QuestDBErrorCode.ArrowUnsupportedColumnKind
     elif code == line_sender_error_arrow_ingest:
-        return IngressErrorCode.ArrowIngest
+        return QuestDBErrorCode.ArrowIngest
     elif code == line_sender_error_failover_retry:
-        return IngressErrorCode.FailoverRetry
+        return QuestDBErrorCode.FailoverRetry
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -318,19 +318,19 @@ cdef inline object c_err_to_fields(line_sender_error* err):
 
 
 cdef inline object c_err_to_py(line_sender_error* err):
-    """Construct an ``IngressError`` from a C error, which will be freed."""
+    """Construct an ``QuestDBError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
-    if tup[0] == IngressErrorCode.ServerRejection:
-        return IngressServerRejectionError(tup[0], tup[1], tup[2])
-    return IngressError(tup[0], tup[1], tup[2])
+    if tup[0] == QuestDBErrorCode.ServerRejection:
+        return QuestDBServerRejectionError(tup[0], tup[1], tup[2])
+    return QuestDBError(tup[0], tup[1], tup[2])
 
 
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
-    """Construct an ``IngressError`` from a C error, which will be freed."""
+    """Construct an ``QuestDBError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
-    if tup[0] == IngressErrorCode.ServerRejection:
-        return IngressServerRejectionError(tup[0], fmt.format(tup[1]), tup[2])
-    return IngressError(tup[0], fmt.format(tup[1]), tup[2])
+    if tup[0] == QuestDBErrorCode.ServerRejection:
+        return QuestDBServerRejectionError(tup[0], fmt.format(tup[1]), tup[2])
+    return QuestDBError(tup[0], fmt.format(tup[1]), tup[2])
 
 
 cdef inline void_int reserve_buffer(
@@ -344,8 +344,8 @@ cdef inline void_int reserve_buffer(
 cdef object _utf8_decode_error(
         PyObject* string, uint32_t bad_codepoint):
     cdef str s = <str><object>string
-    return IngressError(
-        IngressErrorCode.InvalidUtf8,
+    return QuestDBError(
+        QuestDBErrorCode.InvalidUtf8,
         f'Invalid codepoint 0x{bad_codepoint:x} in string {s!r}: ' +
         'Cannot be encoded as UTF-8.')
 
@@ -740,8 +740,8 @@ cdef class SenderTransaction:
 
     def __cinit__(self, Sender sender, str table_name):
         if not _is_http_protocol(sender._c_protocol):
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Transactions are only supported for ILP/HTTP.')
         self._sender = sender
         self._table_name = table_name
@@ -749,15 +749,15 @@ cdef class SenderTransaction:
 
     def __enter__(self):
         if self._sender._in_txn:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Already inside a transaction, can\'t start another.')
         if self._sender._buffer is not None and len(self._sender._buffer):
             if self._sender._auto_flush_mode.enabled:
                 self._sender.flush()
             else:
-                raise IngressError(
-                    IngressErrorCode.InvalidApiCall,
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
                     'Sender buffer must be clear when starting a ' +
                     'transaction. You must call `.flush()` before this call.')
         self._sender._in_txn = True
@@ -790,14 +790,14 @@ cdef class SenderTransaction:
         **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
         """
         if at is None:
-            raise IngressError(
-                IngressErrorCode.InvalidTimestamp,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
 
         if self._sender._buffer is None:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 "row() can\'t be called: Sender is closed."
             )
 
@@ -821,13 +821,13 @@ cdef class SenderTransaction:
         The table name is taken from the transaction.
         """
         if at is None:
-            raise IngressError(
-                IngressErrorCode.InvalidTimestamp,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         if self._sender._buffer is None:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 "dataframe() can\'t be called: Sender is closed."
             )
         _dataframe(
@@ -850,8 +850,8 @@ cdef class SenderTransaction:
         This will flush the buffer.
         """
         if self._complete:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t commit')
         self._sender._in_txn = False
         self._complete = True
@@ -867,8 +867,8 @@ cdef class SenderTransaction:
         This will clear the buffer.
         """
         if self._complete:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t rollback.')
         if self._sender._buffer is not None:
             self._sender._buffer.clear()
@@ -878,7 +878,7 @@ cdef class SenderTransaction:
 cdef class Buffer:
     """
     Buffer for serializing rows before flushing through a
-    :func:`Sender <questdb.ingress.Sender>`.
+    :func:`Sender <questdb.Sender>`.
 
     Use the factory class methods to create a buffer:
 
@@ -887,7 +887,7 @@ cdef class Buffer:
 
     .. code-block:: python
 
-        from questdb.ingress import Buffer, Sender, Protocol, TimestampNanos
+        from questdb import Buffer, Sender, Protocol, TimestampNanos
 
         buf = Buffer.ilp(protocol_version=2)
         buf.row(
@@ -904,7 +904,7 @@ cdef class Buffer:
 
     .. code-block:: python
 
-        from questdb.ingress import Sender, Protocol
+        from questdb import Sender, Protocol
 
         with Sender(Protocol.Http, 'localhost', 9000) as sender:
             buf = sender.new_buffer()
@@ -937,8 +937,8 @@ cdef class Buffer:
             DeprecationWarning,
             stacklevel=2)
         if protocol_version not in range(1, 4):
-            raise IngressError(
-                IngressErrorCode.ProtocolVersionError,
+            raise QuestDBError(
+                QuestDBErrorCode.ProtocolVersionError,
                 'Invalid protocol version. Supported versions are 1-3.')
         self._init_ilp_impl(protocol_version, init_buf_size, max_name_len)
 
@@ -958,8 +958,8 @@ cdef class Buffer:
             Defaults to ``127``.
         """
         if protocol_version not in range(1, 4):
-            raise IngressError(
-                IngressErrorCode.ProtocolVersionError,
+            raise QuestDBError(
+                QuestDBErrorCode.ProtocolVersionError,
                 'Invalid protocol version. Supported versions are 1-3.')
         cdef Buffer buf = Buffer.__new__(Buffer)
         buf._init_ilp_impl(protocol_version, init_buf_size, max_name_len)
@@ -1005,8 +1005,8 @@ cdef class Buffer:
 
     cdef inline void_int _check_impl(self) except -1:
         if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Buffer is not initialized.')
 
     @property
@@ -1151,8 +1151,8 @@ cdef class Buffer:
     cdef inline void_int _column_numpy(
             self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
         if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
-            raise IngressError(
-                IngressErrorCode.ArrayError,
+            raise QuestDBError(
+                QuestDBErrorCode.ArrayError,
                 f'Only float64 numpy arrays are supported, got dtype: {arr.dtype}')
         cdef:
             size_t rank = cnp.PyArray_NDIM(arr)
@@ -1408,8 +1408,8 @@ cdef class Buffer:
             explicitly as a ``TimestampNanos`` object.
         """
         if at is None:
-            raise IngressError(
-                IngressErrorCode.InvalidTimestamp,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         self._row(
@@ -1527,7 +1527,7 @@ cdef class Buffer:
         .. code-block:: python
 
             import pandas as pd
-            import questdb.ingress as qi
+            import questdb as qi
 
             buf = qi.Buffer.ilp(protocol_version=2)
             # ...
@@ -1699,8 +1699,8 @@ cdef class Buffer:
         * The ``'string[python]'`` dtype.
         """
         if at is None:
-            raise IngressError(
-                IngressErrorCode.InvalidTimestamp,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         self._check_impl()
@@ -1773,16 +1773,16 @@ cdef void_int _parse_auto_flush(
         elif auto_flush == 'on':
             auto_flush = True
         else:
-            raise IngressError(
-                IngressErrorCode.ConfigError,
+            raise QuestDBError(
+                QuestDBErrorCode.ConfigError,
                 '"auto_flush" must be None, bool, "on" or "off", ' +
                 f'not {auto_flush!r}')
 
     # Normalise auto_flush parameters to ints or False.
     if isinstance(auto_flush_rows, str):
         if auto_flush_rows == 'on':
-            raise IngressError(
-                IngressErrorCode.ConfigError,
+            raise QuestDBError(
+                QuestDBErrorCode.ConfigError,
                 '"auto_flush_rows" cannot be "on"')
         elif auto_flush_rows == 'off':
             auto_flush_rows = False
@@ -1797,8 +1797,8 @@ cdef void_int _parse_auto_flush(
 
     if isinstance(auto_flush_bytes, str):
         if auto_flush_bytes == 'on':
-            raise IngressError(
-                IngressErrorCode.ConfigError,
+            raise QuestDBError(
+                QuestDBErrorCode.ConfigError,
                 '"auto_flush_bytes" cannot be "on"')
         elif auto_flush_bytes == 'off':
             auto_flush_bytes = False
@@ -1813,8 +1813,8 @@ cdef void_int _parse_auto_flush(
 
     if isinstance(auto_flush_interval, str):
         if auto_flush_interval == 'on':
-            raise IngressError(
-                IngressErrorCode.ConfigError,
+            raise QuestDBError(
+                QuestDBErrorCode.ConfigError,
                 '"auto_flush_interval" cannot be "on"')
         elif auto_flush_interval == 'off':
             auto_flush_interval = False
@@ -2025,7 +2025,7 @@ def _default_qwp_ws_error_handler(error):
         logging.ERROR
         if error.applied_policy is QwpWsErrorPolicy.Halt
         else logging.WARNING)
-    logging.getLogger("questdb.ingress").log(
+    logging.getLogger("questdb").log(
         level,
         "QWP/WebSocket server rejection: "
         "category=%s policy=%s status=%s fsn=[%s,%s] seq=%s message=%s",
@@ -2045,7 +2045,7 @@ cdef void _qwp_ws_error_trampoline(
     try:
         handler(_qwp_ws_error_from_raw(c_qwp_ws_error_view_to_raw(view[0])))
     except BaseException:
-        logging.getLogger("questdb.ingress").exception(
+        logging.getLogger("questdb").exception(
             "QWP/WebSocket error handler failed")
 
 
@@ -2068,7 +2068,7 @@ class TlsCa(TaggedEnum):
 cdef object c_parse_conf_err_to_py(questdb_conf_str_parse_err* err):
     cdef str msg = PyUnicode_FromStringAndSize(
         err.msg, <Py_ssize_t>err.msg_len)
-    cdef object py_err = IngressError(IngressErrorCode.ConfigError, msg)
+    cdef object py_err = QuestDBError(QuestDBErrorCode.ConfigError, msg)
     questdb_conf_str_parse_err_free(err)
     return py_err
 
@@ -2666,8 +2666,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
             if PyUnicode_CheckExact(cell):
                 utf8_buf = PyUnicode_AsUTF8AndSize(cell, &utf8_len)
                 if bytes_used + <size_t>utf8_len > <size_t>2_147_483_647:
-                    raise IngressError(
-                        IngressErrorCode.BadDataFrame,
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
                         f'Bad column {df_col_name!r}: column total UTF-8 '
                         'bytes exceeds the QWP wire varchar offset table '
                         'limit (2 GiB).')
@@ -2687,8 +2687,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
                 b.str_offsets[i + 1] = <int32_t>bytes_used
                 b.has_nulls = True
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected str, '
                     f'got {_fqn(type(<object>cell))}.')
 
@@ -2718,7 +2718,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
     Null detection: ``None``, ``pd.NA``, and ``float('nan')`` all count
     as null — the NaN-as-null rule matches the row-path behaviour
     (`_dataframe_is_null_pyobj` in dataframe.pxi). A non-NaN float in
-    an int-sniffed column raises ``IngressError`` with the row index;
+    an int-sniffed column raises ``QuestDBError`` with the row index;
     we accept the asymmetry because column-wide sniff has already
     locked the source type from the first non-null cell.
     """
@@ -2761,8 +2761,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
             elif _dataframe_is_null_pyobj(cell):
                 b.has_nulls = True
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected int, '
                     f'got {_fqn(type(<object>cell))}.')
 
@@ -2826,8 +2826,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_float_pyobj(
             elif _dataframe_is_null_pyobj(cell):
                 b.has_nulls = True
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected float, '
                     f'got {_fqn(type(<object>cell))}.')
 
@@ -2875,13 +2875,13 @@ cdef pyobj_built_t* _dataframe_columnar_build_bool_pyobj(
                 if cell == <PyObject*>True:
                     bits[i >> 3] |= <uint8_t>(1 << (i & 7))
             elif _dataframe_is_null_pyobj(cell):
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: cannot insert '
                     'null into a boolean column.')
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected bool, '
                     f'got {_fqn(type(<object>cell))}.')
     except:
@@ -2932,8 +2932,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
             elif _dataframe_is_null_pyobj(cell):
                 b.has_nulls = True
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected UUID, '
                     f'got {_fqn(type(<object>cell))}.')
 
@@ -2982,8 +2982,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
             elif _dataframe_is_null_pyobj(cell):
                 b.has_nulls = True
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected '
                     f'ipaddress.IPv4Address, got {_fqn(type(<object>cell))}.')
 
@@ -3072,8 +3072,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
             elif _dataframe_is_null_pyobj(cell):
                 b.has_nulls = True
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected '
                     f'datetime.datetime, got {_fqn(type(<object>cell))}.')
 
@@ -3124,8 +3124,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
                 blob_len = PyBytes_GET_SIZE(<object>cell)
                 blob_buf = PyBytes_AsString(<object>cell)
                 if bytes_used + <size_t>blob_len > <size_t>2_147_483_647:
-                    raise IngressError(
-                        IngressErrorCode.BadDataFrame,
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
                         f'Bad column {df_col_name!r}: column total bytes '
                         'exceeds the QWP wire binary offset table '
                         'limit (2 GiB).')
@@ -3145,8 +3145,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
                 b.str_offsets[i + 1] = <int32_t>bytes_used
                 b.has_nulls = True
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {df_col_name!r} at row {i}: expected bytes, '
                     f'got {_fqn(type(<object>cell))}.')
 
@@ -3691,8 +3691,8 @@ cdef void_int _dataframe_columnar_append_at(
             raise RuntimeError(
                 'PyObject datetime designated TS missing pre-built buffer.')
         if prebuilt.has_nulls:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 'Designated timestamp column cannot contain nulls.')
         data = <const int64_t*>prebuilt.data
         with nogil:
@@ -4390,8 +4390,8 @@ cdef void_int _capsule_consume_stream(
         rc = stream.get_schema(stream, c_schema)
         if rc != 0:
             stream_err = stream.get_last_error(stream)
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 f'Arrow stream get_schema failed: '
                 f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
 
@@ -4400,8 +4400,8 @@ cdef void_int _capsule_consume_stream(
         rc = stream.get_next(stream, &batch)
         if rc != 0:
             stream_err = stream.get_last_error(stream)
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 f'Arrow stream get_next failed: '
                 f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
         if batch.release == NULL:
@@ -4678,7 +4678,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     NOT-SYMBOL" (Rust decodes dict to VARCHAR on emit). See
     column_sender.h `column_sender_arrow_override::arg`.
 
-    Raises IngressError(BadDataFrame) when an explicitly-named symbols
+    Raises QuestDBError(BadDataFrame) when an explicitly-named symbols
     entry targets a non-string column (matches Manual plan semantics).
     """
     cdef list out
@@ -4740,8 +4740,8 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         if is_str is None:
             return None
         if not is_str:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 f'Bad argument `symbols`: column {name!r} is not a '
                 f'strings column.')
         listed.add(name)
@@ -5063,7 +5063,7 @@ cdef void_int _capsule_consume_stream_with_hint(
             conn, stream_owner, c_table_name, c_ts_column_ptr, c_schema,
             c_overrides, c_overrides_len, any_flushed, flush_attempted,
             deferred_since_sync)
-    except IngressError as exc:
+    except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
             if can_slice:
                 hint = (
@@ -5078,14 +5078,14 @@ cdef void_int _capsule_consume_stream_with_hint(
                     f'Materialise to a `pa.Table` '
                     f'(`pa.Table.from_batches(reader)`) or re-batch '
                     f'at the source before passing.')
-            raise IngressError(
+            raise QuestDBError(
                 exc.code, f'{exc}\nHint: {hint}') from exc
         raise
 
 
 cdef bint _is_batch_too_large_error(object exc):
     cdef str msg
-    if not isinstance(exc, IngressError):
+    if not isinstance(exc, QuestDBError):
         return False
     msg = str(exc).lower()
     return (
@@ -5118,8 +5118,8 @@ cdef class Client:
         try:
             db = self._db
             if db == NULL:
-                raise IngressError(
-                    IngressErrorCode.InvalidApiCall,
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
                     f"{method}() can't be called: Client is closed.")
             self._active_uses += 1
             return db
@@ -5157,13 +5157,13 @@ cdef class Client:
         try:
             protocol, params = parse_conf_str(b, conf_str)
             if protocol not in (Protocol.QwpWs, Protocol.QwpWss):
-                raise IngressError(
-                    IngressErrorCode.ConfigError,
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
                     'Client.from_conf() requires a QWP/WebSocket '
                     'configuration string: qwpws:: or qwpwss::.')
             if params.get('addr') is None:
-                raise IngressError(
-                    IngressErrorCode.ConfigError,
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
                     'Missing "addr" parameter in config string')
 
             str_to_utf8(b, <PyObject*>conf_str, &c_conf)
@@ -5182,8 +5182,8 @@ cdef class Client:
         self._state_cond.acquire()
         try:
             if self._db == NULL:
-                raise IngressError(
-                    IngressErrorCode.InvalidApiCall,
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
                     '__enter__() can\'t be called: Client is closed.')
         finally:
             self._state_cond.release()
@@ -5259,7 +5259,7 @@ cdef class Client:
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints
         landing in a wider column are widened). Failures surface as
-        ``IngressError`` from the ``flush()``.
+        ``QuestDBError`` from the ``flush()``.
         """
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
@@ -5301,12 +5301,12 @@ cdef class Client:
                     return self._dataframe_numpy_publish(
                         db, budget_ms, b, &plan, df, table_name,
                         table_name_col, symbols, at, max_rows_per_batch)
-                except IngressError as exc:
+                except QuestDBError as exc:
                     # FailoverRetry = transient flush/sync; SocketError = a
                     # re-borrow that has not reached a live primary yet.
                     if exc.code not in (
-                            IngressErrorCode.FailoverRetry,
-                            IngressErrorCode.SocketError):
+                            QuestDBErrorCode.FailoverRetry,
+                            QuestDBErrorCode.SocketError):
                         raise
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
@@ -5662,8 +5662,8 @@ cdef class Sender:
                 '"qwp_ws_error_handler" must be callable or None, '
                 f'not {_fqn(type(qwp_ws_error_handler))}')
         if qwp_ws_error_handler is not None and not _is_qwp_ws_protocol(self._c_protocol):
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'qwp_ws_error_handler is only supported for QWP/WebSocket senders.')
         if _is_qwp_ws_protocol(self._c_protocol):
             if qwp_ws_error_handler is None:
@@ -5718,8 +5718,8 @@ cdef class Sender:
                         self._opts, line_sender_protocol_version_3, &err):
                     raise c_err_to_py(err)
             else:
-                raise IngressError(
-                    IngressErrorCode.ConfigError,
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
                     '"protocol_version" must be None, "auto", 1-3' +
                     f' not {protocol_version!r}')
 
@@ -5992,8 +5992,8 @@ cdef class Sender:
 
             addr = params.get('addr')
             if addr is None:
-                raise IngressError(
-                    IngressErrorCode.ConfigError,
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
                     'Missing "addr" parameter in config string')
             
             # add fields to the dictionary, so long as they aren't already
@@ -6158,8 +6158,8 @@ cdef class Sender:
         """
         cdef str conf_str = os.environ.get('QDB_CLIENT_CONF')
         if conf_str is None:
-            raise IngressError(
-                IngressErrorCode.ConfigError,
+            raise QuestDBError(
+                QuestDBErrorCode.ConfigError,
                 'Environment variable QDB_CLIENT_CONF is not set.')
         return Sender.from_conf(
             conf_str,
@@ -6210,11 +6210,11 @@ cdef class Sender:
         """
         if self._impl == NULL:
             if self._opts == NULL:
-                raise IngressError(
-                    IngressErrorCode.InvalidApiCall,
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
                     'new_buffer() can\'t be called: Sender is closed.')
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'new_buffer() can\'t be called before establish().')
         return self._new_buffer_for_sender()
 
@@ -6227,8 +6227,8 @@ cdef class Sender:
     def max_name_len(self) -> int:
         """Maximum length of a table or column name."""
         if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'max_name_len() can\'t be called: Sender is closed.')
         return line_sender_get_max_name_len(self._impl)
 
@@ -6287,12 +6287,12 @@ cdef class Sender:
         the array datatype.
         """
         if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'protocol_version() can\'t be called: Sender is closed.')
         if _is_qwp_udp_protocol(self._c_protocol):
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'protocol_version is not applicable for QWP/UDP senders.')
         return <int>line_sender_get_protocol_version(self._impl)
 
@@ -6311,8 +6311,8 @@ cdef class Sender:
         cdef line_sender_error* err = NULL
         cdef PyThreadState * gs = NULL
         if self._opts == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'establish() can\'t be called after close().')
 
         # We disable the GIL when calling `line_sender_build` since for HTTP
@@ -6340,7 +6340,7 @@ cdef class Sender:
             self._slot_id = <int32_t> qdb_active_senders_track_established(&warn)
             if warn:
                 warnings.warn(
-                    "questdb.ingress.Sender: "
+                    "questdb.Sender: "
                     f"Detected a burst of reconnections. "
                     "This may indicate an inefficient coding pattern where the sender is "
                     "frequently created and destroyed. "
@@ -6411,17 +6411,17 @@ cdef class Sender:
         **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
         """
         if self._in_txn:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Cannot append rows explicitly inside a transaction')
         if at is None:
-            raise IngressError(
-                IngressErrorCode.InvalidTimestamp,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         if self._buffer is None:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 "row() can\'t be called: Sender is closed."
             )
 
@@ -6444,7 +6444,7 @@ cdef class Sender:
         .. code-block:: python
 
             import pandas as pd
-            import questdb.ingress as qi
+            import questdb as qi
 
             df = pd.DataFrame({
                 'car': pd.Categorical(['Nic 42', 'Eddi', 'Nic 42', 'Eddi']),
@@ -6478,12 +6478,12 @@ cdef class Sender:
         """
         cdef auto_flush_t af = auto_flush_blank()
         if self._in_txn:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Cannot append rows explicitly inside a transaction')
         if at is None:
-            raise IngressError(
-                IngressErrorCode.InvalidTimestamp,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         if self._auto_flush_mode.enabled:
@@ -6492,8 +6492,8 @@ cdef class Sender:
             af.last_flush_ms = self._last_flush_ms
 
         if self._buffer is None:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 "dataframe() can\'t be called: Sender is closed."
             )
         _dataframe(
@@ -6529,7 +6529,7 @@ cdef class Sender:
         With QWP/WebSocket, this publishes the buffer into the local sender
         queue and returns before the server necessarily ACKs the frame. Later
         terminal diagnostics fail subsequent sender calls and are available as
-        :attr:`IngressError.qwp_ws_error`. Server diagnostics are also
+        :attr:`QuestDBError.qwp_ws_error`. Server diagnostics are also
         available through :func:`Sender.poll_qwp_ws_error`.
 
         :param clear: If ``True``, the flushed buffer is cleared (default).
@@ -6551,16 +6551,16 @@ cdef class Sender:
         cdef bint ok = False
 
         if self._in_txn:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Cannot flush explicitly inside a transaction')
 
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
 
         if sender == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Sender is closed.')
         if buffer is not None:
             buffer._check_impl()
@@ -6602,12 +6602,12 @@ cdef class Sender:
 
     cdef inline void_int _check_qwp_ws(self, str method) except -1:
         if self._impl == NULL:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 f'{method}() can\'t be called: Sender is closed.')
         if not _is_qwp_ws_protocol(self._c_protocol):
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 f'{method}() is only supported for QWP/WebSocket senders.')
 
     def flush_and_get_fsn(self, Buffer buffer=None):
@@ -6623,8 +6623,8 @@ cdef class Sender:
         cdef bint ok = False
 
         if self._in_txn:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Cannot flush explicitly inside a transaction')
         self._check_qwp_ws('flush_and_get_fsn')
         if buffer is not None:
@@ -6657,8 +6657,8 @@ cdef class Sender:
         cdef bint ok = False
 
         if self._in_txn:
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 'Cannot flush explicitly inside a transaction')
         self._check_qwp_ws('flush_and_keep_and_get_fsn')
         if buffer is not None:

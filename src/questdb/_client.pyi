@@ -25,9 +25,9 @@
 __all__ = [
     "Buffer",
     "Client",
-    "IngressError",
-    "IngressErrorCode",
-    "IngressServerRejectionError",
+    "QuestDBError",
+    "QuestDBErrorCode",
+    "QuestDBServerRejectionError",
     "Protocol",
     "QueryResult",
     "Sender",
@@ -53,7 +53,7 @@ import numpy as np
 import pandas as pd
 from decimal import Decimal
 
-class IngressErrorCode(Enum):
+class QuestDBErrorCode(Enum):
     """Category of Error."""
 
     CouldNotResolveAddr = ...
@@ -80,11 +80,11 @@ class IngressErrorCode(Enum):
     FailoverWouldDuplicate = ...
 
 
-class IngressError(Exception):
+class QuestDBError(Exception):
     """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
 
     @property
-    def code(self) -> IngressErrorCode:
+    def code(self) -> QuestDBErrorCode:
         """Return the error code."""
 
     @property
@@ -95,16 +95,16 @@ class IngressError(Exception):
         """
 
 
-class IngressServerRejectionError(IngressError):
+class QuestDBServerRejectionError(QuestDBError):
     """
     A terminal QWP/WebSocket server rejection.
 
     The structured server payload is available through
-    :attr:`IngressError.qwp_ws_error`.
+    :attr:`QuestDBError.qwp_ws_error`.
     """
 
 
-class UnsupportedDataFrameShapeError(IngressError):
+class UnsupportedDataFrameShapeError(QuestDBError):
     """
     A DataFrame shape is not supported by the optimized columnar client path.
     """
@@ -297,7 +297,7 @@ class SenderTransaction:
 class Buffer:
     """
     Buffer for serializing rows before flushing through a
-    :func:`Sender <questdb.ingress.Sender>`.
+    :func:`Sender <questdb.Sender>`.
 
     Use the factory class methods to create a buffer:
 
@@ -306,7 +306,7 @@ class Buffer:
 
     .. code-block:: python
 
-        from questdb.ingress import Buffer, Sender, Protocol, TimestampNanos
+        from questdb import Buffer, Sender, Protocol, TimestampNanos
 
         buf = Buffer.ilp(protocol_version=2)
         buf.row(
@@ -616,7 +616,7 @@ class Buffer:
         .. code-block:: python
 
             import pandas as pd
-            import questdb.ingress as qi
+            import questdb as qi
 
             buf = qi.Buffer.ilp(protocol_version=2)
             # ...
@@ -1288,7 +1288,7 @@ class Sender:
         .. code-block:: python
 
             import pandas as pd
-            import questdb.ingress as qi
+            import questdb as qi
 
             df = pd.DataFrame({
                 'car': pd.Categorical(['Nic 42', 'Eddi', 'Nic 42', 'Eddi']),
@@ -1344,7 +1344,7 @@ class Sender:
         With QWP/WebSocket, this publishes the buffer into the local sender
         queue and returns before the server necessarily ACKs the frame. Later
         terminal diagnostics fail subsequent sender calls and are available as
-        :attr:`IngressError.qwp_ws_error`. Server diagnostics are also
+        :attr:`QuestDBError.qwp_ws_error`. Server diagnostics are also
         available through :func:`Sender.poll_qwp_ws_error`.
 
         :param clear: If ``True``, the flushed buffer is cleared (default).

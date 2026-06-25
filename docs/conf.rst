@@ -5,11 +5,11 @@ Configuration
 =============
 
 When constructing a :ref:`sender <sender>` you can pass a configuration string
-to the :func:`Sender.from_conf <questdb.ingress.Sender.from_conf>` method.
+to the :func:`Sender.from_conf <questdb.Sender.from_conf>` method.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     conf = "http::addr=localhost:9009;username=admin;password=quest;"
     with Sender.from_conf(conf) as sender:
@@ -48,7 +48,7 @@ your code.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     with Sender.from_env() as sender:
         ...
@@ -216,8 +216,8 @@ The following parameters control the :ref:`sender_auto_flush` behavior.
 
 The `auto_flush_interval` parameter controls how long the sender's buffer can be
 left unflushed for after appending a new row via the
-:func:`Sender.row <questdb.ingress.Sender.row>` or the
-:func:`Sender.dataframe <questdb.ingress.Sender.dataframe>` methods.
+:func:`Sender.row <questdb.Sender.row>` or the
+:func:`Sender.dataframe <questdb.Sender.dataframe>` methods.
 It is defined in milliseconds.
 
 Note that this parameter does *not* create a timer that counts down
@@ -230,7 +230,7 @@ Consider the following example:
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
     import time
     conf = "http::addr=localhost:9009;auto_flush_interval=1000;"
     with Sender.from_conf(conf) as sender:

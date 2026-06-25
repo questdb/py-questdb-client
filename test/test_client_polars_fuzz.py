@@ -35,7 +35,7 @@ import uuid
 import patch_path
 patch_path.patch()
 
-import questdb.ingress as qi
+import questdb as qi
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
@@ -400,7 +400,7 @@ class TestClientPolarsDataframeFuzz(unittest.TestCase):
                    iter_seed, prev_binary_frames):
         try:
             client.dataframe(df, **kwargs)
-        except (qi.UnsupportedDataFrameShapeError, qi.IngressError) as exc:
+        except (qi.UnsupportedDataFrameShapeError, qi.QuestDBError) as exc:
             self.assertFalse(
                 expected_supported,
                 f'client rejected an expected-supported frame; '

@@ -19,7 +19,7 @@ Every iteration drives ``Client.dataframe()`` round-trip through a local
   - Frames the v1 planner rejects raise before any QWP/WebSocket binary frame
     is published. Most shape rejections raise
     ``UnsupportedDataFrameShapeError``; Arrow validation rejections surface as
-    ``IngressError``.
+    ``QuestDBError``.
   - Frames the v1 planner accepts complete without raising and produce at
     least one QWP1 binary frame at the server (unless the frame is empty,
     in which case ``Client.dataframe()`` is a no-op).
@@ -63,7 +63,7 @@ import numpy as np
 import patch_path
 patch_path.patch()
 
-import questdb.ingress as qi
+import questdb as qi
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
@@ -649,7 +649,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
             client.dataframe(df, **kwargs)
         except qi.UnsupportedDataFrameShapeError as exc:
             self.assertEqual(
-                exc.code, qi.IngressErrorCode.BadDataFrame,
+                exc.code, qi.QuestDBErrorCode.BadDataFrame,
                 f'UnsupportedDataFrameShapeError did not carry '
                 f'BadDataFrame code; {self._seed_msg(iter_seed)}')
             self.assertFalse(
@@ -662,15 +662,15 @@ class TestClientDataframeFuzz(unittest.TestCase):
                 f'rejection published a binary frame; '
                 f'{self._seed_msg(iter_seed)}')
             return cur
-        except qi.IngressError as exc:
+        except qi.QuestDBError as exc:
             self.assertFalse(
                 expected_supported,
-                f'Client raised IngressError for an expected-supported frame; '
+                f'Client raised QuestDBError for an expected-supported frame; '
                 f'{self._seed_msg(iter_seed)}: {exc.code}: {exc}')
             cur = self.server.snapshot()['binary_frames']
             self.assertEqual(
                 cur, prev_binary_frames,
-                f'IngressError rejection published a binary frame; '
+                f'QuestDBError rejection published a binary frame; '
                 f'{self._seed_msg(iter_seed)}: {exc.code}: {exc}')
             return cur
         # Accept path.
@@ -798,10 +798,10 @@ class TestClientDataframeFuzz(unittest.TestCase):
             c.__enter__()
 
         for op in (_call_dataframe, _call_reap, _call_enter):
-            with self.assertRaises(qi.IngressError) as cm:
+            with self.assertRaises(qi.QuestDBError) as cm:
                 op(client)
             self.assertEqual(
-                cm.exception.code, qi.IngressErrorCode.InvalidApiCall,
+                cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall,
                 f'{op.__name__} on closed client should raise InvalidApiCall')
 
         # close() must remain idempotent on a closed client.
@@ -989,14 +989,14 @@ class TestClientDataframeFuzz(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
     def test_from_conf_rejects_non_qwp_websocket(self):
-        with self.assertRaises(qi.IngressError) as cm:
+        with self.assertRaises(qi.QuestDBError) as cm:
             qi.Client.from_conf('tcp::addr=localhost:9009;')
-        self.assertEqual(cm.exception.code, qi.IngressErrorCode.ConfigError)
+        self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.ConfigError)
 
     def test_from_conf_requires_addr(self):
-        with self.assertRaises(qi.IngressError) as cm:
+        with self.assertRaises(qi.QuestDBError) as cm:
             qi.Client.from_conf('qwpws::pool_size=1;')
-        self.assertEqual(cm.exception.code, qi.IngressErrorCode.ConfigError)
+        self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.ConfigError)
 
 
 @unittest.skipIf(pd is None or pa is None, 'pandas/pyarrow not installed')

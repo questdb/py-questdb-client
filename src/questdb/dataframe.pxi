@@ -851,8 +851,8 @@ def _debug_dataframe_pyarrow_loaded():
 
 cdef object _dataframe_check_is_dataframe(object df):
     if not isinstance(df, _PANDAS.DataFrame):
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidApiCall,
             f'Bad argument `df`: Expected {_fqn(_PANDAS.DataFrame)}, ' +
             f'not an object of type {_fqn(type(df))}.')
 
@@ -882,7 +882,7 @@ cdef ssize_t _dataframe_resolve_table_name(
             try:
                 str_to_table_name_copy(b, <PyObject*>table_name, name_out)
                 return -1  # Magic value for "no column index".
-            except IngressError as ie:
+            except QuestDBError as ie:
                 raise ValueError(
                     f'Bad argument `table_name`: {ie}')
         else:
@@ -917,7 +917,7 @@ cdef ssize_t _dataframe_resolve_table_name(
         try:
             str_to_table_name_copy(b, <PyObject*>df.index.name, name_out)
             return -1  # Magic value for "no column index".
-        except IngressError as ie:
+        except QuestDBError as ie:
             raise ValueError(
                 f'Bad dataframe index name as table name: {ie}')
     else:
@@ -956,8 +956,8 @@ cdef void_int _dataframe_check_column_is_str(
     if not source in _STR_SOURCES:
         if isinstance(pandas_col.dtype, _NUMPY_OBJECT):
             inferred_descr = f' (inferred type: {_PYOBJ_SOURCE_DESCR[source]})'
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             err_msg_prefix + 
             f'Bad dtype `{pandas_col.dtype}`{inferred_descr} for the ' +
             f'{pandas_col.name!r} column: Must be a strings column.')
@@ -1098,8 +1098,8 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
         elif dtype.unit == 'us':
             return col_source_t.col_source_dt64us_tz_arrow
         else:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 f'Unsupported pandas dtype {dtype} unit {dtype.unit}. ' +
                 'Raise an issue if you think it should be supported: ' +
                 'https://github.com/questdb/py-questdb-client/issues.')
@@ -1221,12 +1221,12 @@ cdef void_int _dataframe_series_as_pybuf(
         # Also note that this guarantees a 1D buffer.
         get_buf_ret = PyObject_GetBuffer(nparr, &col.setup.pybuf, PyBUF_SIMPLE)
     except ValueError as ve:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: {ve}') from ve
     except BufferError as be:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: Expected a buffer, got ' +
             f'{pandas_col.series!r} ({_fqn(type(pandas_col.series))})') from be
     _dataframe_alloc_chunks(1, col)
@@ -1307,8 +1307,8 @@ cdef void_int _dataframe_category_series_as_arrow(
     elif strncmp(format, _ARROW_FMT_INT32, 1) == 0:
         col.setup.source = col_source_t.col_source_str_i32_cat
     else:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
             'Unsupported arrow category index type. ' +
             f'Got {(<bytes>format).decode("utf-8")!r}.')
@@ -1316,8 +1316,8 @@ cdef void_int _dataframe_category_series_as_arrow(
     format = col.setup.arrow_schema.dictionary.format
     if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0 and
             strncmp(format, _ARROW_FMT_LRG_UTF8_STRING, 1) != 0):
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
             'Expected a category of strings, ' +
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
@@ -1389,8 +1389,8 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         return 0
     if is_decimal_col:
         if arrowtype.scale < 0 or arrowtype.scale > 76:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 f'Bad column {pandas_col.name!r}: ' +
                 f'Unsupported decimal scale {arrowtype.scale}: ' +
                 'Must be in the range 0 to 76 inclusive.')
@@ -1452,8 +1452,8 @@ cdef void_int _dataframe_series_sniff_pyobj(
                     arr_descr = cnp.PyArray_DescrFromType(arr_type)
                     if arr_descr is not None:
                         arr_type_name = arr_descr.name.decode('ascii')
-                    raise IngressError(
-                        IngressErrorCode.BadDataFrame,
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
                         f'Bad column {pandas_col.name!r}: ' +
                         'Unsupported object column containing a numpy array ' +
                         f'of an unsupported element type {arr_type_name}.')
@@ -1468,8 +1468,8 @@ cdef void_int _dataframe_series_sniff_pyobj(
             elif isinstance(<object>obj, Decimal):
                 col.setup.source = col_source_t.col_source_decimal_pyobj
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {pandas_col.name!r}: ' +
                     f'Unsupported object column containing an object of type ' +
                     _fqn(type(<object>obj)) + '.')
@@ -1570,8 +1570,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
             elif strncmp(col.setup.arrow_schema.format, _ARROW_FMT_LRG_UTF8_STRING, 1) == 0:
                 col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Unknown string dtype storage: {dtype.storage} ' +
                     f'for column {pandas_col.name} of dtype {dtype}. ' +
                     f'Format specifier: ' + repr(bytes(col.setup.arrow_schema.format).decode('latin-1')))
@@ -1579,8 +1579,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
             col.setup.source = col_source_t.col_source_str_pyobj
             _dataframe_series_as_pybuf(pandas_col, col)
         else:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 f'Unknown string dtype storage: f{dtype.storage} ' +
                 f'for column {pandas_col.name} of dtype {dtype}.')
     elif isinstance(dtype, _PANDAS.CategoricalDtype):
@@ -1590,8 +1590,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
     elif isinstance(dtype, _PANDAS.ArrowDtype):
         _dataframe_series_resolve_arrow(pandas_col, dtype.pyarrow_dtype, col)
     else:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Unsupported dtype {dtype} for column {pandas_col.name!r}. ' +
             'Raise an issue if you think it should be supported: ' +
             'https://github.com/questdb/py-questdb-client/issues.')
@@ -1608,8 +1608,8 @@ cdef void_int _dataframe_resolve_target(
         if col.setup.source in target_sources:
             col.setup.target = target
             return 0
-    raise IngressError(
-        IngressErrorCode.BadDataFrame,
+    raise QuestDBError(
+        QuestDBErrorCode.BadDataFrame,
         f'Could not map column source type (code {col.setup.source} for ' +
         f'column {pandas_col.name!r} ' +
         f' ({pandas_col.dtype}) to any ILP type.')
@@ -2740,8 +2740,8 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
     cdef cnp.dtype arr_descr
     if arr_type != NPY_DOUBLE:
         arr_descr = cnp.PyArray_DescrFromType(arr_type)
-        raise IngressError(
-            IngressErrorCode.ArrayWriteToBufferError,
+        raise QuestDBError(
+            QuestDBErrorCode.ArrayWriteToBufferError,
             f'Only float64 numpy arrays are supported, got dtype: {arr_descr}')
     cdef:
         size_t rank = PyArray_NDIM(arr)
@@ -2780,8 +2780,8 @@ cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_colu
         value,
         unscaled,
         &scale,
-        IngressError,
-        IngressErrorCode.BadDataFrame)
+        QuestDBError,
+        QuestDBErrorCode.BadDataFrame)
     if unscaled_length == 0:
         return 0
 
@@ -3286,18 +3286,18 @@ cdef void_int _dataframe(
             if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
                 raise c_err_to_py(err)
 
-            if (isinstance(e, IngressError) and
-                    (e.code == IngressErrorCode.InvalidApiCall) and not was_auto_flush):
+            if (isinstance(e, QuestDBError) and
+                    (e.code == QuestDBErrorCode.InvalidApiCall) and not was_auto_flush):
                 # TODO: This should be allowed by the database.
                 # It currently isn't so we have to raise an error.
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad dataframe row at index {row_index}: ' +
                     'All values are nulls. '+
                     'Ensure at least one column is not null.') from e
             elif was_serializing_cell:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     'Failed to serialize value of column ' +
                     repr(df.columns[col.setup.orig_index]) +
                     f' at row index {row_index} (' +
@@ -3306,9 +3306,9 @@ cdef void_int _dataframe(
             else:
                 raise
     except Exception as e:
-        if not isinstance(e, IngressError):
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+        if not isinstance(e, QuestDBError):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 str(e)) from e
         else:
             raise

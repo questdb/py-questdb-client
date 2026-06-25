@@ -72,8 +72,8 @@ Explicit Buffers
 For more :ref:`advanced use cases <sender_advanced>` where the same messages
 need to be sent to multiple questdb instances or you want to decouple
 serialization and sending (as may be in a multi-threaded application) construct
-:class:`Buffer <questdb.ingress.Buffer>` objects explicitly, then pass them to
-the :func:`Sender.flush <questdb.ingress.Sender.flush>` method.
+:class:`Buffer <questdb.Buffer>` objects explicitly, then pass them to
+the :func:`Sender.flush <questdb.Sender.flush>` method.
 
 Note that this bypasses :ref:`auto-flushing <sender_auto_flush>`.
 
@@ -106,7 +106,7 @@ The following example shows how to insert data from a Pandas DataFrame to the
    :language: python
 
 For details on all options, see the
-:func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` method.
+:func:`Buffer.dataframe <questdb.Buffer.dataframe>` method.
 
 
 ``pd.Categorical`` and multiple tables
@@ -131,7 +131,7 @@ After running this example, the rows will be split across the ``'humidity'``,
 ``'temp_c'`` and ``'voc_index'`` tables.
 
 For details on all options, see the
-:func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` method.
+:func:`Buffer.dataframe <questdb.Buffer.dataframe>` method.
 
 Loading Pandas from a Parquet File
 ----------------------------------
@@ -146,7 +146,7 @@ name.
    :language: python
 
 For details on all options, see the
-:func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` method.
+:func:`Buffer.dataframe <questdb.Buffer.dataframe>` method.
 
 
 Decimal Types (QuestDB 9.2.0+)

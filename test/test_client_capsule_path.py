@@ -15,7 +15,7 @@ import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
-import questdb.ingress as qi
+import questdb as qi
 from qwp_ws_ack_server import QwpAckServer
 
 try:
@@ -412,7 +412,7 @@ class TestBenchFlushArrowBatch(unittest.TestCase):
         batch = pa.RecordBatch.from_pandas(df, preserve_index=False)
         with QwpAckServer() as server:
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     r'UInt64 value 9223372036854775808 .* does not fit QuestDB LONG'):
                 qi._bench_dataframe_flush_arrow_batch(
                     batch,
@@ -431,7 +431,7 @@ class TestCapsulePathPolarsMissing(unittest.TestCase):
         with QwpAckServer() as server:
             client = qi.Client.from_conf(_client_conf(server.port))
             try:
-                with self.assertRaises((TypeError, qi.IngressError)):
+                with self.assertRaises((TypeError, qi.QuestDBError)):
                     client.dataframe(object(), table_name='t', at=None)
             finally:
                 client.close()
@@ -584,7 +584,7 @@ class TestPandasPlannerRouting(unittest.TestCase):
         with QwpAckServer() as server:
             client = qi.Client.from_conf(_client_conf(server.port))
             try:
-                with self.assertRaises(qi.IngressError):
+                with self.assertRaises(qi.QuestDBError):
                     client.dataframe(df_bad, table_name='t', at='ts')
                 client.dataframe(df_good, table_name='t', at='ts')
             finally:

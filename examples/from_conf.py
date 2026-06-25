@@ -1,4 +1,4 @@
-from questdb.ingress import Sender, IngressError, TimestampNanos
+from questdb import Sender, QuestDBError, TimestampNanos
 import sys
 
 
@@ -35,7 +35,7 @@ def example():
 
         # Any remaining pending rows will be sent when the `with` block ends.
 
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 

@@ -55,10 +55,10 @@ following statements from a ``python3`` interactive shell:
 
 .. code-block:: python
 
-    >>> import questdb.ingress
-    >>> buf = questdb.ingress.Buffer.ilp()
-    >>> buf.row('test', symbols={'a': 'b'}, columns={'x': 1}, at=questdb.ingress.ServerTimestamp)
-    <questdb.ingress.Buffer object at 0x104b68240>
+    >>> import questdb
+    >>> buf = questdb.Buffer.ilp()
+    >>> buf.row('test', symbols={'a': 'b'}, columns={'x': 1}, at=questdb.ServerTimestamp)
+    <questdb.Buffer object at 0x104b68240>
     >>> bytes(buf)
     b'test,a=b x=1i\n'
 
@@ -67,11 +67,11 @@ If you also want to check you can serialize from Pandas
 
 .. code-block:: python
 
-    >>> import questdb.ingress
+    >>> import questdb
     >>> import pandas as pd
     >>> df = pd.DataFrame({'a': [1, 2]})
-    >>> buf = questdb.ingress.Buffer.ilp()
-    >>> buf.dataframe(df, table_name='test', at=questdb.ingress.ServerTimestamp)
-    <questdb.ingress.Buffer object at 0x104b68240>
+    >>> buf = questdb.Buffer.ilp()
+    >>> buf.dataframe(df, table_name='test', at=questdb.ServerTimestamp)
+    <questdb.Buffer object at 0x104b68240>
     >>> bytes(buf)
     b'test a=1i\ntest a=2i\n'
