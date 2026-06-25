@@ -253,8 +253,9 @@ cdef object _build_record_batch_reader(
     cdef int seen_seq = cursor_handle._reset_seq
     first = _fetch_one_batch(cursor_handle, pa, compact)
     if first is None:
-        # Empty result: cursor already reached terminal cleanly.
-        # Safe to return the reader to its pool.
+        # No result set (a non-SELECT statement ends with EXEC_DONE and
+        # ships no RESULT_BATCH), so there is no schema to surface; an
+        # empty SELECT still ships a zero-row batch carrying the schema.
         _mark_reader_drained(cursor_handle)
         cursor_handle._free()
         empty = pa.table({})
@@ -1520,7 +1521,6 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
 
     if handle is None or handle._cursor == NULL:
         raise QuestDBError(QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
-    cursor = handle._cursor
     seen_seq = handle._reset_seq
 
     col_names = []
@@ -1533,39 +1533,45 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
 
     try:
         while True:
-            with nogil:
-                batch = reader_cursor_next_batch(cursor, &err)
-            if handle._reset_seq != seen_seq:
-                # Mid-query failover replayed from batch-0: discard the
-                # pre-failover accumulation and re-derive the schema.
-                seen_seq = handle._reset_seq
-                first = True
-                prev_dict_n = 0
-                has_symbol = False
-                col_chunks = []
-                col_masks = []
-                symbol_categories = []
-            if batch == NULL:
-                if err != NULL:
-                    raise _reader_err_to_py(err)
-                break
-            row_count = reader_batch_row_count(batch)
-            if first:
-                (col_names, col_kinds, col_scales, col_precision,
-                 has_symbol) = _numpy_extract_meta(batch)
-                n_cols = <size_t>len(col_names)
-                col_chunks = [[] for _ in range(n_cols)]
-                col_masks = [[] for _ in range(n_cols)]
-                first = False
-            if has_symbol:
-                _reader_check(
-                    reader_batch_symbol_dict(batch, &sd, &err), err,
-                    'reader_batch_symbol_dict')
-                if sd.entry_count > prev_dict_n:
-                    _symbol_categories_extend(symbol_categories, &sd, prev_dict_n)
-                    prev_dict_n = sd.entry_count
-            batch_chunks, batch_masks = _numpy_batch_columns(
-                batch, col_kinds, n_cols, row_count, np)
+            with handle._lock:
+                cursor = handle._cursor
+                if cursor == NULL:
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
+                with nogil:
+                    batch = reader_cursor_next_batch(cursor, &err)
+                if handle._reset_seq != seen_seq:
+                    # Mid-query failover replayed from batch-0: discard the
+                    # pre-failover accumulation and re-derive the schema.
+                    seen_seq = handle._reset_seq
+                    first = True
+                    prev_dict_n = 0
+                    has_symbol = False
+                    col_chunks = []
+                    col_masks = []
+                    symbol_categories = []
+                if batch == NULL:
+                    if err != NULL:
+                        raise _reader_err_to_py(err)
+                    break
+                row_count = reader_batch_row_count(batch)
+                if first:
+                    (col_names, col_kinds, col_scales, col_precision,
+                     has_symbol) = _numpy_extract_meta(batch)
+                    n_cols = <size_t>len(col_names)
+                    col_chunks = [[] for _ in range(n_cols)]
+                    col_masks = [[] for _ in range(n_cols)]
+                    first = False
+                if has_symbol:
+                    _reader_check(
+                        reader_batch_symbol_dict(batch, &sd, &err), err,
+                        'reader_batch_symbol_dict')
+                    if sd.entry_count > prev_dict_n:
+                        _symbol_categories_extend(
+                            symbol_categories, &sd, prev_dict_n)
+                        prev_dict_n = sd.entry_count
+                batch_chunks, batch_masks = _numpy_batch_columns(
+                    batch, col_kinds, n_cols, row_count, np)
             for col_idx in range(n_cols):
                 col_chunks[col_idx].append(batch_chunks[col_idx])
                 col_masks[col_idx].append(batch_masks[col_idx])
@@ -1815,58 +1821,58 @@ cdef class _NumpyBatchIter:
         cdef size_t n_cols
         if self.done or self.handle is None or self.handle._cursor == NULL:
             raise StopIteration
-        cursor = self.handle._cursor
-        with nogil:
-            batch = reader_cursor_next_batch(cursor, &err)
-        if self.handle._reset_seq != self.seen_seq:
-            # Mid-query failover after batches were already yielded: the
-            # replayed batch-0 would duplicate them. Streaming can't
-            # discard it, so surface a clean, catchable error.
-            self.done = True
-            self.handle._free()
-            raise QuestDBError(
-                QuestDBErrorCode.FailoverWouldDuplicate,
-                'mid-query failover would duplicate already-delivered '
-                'batches; re-issue the query')
-        if batch == NULL:
-            if err != NULL:
-                self.done = True
-                self.handle._free()
-                raise _reader_err_to_py(err)
-            self.done = True
-            _mark_reader_drained(self.handle)
-            self.handle._free()
-            raise StopIteration
         try:
-            row_count = reader_batch_row_count(batch)
-            if self.first:
-                (self.col_names, self.col_kinds, self.col_scales,
-                 self.col_precision, self.has_symbol) = \
-                    _numpy_extract_meta(batch)
-                self.first = False
-            n_cols = <size_t>len(self.col_names)
-            if self.has_symbol:
-                _reader_check(
-                    reader_batch_symbol_dict(batch, &sd, &err), err,
-                    'reader_batch_symbol_dict')
-                if sd.entry_count > self.prev_dict_n:
-                    _symbol_categories_extend(
-                        self.symbol_categories, &sd, self.prev_dict_n)
-                    self.symbol_dtype = self.pd.CategoricalDtype(
-                        self.symbol_categories)
-                    self.prev_dict_n = sd.entry_count
-            batch_chunks, batch_masks = _numpy_batch_columns(
-                batch, self.col_kinds, n_cols, row_count, self.np)
-            col_chunks = [[c] for c in batch_chunks]
-            col_masks = [[m] for m in batch_masks]
-            return _numpy_assemble_frame(
-                self.col_names, self.col_kinds, self.col_scales,
-                self.col_precision, col_chunks, self.symbol_categories,
-                self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
+            with self.handle._lock:
+                cursor = self.handle._cursor
+                if cursor == NULL:
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
+                with nogil:
+                    batch = reader_cursor_next_batch(cursor, &err)
+                if self.handle._reset_seq != self.seen_seq:
+                    # Mid-query failover after batches were already yielded: the
+                    # replayed batch-0 would duplicate them. Streaming can't
+                    # discard it, so surface a clean, catchable error.
+                    self.done = True
+                    raise QuestDBError(
+                        QuestDBErrorCode.FailoverWouldDuplicate,
+                        'mid-query failover would duplicate already-delivered '
+                        'batches; re-issue the query')
+                if batch == NULL:
+                    self.done = True
+                    if err != NULL:
+                        raise _reader_err_to_py(err)
+                    _mark_reader_drained(self.handle)
+                    raise StopIteration
+                row_count = reader_batch_row_count(batch)
+                if self.first:
+                    (self.col_names, self.col_kinds, self.col_scales,
+                     self.col_precision, self.has_symbol) = \
+                        _numpy_extract_meta(batch)
+                    self.first = False
+                n_cols = <size_t>len(self.col_names)
+                if self.has_symbol:
+                    _reader_check(
+                        reader_batch_symbol_dict(batch, &sd, &err), err,
+                        'reader_batch_symbol_dict')
+                    if sd.entry_count > self.prev_dict_n:
+                        _symbol_categories_extend(
+                            self.symbol_categories, &sd, self.prev_dict_n)
+                        self.symbol_dtype = self.pd.CategoricalDtype(
+                            self.symbol_categories)
+                        self.prev_dict_n = sd.entry_count
+                batch_chunks, batch_masks = _numpy_batch_columns(
+                    batch, self.col_kinds, n_cols, row_count, self.np)
         except:
             self.done = True
             self.handle._free()
             raise
+        col_chunks = [[c] for c in batch_chunks]
+        col_masks = [[m] for m in batch_masks]
+        return _numpy_assemble_frame(
+            self.col_names, self.col_kinds, self.col_scales,
+            self.col_precision, col_chunks, self.symbol_categories,
+            self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
 
     def __dealloc__(self):
         if not self.done and self.handle is not None:

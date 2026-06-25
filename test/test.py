@@ -36,7 +36,10 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
         TestWithDatabase,
         TestEgressWithDatabase,
         TestEgressPool,
-        TestColumnIngressNarrowTypes)
+        TestColumnIngressNarrowTypes,
+        TestColumnIngressFailover,
+        TestEgressFailover,
+        TestEgressFailoverRoleNegotiation)
 
 from fixture import _parse_version
 
@@ -516,6 +519,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     qi.QuestDBError,
                     r'drive_once\(\) can\'t be called: Sender is closed'):
                 sender.drive_once()
+        finally:
+            sender.close(False)
+
+    def test_published_fsn_rejects_when_not_connected(self):
+        sender = qi.Sender.from_conf('qwpws::addr=localhost:9000;')
+        try:
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    r'published_fsn\(\) can\'t be called: Sender is closed'):
+                sender.published_fsn()
         finally:
             sender.close(False)
 

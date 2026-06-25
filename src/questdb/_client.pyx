@@ -56,10 +56,9 @@ __all__ = [
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
 from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t, uint32_t, \
     uintptr_t, INT64_MAX, INT64_MIN
-from libc.stdlib cimport malloc, calloc, realloc, free, abort, qsort
+from libc.stdlib cimport malloc, calloc, realloc, free, qsort
 from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan
-from libc.errno cimport errno
 # from libc.stdio cimport stderr, fprintf
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
@@ -73,7 +72,6 @@ from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
-from cpython.memoryview cimport PyMemoryView_FromMemory
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
 from cpython.ref cimport Py_INCREF, Py_DECREF
@@ -95,20 +93,15 @@ include "dataframe.pxi"
 include "egress.pxi"
 
 from enum import Enum
-from typing import List, Tuple, Dict, Union, Any, Optional, Callable, \
-    Iterable
+from typing import List, Dict, Union, Any, Optional, Iterable
 from dataclasses import dataclass
-import pathlib
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString)
 
-import sys
 import datetime
 import os
 import threading
-import collections
 import time
-import heapq
 import warnings
 import logging
 
@@ -780,7 +773,7 @@ cdef class SenderTransaction:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray, Decimal]]
                 ]=None,
             at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
@@ -1310,7 +1303,7 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray]]
+                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray, Decimal]]
                 ]=None,
             at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
@@ -6420,7 +6413,7 @@ cdef class Sender:
             symbols: Optional[Dict[str, str]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, datetime.datetime, numpy.ndarray, Decimal]]]=None,
+                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray, Decimal]]]=None,
             at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
@@ -6826,11 +6819,15 @@ cdef class Sender:
             raise c_err_to_py(err)
 
     cdef _close(self):
+        cdef PyThreadState* gs = NULL
         self._buffer = None
         line_sender_opts_free(self._opts)
         self._opts = NULL
-        line_sender_close(self._impl)
-        self._impl = NULL
+        if self._impl != NULL:
+            _ensure_doesnt_have_gil(&gs)
+            line_sender_close(self._impl)
+            _ensure_has_gil(&gs)
+            self._impl = NULL
         self._qwp_ws_error_handler = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)

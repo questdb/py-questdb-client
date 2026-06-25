@@ -2116,10 +2116,9 @@ class TestEgressWithDatabase(unittest.TestCase):
                 pass
 
     def test_empty_result(self):
-        """A query that returns zero rows. The server still sends a
-        terminal frame; ``Client.query`` must not hang or crash.
-        Current behaviour: returns a DataFrame with zero columns (the
-        ``pa.table({})`` fallback). Pins that contract."""
+        """A SELECT matching zero rows. Per the QWP egress spec the server
+        still ships one zero-row RESULT_BATCH carrying the schema, so the
+        result is an empty DataFrame that keeps its columns and types."""
         import pandas as pd
         table_name = 't_egress_empty_' + uuid.uuid4().hex[:8]
         try:
@@ -2133,6 +2132,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 ).to_pandas()
             self.assertIsInstance(pdf, pd.DataFrame)
             self.assertEqual(len(pdf), 0)
+            self.assertEqual(list(pdf.columns), ['ts', 'x'])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')

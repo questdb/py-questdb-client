@@ -251,7 +251,7 @@ class SenderTransaction:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray, Decimal]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
         ] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> SenderTransaction:
@@ -410,7 +410,7 @@ class Buffer:
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray, Decimal]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
         ] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> Buffer:
@@ -1261,7 +1261,7 @@ class Sender:
         *,
         symbols: Optional[Dict[str, str]] = None,
         columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, datetime, np.ndarray, Decimal]]
+            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
         ] = None,
         at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:

@@ -39,8 +39,10 @@ ILP transports.
   ``published_fsn``, ``acked_fsn``, ``await_acked_fsn``, ``drive_once``,
   ``poll_qwp_ws_error``, ``qwp_ws_errors_dropped`` and ``close_drain``.
   Server diagnostics are reported through a ``qwp_ws_error_handler``
-  callback or polled as :class:`QwpWsError` values; terminal server
-  rejections raise :class:`QuestDBServerRejectionError`.
+  callback or polled as :class:`QwpWsError` values (classified by the
+  :class:`QwpWsErrorCategory`, :class:`QwpWsErrorPolicy` and
+  :class:`QwpWsProgress` enums); terminal server rejections raise
+  :class:`QuestDBServerRejectionError`.
 
 Additional configuration keys ``tls_roots_password``,
 ``retry_max_backoff_millis`` and ``qwp_ws_progress`` are also accepted.
@@ -116,6 +118,9 @@ rejection.
 Build & dependencies
 ~~~~~~~~~~~~~~~~~~~~~~
 
+- The bundled ``c-questdb-client`` native library is upgraded to 6.1.0,
+  providing the QWP transports, the columnar ``column_sender`` API and the
+  ``line_reader`` query API that back the new features above.
 - The minimum supported Python is raised from 3.8 to **3.10**; Python 3.8
   and 3.9 are no longer supported.
 - ``numpy>=1.21.0`` is now a hard runtime dependency (previously it was
