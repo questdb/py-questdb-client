@@ -44,10 +44,11 @@ class OidcError(Exception):
         # ANSI — is a sink the renderer's own sanitization never sees. Without
         # this, a hostile or MITM'd IdP could inject ANSI escapes or a bidi
         # override into that traceback to spoof the prompt. Doing it here (not at
-        # each raise site) means no raise site can forget; non-string args (rare)
-        # pass through unchanged.
+        # each raise site) means no raise site can forget. A non-string arg is
+        # coerced through str() so its text representation is sanitized too (no
+        # raise site passes one today — this is defense-in-depth).
         args = tuple(
-            _strip_control(a) if isinstance(a, str) else a for a in args)
+            _strip_control(a if isinstance(a, str) else str(a)) for a in args)
         super().__init__(*args)
         # HTTP status behind a non-JSON HTTP response (else None), so the poll
         # loop and silent refresh can tell a terminal 4xx (e.g. a WAF error

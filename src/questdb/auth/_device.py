@@ -515,8 +515,13 @@ class OidcDeviceAuth:
         # Fast path: return a valid token without the lock, so a caller with a
         # usable token never blocks behind another thread's refresh/sign-in.
         # READ-ONLY — never writes self._tokens; every write to that field is
-        # under the lock (the promotion below, _store, clear), so this lock-free
-        # reader can't race a write or resurrect a just-cleared token.
+        # under the lock (the promotion below, _store, clear). On the GIL build
+        # the single-reference read is atomic and ordered, so it can't see a torn
+        # value or race a write. On a free-threaded build the read is
+        # intentionally race-TOLERANT, not race-free: a stale None falls through
+        # to the locked slow path, and a stale-but-valid (frozen) TokenSet is
+        # returned once — never a torn or wrong-context one — and the read writes
+        # nothing, so it can't resurrect a cleared entry in the shared cache.
         tokens = self._valid_cached()
         if tokens is not None:
             return tokens

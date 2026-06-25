@@ -2961,6 +2961,100 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertEqual(_fmt_mmss(-5), '0:00')      # clamped, never negative
         self.assertEqual(_fmt_mmss(125.9), '2:05')   # truncates seconds
 
+    def test_fmt_mmss_handles_non_finite(self):
+        # A non-finite remaining time (inf/nan) must not crash _fmt_mmss with an
+        # OverflowError/ValueError from int(); it degrades to 0:00. Unreachable in
+        # practice (callers clamp to a finite value) — defense-in-depth. M5.
+        from questdb.auth._render import _fmt_mmss
+        self.assertEqual(_fmt_mmss(float('inf')), '0:00')
+        self.assertEqual(_fmt_mmss(float('nan')), '0:00')
+        self.assertEqual(_fmt_mmss(float('-inf')), '0:00')
+
+    def test_jupyter_second_signin_creates_new_display(self):
+        # A second sign-in on the SAME renderer (e.g. after clear() then token())
+        # must create a FRESH display in the current cell, not .update() the
+        # previous sign-in's output area: on_prompt resets the display handle. M3.
+        from questdb.auth._render import JupyterRenderer
+        events = []
+
+        class _Cap(JupyterRenderer):
+            def _display(self, html_str):
+                # Mimic IPython: create when handle is None, else update in place.
+                if self._handle is None:
+                    self._handle = object()
+                    events.append('create')
+                else:
+                    events.append('update')
+
+        r = _Cap()
+        resp = {'user_code': 'A', 'verification_uri': 'https://idp/d',
+                'expires_in': 600, 'interval': 5}
+        r.on_prompt(resp)            # first sign-in -> create
+        r.on_waiting(120.0)          # same sign-in -> update in place
+        r.on_success('alice', 3600)  # same sign-in -> update in place
+        r.on_prompt(resp)            # SECOND sign-in -> must create afresh
+        self.assertEqual(events, ['create', 'update', 'update', 'create'])
+
+    def test_terminal_qr_suppressed_for_dangerous_url(self):
+        # With qr=True, a dangerous (javascript:/data:) verification URL must NOT
+        # be encoded into a terminal QR: the target is scheme-vetted via
+        # _safe_link_url before qrcode is ever called, mirroring the Jupyter QR.
+        # Holds whether or not the optional qrcode dep is installed. M4.
+        import io
+        from questdb.auth._render import TerminalRenderer
+        invoked = {'n': 0}
+        fake_qrcode = types.ModuleType('qrcode')
+
+        class _QR:
+            def __init__(self, *a, **k):
+                invoked['n'] += 1
+
+            def add_data(self, *a):
+                pass
+
+            def make(self, *a, **k):
+                pass
+
+            def print_ascii(self, *a, **k):
+                pass
+
+        fake_qrcode.QRCode = _QR
+        with mock.patch.dict(sys.modules, {'qrcode': fake_qrcode}):
+            TerminalRenderer(stream=io.StringIO(), qr=True).on_prompt({
+                'user_code': 'X', 'verification_uri': 'javascript:alert(1)',
+                'expires_in': 600, 'interval': 5})
+        self.assertEqual(invoked['n'], 0)  # qrcode never reached for a bad URL
+
+    def test_terminal_qr_rendered_for_safe_url(self):
+        # The flip side: a legitimate https verification URL with qr=True IS
+        # encoded and written to the terminal — the scheme gate must not
+        # over-block the happy path. Stub qrcode so this is deterministic. M4.
+        import io
+        from questdb.auth._render import TerminalRenderer
+        fake_qrcode = types.ModuleType('qrcode')
+
+        class _QR:
+            def __init__(self, *a, **k):
+                pass
+
+            def add_data(self, *a):
+                pass
+
+            def make(self, *a, **k):
+                pass
+
+            def print_ascii(self, *a, out=None, **k):
+                out.write('QR-ART')
+
+        fake_qrcode.QRCode = _QR
+        buf = io.StringIO()
+        with mock.patch.dict(sys.modules, {'qrcode': fake_qrcode}):
+            TerminalRenderer(stream=buf, qr=True).on_prompt({
+                'user_code': 'X',
+                'verification_uri': 'https://idp.example.com/device',
+                'expires_in': 600, 'interval': 5})
+        self.assertIn('QR-ART', buf.getvalue())
+
     def test_detect_interactive_requires_tty(self):
         # Outside a notebook kernel, interactivity requires both stdin AND stdout
         # to be a TTY (guards against hanging in papermill / cron / CI).
@@ -3127,6 +3221,21 @@ class TestRendererSecurity(unittest.TestCase):
         d2 = OidcDeviceFlowError('x')
         self.assertIsNone(d2.error)
         self.assertIsNone(d2.error_description)
+
+    def test_oidc_error_sanitizes_non_string_arg(self):
+        # A non-string positional arg is coerced through str() and sanitized too,
+        # so an object whose text representation embeds ANSI/bidi can't leak it
+        # into a traceback. No raise site passes one today — defense-in-depth. M6.
+        class _Evil:
+            def __str__(self):
+                return 'boom \x1b[31m' + chr(0x202e) + 'spoof\x07'
+
+        e = OidcError(_Evil())
+        self.assertNotIn('\x1b', str(e))
+        self.assertNotIn('\x07', str(e))
+        self.assertNotIn(chr(0x202e), str(e))
+        self.assertIn('boom', str(e))
+        self.assertIn('spoof', str(e))
 
     def test_qr_helpers_degrade_without_qrcode(self):
         # The QR helpers must degrade gracefully (return None), never raise,

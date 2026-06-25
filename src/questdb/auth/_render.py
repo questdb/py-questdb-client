@@ -33,6 +33,7 @@ falling back to plain text on a terminal. Not required for ``token()`` /
 from __future__ import annotations
 
 import html
+import math
 import sys
 import unicodedata
 import urllib.parse
@@ -169,6 +170,11 @@ def format_prompt(resp: Dict[str, Any]) -> str:
 
 
 def _fmt_mmss(seconds: float) -> str:
+    # A non-finite input (inf/nan) would make int() raise (OverflowError /
+    # ValueError); treat it as 0 — it can't be a real countdown. Callers pass a
+    # clamped, finite remaining time today, so this is defense-in-depth.
+    if not math.isfinite(seconds):
+        seconds = 0
     seconds = max(0, int(seconds))
     return f'{seconds // 60}:{seconds % 60:02d}'
 
@@ -216,8 +222,12 @@ class TerminalRenderer(Renderer):
     def on_prompt(self, resp: Dict[str, Any]) -> None:
         self._write(format_prompt(resp) + '\n')
         if self._qr:
-            target = _verification_uri_complete(resp) or _verification_uri(resp)
-            art = _qr_ascii(target)
+            # Scheme-vet the target before encoding it, mirroring the Jupyter QR
+            # (_qr_img): never turn a javascript:/data: verification_uri from a
+            # hostile device response into a scannable QR.
+            target = (_safe_link_url(_verification_uri_complete(resp))
+                      or _safe_link_url(_verification_uri(resp)))
+            art = _qr_ascii(target) if target else None
             if art:
                 self._write(art + '\n')
 
@@ -318,8 +328,12 @@ class JupyterRenderer(Renderer):
 
     def on_prompt(self, resp: Dict[str, Any]) -> None:
         self._resp = resp
-        # Rebuild the QR for this response (a re-sign-in has a fresh user_code,
-        # so the cached image from a previous prompt would be stale/wrong).
+        # Start a FRESH display for this sign-in. Without resetting the handle, a
+        # second sign-in on the same renderer (e.g. after clear() then token())
+        # would .update() the previous sign-in's output area instead of the cell
+        # the user just ran. Rebuild the QR too (a re-sign-in has a fresh
+        # user_code, so the cached image from a previous prompt would be stale).
+        self._handle = None
         self._qr_html = None
         body, _uri, _complete = self._prompt_head()
         body.append(
