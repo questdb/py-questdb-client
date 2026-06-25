@@ -2314,6 +2314,25 @@ class TestAdapters(unittest.TestCase):
             _require_host('https://db.example.com:9000', 'questdb.example.com'),
             'questdb.example.com')
 
+    def test_pg_port_validation(self):
+        # A non-integer pg_port (e.g. a port read from an env var without int())
+        # must surface as OidcConfigError, not a bare ValueError / driver error
+        # from URL.create(port=...) / connect(port=...). The check runs before
+        # the driver import, so it holds even without sqlalchemy / psycopg.
+        from questdb.auth._adapters import _coerce_port
+        for bad in ('not-a-port', None, '88a2', True, 0, 70000):
+            with self.subTest(pg_port=bad):
+                with self.assertRaises(OidcConfigError):
+                    _coerce_port(bad)
+        self.assertEqual(_coerce_port(8812), 8812)
+        self.assertEqual(_coerce_port('5432'), 5432)   # str port coerced
+        # Both adapter entry points reject it up front (no driver required).
+        for fn in (sqlalchemy_engine, psycopg_connect):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(OidcConfigError):
+                    fn(_FakeAuth(), 'https://db.example.com:9000',
+                       pg_port='not-a-port')
+
     @unittest.skipIf(importlib.util.find_spec('sqlalchemy') is not None,
                      'sqlalchemy installed')
     def test_sqlalchemy_engine_missing_dep_raises(self):
@@ -3031,17 +3050,21 @@ class TestTransportSecurity(unittest.TestCase):
         # See M4.
         from questdb.auth import _http
         with _raw_response_server(500, 'text/plain', b'boom') as b:
-            with self.assertRaises(OidcError):
+            with self.assertRaises(OidcError) as cm:
                 _http.get_json(b + '/settings', timeout=5)
+        # The HTTP status is attached (mirroring post_form) so a future retry
+        # caller can classify terminal-vs-transient the same way.
+        self.assertEqual(cm.exception.status, 500)
 
     def test_get_json_non_json_2xx_raises_oidc_error(self):
         # A 2xx /settings or discovery body that isn't JSON must surface as
         # OidcError, not a raw JSONDecodeError. See M4.
         from questdb.auth import _http
         with _raw_response_server(200, 'text/html', b'<html>x</html>') as b:
-            with self.assertRaises(OidcError):
+            with self.assertRaises(OidcError) as cm:
                 _http.get_json(
                     b + '/.well-known/openid-configuration', timeout=5)
+        self.assertEqual(cm.exception.status, 200)  # status attached
 
 
 class TestRendererSecurity(unittest.TestCase):

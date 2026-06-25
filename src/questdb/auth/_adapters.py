@@ -97,6 +97,31 @@ def _require_host(url: str, host: Optional[str] = None) -> str:
     return resolved
 
 
+def _coerce_port(pg_port: Any) -> int:
+    """
+    Coerce ``pg_port`` to an ``int`` within the module's typed-error contract.
+
+    A non-integer ``pg_port`` (e.g. a port read from an env var without an
+    ``int()``) would otherwise reach ``URL.create(port=...)`` /
+    ``driver.connect(port=...)`` and surface as a bare ``ValueError`` / driver
+    error, escaping ``OidcConfigError``. ``bool`` is an ``int`` subclass but
+    ``True``/``False`` is never a meaningful port, so reject it explicitly —
+    mirroring the constructor's other up-front type checks.
+    """
+    if isinstance(pg_port, bool):
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.')
+    try:
+        port = int(pg_port)
+    except (TypeError, ValueError) as e:
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.') from e
+    if not 1 <= port <= 65535:
+        raise OidcConfigError(
+            f'pg_port must be a valid TCP port (1-65535), got {port}.')
+    return port
+
+
 def sqlalchemy_engine(
         auth: OidcDeviceAuth,
         url: str,
@@ -128,6 +153,7 @@ def sqlalchemy_engine(
         (v3) or ``postgresql+psycopg2`` depending on what is installed.
     :param engine_kwargs: Forwarded to ``create_engine``.
     """
+    pg_port = _coerce_port(pg_port)
     try:
         from sqlalchemy import create_engine, event
         from sqlalchemy.engine import URL
@@ -181,6 +207,7 @@ def psycopg_connect(
         ``host=`` is given.
     :param connect_kwargs: Forwarded to the driver's ``connect()``.
     """
+    pg_port = _coerce_port(pg_port)
     mod = _pg_module()
     return mod.connect(
         host=_require_host(url, host),

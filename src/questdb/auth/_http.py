@@ -296,14 +296,20 @@ def get_json(
         'GET', url, headers=headers, timeout=timeout, ctx=ctx,
         insecure=insecure)
     if not resp.ok:
+        # Attach the HTTP status (mirroring post_form) so a future retry caller
+        # can tell a terminal 4xx from a transient 5xx/429 the same way the poll
+        # loop / silent refresh do. Today's callers (fetch_settings, IdP
+        # discovery) are one-shot and ignore it; this keeps the contract uniform.
         raise OidcError(
-            f'HTTP {resp.status} from {url}: {resp.text()[:200]}')
+            f'HTTP {resp.status} from {url}: {resp.text()[:200]}',
+            status=resp.status)
     try:
         return resp.json()
     except (ValueError, UnicodeDecodeError, RecursionError) as e:
         # RecursionError (deeply-nested JSON) isn't a ValueError, so catch it
         # explicitly to keep the typed contract.
-        raise OidcError(f'Invalid JSON from {url}: {e}') from e
+        raise OidcError(
+            f'Invalid JSON from {url}: {e}', status=resp.status) from e
 
 
 def post_form(
