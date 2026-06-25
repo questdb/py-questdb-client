@@ -580,6 +580,73 @@ class TestDeviceFlow(AuthTestBase):
         with self.assertRaises(OidcError):   # typed, not TypeError
             auth.token()
 
+    def test_missing_verification_uri_is_rejected(self):
+        # Issue 6: a 200 device-auth response with device_code/user_code but NO
+        # verification URI (RFC 8628 §3.2 requires it) must be rejected with a
+        # typed error, not accepted into a prompt that renders a blank
+        # "Open  and enter code" gap and then polls pointlessly.
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'WDJB-MJHT',
+            'expires_in': 600, 'interval': 5}   # no verification_uri / _url
+        auth = self.make_auth()
+        with self.assertRaises(OidcDeviceFlowError):
+            auth.token()
+        self.assertEqual(len(self.state.token_requests), 0)  # never polled
+        # The legacy verification_url spelling (older Google) is accepted.
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'WDJB-MJHT',
+            'verification_url': 'https://idp.example.com/device',
+            'expires_in': 600, 'interval': 5}
+        self.state.token_script = [(200, None)]
+        self.assertEqual(self.make_auth().token(), ID_TOKEN)
+
+    def test_success_message_reports_real_jwt_lifetime(self):
+        # Issue 7: the "expires in N min" message must report the token's REAL
+        # lifetime (JWT exp), not the cache's clamped expires_at (_MAX_EXPIRES_IN,
+        # 1h). An 8h token must not be reported as "60 min".
+        from questdb.auth._device import _MAX_EXPIRES_IN
+
+        class _Rec(Renderer):
+            expires_in = None
+
+            def on_success(self, identity, expires_in):
+                self.expires_in = expires_in
+
+        auth = self.make_auth()           # sets self._clock
+        auth._renderer = _Rec()
+        real_exp = self._clock.now() + 8 * 3600
+        id_tok = _jwt({'sub': 'alice', 'exp': real_exp})
+        self.state.token_script = [(200, {
+            'access_token': 'a', 'id_token': id_tok, 'refresh_token': 'r',
+            'expires_in': 8 * 3600, 'scope': 'openid groups'})]  # clamped to 1h
+        auth.token()
+        # Reported lifetime reflects the 8h JWT exp, well beyond the 1h clamp...
+        self.assertGreater(auth._renderer.expires_in, 7 * 3600)
+        self.assertLessEqual(auth._renderer.expires_in, 8 * 3600)
+        # ...while the CACHED token is still clamped (re-validated at least hourly).
+        self.assertLessEqual(auth._tokens.expires_at - self._clock.now(),
+                             _MAX_EXPIRES_IN)
+
+    def test_poll_honors_retry_after(self):
+        # Issue 8: a slow_down poll response carrying Retry-After backs off by
+        # that many seconds (clamped), not the fixed +5s.
+        from questdb.auth._http import _PostResult
+        auth = self.make_auth()
+        real = auth._idp_post
+        n = {'tok': 0}
+
+        def fake(url, form):
+            if url.endswith('/token'):
+                n['tok'] += 1
+                if n['tok'] == 1:
+                    return _PostResult(400, {'error': 'slow_down'}, 30)
+                return real(url, form)   # then succeed
+            return real(url, form)
+
+        auth._idp_post = fake
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertIn(30, self._clock.sleeps)   # honored Retry-After, not +5
+
     def test_nonpositive_expires_in_still_polls(self):
         # A non-positive expires_in in the device-auth response must be treated
         # as unknown, not as "already expired" — otherwise the flow times out
@@ -2870,6 +2937,59 @@ class TestTransportSecurity(unittest.TestCase):
         # off-origin target never saw the request (or the bearer token).
         self.assertEqual(resp.status, 302)
         self.assertEqual(seen, [('/exec', 'Bearer SECRET')])
+
+    def test_https_opener_refuses_redirects(self):
+        # Issue 9: the production path carries the bearer / refresh token over
+        # HTTPS (ctx is a real SSLContext); the end-to-end redirect test above
+        # exercises only the plain-HTTP (ctx=None) opener. Pin that _NoRedirect is
+        # wired into the HTTPS opener too — and that it REPLACES the default
+        # HTTPRedirectHandler (so a 30x is actually refused, not just shadowed).
+        import ssl
+        import urllib.request
+        from questdb.auth import _http
+        opener = _http._opener(ssl.create_default_context())
+        redirect_handlers = [
+            h for h in opener.handlers
+            if isinstance(h, urllib.request.HTTPRedirectHandler)]
+        self.assertEqual(len(redirect_handlers), 1,
+                         'expected exactly one redirect handler in the opener')
+        self.assertIsInstance(
+            redirect_handlers[0], _http._NoRedirect,
+            '_NoRedirect missing from the HTTPS opener — a 30x could re-send the '
+            'bearer/refresh token cross-origin')
+
+    def test_parse_retry_after(self):
+        # Issue 8: Retry-After delta-seconds parsed (case-insensitive); the
+        # HTTP-date form and junk return None (caller falls back to its +5s step).
+        from questdb.auth._http import _parse_retry_after
+        self.assertEqual(_parse_retry_after({'Retry-After': '30'}), 30)
+        self.assertEqual(_parse_retry_after({'retry-after': ' 45 '}), 45)
+        self.assertEqual(_parse_retry_after({'Retry-After': '0'}), 0)
+        for bad in ({'Retry-After': 'Wed, 21 Oct 2015 07:28:00 GMT'},
+                    {'Retry-After': '-5'}, {'Retry-After': 'soon'},
+                    {'X-Other': '5'}, {}, None):
+            self.assertIsNone(_parse_retry_after(bad))
+
+    def test_backoff_interval(self):
+        # Issue 8: honor Retry-After (clamped to [5, 60]); else the RFC 8628 +5s.
+        from questdb.auth._device import (
+            _backoff_interval, _MIN_POLL_INTERVAL, _MAX_POLL_INTERVAL)
+        self.assertEqual(_backoff_interval(5, None), 10)       # +5s step
+        self.assertEqual(_backoff_interval(20, None), 25)
+        self.assertEqual(_backoff_interval(5, 30), 30)         # honored
+        self.assertEqual(_backoff_interval(5, 120), _MAX_POLL_INTERVAL)  # capped
+        self.assertEqual(_backoff_interval(5, 1), _MIN_POLL_INTERVAL)    # floored
+
+    def test_post_result_is_2tuple_with_retry_after(self):
+        # Issue 8: _PostResult is a 2-tuple (existing `status, body = ...` callers
+        # are unaffected) that also carries .retry_after.
+        from questdb.auth._http import _PostResult
+        r = _PostResult(429, {'error': 'slow_down'}, 30)
+        status, body = r
+        self.assertEqual((status, body), (429, {'error': 'slow_down'}))
+        self.assertEqual(r, (429, {'error': 'slow_down'}))   # equals plain tuple
+        self.assertEqual(r.retry_after, 30)
+        self.assertIsNone(_PostResult(200, {}, None).retry_after)
 
     def test_malformed_url_raises_config_error(self):
         # A non-integer port must surface as OidcConfigError, not a raw

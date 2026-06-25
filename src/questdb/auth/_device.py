@@ -173,6 +173,19 @@ def _http_status_is_transient(status: Optional[int]) -> bool:
     return status is not None and (status >= 500 or status == 429)
 
 
+def _backoff_interval(interval: int, retry_after: Optional[int]) -> int:
+    """
+    The next poll interval after a 429 / ``slow_down``.
+
+    Honors a server ``Retry-After`` (delta-seconds) when present, else the RFC
+    8628 §3.5 +5s slow-down step. Clamped to ``[_MIN_POLL_INTERVAL,
+    _MAX_POLL_INTERVAL]`` so a hostile/huge value can't pin the polling thread —
+    the device-code deadline still bounds the total wait.
+    """
+    target = retry_after if retry_after is not None else interval + 5
+    return min(_MAX_POLL_INTERVAL, max(_MIN_POLL_INTERVAL, target))
+
+
 def _validate_positive_number(value: Any, name: str) -> None:
     """
     Require a duration argument to be a positive, finite number of seconds.
@@ -737,9 +750,25 @@ class OidcDeviceAuth:
         claims = (_decode_jwt_claims(tokens.id_token)
                   or _decode_jwt_claims(tokens.access_token))
         identity = _identity_from_claims(claims)
-        self._renderer.on_success(
-            identity, max(0.0, tokens.expires_at - self._now()))
+        self._renderer.on_success(identity, self._display_lifetime(tokens, claims))
         return tokens
+
+    def _display_lifetime(
+            self, tokens: TokenSet, claims: Dict[str, Any]) -> float:
+        # Remaining lifetime to SHOW in the sign-in message. tokens.expires_at is
+        # deliberately clamped to _MAX_EXPIRES_IN so a cached token is
+        # re-validated at least hourly — reporting that would under-state a token
+        # that genuinely lives longer. Prefer the JWT `exp` claim (the
+        # authoritative token expiry); fall back to the clamped value for an
+        # opaque token with no exp. Bounded to ~1y so a hostile/garbage exp
+        # (incl. inf/nan, which fail the comparison) can't overflow on_success's
+        # int(round(...)).
+        exp = claims.get('exp')
+        if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+            remaining = float(exp) - self._now()
+            if 0 < remaining <= 366 * 24 * 3600:
+                return remaining
+        return max(0.0, tokens.expires_at - self._now())
 
     def _request_device_code(self) -> Dict[str, Any]:
         form = {
@@ -750,20 +779,27 @@ class OidcDeviceAuth:
             form['audience'] = self.config.audience
         status, body = self._idp_post(
             self.config.device_authorization_endpoint, form)
+        # RFC 8628 §3.2 requires device_code, user_code AND a verification URI
+        # (RFC spells it verification_uri; some IdPs, e.g. older Google, use
+        # verification_url). Require the URI too: without it the prompt would
+        # render a blank "Open  and enter code" gap, so its absence is a
+        # non-conformant response, not a usable one.
         if (status == 200 and _str_or_none(body.get('device_code'))
-                and _str_or_none(body.get('user_code'))):
+                and _str_or_none(body.get('user_code'))
+                and (_str_or_none(body.get('verification_uri'))
+                     or _str_or_none(body.get('verification_url')))):
             return body
         error = body.get('error')
         if status == 200:
-            # 200 but the guard above failed: device_code/user_code missing or
+            # 200 but the guard above failed: a required field is missing or
             # non-string (coerced via _str_or_none, so a JSON number/list reads
-            # as absent instead of being stringified into the poll request).
-            # A non-conformant body, not an HTTP failure — say so plainly rather
-            # than a contradictory "failed (HTTP 200)".
+            # as absent instead of being stringified into the prompt / poll
+            # request). A non-conformant body, not an HTTP failure — say so
+            # plainly rather than a contradictory "failed (HTTP 200)".
             raise OidcDeviceFlowError(
-                'The IdP returned a 200 device-authorization response that is '
-                'missing the required "device_code"/"user_code" fields; cannot '
-                'start the device flow.',
+                'The IdP returned a 200 device-authorization response missing a '
+                'required field (device_code, user_code, or verification_uri); '
+                'cannot start the device flow.',
                 error=error,
                 error_description=body.get('error_description'))
         if status in (400, 404, 405) or error in (
@@ -815,7 +851,7 @@ class OidcDeviceAuth:
             self._sleep(min(interval, remaining))
 
             try:
-                status, body = self._idp_post(
+                result = self._idp_post(
                     self.config.token_endpoint,
                     {
                         'grant_type': DEVICE_CODE_GRANT,
@@ -844,8 +880,15 @@ class OidcDeviceAuth:
                 # poll again rather than discard the sign-in (the deadline bounds
                 # the total wait; a genuine JSON rejection arrives below).
                 if getattr(e, 'status', None) == 429:
-                    interval = min(_MAX_POLL_INTERVAL, interval + 5)
+                    # No JSON body here (a non-JSON 429 from a proxy/WAF), so no
+                    # Retry-After is surfaced; fall back to the +5s step.
+                    interval = _backoff_interval(interval, None)
                 continue
+
+            status, body = result
+            # post_form surfaces Retry-After on the JSON path via _PostResult; a
+            # mocked _idp_post may return a plain 2-tuple, hence getattr/default.
+            retry_after = getattr(result, 'retry_after', None)
 
             if status == 200:
                 # The RFC 6749 §5.1 token response: the grant completed. Accept
@@ -869,14 +912,14 @@ class OidcDeviceAuth:
             # polling until the deadline, as above.
             if status >= 500 or status == 429:
                 if status == 429:
-                    interval = min(_MAX_POLL_INTERVAL, interval + 5)
+                    interval = _backoff_interval(interval, retry_after)
                 continue
 
             error = body.get('error')
             if error == 'authorization_pending':
                 continue
             if error == 'slow_down':
-                interval = min(_MAX_POLL_INTERVAL, interval + 5)
+                interval = _backoff_interval(interval, retry_after)
                 continue
             if error == 'expired_token':
                 self._renderer.on_failure(

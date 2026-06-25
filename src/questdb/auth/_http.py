@@ -312,6 +312,44 @@ def get_json(
             f'Invalid JSON from {url}: {e}', status=resp.status) from e
 
 
+def _parse_retry_after(headers: Optional[Mapping[str, str]]) -> Optional[int]:
+    """
+    A ``Retry-After`` header as a non-negative ``int`` of seconds, else ``None``.
+
+    Honors the delta-seconds form (RFC 7231 §7.1.3); the HTTP-date form is
+    ignored (the caller's fixed back-off covers that rarer case, and parsing a
+    date pulls in tz handling for little gain). Case-insensitive, so an HTTP/2 /
+    proxy-lowercased header name is still matched.
+    """
+    if not headers:
+        return None
+    value = None
+    for key, val in headers.items():
+        if key.lower() == 'retry-after':
+            value = val
+            break
+    try:
+        secs = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return secs if secs >= 0 else None
+
+
+class _PostResult(tuple):
+    """``(status, body)`` carrying an extra ``.retry_after`` (seconds or None).
+
+    A 2-tuple subclass, so existing ``status, body = post_form(...)`` callers are
+    unchanged; the device-flow poll additionally reads ``.retry_after`` to honor
+    a 429 / 503 ``Retry-After`` header instead of its fixed +5s back-off.
+    """
+
+    def __new__(cls, status: int, body: Dict[str, Any],
+                retry_after: Optional[int]):
+        self = super().__new__(cls, (status, body))
+        self.retry_after = retry_after
+        return self
+
+
 def post_form(
         url: str,
         form: Mapping[str, Any],
@@ -323,12 +361,15 @@ def post_form(
     """
     POST a form-url-encoded body and parse the JSON response.
 
-    Returns ``(status, parsed_json)``. Used for the device-authorization and
-    token endpoints, which return JSON on both success and error.
+    Returns ``(status, parsed_json)`` — a :class:`_PostResult`, a 2-tuple that
+    also carries ``.retry_after`` (the parsed ``Retry-After`` seconds, or
+    ``None``). Used for the device-authorization and token endpoints, which
+    return JSON on both success and error.
     """
     resp = request(
         'POST', url, form=form, headers=headers, timeout=timeout, ctx=ctx,
         insecure=insecure)
+    retry_after = _parse_retry_after(resp.headers)
     try:
         parsed = resp.json()
     except (ValueError, UnicodeDecodeError, RecursionError):
@@ -349,4 +390,4 @@ def post_form(
         # — fails the poll loop fast instead of polling on to "code expired".
         raise OidcError(
             f'Unexpected JSON shape from {url}: {parsed!r}', status=resp.status)
-    return resp.status, parsed
+    return _PostResult(resp.status, parsed, retry_after)
