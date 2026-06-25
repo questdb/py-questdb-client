@@ -164,9 +164,16 @@ class MemoryCache:
             remaining = _MEMORY_INFLIGHT.get(key, 0) - 1
             if remaining > 0:
                 _MEMORY_INFLIGHT[key] = remaining
-            else:
+            elif remaining == 0:
                 _MEMORY_INFLIGHT.pop(key, None)
                 _MEMORY_GENERATION.pop(key, None)
+            # remaining < 0 means more release()s than generation() captures (a
+            # double-release): floor at zero and do NOT reclaim the generation —
+            # a concurrent acquisition may still hold a captured value to compare
+            # against, so reclaiming here could drop the clear()-defense. Today
+            # every generation() is paired with exactly one release() (the
+            # finally in _obtain_tokens), so this guards a future caller, not a
+            # path reached now.
 
     def store_if_current(
             self, key: str, tokens: TokenSet, generation: int) -> bool:

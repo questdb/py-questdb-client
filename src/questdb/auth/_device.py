@@ -456,11 +456,11 @@ class OidcDeviceAuth:
         Identifies the token's security context for caching.
 
         Two sessions share a cached token only when they'd accept the same one:
-        same IdP token endpoint (**path included**, so multi-tenant realms on one
-        host don't collide), client id, scope *set* (order-insensitive),
-        audience, and token-kind mode (``groups_in_token`` — id_token vs
-        access_token). The QuestDB URL is excluded — the same IdP token is valid
-        against any QuestDB that trusts it.
+        same pinned ``issuer`` (when one is set), IdP token endpoint (**path
+        included**, so multi-tenant realms on one host don't collide), client id,
+        scope *set* (order-insensitive), audience, and token-kind mode
+        (``groups_in_token`` — id_token vs access_token). The QuestDB URL is
+        excluded — the same IdP token is valid against any QuestDB that trusts it.
 
         ``groups_in_token`` is keyed because it selects the token kind
         :meth:`_select` returns; otherwise two sessions differing only in that
@@ -589,8 +589,14 @@ class OidcDeviceAuth:
         #  (b) self.config / self.cache_key are set once in __init__ and never
         #      reassigned, so a token published by another thread is always for
         #      THIS instance's security context (never a wrong-context token).
-        # If either is broken, this read must move under self._lock. Exercised
-        # under real contention by TestConcurrency.test_token_clear_stress.
+        # (a)/(b) concern the pointed-TO object. The atomicity of the reference
+        # READ itself, and the guarantee the object isn't freed between the load
+        # below and its use, come from the CPython memory model (an atomic pointer
+        # load, plus free-threaded QSBR / deferred ref-counting on a no-GIL build)
+        # — NOT from frozen-ness; a non-CPython runtime lacking those would need
+        # the lock. If any of this is broken, this read must move under
+        # self._lock. Exercised under real contention by
+        # TestConcurrency.test_token_clear_stress.
         tokens = self._tokens
         if tokens is None:
             tokens = self._cache.load(self.cache_key)

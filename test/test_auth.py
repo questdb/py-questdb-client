@@ -331,7 +331,7 @@ class AuthTestBase(unittest.TestCase):
         self.thread.join(timeout=5)
 
     def make_auth(self, *, clock=None, groups_in_token=True,
-                  interactive=True, **kw):
+                  interactive=True, renderer=None, **kw):
         clock = clock or FakeClock()
         self._clock = clock
         return OidcDeviceAuth(
@@ -342,7 +342,7 @@ class AuthTestBase(unittest.TestCase):
             groups_in_token=groups_in_token,
             insecure=True,
             interactive=interactive,
-            renderer=Renderer(),
+            renderer=renderer if renderer is not None else Renderer(),
             _clock=clock,
             **kw)
 
@@ -577,7 +577,7 @@ class TestDeviceFlow(AuthTestBase):
             (400, {'error': {'nested': 'obj'},
                    'error_description': ['a', 'list']})]
         auth = self.make_auth()
-        with self.assertRaises(OidcError):   # typed, not TypeError
+        with self.assertRaises(OidcDeviceFlowError):  # the specific typed error
             auth.token()
 
     def test_missing_verification_uri_is_rejected(self):
@@ -795,12 +795,23 @@ class TestDeviceFlow(AuthTestBase):
                          {'Authorization': 'Bearer ' + ACCESS_TOKEN})
 
     def test_clear_forces_resignin(self):
-        auth = self.make_auth()
+        # A stateful renderer confirms the prompt is drawn END-TO-END on the
+        # second sign-in (not merely that the device endpoint is hit again):
+        # clear() then token() must re-run on_prompt, exercising the renderer's
+        # own re-sign-in reset path too.
+        prompts = []
+
+        class _CountingRenderer(Renderer):
+            def on_prompt(self, resp):
+                prompts.append(resp.get('user_code'))
+
+        auth = self.make_auth(renderer=_CountingRenderer())
         auth.token()
         self.assertEqual(self.state.device_requests, 1)
         auth.clear()
         auth.token()
         self.assertEqual(self.state.device_requests, 2)  # prompted again
+        self.assertEqual(len(prompts), 2)                # renderer saw both
 
     def test_openid_scope_auto_added_for_groups_in_token(self):
         # groups-in-token requires an id_token, which needs the openid scope.
@@ -2313,6 +2324,40 @@ class TestAdapters(unittest.TestCase):
             events['fn'](None, None, [], cparams)
             self.assertEqual(cparams['password'], 'TKN')
         self.assertEqual(auth.calls - before, 2)
+
+    def test_sqlalchemy_engine_uses_bare_ipv6_host(self):
+        # m6: SQLAlchemy's URL.create takes host and port separately and hands
+        # the host to the driver as a connect kwarg (not a "host:port" DSN
+        # string), so the host must be the UNBRACKETED IPv6 literal '::1' —
+        # exactly as the (separately tested) psycopg path passes it. Asserted at
+        # the adapter boundary; real SQLAlchemy is not a test dependency.
+        created = {}
+        fake_sa = types.ModuleType('sqlalchemy')
+        fake_sa.__path__ = []
+        fake_sa.create_engine = lambda url, **kw: object()
+
+        class _Event:
+            @staticmethod
+            def listens_for(target, name):
+                return lambda fn: fn
+
+        fake_sa.event = _Event
+        fake_eng = types.ModuleType('sqlalchemy.engine')
+
+        class _URL:
+            @staticmethod
+            def create(**kw):
+                created.update(kw)
+                return 'URL'
+
+        fake_eng.URL = _URL
+        with mock.patch.dict(sys.modules, {
+                'sqlalchemy': fake_sa,
+                'sqlalchemy.engine': fake_eng,
+                'psycopg': types.ModuleType('psycopg')}):
+            sqlalchemy_engine(_FakeAuth(), 'https://[::1]:9000')
+        self.assertEqual(created['host'], '::1')  # unbracketed, like psycopg
+        self.assertEqual(created['port'], 8812)
 
     def test_sqlalchemy_engine_uses_psycopg2_drivername(self):
         # When only psycopg2 (v2) is importable, the SQLAlchemy driver name is

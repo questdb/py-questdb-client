@@ -88,12 +88,14 @@ def _verification_uri_complete(resp: Dict[str, Any]) -> Optional[str]:
 
 
 # A host safe to make clickable / auto-open: plain ASCII letters-digits-hyphen
-# (a DNS name or punycode ``xn--`` label), dots, and the ``:``/``%`` an IPv6
-# literal carries once urlparse has stripped its brackets. Anything else — a
-# non-ASCII confusable (e.g. a Cyrillic look-alike, or the fullwidth solidus
-# ``U+FF0F``) or a stray control char in the authority — can misrepresent the
-# real destination host, so such a URL is never made clickable/auto-opened.
-_SAFE_HOST_RE = re.compile(r'\A[a-z0-9._%:-]+\Z')
+# (a DNS name or punycode ``xn--`` label), dots, and the ``:`` an IPv6 literal
+# carries once urlparse has stripped its brackets. Anything else — a non-ASCII
+# confusable (e.g. a Cyrillic look-alike, or the fullwidth solidus ``U+FF0F``),
+# a stray control char, or a ``%`` (percent-encoding, or an IPv6 zone-id —
+# neither of which a remote verification host legitimately needs, matching the
+# hygiene in ``_adapters._ILLEGAL_HOST_CHARS``) — can misrepresent the real
+# destination host, so such a URL is never made clickable/auto-opened.
+_SAFE_HOST_RE = re.compile(r'\A[a-z0-9._:-]+\Z')
 
 
 def _safe_link_url(url: Optional[str]) -> Optional[str]:

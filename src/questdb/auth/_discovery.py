@@ -125,6 +125,14 @@ def _settings_url(questdb_url: str) -> str:
     # ".../?x=1/settings". The path is rstrip('/')-ed to avoid a double slash.
     # safe_urlparse maps a malformed URL to OidcConfigError, not a bare ValueError.
     parts, _ = safe_urlparse(questdb_url)
+    # Require an explicit http(s):// scheme. Without one urllib mis-parses a bare
+    # "host:port" — "questdb.example.com:9000" parses with scheme
+    # "questdb.example.com" — which would otherwise surface much later as a
+    # confusing "insecure URL (scheme 'questdb.example.com')" from _require_secure.
+    if (parts.scheme or '').lower() not in ('http', 'https'):
+        raise OidcConfigError(
+            f'The QuestDB URL {questdb_url!r} needs an explicit http(s):// '
+            'scheme, e.g. "https://questdb.example.com:9000".')
     path = (parts.path or '').rstrip('/') + '/settings'
     return urllib.parse.urlunparse(
         (parts.scheme, parts.netloc, path, '', '', ''))
