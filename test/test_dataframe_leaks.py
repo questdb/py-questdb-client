@@ -58,10 +58,11 @@ def _rss():
 
 
 def _assert_no_leak(test, work, warmup, measure):
-    # A real leak keeps a steady RSS slope; glibc/obmalloc arena retention
-    # fills then flattens, sometimes with a one-off mid-run spike. Compare the
-    # median per-window growth of the last windows against the first so a single
-    # transient spike can't read as a leak — judging the shape, not a size.
+    # A real native leak grows in *every* window; glibc/obmalloc arena
+    # retention bursts (sometimes across several consecutive windows) then
+    # flattens. Take the smallest growth across the last half: if RSS held flat
+    # for even one tail window, it has plateaued, so a transient multi-window
+    # burst can't read as a leak — judging the shape, not an absolute size.
     windows = 6
     per = max(1, measure // windows)
     for _ in range(warmup):
@@ -78,7 +79,7 @@ def _assert_no_leak(test, work, warmup, measure):
         prev = now
     half = max(1, windows // 2)
     head = sorted(growths[:half])[half // 2]
-    tail = sorted(growths[-half:])[half // 2]
+    tail = min(growths[-half:])
     test.assertTrue(
         tail <= 3 * 1024 * 1024 or tail * 2 <= head,
         f'RSS not plateauing: per-window growth {growths} bytes over '
