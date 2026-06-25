@@ -121,6 +121,11 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     if not url or not isinstance(url, str):
         # A non-string has no scheme to vet and would make urlparse raise.
         return None
+    # urlparse() ignores surrounding whitespace when parsing the scheme, so
+    # "  https://idp/..." parses as https; trim it so the value we vet is the
+    # value we return (and hand to the href / webbrowser.open()), not the
+    # untrimmed original.
+    url = url.strip()
     try:
         parts = urllib.parse.urlparse(url)
         scheme = (parts.scheme or '').lower()

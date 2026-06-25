@@ -43,12 +43,16 @@ from ._http import safe_urlparse
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
 
-# Reject connection-string delimiters (';', '=') and whitespace/control chars in
-# the host: a real hostname/IP never has them, so their presence means a
-# tampered URL trying to inject PG connection parameters (psycopg turns its
-# kwargs into a libpq conninfo string). ':' is allowed — IPv6 literals contain
-# it, and the PG drivers take host and port separately.
-_ILLEGAL_HOST_CHARS = re.compile(r'[\x00-\x20\x7f;=]')
+# Reject connection-string delimiters (';', '='), whitespace/control chars, and
+# '%' in the host: a real hostname / IPv4 / IPv6-literal never has them, so their
+# presence means a tampered URL trying to inject PG connection parameters
+# (psycopg turns its kwargs into a libpq conninfo string). ':' is allowed — IPv6
+# literals contain it, and the PG drivers take host and port separately. '%'
+# would only appear as an IPv6 zone-id (e.g. 'fe80::1%eth0'), meaningful only for
+# a link-local address on the local machine and never for reaching a remote
+# QuestDB; rejecting it keeps the guard a strict plain-host allowlist
+# (defense-in-depth — '%' is not itself a conninfo delimiter).
+_ILLEGAL_HOST_CHARS = re.compile(r'[\x00-\x20\x7f;=%]')
 
 
 def _pg_module():
@@ -87,8 +91,8 @@ def _require_host(url: str, host: Optional[str] = None) -> str:
     if _ILLEGAL_HOST_CHARS.search(resolved):
         raise OidcConfigError(
             f'The QuestDB host {resolved!r} contains an illegal character '
-            "(';', '=', whitespace or a control character). A hostname or IP "
-            'address never does; this indicates a malformed or tampered URL. '
+            "(';', '=', '%', whitespace or a control character). A hostname or "
+            'IP address never does; this indicates a malformed or tampered URL. '
             '(Such a host could otherwise inject PG connection parameters.)')
     return resolved
 

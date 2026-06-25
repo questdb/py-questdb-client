@@ -2298,9 +2298,11 @@ class TestAdapters(unittest.TestCase):
             with self.subTest(url=bad):
                 with self.assertRaises(OidcConfigError):
                     _require_host(bad)
-        # An explicit host= override goes through the same guard (incl.
-        # whitespace, which is never valid in a host).
-        for bad_host in ('evil;sslmode=disable', 'a=b', 'h ost'):
+        # An explicit host= override goes through the same guard: whitespace
+        # (never valid in a host) and an IPv6 zone-id '%' (meaningful only for a
+        # link-local address on the local machine, never a remote QuestDB) are
+        # rejected too, keeping the guard a strict plain-host allowlist.
+        for bad_host in ('evil;sslmode=disable', 'a=b', 'h ost', 'fe80::1%eth0'):
             with self.subTest(host=bad_host):
                 with self.assertRaises(OidcConfigError):
                     _require_host('https://db.example.com:9000', bad_host)
@@ -3054,6 +3056,12 @@ class TestRendererSecurity(unittest.TestCase):
         for bad in ('javascript:alert(1)', 'data:text/html,x',
                     'vbscript:x', 'file:///etc/passwd', '', None):
             self.assertIsNone(_safe_link_url(bad))
+        # Surrounding whitespace is trimmed: urlparse ignores it when parsing the
+        # scheme, so the value we return (and hand to the href / browser) must be
+        # the trimmed one, not the untrimmed original.
+        self.assertEqual(
+            _safe_link_url('  https://idp.example.com/x  '),
+            'https://idp.example.com/x')
 
     def test_safe_link_url_rejects_userinfo_and_confusable_host(self):
         # M2: an http(s) URL that could MISREPRESENT its destination host must
