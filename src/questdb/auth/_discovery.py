@@ -54,9 +54,15 @@ _K_GROUPS_IN_TOKEN = 'acl.oidc.groups.encoded.in.token'
 _K_AUDIENCE = 'acl.oidc.audience'
 
 
-@dataclass
+@dataclass(frozen=True)
 class OidcConfig:
-    """Resolved OIDC parameters needed to run the device flow."""
+    """Resolved OIDC parameters needed to run the device flow.
+
+    ``frozen`` because :class:`~questdb.auth._device.OidcDeviceAuth` reads
+    ``self.config`` (and the ``cache_key`` derived from it) on the lock-free
+    fast path; the fields are set once at construction and never reassigned, so
+    freezing makes that immutability structural rather than convention.
+    """
 
     client_id: str
     token_endpoint: str
@@ -271,10 +277,15 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     # A residual '%' means the path did not fully decode within the bounded loop
     # (an over-deeply multiply-encoded escape) or is a malformed escape; a server
     # may yet decode it further to a dot-segment, so fail closed rather than
-    # prefix-match a value that could still resolve to a different path.
-    # Legitimate credential-endpoint paths are plain ASCII with no encoding.
+    # prefix-match a value that could still resolve to a different path. A
+    # non-ASCII segment is rejected for the same reason: a homoglyph dot
+    # (e.g. fullwidth U+FF0E '．．') is not literally '..' here, yet a server that
+    # NFKC-normalizes the path before dot-segment removal could fold it to a real
+    # '..' and traverse to a different tenant. Legitimate credential-endpoint
+    # paths are plain ASCII with no encoding.
     if ('.' in ep_segs or '..' in ep_segs
             or any('%' in s for s in ep_segs)
+            or any(not s.isascii() for s in ep_segs)
             or any(_has_control_char(s) for s in ep_segs)):
         return False
     return ep_segs[:len(base_segs)] == base_segs

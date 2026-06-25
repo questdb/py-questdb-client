@@ -50,6 +50,8 @@ from ._http import build_ssl_context, post_form, safe_urlparse
 from ._render import (
     Renderer,
     _safe_target,
+    _verification_uri,
+    _verification_uri_complete,
     detect_interactive,
     in_ipython_kernel,
     make_renderer,
@@ -235,7 +237,9 @@ class OidcDeviceAuth:
     never blocks, but one whose token is missing/expired waits behind the
     signer. So when threads share an auth object (e.g. a SQLAlchemy/psycopg
     pool), sign in once up front — call :meth:`token` once on the main thread
-    before the pool opens connections.
+    before the pool opens connections. (A custom ``renderer``'s callbacks run
+    while this lock is held, so they must not call back into the same instance's
+    :meth:`token` / :meth:`clear` — the lock is not reentrant.)
 
     .. code-block:: python
 
@@ -346,9 +350,10 @@ class OidcDeviceAuth:
         self._interactive = interactive
         self._default_interval = default_interval
         # Per-request network timeout for every IdP call (device-code, each poll,
-        # refresh). Bounds how long one network leg pins the acquisition lock if
-        # the IdP stalls; the total poll duration is separately capped by
-        # _MAX_DEVICE_CODE_LIFETIME.
+        # refresh). Applied to connect+headers and then again to the body read,
+        # so one network leg can pin the acquisition lock for up to ~2x this
+        # value if the IdP stalls; the total poll duration is separately capped
+        # by _MAX_DEVICE_CODE_LIFETIME.
         self._timeout = timeout
         self._cache = MemoryCache()
         self._ctx = build_ssl_context(ca_bundle)
@@ -396,6 +401,13 @@ class OidcDeviceAuth:
         groups mode, falling back to the IdP ``.well-known`` document for the
         device-authorization endpoint when QuestDB doesn't advertise it. Any
         explicit keyword overrides discovery.
+
+        When the server does not advertise the device-authorization endpoint (so
+        it must be discovered from the IdP), ``issuer=`` is **required** to pin
+        the identity provider — the helper refuses to derive the discovery origin
+        from a server-supplied endpoint, so a tampered ``/settings`` cannot
+        redirect the device-code / refresh-token POSTs. See :ref:`oidc_auth`.
+        Raises :class:`OidcConfigError` if the configuration can't be resolved.
         """
         # Validate before resolve_config consumes `timeout` on its /settings and
         # discovery HTTP calls (which run before cls() would validate it), so a
@@ -749,6 +761,7 @@ class OidcDeviceAuth:
                 'the refresh token is still valid — retry later.')
         raise OidcDeviceFlowError(
             f"Token refresh failed: {body.get('error', 'unknown error')}",
+            status=status,
             error=body.get('error'),
             error_description=body.get('error_description'))
 
@@ -819,6 +832,7 @@ class OidcDeviceAuth:
                 'The IdP returned a 200 device-authorization response missing a '
                 'required field (device_code, user_code, or verification_uri); '
                 'cannot start the device flow.',
+                status=status,
                 error=error,
                 error_description=body.get('error_description'))
         if status in (400, 404, 405) or error in (
@@ -830,11 +844,13 @@ class OidcDeviceAuth:
                 f'{self.config.client_id!r} has the device grant '
                 "('urn:ietf:params:oauth:grant-type:device_code') enabled and "
                 'is registered as a public client.',
+                status=status,
                 error=error,
                 error_description=body.get('error_description'))
         raise OidcDeviceFlowError(
             f'Device authorization request failed (HTTP {status}): '
             f'{body.get("error_description") or error or body}',
+            status=status,
             error=error,
             error_description=body.get('error_description'))
 
@@ -891,7 +907,8 @@ class OidcDeviceAuth:
                         'request.')
                     raise OidcDeviceFlowError(
                         f'Device flow failed: the IdP rejected the token '
-                        f'request ({e}).') from e
+                        f'request ({e}).',
+                        status=getattr(e, 'status', None)) from e
                 # Otherwise transient: a dropped connection / DNS blip / timeout
                 # (OidcNetworkError) or a non-JSON 5xx/429 from a proxy (bare
                 # OidcError). The user may already have authorized, and RFC 8628
@@ -927,12 +944,29 @@ class OidcDeviceAuth:
                 raise self._missing_required_token_error()
 
             # A 5xx/429 with a JSON body is also transient (server error or
-            # rate-limit), not a terminal rejection: back off on 429 and keep
-            # polling until the deadline, as above.
+            # rate-limit), not a terminal rejection: keep polling until the
+            # deadline. Honor a Retry-After on either a 429 or a transient 5xx
+            # (as _PostResult documents); apply the RFC 8628 §3.5 +5s slow-down
+            # step only to a 429 with no header (a generic 5xx is a server error,
+            # not a rate-limit, so its cadence is unchanged absent a Retry-After).
             if status >= 500 or status == 429:
-                if status == 429:
+                if status == 429 or retry_after is not None:
                     interval = _backoff_interval(interval, retry_after)
                 continue
+
+            # A 3xx with a JSON body is still a redirect these endpoints never
+            # legitimately return (and _NoRedirect won't follow): treat it as
+            # terminal, like the non-JSON 3xx the exception path above rejects, so
+            # a proxy/WAF returning a JSON-bodied redirect that happens to carry
+            # an OAuth error field can't be mistaken for a live poll state and
+            # polled on to a misleading "code expired".
+            if 300 <= status < 400:
+                self._renderer.on_failure(
+                    'Sign-in failed: the identity provider rejected the request.')
+                raise OidcDeviceFlowError(
+                    'Device flow failed: the IdP returned an unexpected '
+                    f'redirect (HTTP {status}).',
+                    status=status)
 
             error = body.get('error')
             if error == 'authorization_pending':
@@ -952,6 +986,7 @@ class OidcDeviceAuth:
             self._renderer.on_failure(f'Sign-in failed: {description}')
             raise OidcDeviceFlowError(
                 f'Device flow failed: {description}',
+                status=status,
                 error=error,
                 error_description=body.get('error_description'))
 
@@ -968,14 +1003,16 @@ class OidcDeviceAuth:
         # kernel host isn't the user's machine. Suppress with open_browser=False.
         if not self.open_browser or in_ipython_kernel():
             return
-        # Open the SAME _strip_control'd, vetted target the prompt shows (via
-        # _safe_target) — not the raw response value — so a char stripped from the
-        # on-screen link can't survive into the opened URL, and a javascript:/
-        # data: scheme (or userinfo / non-ASCII host) is never opened.
-        target = _safe_target(
-            resp.get('verification_uri_complete')
-            or resp.get('verification_uri')
-            or resp.get('verification_url'))
+        # Open the SAME _strip_control'd, vetted target the prompt shows — not the
+        # raw response value — so a char stripped from the on-screen link can't
+        # survive into the opened URL, and a javascript:/data: scheme (or
+        # userinfo / non-ASCII host) is never opened. Vet each field
+        # independently and fall back, exactly as the renderers do (_safe_target
+        # per field, complete-then-plain), so a truthy-but-unsafe
+        # verification_uri_complete can't shadow a usable verification_uri and
+        # make the browser diverge from the displayed link / QR.
+        target = (_safe_target(_verification_uri_complete(resp))
+                  or _safe_target(_verification_uri(resp)))
         if target:
             try:
                 webbrowser.open(target)

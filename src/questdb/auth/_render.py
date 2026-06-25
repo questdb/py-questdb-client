@@ -56,15 +56,54 @@ def in_ipython_kernel() -> bool:
         'ZMQInteractiveShell', 'TerminalInteractiveShell')
 
 
+def _kernel_allows_stdin() -> bool:
+    """
+    True if the live IPython kernel can prompt a human for input.
+
+    A real Jupyter frontend (Lab / Notebook / VS Code / qtconsole / jupyter
+    console) issues each ``execute_request`` with ``allow_stdin=True``. A
+    notebook *executor* — papermill, ``nbclient``, ``jupyter nbconvert
+    --execute`` / ``jupyter run`` — runs the same kind of kernel (so
+    :func:`in_ipython_kernel` is ``True``) but sends ``allow_stdin=False``: there
+    is no human to authorize, and an input request would raise
+    ``StdinNotImplementedError``. ipykernel records the current request's value
+    on the kernel as ``_allow_stdin``; read it so the device flow fails fast with
+    :class:`~questdb.auth._errors.OidcInteractionRequired` instead of polling to
+    the device-code deadline. papermill sets no environment variable (its
+    ``PAPERMILL_*_PATH`` values are opt-in *notebook parameters*, not
+    ``os.environ`` entries), so the kernel's stdin flag — not an env var — is the
+    authoritative signal.
+
+    Defaults to ``True`` (assume a human is present) whenever the signal can't be
+    read: a terminal IPython shell has no ``kernel`` attribute, and on an
+    unexpected ipykernel layout it is safer to let a present user sign in than to
+    wrongly refuse one.
+    """
+    try:
+        from IPython import get_ipython  # type: ignore
+        kernel = getattr(get_ipython(), 'kernel', None)
+        if kernel is None:
+            return True  # e.g. TerminalInteractiveShell — a human at the REPL
+        allow = getattr(kernel, '_allow_stdin', None)
+        return True if allow is None else bool(allow)
+    except Exception:
+        return True
+
+
 def detect_interactive() -> bool:
     """
     Best-effort detection of whether a human can complete the sign-in.
 
-    Interactive when attached to a TTY or an interactive IPython shell; guards
-    against hanging forever in a non-interactive context (papermill/cron/CI).
+    Interactive when attached to a TTY, or inside an IPython kernel whose
+    frontend accepts stdin. A notebook executor (papermill / ``nbclient`` /
+    ``nbconvert --execute``) runs a real kernel — so :func:`in_ipython_kernel`
+    is ``True`` — but with no human to authorize; it executes with
+    ``allow_stdin=False``, which :func:`_kernel_allows_stdin` detects, so the
+    device flow fails fast in those contexts instead of hanging until the
+    device code expires.
     """
     if in_ipython_kernel():
-        return True
+        return _kernel_allows_stdin()
     try:
         return bool(sys.stdin and sys.stdin.isatty()
                     and sys.stdout and sys.stdout.isatty())
@@ -290,6 +329,17 @@ def _fmt_mmss(seconds: float) -> str:
     return f'{seconds // 60}:{seconds % 60:02d}'
 
 
+def _fmt_minutes(seconds: float) -> int:
+    # Minutes for the "expires in N min" success line, with the same non-finite
+    # guard as _fmt_mmss: a hostile/garbage lifetime (inf/nan) would otherwise
+    # make int(round(...)) raise (OverflowError/ValueError) inside on_success and
+    # break the sign-in at the last step. Callers pass a clamped, finite value
+    # today (see _device._display_lifetime), so this is defense-in-depth.
+    if not math.isfinite(seconds):
+        return 1
+    return max(1, int(round(seconds / 60)))
+
+
 class Renderer:
     """No-op renderer interface; subclasses present the prompt to the user."""
 
@@ -352,7 +402,7 @@ class TerminalRenderer(Renderer):
             self._write('\n')
             self._countdown_active = False
         who = f' as {_strip_control(identity)}' if identity else ''
-        mins = max(1, int(round(expires_in / 60)))
+        mins = _fmt_minutes(expires_in)
         self._write(f'✅ Signed in{who} — token cached, expires in {mins} min\n')
 
     def on_failure(self, message: str) -> None:
@@ -467,7 +517,7 @@ class JupyterRenderer(Renderer):
     def on_success(self, identity: Optional[str], expires_in: float) -> None:
         # identity comes from untrusted JWT claims: strip then html-escape.
         who = html.escape(_strip_control(identity)) if identity else ''
-        mins = max(1, int(round(expires_in / 60)))
+        mins = _fmt_minutes(expires_in)
         suffix = f' as <b>{who}</b>' if who else ''
         self._render_with_status(
             f'✅ Signed in{suffix} — token cached, expires in {mins} min',

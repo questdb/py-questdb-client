@@ -46,6 +46,7 @@ import types
 import unittest
 import http.server
 import urllib.parse
+from dataclasses import replace
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -329,6 +330,11 @@ class AuthTestBase(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        # Assert the server thread actually terminated: a join() that times out
+        # silently leaks a thread, so a future deadlock regression would still
+        # "pass" instead of failing here.
+        self.assertFalse(self.thread.is_alive(),
+                         'mock server thread did not shut down within 5s')
 
     def make_auth(self, *, clock=None, groups_in_token=True,
                   interactive=True, renderer=None, **kw):
@@ -474,8 +480,9 @@ class TestDeviceFlow(AuthTestBase):
             # Point only the poll (token) endpoint at the non-JSON 403; the
             # device-code request still hits the JSON mock IdP. Set it post-
             # construction so the (already-satisfied) co-location check isn't
-            # re-run against the throwaway origin.
-            auth.config.token_endpoint = raw + '/token'
+            # re-run against the throwaway origin. OidcConfig is frozen, so
+            # rebuild it via replace() rather than mutating in place.
+            auth.config = replace(auth.config, token_endpoint=raw + '/token')
             with self.assertRaises(OidcDeviceFlowError) as cm:
                 auth.token()
         # Terminal on the first poll: not a timeout, and it did not keep polling
@@ -492,7 +499,26 @@ class TestDeviceFlow(AuthTestBase):
         auth = self.make_auth()
         with _raw_response_server(
                 302, 'text/html', b'<html>see /login</html>') as raw:
-            auth.config.token_endpoint = raw + '/token'  # post-construction
+            # OidcConfig is frozen; rebuild it rather than mutating in place.
+            auth.config = replace(auth.config, token_endpoint=raw + '/token')
+            with self.assertRaises(OidcDeviceFlowError) as cm:
+                auth.token()
+        self.assertNotIsInstance(cm.exception, OidcTimeoutError)
+        self.assertLessEqual(len(self._clock.sleeps), 1)
+
+    def test_json_3xx_during_poll_is_terminal(self):
+        # A 3xx whose body IS valid JSON (a proxy/WAF redirect that happens to
+        # carry an OAuth-looking error field) must fail fast too: _NoRedirect
+        # refuses the redirect and post_form returns (3xx, {...}), which the poll
+        # loop must classify terminal rather than mistake the embedded
+        # authorization_pending for a live poll state and poll on to "code
+        # expired". (The non-JSON 3xx is covered above via the exception path;
+        # this exercises the JSON-body path inside the loop.)
+        auth = self.make_auth()
+        with _raw_response_server(
+                302, 'application/json',
+                b'{"error": "authorization_pending"}') as raw:
+            auth.config = replace(auth.config, token_endpoint=raw + '/token')
             with self.assertRaises(OidcDeviceFlowError) as cm:
                 auth.token()
         self.assertNotIsInstance(cm.exception, OidcTimeoutError)
@@ -567,6 +593,17 @@ class TestDeviceFlow(AuthTestBase):
         with self.assertRaises(OidcTimeoutError) as cm:
             auth.token()
         self.assertEqual(cm.exception.error, 'expired_token')
+
+    def test_device_flow_error_carries_http_status(self):
+        # An OidcDeviceFlowError raised in response to a known HTTP status now
+        # carries it on .status (forwarded to the OidcError base) instead of
+        # always reporting None, so a caller can inspect err.status.
+        self.state.device_status = 400
+        self.state.device_response = {'error': 'invalid_client'}
+        auth = self.make_auth()
+        with self.assertRaises(OidcDeviceFlowError) as cm:
+            auth.token()
+        self.assertEqual(cm.exception.status, 400)
 
     def test_non_string_poll_error_field_raises_typed_error(self):
         # M1 (end-to-end): a non-conformant/hostile IdP can answer the token poll
@@ -646,6 +683,28 @@ class TestDeviceFlow(AuthTestBase):
         auth._idp_post = fake
         self.assertEqual(auth.token(), ID_TOKEN)
         self.assertIn(30, self._clock.sleeps)   # honored Retry-After, not +5
+
+    def test_poll_honors_retry_after_on_5xx(self):
+        # A transient 5xx poll response carrying Retry-After backs off by that
+        # many seconds (clamped) — as _PostResult documents for 429/503, not just
+        # 429. (The +5s slow-down step stays 429/slow_down-only; a 5xx without a
+        # Retry-After keeps its cadence.)
+        from questdb.auth._http import _PostResult
+        auth = self.make_auth()
+        real = auth._idp_post
+        n = {'tok': 0}
+
+        def fake(url, form):
+            if url.endswith('/token'):
+                n['tok'] += 1
+                if n['tok'] == 1:
+                    return _PostResult(503, {'error': 'server_error'}, 30)
+                return real(url, form)   # then succeed
+            return real(url, form)
+
+        auth._idp_post = fake
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertIn(30, self._clock.sleeps)   # honored Retry-After on a 5xx
 
     def test_nonpositive_expires_in_still_polls(self):
         # A non-positive expires_in in the device-auth response must be treated
@@ -1116,6 +1175,18 @@ class TestDeviceFlow(AuthTestBase):
                 {'verification_uri': 'https://idp.example.com/device'})
             opener.assert_called_once_with('https://idp.example.com/device')
 
+    def test_open_browser_falls_back_past_unsafe_complete(self):
+        # A truthy-but-unsafe verification_uri_complete must not shadow a usable
+        # verification_uri: each field is vetted independently (complete-then-
+        # plain), so the browser opens the SAME safe target the prompt and QR
+        # show, instead of opening nothing — the link/browser/QR can't diverge.
+        auth = self.make_auth(open_browser=True)
+        with mock.patch('webbrowser.open') as opener:
+            auth._maybe_open_browser({
+                'verification_uri_complete': 'javascript:alert(1)',
+                'verification_uri': 'https://idp.example.com/device'})
+            opener.assert_called_once_with('https://idp.example.com/device')
+
     def test_open_browser_default_is_true(self):
         # We try to open the browser by default ("always when possible"), via
         # both the explicit constructor and discovery.
@@ -1222,6 +1293,23 @@ class TestNonInteractive(AuthTestBase):
         with self.assertRaises(OidcInteractionRequired):
             auth.token()
         self.assertEqual(self.state.device_requests, 0)
+
+    def test_papermill_kernel_fails_fast(self):
+        # End-to-end auto-detection (no explicit interactive= override): a
+        # papermill-style kernel (a real kernel, but allow_stdin=False) makes
+        # token() raise OidcInteractionRequired immediately — no device request,
+        # no poll — rather than hanging until the device code expires.
+        from questdb.auth import _render
+        auth = self.make_auth(interactive=None)  # fall through to auto-detection
+        fake_ip = types.ModuleType('IPython')
+        fake_ip.get_ipython = lambda: types.SimpleNamespace(
+            kernel=types.SimpleNamespace(_allow_stdin=False))
+        with mock.patch.object(_render, 'in_ipython_kernel', return_value=True), \
+                mock.patch.dict(sys.modules, {'IPython': fake_ip}):
+            with self.assertRaises(OidcInteractionRequired):
+                auth.token()
+        self.assertEqual(self.state.device_requests, 0)
+        self.assertEqual(self.state.token_requests, [])
 
 
 class TestRefresh(AuthTestBase):
@@ -2438,7 +2526,10 @@ class TestAdapters(unittest.TestCase):
         # from URL.create(port=...) / connect(port=...). The check runs before
         # the driver import, so it holds even without sqlalchemy / psycopg.
         from questdb.auth._adapters import _coerce_port
-        for bad in ('not-a-port', None, '88a2', True, 0, 70000):
+        # float('inf')/1e400 raise OverflowError (not ValueError) from int();
+        # float('nan') raises ValueError. Both must map to OidcConfigError.
+        for bad in ('not-a-port', None, '88a2', True, 0, 70000, -1,
+                    float('inf'), float('-inf'), float('nan'), 1e400):
             with self.subTest(pg_port=bad):
                 with self.assertRaises(OidcConfigError):
                     _coerce_port(bad)
@@ -2814,6 +2905,17 @@ class TestEndpointValidation(unittest.TestCase):
         self.assertFalse(under(iss + '/..%7f/EVIL/token', iss))      # ..DEL
         # A printable-ASCII segment with an internal space (%20) is still fine.
         self.assertTrue(under(iss + '/ok%20name/token', iss))
+        # A non-ASCII homoglyph dot segment is rejected too: a fullwidth U+FF0E
+        # '．．' (literal, its %-encoded UTF-8, or the ideographic U+3002) is not
+        # literally '..' here, yet a server that NFKC-normalizes the path before
+        # dot-segment removal could fold it to a real '..' and reach a different
+        # realm. Legitimate credential-endpoint paths are plain ASCII (chr() keeps
+        # the confusables out of the test source).
+        fw_dot = chr(0xff0e) * 2                       # fullwidth '．．'
+        self.assertFalse(under(iss + '/' + fw_dot + '/EVIL/token', iss))
+        self.assertFalse(under(iss + '/%ef%bc%8e%ef%bc%8e/EVIL/token', iss))
+        self.assertFalse(                              # ideographic full stop
+            under(iss + '/' + chr(0x3002) * 2 + '/EVIL/token', iss))
 
 
 class TestCacheKey(unittest.TestCase):
@@ -3534,6 +3636,42 @@ class TestRendererSecurity(unittest.TestCase):
                 self.assertTrue(_render.detect_interactive())
                 so.isatty.return_value = False  # stdout not a tty
                 self.assertFalse(_render.detect_interactive())
+
+    def test_kernel_without_stdin_is_noninteractive(self):
+        # papermill / nbclient / nbconvert --execute run a real kernel
+        # (in_ipython_kernel True) but execute with allow_stdin=False — there is
+        # no human to authorize. detect_interactive must report non-interactive
+        # so the device flow fails fast instead of polling to the device-code
+        # deadline; a real Jupyter frontend sends allow_stdin=True (interactive).
+        # papermill sets no env var, so the kernel stdin flag is the signal.
+        from questdb.auth import _render
+
+        def fake_ipython(kernel):
+            mod = types.ModuleType('IPython')
+            mod.get_ipython = lambda: types.SimpleNamespace(kernel=kernel)
+            return mod
+
+        with mock.patch.object(_render, 'in_ipython_kernel', return_value=True):
+            # papermill / nbclient / nbconvert: allow_stdin False -> fail fast.
+            with mock.patch.dict(sys.modules, {'IPython': fake_ipython(
+                    types.SimpleNamespace(_allow_stdin=False))}):
+                self.assertFalse(_render._kernel_allows_stdin())
+                self.assertFalse(_render.detect_interactive())
+            # Real Jupyter frontend: allow_stdin True -> interactive.
+            with mock.patch.dict(sys.modules, {'IPython': fake_ipython(
+                    types.SimpleNamespace(_allow_stdin=True))}):
+                self.assertTrue(_render._kernel_allows_stdin())
+                self.assertTrue(_render.detect_interactive())
+            # Signal unreadable -> assume a human is present (never wrongly refuse
+            # one): terminal IPython has no .kernel; a kernel may lack the attr;
+            # and IPython may fail to import entirely.
+            with mock.patch.dict(sys.modules, {'IPython': fake_ipython(None)}):
+                self.assertTrue(_render._kernel_allows_stdin())
+            with mock.patch.dict(sys.modules, {'IPython': fake_ipython(
+                    types.SimpleNamespace())}):
+                self.assertTrue(_render._kernel_allows_stdin())
+            with mock.patch.dict(sys.modules, {'IPython': None}):
+                self.assertTrue(_render._kernel_allows_stdin())
 
     def test_in_ipython_kernel_false_without_ipython(self):
         # When IPython can't be imported (plain CPython), it's not a kernel.

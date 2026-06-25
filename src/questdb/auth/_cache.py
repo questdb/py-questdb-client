@@ -95,7 +95,9 @@ class MemoryCache:
     """
 
     def load(self, key: str) -> Optional[TokenSet]:
-        # Return a copy so callers can't mutate the cached entry in place.
+        # TokenSet is frozen, so a caller can't mutate it anyway; the replace()
+        # copy is defensive — it hands back a distinct instance and keeps the
+        # contract correct should the dataclass ever lose frozen.
         with _MEMORY_LOCK:
             tokens = _MEMORY_STORE.get(key)
         return replace(tokens) if tokens is not None else None

@@ -113,7 +113,10 @@ def _coerce_port(pg_port: Any) -> int:
             f'pg_port must be an integer port number, got {pg_port!r}.')
     try:
         port = int(pg_port)
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError, OverflowError) as e:
+        # int(float('inf')) / int(1e400) raise OverflowError (not ValueError),
+        # so catch it too — else a non-finite pg_port escapes the typed-error
+        # contract as a bare OverflowError (mirrors _validate_positive_number).
         raise OidcConfigError(
             f'pg_port must be an integer port number, got {pg_port!r}.') from e
     if not 1 <= port <= 65535:
