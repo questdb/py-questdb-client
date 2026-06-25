@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import threading
 import time
 import webbrowser
@@ -190,17 +191,29 @@ def _validate_positive_number(value: Any, name: str) -> None:
     """
     Require a duration argument to be a positive, finite number of seconds.
 
-    Mirrors the constructor's other up-front type checks: a non-numeric value
-    would otherwise surface later as a bare TypeError from the poll-interval
-    clamp (``max(_MIN_POLL_INTERVAL, default_interval)``) or a urllib socket
-    call (``timeout``), escaping the module's typed-error contract. ``bool`` is
-    an ``int`` subclass, so reject it explicitly; ``NaN`` fails ``> 0`` and is
-    rejected too (``<= 0`` would let it through).
+    Mirrors the constructor's other up-front type checks: a value that is
+    non-numeric, non-finite, or too large for the platform clock would otherwise
+    surface later as a bare ``TypeError``/``OverflowError`` from the poll-interval
+    clamp (``max(_MIN_POLL_INTERVAL, default_interval)``) or a urllib socket call
+    (``timeout`` -> ``socket.settimeout``), escaping the module's typed-error
+    contract. ``bool`` is an ``int`` subclass, so reject it explicitly. ``NaN``
+    fails ``> 0``; ``inf`` *passes* ``> 0`` yet overflows ``settimeout``, and a
+    too-large ``int`` does too — both are caught by the finite check below (which
+    is wrapped because ``math.isfinite`` itself raises ``OverflowError`` on an
+    ``int`` too large to convert to ``float``).
     """
-    if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not value > 0):
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if ok:
+        try:
+            ok = math.isfinite(value) and value > 0
+        except (OverflowError, ValueError):
+            # A too-large int: finite in principle but unusable as a timeout
+            # (settimeout would raise its own OverflowError later).
+            ok = False
+    if not ok:
         raise OidcConfigError(
-            f'{name} must be a positive number of seconds, got {value!r}')
+            f'{name} must be a positive, finite number of seconds, '
+            f'got {value!r}')
 
 
 class OidcDeviceAuth:

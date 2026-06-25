@@ -35,6 +35,7 @@ Resolution order:
 
 from __future__ import annotations
 
+import re
 import ssl
 import urllib.parse
 from dataclasses import dataclass
@@ -271,6 +272,31 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
     return ep_segs[:len(base_segs)] == base_segs
 
 
+# An endpoint authority that urllib's urlparse() splits differently than the
+# transport (http.client) connects to. Every origin / issuer-pin / cache-key
+# check derives the host from ``urlparse(url).hostname``, which strips userinfo
+# at the LAST ``@`` (rpartition); urllib, however, hands the FULL netloc to the
+# connection. So ``https://attacker.evil\@idp.good/token`` validates as host
+# ``idp.good`` (passing the issuer-origin pin) while urllib connects to the whole
+# ``attacker.evil\@idp.good``. A real credential-endpoint authority never carries
+# userinfo, a backslash, whitespace or a control char, so reject them — fail
+# closed — mirroring the host hygiene already enforced in
+# ``_adapters._ILLEGAL_HOST_CHARS`` and ``_render._SAFE_HOST_RE``.
+_UNSAFE_AUTHORITY_RE = re.compile(r'[\\\s\x00-\x1f\x7f]')
+
+
+def _reject_confusable_authority(url: str, *, label: str) -> None:
+    """Reject a credential URL whose authority urllib may resolve unlike parsed."""
+    netloc = safe_urlparse(url)[0].netloc
+    if '@' in netloc or _UNSAFE_AUTHORITY_RE.search(netloc):
+        raise OidcConfigError(
+            f'The OIDC {label} URL {url!r} has an unsafe authority (userinfo '
+            "'@', a backslash, whitespace, or a control character). A real "
+            'endpoint host never contains these, so this indicates a malformed '
+            'or tampered configuration; refusing to send credentials to a host '
+            'the HTTP transport may resolve differently than the one validated.')
+
+
 def validate_endpoint_origins(
         token_endpoint: str,
         device_authorization_endpoint: str) -> None:
@@ -293,6 +319,14 @@ def validate_endpoint_origins(
     ``oauth2.googleapis.com``), so requiring issuer-origin equality there would
     reject a legitimate cross-origin IdP.
     """
+    # Reject a confusable authority FIRST, so the origin comparison below (and
+    # every later check) can't validate a host different from the one urllib
+    # will connect to. Runs in OidcDeviceAuth.__init__, which every construction
+    # path goes through, so it covers caller-explicit and discovered endpoints.
+    _reject_confusable_authority(token_endpoint, label='token endpoint')
+    _reject_confusable_authority(
+        device_authorization_endpoint,
+        label='device-authorization endpoint')
     if _normalized_origin(token_endpoint) != _normalized_origin(
             device_authorization_endpoint):
         raise OidcConfigError(
@@ -517,6 +551,9 @@ def resolve_config(
     # outside the issuer path), so pinning them would reject a legitimate IdP.
     # The co-location check in OidcDeviceAuth.__init__ still applies on top.
     if issuer:
+        # The pin compares each /settings endpoint's origin against the issuer's;
+        # a confusable issuer authority would pin to the wrong host, so vet it too.
+        _reject_confusable_authority(issuer, label='issuer')
         issuer_origin = _normalized_origin(issuer)
         for label, url, from_settings, confirmed_by_idp in (
                 ('token endpoint', token_endpoint, token_from_settings,

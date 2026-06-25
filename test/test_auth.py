@@ -838,8 +838,14 @@ class TestDeviceFlow(AuthTestBase):
                 {'default_interval': 'soon'}, {'default_interval': 0},
                 {'default_interval': -1}, {'default_interval': True},
                 {'default_interval': float('nan')},
+                {'default_interval': float('inf')},
                 {'timeout': 'slow'}, {'timeout': 0}, {'timeout': -5},
-                {'timeout': True}, {'timeout': float('nan')}):
+                {'timeout': True}, {'timeout': float('nan')},
+                # M2: inf passes ``> 0`` but crashes socket.settimeout with a
+                # bare OverflowError, and a too-large int does the same; both
+                # must raise the typed error up front, not escape from urllib.
+                {'timeout': float('inf')}, {'timeout': float('-inf')},
+                {'timeout': 10 ** 1000}, {'default_interval': 10 ** 1000}):
             with self.assertRaises(OidcConfigError):
                 OidcDeviceAuth(**{**good, **bad})
         # A float interval/timeout is fine (clamped / passed to the socket).
@@ -2667,6 +2673,43 @@ class TestEndpointValidation(unittest.TestCase):
                 device_authorization_endpoint='https://idp.example.com/device',
                 token_endpoint='https://attacker.example/token',
                 renderer=Renderer())
+
+    def test_confusable_authority_endpoint_rejected(self):
+        # M1: urlparse(url).hostname (what co-location, the issuer-origin pin and
+        # the cache key all derive the host from) can report a DIFFERENT host
+        # than urllib connects to when the authority carries userinfo. E.g.
+        # 'https://attacker.evil\\@idp.good/token' parses with hostname
+        # 'idp.good' (passing the origin pin) while urllib connects to the full
+        # 'attacker.evil\\@idp.good'. Such an endpoint must be rejected on every
+        # construction path, fail-closed.
+        from questdb.auth._discovery import _reject_confusable_authority
+        for url in ('https://attacker.evil\\@idp.good/token',
+                    'https://idp.good@attacker.evil/token'):
+            with self.assertRaises(OidcConfigError):
+                _reject_confusable_authority(url, label='token endpoint')
+            with self.assertRaises(OidcConfigError):   # public co-location entry
+                self._validate(url, url)
+            with self.assertRaises(OidcConfigError):   # and the full constructor
+                OidcDeviceAuth(
+                    client_id='questdb',
+                    device_authorization_endpoint=url,
+                    token_endpoint=url,
+                    renderer=Renderer())
+        # A legitimate IPv6-literal authority is NOT flagged as confusable.
+        self._validate('https://[::1]:443/token', 'https://[::1]:443/device')
+
+    def test_confusable_issuer_rejected(self):
+        # M1 (defense-in-depth): a confusable issuer authority would make the
+        # issuer-origin pin compare against the wrong host. With explicit
+        # (caller-trusted) endpoints the pin loop is skipped, but the issuer is
+        # still vetted up front, so this raises.
+        from questdb.auth._discovery import resolve_config
+        with self.assertRaises(OidcConfigError):
+            resolve_config(
+                client_id='questdb',
+                token_endpoint='https://idp.good/token',
+                device_authorization_endpoint='https://idp.good/device',
+                issuer='https://idp.good@attacker.evil')
 
     def test_endpoint_path_under_issuer(self):
         # M1: segment-aware path containment used to isolate path-based realms.
