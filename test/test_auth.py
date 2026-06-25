@@ -2805,6 +2805,48 @@ class TestRendererSecurity(unittest.TestCase):
             'expires_in': 600, 'interval': 5})
         self.assertNotIn('<img', captured['html'].lower())
 
+    def test_jupyter_qr_persists_across_rerenders(self):
+        # M2: the QR <img> is built in the shared _prompt_head, so it survives
+        # EVERY re-render. on_waiting fires on the first poll tick and used to
+        # wipe it (the countdown re-render dropped the QR), leaving qr=True
+        # effectively dead in Jupyter. Stub qrcode so this is deterministic
+        # whether or not the optional dep is installed.
+        import re
+        from questdb.auth._render import JupyterRenderer
+        renders = []
+
+        class _Capturing(JupyterRenderer):
+            def _display(self, html_str):
+                renders.append(html_str)
+
+        fake_qrcode = types.ModuleType('qrcode')
+
+        def _make(data):
+            class _Img:
+                def save(self, buf, format=None):
+                    buf.write(b'\x89PNG' + data.encode())
+            return _Img()
+        fake_qrcode.make = _make
+
+        with mock.patch.dict(sys.modules, {'qrcode': fake_qrcode}):
+            r = _Capturing(qr=True)
+            r.on_prompt({
+                'user_code': 'WDJB-MJHT',
+                'verification_uri': 'https://idp.example.com/device',
+                'verification_uri_complete':
+                    'https://idp.example.com/device?user_code=WDJB-MJHT',
+                'expires_in': 600, 'interval': 5})
+            r.on_waiting(120.0)   # the first countdown tick — used to drop the QR
+            r.on_success('alice@example.com', 3600)
+
+        self.assertEqual(len(renders), 3)
+        self.assertTrue(
+            all('<img alt="QR code"' in h for h in renders),
+            'QR <img> must persist across on_prompt / on_waiting / on_success')
+        # The PNG is generated once and reused (same data-URI on every render).
+        uris = [re.search(r'src="(data:[^"]+)"', h).group(1) for h in renders]
+        self.assertEqual(len(set(uris)), 1)
+
     def test_fmt_mmss(self):
         from questdb.auth._render import _fmt_mmss
         self.assertEqual(_fmt_mmss(0), '0:00')

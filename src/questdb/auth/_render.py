@@ -247,6 +247,11 @@ class JupyterRenderer(Renderer):
         self._qr = qr
         self._handle = None
         self._resp: Dict[str, Any] = {}
+        # Cached QR <img> tag. None = not built yet; '' = built but unavailable
+        # (no scheme-valid target / qrcode not installed). Built once per prompt
+        # so every re-render (countdown ticks, success/failure) keeps the QR
+        # instead of dropping it, and the PNG isn't regenerated each tick.
+        self._qr_html: Optional[str] = None
 
     def _display(self, html_str: str):
         from IPython.display import HTML, display  # type: ignore
@@ -262,14 +267,15 @@ class JupyterRenderer(Renderer):
             + body + '</div>')
 
     def _prompt_head(self):
-        """Header + sanitized verification link and user code.
+        """Header + sanitized verification link, user code, and QR (if enabled).
 
-        Shared by :meth:`on_prompt` and :meth:`_render_with_status` so
-        sanitization is applied on both paths, never forgotten on one. The
-        untrusted device-response fields are stripped of control/bidi/zero-width
-        chars (which ``html.escape`` does NOT remove) before rendering;
-        ``_render_link`` also html-escapes and scheme-vets the URL. Returns
-        ``(body, uri, complete)`` so the QR target isn't re-derived.
+        Shared by :meth:`on_prompt` and :meth:`_render_with_status` so the QR and
+        the sanitized fields appear on EVERY render. The countdown re-renders go
+        through here too, so building the QR only in ``on_prompt`` would drop it
+        on the first tick. The untrusted device-response fields are stripped of
+        control/bidi/zero-width chars (which ``html.escape`` does NOT remove)
+        before rendering; ``_render_link`` also html-escapes and scheme-vets the
+        URL. Returns ``(body, uri, complete)``.
         """
         resp = self._resp
         uri = _strip_control(_verification_uri(resp))
@@ -288,18 +294,34 @@ class JupyterRenderer(Renderer):
                 '<div>' + _render_link(
                     complete, text='Click here to authorize directly →')
                 + '</div>')
+        if self._qr:
+            qr_html = self._qr_img(complete, uri)
+            if qr_html:
+                body.append(qr_html)
         return body, uri, complete
+
+    def _qr_img(self, complete: Optional[str], uri: str) -> str:
+        """The QR ``<img>`` for the verification URL, built once and cached.
+
+        Returns ``''`` when there is no scheme-valid target or ``qrcode`` is not
+        installed. Generated lazily on the first render and reused thereafter, so
+        the countdown re-renders neither drop the QR nor regenerate the PNG.
+        """
+        if self._qr_html is None:
+            target = _safe_link_url(complete) or _safe_link_url(uri)
+            data_uri = _qr_data_uri(target) if target else None
+            self._qr_html = (
+                f'<img alt="QR code" src="{data_uri}" '
+                'style="margin-top:8px;width:160px;height:160px"/>'
+            ) if data_uri else ''
+        return self._qr_html
 
     def on_prompt(self, resp: Dict[str, Any]) -> None:
         self._resp = resp
-        body, uri, complete = self._prompt_head()
-        if self._qr:
-            qr_target = _safe_link_url(complete) or _safe_link_url(uri)
-            data_uri = _qr_data_uri(qr_target) if qr_target else None
-            if data_uri:
-                body.append(
-                    f'<img alt="QR code" src="{data_uri}" '
-                    'style="margin-top:8px;width:160px;height:160px"/>')
+        # Rebuild the QR for this response (a re-sign-in has a fresh user_code,
+        # so the cached image from a previous prompt would be stale/wrong).
+        self._qr_html = None
+        body, _uri, _complete = self._prompt_head()
         body.append(
             '<div id="qdb-oidc-status" style="color:#888;margin-top:8px">'
             '⏳ waiting for authorization…</div>')
