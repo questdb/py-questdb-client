@@ -23,7 +23,7 @@ except ImportError:
     pa = None
 
 import patch_path
-import questdb as qi
+import questdb._client as qi
 from qwp_ws_ack_server import QwpAckServer
 
 

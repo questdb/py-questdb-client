@@ -46,7 +46,7 @@ except ImportError:
     pa = None
 
 import patch_path
-import questdb as qi
+import questdb._client as qi
 
 # Reuse the ingress spine: schema generator, the JSON-contract helpers, SQL
 # helpers, timing, and the table-name convention all stay shared so the two

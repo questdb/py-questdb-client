@@ -63,7 +63,7 @@ import numpy as np
 import patch_path
 patch_path.patch()
 
-import questdb as qi
+import questdb._client as qi
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))

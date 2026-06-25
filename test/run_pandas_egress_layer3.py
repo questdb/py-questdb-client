@@ -26,7 +26,7 @@ sys.path.append(str(PROJ_ROOT / "c-questdb-client" / "system_test"))
 
 from fixture import QuestDbFixture, install_questdb_from_repo
 
-import questdb as qi
+import questdb._client as qi
 from benchmark_pandas_columnar import (
     DEFAULT_HI_SYM_CARD,
     DEFAULT_SYM_CARD,

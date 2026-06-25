@@ -19,7 +19,7 @@ import atheris
 
 
 with atheris.instrument_imports():
-    import questdb as qi
+    import questdb._client as qi
 
 
 @atheris.instrument_func

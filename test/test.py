@@ -29,7 +29,7 @@ from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 from qwp_ws_ack_server import QwpAckServer
 
-import questdb as qi
+import questdb._client as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import (

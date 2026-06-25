@@ -2,7 +2,7 @@
 import struct
 import datetime
 import numpy as np
-import questdb as qi
+import questdb._client as qi
 
 ARRAY_TYPE_TAGS = {
     np.float64: 10,

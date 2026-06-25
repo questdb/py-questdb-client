@@ -32,7 +32,7 @@ except ImportError:
     pyarrow = None
 
 
-import questdb as qi
+import questdb._client as qi
 
 
 QUESTDB_VERSION = '9.4.3'

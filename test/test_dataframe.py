@@ -22,7 +22,7 @@ except ImportError:
     import pytz
     _TZ = pytz.timezone('America/New_York')
 
-import questdb as qi
+import questdb._client as qi
 import pandas as pd
 import numpy as np
 import pyarrow as pa

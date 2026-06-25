@@ -15,7 +15,7 @@ import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
-import questdb as qi
+import questdb._client as qi
 from qwp_ws_ack_server import QwpAckServer
 
 try:

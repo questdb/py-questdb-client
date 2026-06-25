@@ -20,7 +20,7 @@ _limit_malloc_arenas()
 
 import patch_path
 
-import questdb as qi
+import questdb._client as qi
 
 try:
     import numpy as np
