@@ -243,29 +243,25 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
 
 def validate_endpoint_origins(
         token_endpoint: str,
-        device_authorization_endpoint: str,
-        issuer: Optional[str] = None) -> None:
+        device_authorization_endpoint: str) -> None:
     """
-    Reject an OIDC configuration that would send credentials off-origin.
+    Require the two credential endpoints to share a single origin.
 
     The device code and long-lived refresh token are POSTed to the device-
-    authorization and token endpoints. This limits a tampered or MITM'd config
-    from steering those credentials to an attacker host:
+    authorization and token endpoints, which RFC 8628 always co-locates on one
+    authorization server. A configuration that splits them across origins is
+    therefore malformed or tampered; refuse it rather than POST the credentials
+    to two different hosts.
 
-    * the two credential endpoints must share a single origin (always co-located
-      on the authorization server per RFC 8628); and
-    * when ``issuer`` is known independently (explicit or from the IdP
-      ``.well-known``), both endpoints must share its **origin**.
-
-    Origin-level only: it does **not** isolate path-based multi-tenant realms
-    (e.g. Keycloak ``https://host/realms/{realm}``, one origin per realm). That
-    path-scoping lives in :func:`resolve_config`, and only for endpoints from the
-    untrusted QuestDB ``/settings``; endpoints from IdP discovery or the caller
-    are authoritative and not path-restricted (some IdPs, e.g. Azure AD,
-    legitimately place endpoints outside the issuer path).
-
-    Pass ``issuer=`` to pin the IdP when QuestDB advertises the endpoints
-    directly, so a compromised server cannot redirect the token POST.
+    The issuer-**origin** pin for endpoints sourced from the untrusted QuestDB
+    ``/settings`` response is enforced separately, in :func:`resolve_config`,
+    where each endpoint's provenance is known. Endpoints passed explicitly by the
+    caller, or discovered from the IdP's own (authoritative, TLS-fetched)
+    ``.well-known`` document, are NOT pinned to the issuer origin: the OIDC
+    issuer is an *identifier*, not necessarily the endpoints' host (e.g. Google
+    issues from ``accounts.google.com`` but serves tokens from
+    ``oauth2.googleapis.com``), so requiring issuer-origin equality there would
+    reject a legitimate cross-origin IdP.
     """
     if _normalized_origin(token_endpoint) != _normalized_origin(
             device_authorization_endpoint):
@@ -275,18 +271,6 @@ def validate_endpoint_origins(
             f'{_origin_str(device_authorization_endpoint)}); refusing to send '
             'credentials. This indicates a misconfigured or tampered OIDC '
             'configuration.')
-    if issuer:
-        issuer_origin = _normalized_origin(issuer)
-        for label, url in (
-                ('token endpoint', token_endpoint),
-                ('device-authorization endpoint',
-                 device_authorization_endpoint)):
-            if _normalized_origin(url) != issuer_origin:
-                raise OidcConfigError(
-                    f'OIDC {label} origin ({_origin_str(url)}) does not match '
-                    f'the issuer origin ({_origin_str(issuer)}); refusing to '
-                    'send credentials to an endpoint outside the trusted '
-                    'issuer.')
 
 
 def _resolve_endpoint(value: Any) -> Optional[str]:
@@ -296,7 +280,7 @@ def _resolve_endpoint(value: Any) -> Optional[str]:
     Mirroring the Java client, a QuestDB-advertised endpoint is taken verbatim
     and only as an absolute URL. A path-only (or otherwise non-absolute, or
     non-string) value is treated as absent, so resolution falls back to the IdP
-    ``.well-known`` document — which requires an issuer / ``discovery_url`` pin.
+    ``.well-known`` document — which requires an ``issuer`` pin.
     We deliberately do **not** assemble a URL from ``acl.oidc.host`` /
     ``acl.oidc.port`` / ``acl.oidc.tls.enabled``: those are server building
     blocks, not a credential-routing source the client should trust.
@@ -314,26 +298,26 @@ def well_known_url(issuer: str) -> str:
 def discover_device_endpoint_from_idp(
         *,
         issuer: Optional[str],
-        discovery_url: Optional[str],
         ctx: Optional[ssl.SSLContext] = None,
         insecure: bool = False,
         timeout: float = 30) -> Dict[str, Any]:
     """
     Fetch the IdP ``.well-known/openid-configuration`` and return it.
 
-    The discovery URL comes from ``discovery_url``, else built from ``issuer``;
-    one is required. The discovery origin is **never** derived from a
-    QuestDB-advertised endpoint — that would let a tampered ``/settings`` choose
-    where credentials are sent, with the co-location / issuer-pin checks passing
-    trivially because every value would share the attacker's origin.
+    The discovery URL is built from the pinned ``issuer``
+    (``{issuer}/.well-known/openid-configuration``). The discovery origin is
+    **never** derived from a QuestDB-advertised endpoint — that would let a
+    tampered ``/settings`` choose where credentials are sent, with the
+    co-location / issuer-pin checks passing trivially because every value would
+    share the attacker's origin.
     """
-    url = discovery_url or (well_known_url(issuer) if issuer else None)
-    if not url:
+    if not issuer:
         raise OidcConfigError(
             'Cannot discover the IdP device-authorization endpoint: no issuer '
-            'or discovery_url was given. Pass issuer=... (or '
-            'device_authorization_endpoint=... to skip discovery).')
-    doc = get_json(url, ctx=ctx, insecure=insecure, timeout=timeout)
+            'was given. Pass issuer=... (or device_authorization_endpoint=... '
+            'to skip discovery).')
+    doc = get_json(
+        well_known_url(issuer), ctx=ctx, insecure=insecure, timeout=timeout)
     # get_json guarantees valid JSON, not a JSON *object*. Coerce a non-dict
     # document (from a captive portal, bad proxy, or hostile IdP) to empty so
     # resolve_config's doc.get(...) yields a clear "could not resolve" error
@@ -351,7 +335,6 @@ def resolve_config(
         token_endpoint: Optional[str] = None,
         device_authorization_endpoint: Optional[str] = None,
         issuer: Optional[str] = None,
-        discovery_url: Optional[str] = None,
         ctx: Optional[ssl.SSLContext] = None,
         insecure: bool = False,
         timeout: float = 30) -> OidcConfig:
@@ -399,28 +382,40 @@ def resolve_config(
         device_authorization_endpoint
         or _resolve_endpoint(cfg.get(_K_DEVICE_ENDPOINT)))
 
+    # Freeze each endpoint's provenance BEFORE discovery may fill a missing one.
+    # Only endpoints that came from the untrusted /settings get pinned to the
+    # issuer origin below; a caller-explicit or IdP-discovered endpoint is
+    # authoritative. `doc_*_endpoint` record what IdP discovery advertised, so a
+    # /settings endpoint the IdP's own document confirms can be trusted even when
+    # it sits off the issuer origin (e.g. Google: accounts.google.com issuer vs
+    # oauth2.googleapis.com endpoints).
+    token_from_settings = bool(token_endpoint) and not explicit_token_endpoint
+    device_from_settings = (
+        bool(device_authorization_endpoint) and not explicit_device_endpoint)
+    doc_token_endpoint: Optional[str] = None
+    doc_device_endpoint: Optional[str] = None
+
     # Over a plaintext-http /settings channel (insecure=True, non-loopback), a
     # tampered response can advertise BOTH credential endpoints at one attacker
     # origin: the discovery path below is skipped, co-location passes trivially
     # (shared origin) and the issuer-pin check is vacuous (no issuer), so nothing
-    # else catches it. Demand the same out-of-band pin (issuer= / discovery_url=)
-    # before trusting /settings endpoints here. Caller-explicit endpoints and
-    # those from an authenticated (https / loopback) /settings are unaffected.
+    # else catches it. Demand an out-of-band issuer pin before trusting /settings
+    # endpoints here. Caller-explicit endpoints and those from an authenticated
+    # (https / loopback) /settings are unaffected.
     settings_supplied_credentials = (
         (token_endpoint and not explicit_token_endpoint)
         or (device_authorization_endpoint and not explicit_device_endpoint))
     if (questdb_url and settings_supplied_credentials
-            and not issuer and not discovery_url
+            and not issuer
             and _settings_channel_is_plaintext(questdb_url)):
         raise OidcConfigError(
             'QuestDB was reached over plaintext http (insecure=True), so its '
             '/settings response — and the OIDC endpoints it advertises — can be '
             'tampered in transit and used to redirect the device-code and '
             'refresh-token requests to an attacker. Pin the identity provider '
-            'out-of-band with issuer="https://your-idp" (or discovery_url=...), '
-            'pass the endpoints explicitly (token_endpoint=..., '
-            'device_authorization_endpoint=...), or connect to QuestDB over '
-            'https so /settings is authenticated.')
+            'out-of-band with issuer="https://your-idp", pass the endpoints '
+            'explicitly (token_endpoint=..., device_authorization_endpoint=...), '
+            'or connect to QuestDB over https so /settings is authenticated.')
 
     # For /settings endpoints with an out-of-band issuer, require each under the
     # issuer's PATH, not just its origin: path-based IdPs share one origin per
@@ -446,34 +441,6 @@ def resolve_config(
                     'them explicitly (token_endpoint=..., '
                     'device_authorization_endpoint=...).')
 
-    # Same scoping for a discovery_url-only pin (no issuer): require each
-    # /settings credential endpoint on the pinned discovery origin. The plaintext
-    # guard above accepts discovery_url= as a sufficient pin, but the only other
-    # discovery_url enforcement lives in the IdP-discovery block below, which is
-    # SKIPPED when /settings already advertises both endpoints — so without this
-    # a tampered plaintext /settings could route the device code and refresh
-    # token to an attacker origin the pin was meant to forbid. When discovery
-    # DOES run, that block additionally pins the discovered endpoint(s) to this
-    # origin. Caller-explicit endpoints are authoritative and skip this.
-    if discovery_url and not issuer:
-        discovery_origin = _normalized_origin(discovery_url)
-        for label, url, from_settings in (
-                ('token endpoint', token_endpoint,
-                 not explicit_token_endpoint),
-                ('device-authorization endpoint',
-                 device_authorization_endpoint, not explicit_device_endpoint)):
-            if (url and from_settings
-                    and _normalized_origin(url) != discovery_origin):
-                raise OidcConfigError(
-                    f'The OIDC {label} advertised by QuestDB /settings '
-                    f'({url!r}) is not on the pinned discovery_url origin '
-                    f'({_origin_str(discovery_url)}); refusing to send '
-                    'credentials to an endpoint off the pinned IdP origin. If '
-                    'your IdP serves discovery and tokens from different '
-                    'origins, pin with issuer=... or pass the endpoints '
-                    'explicitly (token_endpoint=..., '
-                    'device_authorization_endpoint=...).')
-
     # Fall back to IdP discovery when QuestDB doesn't advertise the device
     # (and/or token) endpoint. This contacts the IdP, so it is held to
     # https/loopback (insecure=False) regardless of the QuestDB flag.
@@ -482,7 +449,7 @@ def resolve_config(
         # target would be guessed from the /settings token endpoint, so a
         # tampered /settings could steer discovery (and the credential POSTs) to
         # an attacker origin with co-location / issuer-pin passing trivially.
-        if not issuer and not discovery_url:
+        if not issuer:
             raise OidcConfigError(
                 'QuestDB did not advertise the OIDC device-authorization '
                 'endpoint (and/or the token endpoint), so it must be '
@@ -492,44 +459,22 @@ def resolve_config(
                 'the device-code and refresh-token requests to an attacker. '
                 'Alternatively pass the endpoint(s) explicitly '
                 '(device_authorization_endpoint=..., token_endpoint=...) to '
-                'skip discovery, or discovery_url=... to pin the discovery '
-                'document.')
+                'skip discovery.')
         doc = discover_device_endpoint_from_idp(
-            issuer=issuer, discovery_url=discovery_url,
-            ctx=ctx, insecure=False, timeout=timeout)
-        # The discovery document is untrusted too: coerce its values like
-        # /settings. A non-string endpoint / issuer reads as absent (clear
-        # "could not resolve" below, or no issuer pin) instead of reaching
-        # safe_urlparse / the cache-key join as a raw object.
+            issuer=issuer, ctx=ctx, insecure=False, timeout=timeout)
+        # The discovery document is authoritative — fetched over TLS from the
+        # pinned issuer's own origin — but still coerce its values: a non-string
+        # endpoint reads as absent (clear "could not resolve" below) instead of
+        # reaching safe_urlparse / the cache-key join as a raw object. These
+        # discovered URLs are trusted as-is (no issuer-origin pin), so a
+        # cross-origin IdP — e.g. Google, which issues from accounts.google.com
+        # but serves tokens from oauth2.googleapis.com — resolves correctly.
+        doc_token_endpoint = _str_setting(doc.get('token_endpoint'))
+        doc_device_endpoint = _str_setting(
+            doc.get('device_authorization_endpoint'))
         device_authorization_endpoint = (
-            device_authorization_endpoint
-            or _str_setting(doc.get('device_authorization_endpoint')))
-        token_endpoint = (
-            token_endpoint or _str_setting(doc.get('token_endpoint')))
-        # OIDC Discovery §4.3 / RFC 8414 §3: when pinned ONLY by discovery_url,
-        # the document's self-declared issuer (the anchor
-        # validate_endpoint_origins would use) comes from that same untrusted
-        # document, so it's a vacuous check. Anchor to the caller-pinned
-        # discovery_url instead: require the credential endpoints on its origin
-        # so the document can't redirect the POSTs off it. Origin-level; pass
-        # issuer= and explicit endpoints if discovery and tokens differ in origin.
-        if discovery_url and not issuer:
-            discovery_origin = _normalized_origin(discovery_url)
-            for label, url in (
-                    ('token endpoint', token_endpoint),
-                    ('device-authorization endpoint',
-                     device_authorization_endpoint)):
-                if url and _normalized_origin(url) != discovery_origin:
-                    raise OidcConfigError(
-                        f'The OIDC {label} ({url!r}) discovered via the pinned '
-                        f'discovery_url ({discovery_url!r}) is on a different '
-                        'origin; refusing to let a discovery document redirect '
-                        'credentials off the pinned IdP origin (OIDC Discovery '
-                        '§4.3). Pin the IdP with issuer="https://your-idp" and '
-                        'pass token_endpoint=/device_authorization_endpoint= '
-                        'explicitly if it serves discovery and tokens from '
-                        'different origins.')
-        issuer = issuer or _str_setting(doc.get('issuer'))
+            device_authorization_endpoint or doc_device_endpoint)
+        token_endpoint = token_endpoint or doc_token_endpoint
 
     if not token_endpoint:
         raise OidcConfigError(
@@ -543,9 +488,44 @@ def resolve_config(
             'device grant, or pass device_authorization_endpoint=... '
             'explicitly.')
 
-    # The credential-endpoint origin check (validate_endpoint_origins) is
+    # Pin /settings-sourced credential endpoints to the out-of-band issuer's
+    # ORIGIN. /settings is untrusted (a tampered or MITM'd response can advertise
+    # an attacker endpoint), so an endpoint it supplies must resolve to the
+    # pinned issuer's origin — UNLESS the IdP's own (authoritative, TLS-fetched)
+    # discovery document advertised that very URL, which independently confirms
+    # it. Caller-explicit and IdP-discovered endpoints are authoritative and skip
+    # this: the issuer is an OIDC *identifier*, not necessarily the endpoints'
+    # host (Google issues from accounts.google.com but serves tokens from
+    # oauth2.googleapis.com), so pinning them to the issuer origin would reject a
+    # legitimate cross-origin IdP. The issuer-PATH check above and the
+    # co-location check in OidcDeviceAuth.__init__ still apply.
+    if issuer:
+        issuer_origin = _normalized_origin(issuer)
+        for label, url, from_settings, confirmed_by_idp in (
+                ('token endpoint', token_endpoint, token_from_settings,
+                 doc_token_endpoint),
+                ('device-authorization endpoint',
+                 device_authorization_endpoint, device_from_settings,
+                 doc_device_endpoint)):
+            if (from_settings
+                    and _normalized_origin(url) != issuer_origin
+                    and url != confirmed_by_idp):
+                raise OidcConfigError(
+                    f'The OIDC {label} advertised by QuestDB /settings '
+                    f'({url!r}) is not on the pinned issuer origin '
+                    f'({_origin_str(issuer)}) and was not confirmed by the IdP '
+                    'discovery document; refusing to send credentials to an '
+                    'endpoint outside the trusted issuer. If your IdP serves '
+                    'tokens from a different origin than its issuer, pass the '
+                    'endpoint(s) explicitly (token_endpoint=..., '
+                    'device_authorization_endpoint=...), or omit them from '
+                    '/settings so they are taken from authoritative IdP '
+                    'discovery.')
+
+    # The credential-endpoint CO-LOCATION check (validate_endpoint_origins) is
     # enforced centrally in OidcDeviceAuth.__init__, which every path goes
-    # through.
+    # through; the issuer-ORIGIN pin for /settings-sourced endpoints is enforced
+    # just above, where each endpoint's provenance is known.
 
     return OidcConfig(
         client_id=client_id,

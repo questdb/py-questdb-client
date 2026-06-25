@@ -37,7 +37,11 @@ QuestDB over the auth paths it already supports (HTTP ``Bearer`` / PG-wire
 Highlights:
 
 * Auto-discovery of OIDC config from the QuestDB ``/settings`` endpoint, with a
-  fallback to the IdP ``.well-known`` document.
+  fallback to the IdP ``.well-known`` document. Works with IdPs whose issuer is
+  on a different origin than its token / device-authorization endpoints (e.g.
+  Google: ``accounts.google.com`` issuer, ``oauth2.googleapis.com`` endpoints),
+  while still pinning endpoints advertised over an untrusted ``/settings``
+  channel to the issuer.
 * In-process token cache with silent refresh (tokens are never written to
   disk).
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,

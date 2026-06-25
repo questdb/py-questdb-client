@@ -116,7 +116,7 @@ resolves the OIDC configuration in this order:
 2. If the device-authorization endpoint is not advertised, the helper falls
    back to the IdP discovery document
    (``{issuer}/.well-known/openid-configuration``). This path **requires** an
-   explicit ``issuer=`` (or ``discovery_url=``) argument.
+   explicit ``issuer=`` argument.
 
 Anything you pass explicitly overrides discovery. You can also skip discovery
 entirely:
@@ -226,19 +226,23 @@ Security notes
   QuestDB ``/settings``. The helper requires both endpoints to share a single
   origin and rejects the configuration otherwise. Because ``/settings`` is
   authoritative-by-QuestDB, a compromised server could in principle point them
-  elsewhere; pass ``issuer=`` to **pin** the IdP so the endpoints are verified
-  to belong to it and credentials can't be redirected to another host. The pin
-  checks both the **origin** and, for endpoints advertised by ``/settings``, the
-  issuer **path** — so on a path-based multi-tenant IdP (e.g. Keycloak issuers
-  ``https://host/realms/{realm}``) a tampered ``/settings`` cannot redirect the
-  device code / refresh token to a *different realm on the same host*. (Caller-
-  supplied endpoints and endpoints from the IdP's own discovery document are
-  trusted as-is and not path-restricted, since some IdPs — e.g. Azure AD — place
-  their endpoints outside the issuer path; pass such endpoints explicitly or let
-  discovery resolve them.) When the server does not advertise the device-
-  authorization endpoint (so it must be discovered from the IdP), ``issuer=``
-  (or ``discovery_url=``) is **required** for exactly this reason — the helper
-  refuses to guess the discovery origin from the server-supplied token endpoint.
+  elsewhere; pass ``issuer=`` to **pin** the IdP so endpoints advertised over
+  ``/settings`` are verified to belong to it and credentials can't be redirected
+  to another host. For a ``/settings`` endpoint the pin checks the issuer
+  **origin** and **path** — so on a path-based multi-tenant IdP (e.g. Keycloak
+  issuers ``https://host/realms/{realm}``) a tampered ``/settings`` cannot
+  redirect the device code / refresh token to a *different realm on the same
+  host*. (Caller-supplied endpoints and endpoints from the IdP's own
+  ``.well-known`` document are authoritative and are **not** pinned to the issuer
+  origin/path: the issuer is an OIDC *identifier*, not necessarily the
+  endpoints' host — e.g. Google issues from ``accounts.google.com`` but serves
+  tokens from ``oauth2.googleapis.com``, and some IdPs such as Azure AD place
+  endpoints outside the issuer path. A ``/settings`` endpoint that sits off the
+  issuer origin is still accepted when the IdP's own discovery document confirms
+  the same URL.) When the server does not advertise the device-
+  authorization endpoint (so it must be discovered from the IdP), ``issuer=`` is
+  **required** for exactly this reason — the helper refuses to guess the
+  discovery origin from the server-supplied token endpoint.
 * Adapters avoid logging the token / PG DSN. Avoid logging them yourself.
 * Standard proxy / CA settings (``HTTPS_PROXY``, ``REQUESTS_CA_BUNDLE``,
   ``SSL_CERT_FILE``) are honoured for the IdP / discovery transport; you can

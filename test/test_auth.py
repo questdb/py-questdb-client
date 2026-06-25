@@ -1447,49 +1447,6 @@ class TestDiscovery(AuthTestBase):
             OidcDeviceAuth.from_questdb(self.base, insecure=True)
         self.assertIn('issuer', str(cm.exception))
 
-    def test_device_fallback_with_discovery_url_is_accepted(self):
-        # discovery_url= is an out-of-band pin too, accepted in lieu of issuer=.
-        self.state.settings = {'config': {
-            'acl.oidc.enabled': True,
-            'acl.oidc.client.id': 'questdb',
-            'acl.oidc.token.endpoint': self.base + '/token',
-        }}
-        self.state.well_known = {
-            'issuer': self.base,
-            'token_endpoint': self.base + '/token',
-            'device_authorization_endpoint': self.base + '/device',
-        }
-        auth = OidcDeviceAuth.from_questdb(
-            self.base,
-            discovery_url=self.base + '/.well-known/openid-configuration',
-            insecure=True, renderer=Renderer())
-        self.assertEqual(auth.config.device_authorization_endpoint,
-                         self.base + '/device')
-
-    def test_discovery_url_rejects_off_origin_issuer_in_doc(self):
-        # M4: discovery_url= is advertised as an out-of-band pin, but the doc it
-        # points to could declare an attacker issuer AND endpoints all on one
-        # (attacker) origin — which passes co-location / issuer-origin vacuously.
-        # The discovered issuer must share the pinned discovery_url origin (OIDC
-        # Discovery §4.3), else refuse. /settings advertises NO endpoints, so
-        # both come from the (hostile) doc — the exact gap the fix closes.
-        self.state.settings = {'config': {
-            'acl.oidc.enabled': True,
-            'acl.oidc.client.id': 'questdb',
-        }}
-        self.state.well_known = {
-            'issuer': 'https://attacker.example.net',
-            'token_endpoint': 'https://attacker.example.net/token',
-            'device_authorization_endpoint':
-                'https://attacker.example.net/device',
-        }
-        with self.assertRaises(OidcConfigError) as cm:
-            OidcDeviceAuth.from_questdb(
-                self.base,
-                discovery_url=self.base + '/.well-known/openid-configuration',
-                insecure=True)
-        self.assertIn('origin', str(cm.exception).lower())
-
     def test_oidc_disabled_raises(self):
         self.state.settings = {'config': {'acl.oidc.enabled': False}}
         with self.assertRaises(OidcConfigError):
@@ -1580,6 +1537,67 @@ class TestDiscovery(AuthTestBase):
         self.assertEqual(auth.config.device_authorization_endpoint,
                          self.base + '/device')
 
+    def test_settings_endpoint_off_issuer_origin_confirmed_by_discovery(self):
+        # Google-style IdP: /settings advertises the token endpoint on a
+        # DIFFERENT origin than the pinned issuer, and the device endpoint is
+        # discovered. The IdP's own .well-known (fetched from the pinned issuer)
+        # advertises the SAME off-origin token endpoint, which authoritatively
+        # confirms it — so it is accepted despite not being on the issuer origin.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': 'https://oauth2.idp.example/token',
+        }}
+        self.state.well_known = {
+            'issuer': self.base,
+            'token_endpoint': 'https://oauth2.idp.example/token',
+            'device_authorization_endpoint':
+                'https://oauth2.idp.example/device',
+        }
+        auth = OidcDeviceAuth.from_questdb(
+            self.base, issuer=self.base, insecure=True, renderer=Renderer())
+        self.assertEqual(auth.config.token_endpoint,
+                         'https://oauth2.idp.example/token')
+        self.assertEqual(auth.config.device_authorization_endpoint,
+                         'https://oauth2.idp.example/device')
+
+    def test_settings_off_origin_token_not_confirmed_by_discovery_rejected(self):
+        # The flip side of the confirmed case: /settings advertises an
+        # off-issuer-origin token endpoint that the IdP discovery document does
+        # NOT match (a tampered redirect). It is rejected — the device endpoint
+        # is discovered on the SAME (attacker) origin only so co-location passes
+        # and the issuer-origin pin is what does the rejecting.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': 'https://attacker.example/token',
+        }}
+        self.state.well_known = {
+            'issuer': self.base,
+            'token_endpoint': 'https://oauth2.idp.example/token',
+            'device_authorization_endpoint': 'https://attacker.example/device',
+        }
+        with self.assertRaises(OidcConfigError) as cm:
+            OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                        insecure=True)
+        self.assertIn('issuer', str(cm.exception).lower())
+
+    def test_settings_both_endpoints_off_issuer_origin_rejected(self):
+        # When /settings advertises BOTH credential endpoints off the issuer
+        # origin, there is no IdP discovery round-trip to confirm them (both are
+        # present), so they cannot be trusted on the untrusted /settings channel
+        # -> reject. Pass them explicitly, or omit one so discovery confirms it.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': 'https://oauth2.idp.example/token',
+            'acl.oidc.device.authorization.endpoint':
+                'https://oauth2.idp.example/device',
+        }}
+        with self.assertRaises(OidcConfigError):
+            OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                        insecure=True)
+
     def test_well_known_404_raises_oidc_error(self):
         # issuer pinned (so the IdP fallback is allowed), but the .well-known
         # document 404s: get_json maps the non-2xx to OidcError rather than a
@@ -1613,8 +1631,8 @@ class TestInsecureSettingsGuard(unittest.TestCase):
     M1: a /settings response fetched over plaintext http to a non-loopback host
     (only reachable with insecure=True) is MITM-able, so IdP endpoints it
     advertises must not be trusted to route the device code / refresh token
-    without an out-of-band issuer/discovery_url pin — even when BOTH endpoints
-    are present (so the co-location check would otherwise pass trivially).
+    without an out-of-band issuer pin — even when BOTH endpoints are present (so
+    the co-location check would otherwise pass trivially).
     """
 
     _TAMPERED = {
@@ -1677,37 +1695,6 @@ class TestInsecureSettingsGuard(unittest.TestCase):
                             questdb_url='http://qdb.internal.example:9000',
                             insecure=True, issuer='https://evil.example.com')
         self.assertEqual(cfg.token_endpoint, 'https://evil.example.com/token')
-
-    def test_discovery_url_pin_scopes_settings_endpoints(self):
-        # C1: the plaintext guard accepts discovery_url= as a sufficient pin, but
-        # when /settings advertises BOTH credential endpoints the IdP-discovery
-        # block (the only other discovery_url enforcement) is skipped. A
-        # discovery_url pin must still constrain settings-supplied endpoints to
-        # its origin, else a tampered plaintext /settings routes credentials to
-        # an attacker the pin was meant to forbid. IdP discovery must NOT run.
-        with self.assertRaises(OidcConfigError) as cm:
-            self._resolve(
-                self._TAMPERED,  # both endpoints on evil.example.com
-                questdb_url='http://qdb.internal.example:9000', insecure=True,
-                discovery_url='https://idp.example.com/.well-known/'
-                              'openid-configuration')
-        self.assertIn('discovery_url', str(cm.exception))
-
-    def test_discovery_url_pin_accepts_on_origin_settings_endpoints(self):
-        # The legitimate case: /settings endpoints on the pinned discovery_url
-        # origin are accepted (origin-level, so a different path is fine), with
-        # no IdP round-trip since both endpoints are present.
-        good = {
-            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
-            'acl.oidc.token.endpoint': 'https://idp.example.com/oauth/token',
-            'acl.oidc.device.authorization.endpoint':
-                'https://idp.example.com/oauth/device'}
-        cfg = self._resolve(
-            good, questdb_url='http://qdb.internal.example:9000', insecure=True,
-            discovery_url='https://idp.example.com/.well-known/'
-                          'openid-configuration')
-        self.assertEqual(cfg.token_endpoint,
-                         'https://idp.example.com/oauth/token')
 
     def test_issuer_path_scopes_settings_endpoints(self):
         # M1: a tampered /settings advertising a DIFFERENT realm's endpoints on
@@ -2179,14 +2166,13 @@ class TestConfigHelpers(unittest.TestCase):
                 {'device_authorization_endpoint': ['nope'],
                  'token_endpoint': 'https://idp.example.com/token'},
                 issuer='https://idp.example.com')
-        # A non-string discovered issuer is dropped (no pin); valid endpoints
-        # still resolve and the cache key builds (the former crash site).
+        # Valid discovered endpoints still resolve and the cache key builds
+        # (the former non-string-field crash site).
         auth = from_discovery(
             {'device_authorization_endpoint': 'https://idp.example.com/device',
-             'token_endpoint': 'https://idp.example.com/token',
-             'issuer': ['not', 'a', 'string']},
-            discovery_url='https://idp.example.com/.well-known/openid-configuration')
-        self.assertIsNone(auth.config.issuer)
+             'token_endpoint': 'https://idp.example.com/token'},
+            issuer='https://idp.example.com')
+        self.assertEqual(auth.config.issuer, 'https://idp.example.com')
         self.assertTrue(auth.cache_key)
 
     def test_settings_config_nesting(self):
@@ -2245,12 +2231,31 @@ class TestEndpointValidation(unittest.TestCase):
         with self.assertRaises(OidcConfigError):
             self._validate('https://idp/token', 'https://evil.example/device')
 
-    def test_both_endpoints_off_issuer_rejected(self):
-        # Endpoints agree with each other but not with the pinned issuer:
-        # the issuer-pin loop must check both, not just their consistency.
-        with self.assertRaises(OidcConfigError):
-            self._validate('https://idp/token', 'https://idp/device',
-                           issuer='https://other-issuer.example')
+    def test_co_located_endpoints_accepted(self):
+        # validate_endpoint_origins now enforces ONLY co-location: the two
+        # credential endpoints must share an origin. The issuer-ORIGIN pin for
+        # /settings-sourced endpoints moved to resolve_config (where each
+        # endpoint's provenance is known), so a caller/discovery endpoint set
+        # whose origin differs from the issuer is no longer rejected here — see
+        # test_issuer_pin_rejects_off_origin_endpoints (/settings rejection) and
+        # test_explicit_cross_origin_issuer_accepted (Google-style acceptance).
+        self._validate('https://idp/token', 'https://idp/device')
+
+    def test_explicit_cross_origin_issuer_accepted(self):
+        # Google-style IdP: the issuer host differs from the endpoint host
+        # (issues from accounts.google.com, serves tokens from
+        # oauth2.googleapis.com). Endpoints passed explicitly are authoritative,
+        # so a cross-origin issuer must NOT be rejected — the issuer is an OIDC
+        # identifier, not necessarily the endpoints' host.
+        auth = OidcDeviceAuth(
+            client_id='questdb',
+            token_endpoint='https://oauth2.googleapis.com/token',
+            device_authorization_endpoint=
+                'https://oauth2.googleapis.com/device/code',
+            issuer='https://accounts.google.com',
+            renderer=Renderer())
+        self.assertEqual(auth.config.token_endpoint,
+                         'https://oauth2.googleapis.com/token')
 
     def test_malformed_port_raises_config_error(self):
         # A non-integer port must surface as OidcConfigError, not urllib's bare

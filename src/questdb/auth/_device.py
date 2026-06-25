@@ -297,13 +297,16 @@ class OidcDeviceAuth:
             audience=audience,
             issuer=issuer)
 
-        # Enforce the credential-endpoint co-location / issuer pin here too (not
-        # just on the discovery path), so the guarantee holds for this
-        # constructor as well.
+        # Enforce credential-endpoint co-location here too (not just on the
+        # discovery path), so the guarantee holds for this constructor as well.
+        # The issuer-ORIGIN pin is provenance-aware and lives in resolve_config
+        # (it applies only to endpoints from the untrusted /settings); endpoints
+        # reaching this constructor are caller-explicit (authoritative), so a
+        # cross-origin issuer — e.g. Google's accounts.google.com issuer with
+        # oauth2.googleapis.com endpoints — is intentionally accepted here.
         validate_endpoint_origins(
             self.config.token_endpoint,
-            self.config.device_authorization_endpoint,
-            self.config.issuer)
+            self.config.device_authorization_endpoint)
 
         # `insecure` permits plaintext http only to QuestDB (e.g. local dev).
         # _idp_post always holds the IdP to https (or loopback http), so the
@@ -349,7 +352,6 @@ class OidcDeviceAuth:
             audience: Optional[str] = None,
             groups_in_token: Optional[bool] = None,
             issuer: Optional[str] = None,
-            discovery_url: Optional[str] = None,
             token_endpoint: Optional[str] = None,
             device_authorization_endpoint: Optional[str] = None,
             insecure: bool = False,
@@ -385,7 +387,6 @@ class OidcDeviceAuth:
             token_endpoint=token_endpoint,
             device_authorization_endpoint=device_authorization_endpoint,
             issuer=issuer,
-            discovery_url=discovery_url,
             ctx=ctx,
             insecure=insecure,
             timeout=timeout)
