@@ -118,6 +118,17 @@ def settings_config(settings: Any) -> Dict[str, Any]:
     return settings
 
 
+def _settings_url(questdb_url: str) -> str:
+    # Build the /settings endpoint on the base URL's PATH, dropping any query or
+    # fragment, so a base like "https://host:9000/?x=1" can't yield a malformed
+    # ".../?x=1/settings". The path is rstrip('/')-ed to avoid a double slash.
+    # safe_urlparse maps a malformed URL to OidcConfigError, not a bare ValueError.
+    parts, _ = safe_urlparse(questdb_url)
+    path = (parts.path or '').rstrip('/') + '/settings'
+    return urllib.parse.urlunparse(
+        (parts.scheme, parts.netloc, path, '', '', ''))
+
+
 def fetch_settings(
         questdb_url: str,
         *,
@@ -125,8 +136,7 @@ def fetch_settings(
         insecure: bool = False,
         timeout: float = 30) -> Dict[str, Any]:
     """Fetch and return the QuestDB ``/settings`` config map."""
-    base = questdb_url.rstrip('/')
-    data = get_json(base + '/settings', ctx=ctx, insecure=insecure,
+    data = get_json(_settings_url(questdb_url), ctx=ctx, insecure=insecure,
                     timeout=timeout)
     return settings_config(data)
 

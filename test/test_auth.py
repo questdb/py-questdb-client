@@ -64,7 +64,7 @@ from questdb.auth import (  # noqa: E402
     psycopg_connect,
 )
 from questdb.auth._cache import (  # noqa: E402
-    MemoryCache, _MEMORY_GENERATION, _MEMORY_STORE)
+    MemoryCache, _MEMORY_GENERATION, _MEMORY_INFLIGHT, _MEMORY_STORE)
 from questdb.auth._render import Renderer  # noqa: E402
 from questdb.auth._adapters import _require_host  # noqa: E402
 
@@ -281,6 +281,7 @@ class AuthTestBase(unittest.TestCase):
     def setUp(self):
         _MEMORY_STORE.clear()
         _MEMORY_GENERATION.clear()
+        _MEMORY_INFLIGHT.clear()
         # open_browser defaults to True, so stub webbrowser.open: device-flow
         # tests must never spawn a real browser. Tests asserting open/skip
         # behaviour use self.mock_browser_open (or patch it themselves).
@@ -1975,6 +1976,46 @@ class TestConcurrency(AuthTestBase):
             cache.store_if_current(key, TokenSet(access_token='T2'), gen2))
         self.assertIsNotNone(cache.load(key))
 
+    def test_generation_pruned_when_no_acquisition_in_flight(self):
+        # M8: the per-key clear()-generation must not accumulate forever. After a
+        # clear() and a completed re-acquisition (no acquisition left in flight),
+        # neither the generation nor the in-flight bookkeeping is retained for
+        # the key, so the process-global maps stay bounded.
+        auth = self.make_auth()
+        auth.token()                 # sign in (slow path: capture + release)
+        self.assertNotIn(auth.cache_key, _MEMORY_INFLIGHT)   # released
+        auth.clear()                 # no acquisition in flight -> drop, no bump
+        self.assertNotIn(auth.cache_key, _MEMORY_GENERATION)
+        auth.token()                 # re-acquire; release() prunes on completion
+        self.assertNotIn(auth.cache_key, _MEMORY_GENERATION)
+        self.assertNotIn(auth.cache_key, _MEMORY_INFLIGHT)
+
+    def test_concurrent_clear_retains_generation_until_acquire_done(self):
+        # The flip side of pruning: while an acquisition IS in flight, a
+        # concurrent clear() must RETAIN the bumped generation so the in-flight
+        # store_if_current is still dropped (clear() honored). The entry is
+        # reclaimed only once that acquisition releases — pruning must not weaken
+        # this in-flight defense. Strengthens the cross-instance clear() test.
+        seen = {}
+        a = self.make_auth()
+        b = self.make_auth()
+        self.assertEqual(a.cache_key, b.cache_key)
+
+        class _ClearMidFlow(Renderer):
+            def on_prompt(self, resp):
+                b.clear()  # concurrent clear during A's in-flight sign-in
+                # A is mid-acquisition, so the generation is retained here.
+                seen['gen_present'] = a.cache_key in _MEMORY_GENERATION
+                seen['inflight'] = _MEMORY_INFLIGHT.get(a.cache_key, 0)
+
+        a._renderer = _ClearMidFlow()
+        self.assertEqual(a.token(), ID_TOKEN)
+        self.assertTrue(seen['gen_present'])             # retained during the flow
+        self.assertGreaterEqual(seen['inflight'], 1)
+        self.assertNotIn(a.cache_key, _MEMORY_STORE)        # A's store dropped
+        self.assertNotIn(a.cache_key, _MEMORY_GENERATION)   # reclaimed on release
+        self.assertNotIn(a.cache_key, _MEMORY_INFLIGHT)
+
 
 class TestAdapters(unittest.TestCase):
     """PG-wire connection adapters: tested via injected fake modules (the real
@@ -2284,6 +2325,22 @@ class TestConfigHelpers(unittest.TestCase):
         from questdb.auth._discovery import settings_config
         self.assertEqual(settings_config({'config': {'a': 1}}), {'a': 1})
         self.assertEqual(settings_config({'a': 1}), {'a': 1})  # flat fallback
+
+    def test_settings_url_drops_query_and_fragment(self):
+        # M9: the /settings endpoint is built on the QuestDB base URL's PATH,
+        # dropping any query/fragment, so a base carrying one can't yield a
+        # malformed ".../?x=1/settings". A trailing slash doesn't double up.
+        from questdb.auth._discovery import _settings_url
+        self.assertEqual(_settings_url('https://h:9000'),
+                         'https://h:9000/settings')
+        self.assertEqual(_settings_url('https://h:9000/'),
+                         'https://h:9000/settings')
+        self.assertEqual(_settings_url('https://h:9000/qdb'),
+                         'https://h:9000/qdb/settings')
+        self.assertEqual(_settings_url('https://h:9000/?x=1'),
+                         'https://h:9000/settings')
+        self.assertEqual(_settings_url('https://h:9000/base/#frag'),
+                         'https://h:9000/base/settings')
 
     def test_settings_config_ignores_user_writable_preferences(self):
         # QuestDB /settings nests server-authoritative values under "config"

@@ -78,6 +78,11 @@ _MEMORY_STORE: Dict[str, TokenSet] = {}
 # clear() on a different OidcDeviceAuth sharing this store, whose per-instance
 # lock doesn't serialize against this one — so clear() can't be silently undone.
 _MEMORY_GENERATION: Dict[str, int] = {}
+# Count of in-flight acquisitions per key (a generation() capture not yet
+# released). While > 0, a concurrent clear() retains the bumped generation so
+# the in-flight store_if_current is still dropped; once it falls back to 0 the
+# generation entry is reclaimed, bounding the maps' growth (see release()).
+_MEMORY_INFLIGHT: Dict[str, int] = {}
 _MEMORY_LOCK = threading.Lock()
 
 
@@ -102,7 +107,17 @@ class MemoryCache:
     def clear(self, key: str) -> None:
         with _MEMORY_LOCK:
             _MEMORY_STORE.pop(key, None)
-            _MEMORY_GENERATION[key] = _MEMORY_GENERATION.get(key, 0) + 1
+            # The clear()-generation only needs to outlive an IN-FLIGHT
+            # acquisition, so that acquisition's store_if_current (which captured
+            # the pre-clear value) is dropped. With none in flight there is no
+            # stale capturer to defend against, so drop the entry rather than
+            # retain one per cleared key forever: the slow path is the only
+            # writer and always captures a fresh generation, so a cleared token
+            # can't be silently resurrected.
+            if _MEMORY_INFLIGHT.get(key, 0) > 0:
+                _MEMORY_GENERATION[key] = _MEMORY_GENERATION.get(key, 0) + 1
+            else:
+                _MEMORY_GENERATION.pop(key, None)
 
     def evict(self, key: str) -> None:
         """
@@ -121,13 +136,37 @@ class MemoryCache:
 
     def generation(self, key: str) -> int:
         """
-        Current clear()-generation for ``key``.
+        Current clear()-generation for ``key``; marks an acquisition in flight.
 
         Capture before an IdP round-trip and pass to :meth:`store_if_current`,
         which drops the write if a ``clear()`` bumped the counter meanwhile.
+        Every call MUST be paired with a :meth:`release` (the caller does so in
+        a ``finally``) so the per-key generation can be reclaimed once no
+        acquisition is in flight for the key.
         """
         with _MEMORY_LOCK:
+            _MEMORY_INFLIGHT[key] = _MEMORY_INFLIGHT.get(key, 0) + 1
             return _MEMORY_GENERATION.get(key, 0)
+
+    def release(self, key: str) -> None:
+        """
+        End the acquisition a :meth:`generation` capture began.
+
+        When the last in-flight acquisition for ``key`` finishes, the per-key
+        clear()-generation is reclaimed: with no acquisition holding a captured
+        (possibly stale) value there is nothing left to compare against, so
+        retaining it would only grow the process-global maps by one entry per
+        distinct cache key. A later acquisition captures a fresh 0 and a later
+        ``clear()`` re-establishes a monotonic sequence with no stale capturer
+        to race, so reclaiming it can't resurrect a write a ``clear()`` dropped.
+        """
+        with _MEMORY_LOCK:
+            remaining = _MEMORY_INFLIGHT.get(key, 0) - 1
+            if remaining > 0:
+                _MEMORY_INFLIGHT[key] = remaining
+            else:
+                _MEMORY_INFLIGHT.pop(key, None)
+                _MEMORY_GENERATION.pop(key, None)
 
     def store_if_current(
             self, key: str, tokens: TokenSet, generation: int) -> bool:

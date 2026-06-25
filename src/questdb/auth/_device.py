@@ -533,19 +533,24 @@ class OidcDeviceAuth:
             # clear() — including on another instance sharing the process-global
             # MemoryCache (whose per-instance lock doesn't serialize against
             # ours) — invalidates the store below instead of resurrecting the
-            # cleared entry.
+            # cleared entry. Paired with release() in the finally so the cache
+            # reclaims the per-key generation once no acquisition is in flight
+            # for it (bounds the process-global maps; see MemoryCache.release).
             generation = self._cache_generation()
-            # Promote a cached token under the lock (even expired, so _acquire
-            # can reuse its refresh_token). Here, not on the fast path, so every
-            # write to self._tokens stays serialized.
-            if self._tokens is None:
-                cached = self._cache.load(self.cache_key)
-                if cached is not None:
-                    self._tokens = cached
-            tokens = self._valid_cached()
-            if tokens is not None:
-                return tokens
-            return self._acquire(generation)
+            try:
+                # Promote a cached token under the lock (even expired, so
+                # _acquire can reuse its refresh_token). Here, not on the fast
+                # path, so every write to self._tokens stays serialized.
+                if self._tokens is None:
+                    cached = self._cache.load(self.cache_key)
+                    if cached is not None:
+                        self._tokens = cached
+                tokens = self._valid_cached()
+                if tokens is not None:
+                    return tokens
+                return self._acquire(generation)
+            finally:
+                self._cache.release(self.cache_key)
 
     def _valid_cached(self) -> Optional[TokenSet]:
         # Read-only: reads the published field, falling back to the shared cache
