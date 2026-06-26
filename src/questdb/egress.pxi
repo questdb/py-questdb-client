@@ -252,7 +252,6 @@ cdef object _build_record_batch_reader(
     """
     import pyarrow as pa
 
-    cdef int seen_seq = cursor_handle._reset_seq
     first = _fetch_one_batch(cursor_handle, pa, compact)
     if first is None:
         # No result set (a non-SELECT statement ends with EXEC_DONE and
@@ -263,6 +262,10 @@ cdef object _build_record_batch_reader(
         empty = pa.table({})
         return empty.to_reader()
 
+    # Pin the sequence after the first batch: a pre-delivery failover
+    # replays batch-0 transparently into ``first``, so only resets that
+    # happen once batches are flowing can duplicate already-yielded data.
+    cdef int seen_seq = cursor_handle._reset_seq
     schema = first.schema
 
     def _gen(compact):
@@ -322,7 +325,12 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
                 QuestDBErrorCode.ServerFlushError,
                 'questdb_db_borrow_reader returned NULL without setting err')
         raise _reader_err_to_py(err)
-    cdef _ReaderHandle handle = _ReaderHandle()
+    cdef _ReaderHandle handle
+    try:
+        handle = _ReaderHandle()
+    except:
+        reader_close(reader)
+        raise
     handle._attach(reader)
     return handle
 
@@ -606,11 +614,17 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
                     local_array.release(&local_array)
                 if local_schema.release != NULL:
                     local_schema.release(&local_schema)
-                full = (
-                    '[' + QuestDBErrorCode.FailoverWouldDuplicate.name + '] '
-                    'mid-query failover would duplicate already-delivered '
-                    'batches; re-issue the query').encode('utf-8')
-                _qs_set_error(prod, full, <size_t>len(full))
+                try:
+                    full = (
+                        '[' + QuestDBErrorCode.FailoverWouldDuplicate.name + '] '
+                        'mid-query failover would duplicate already-delivered '
+                        'batches; re-issue the query').encode('utf-8')
+                    _qs_set_error(prod, full, <size_t>len(full))
+                except:
+                    fallback = (
+                        b'[FailoverWouldDuplicate] mid-query failover would '
+                        b'duplicate already-delivered batches; re-issue the query')
+                    _qs_set_error(prod, fallback, <size_t>len(fallback))
                 prod.exhausted = True
                 return -1
             # Pre-delivery failover: nothing reached the consumer yet, so
@@ -1813,6 +1827,7 @@ cdef class _NumpyBatchIter:
     cdef list symbol_categories
     cdef object symbol_dtype
     cdef int seen_seq
+    cdef bint delivered
 
     def __cinit__(self, _CursorHandle handle):
         import numpy as np
@@ -1831,6 +1846,7 @@ cdef class _NumpyBatchIter:
         self.symbol_categories = []
         self.symbol_dtype = None
         self.seen_seq = handle._reset_seq if handle is not None else 0
+        self.delivered = False
 
     def __iter__(self):
         return self
@@ -1853,14 +1869,18 @@ cdef class _NumpyBatchIter:
                 with nogil:
                     batch = reader_cursor_next_batch(cursor, &err)
                 if self.handle._reset_seq != self.seen_seq:
-                    # Mid-query failover after batches were already yielded: the
-                    # replayed batch-0 would duplicate them. Streaming can't
-                    # discard it, so surface a clean, catchable error.
-                    self.done = True
-                    raise QuestDBError(
-                        QuestDBErrorCode.FailoverWouldDuplicate,
-                        'mid-query failover would duplicate already-delivered '
-                        'batches; re-issue the query')
+                    if self.delivered:
+                        # Mid-query failover after batches were already yielded:
+                        # the replayed batch-0 would duplicate them. Streaming
+                        # can't discard it, so surface a clean, catchable error.
+                        self.done = True
+                        raise QuestDBError(
+                            QuestDBErrorCode.FailoverWouldDuplicate,
+                            'mid-query failover would duplicate already-'
+                            'delivered batches; re-issue the query')
+                    # Pre-delivery failover replays batch-0 transparently;
+                    # re-pin to the new stream and keep going.
+                    self.seen_seq = self.handle._reset_seq
                 if batch == NULL:
                     self.done = True
                     if err != NULL:
@@ -1892,10 +1912,12 @@ cdef class _NumpyBatchIter:
             raise
         col_chunks = [[c] for c in batch_chunks]
         col_masks = [[m] for m in batch_masks]
-        return _numpy_assemble_frame(
+        frame = _numpy_assemble_frame(
             self.col_names, self.col_kinds, self.col_scales,
             self.col_precision, col_chunks, self.symbol_categories,
             self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
+        self.delivered = True
+        return frame
 
     def __dealloc__(self):
         if not self.done and self.handle is not None:

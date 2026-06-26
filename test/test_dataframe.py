@@ -733,6 +733,22 @@ class TestPandasBase:
             self.assertEqual(plan['failures'], [])
             self.assertEqual(plan['normalizations'], [])
 
+        def test_arrow_backed_column_nonzero_offset_slice(self):
+            # An Arrow-backed column whose underlying buffer has a non-zero
+            # offset (a positional slice) must serialize the surviving rows
+            # rather than walking off the chunk into the spare blank chunk.
+            ser = pd.Series(
+                pa.array(['a', 'b', 'c', 'd', 'e']),
+                dtype=pd.ArrowDtype(pa.string()))
+            df = pd.DataFrame({'s': ser}).iloc[2:]
+            buf = _dataframe(
+                self.version, df, table_name='t', at=qi.ServerTimestamp)
+            self.assertEqual(buf.count(b'\n'), 3)
+            for keep in (b'"c"', b'"d"', b'"e"'):
+                self.assertIn(keep, buf)
+            for drop in (b'"a"', b'"b"'):
+                self.assertNotIn(drop, buf)
+
         def test_debug_dataframe_columnar_plan_preserves_large_string_category(self):
             symbols = pd.Series(
                 pa.array(

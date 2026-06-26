@@ -2150,11 +2150,16 @@ cdef object parse_conf_str(
         'max_name_len': int,
         'qwp_ws_progress': str,
     }
-    params = {
-        k: type_mappings.get(k, str)(v)
-        for k, v in params.items()
-    }
-    return (Protocol.parse(service), params)
+    typed_params = {}
+    for key, value in params.items():
+        converter = type_mappings.get(key, str)
+        try:
+            typed_params[key] = converter(value)
+        except (ValueError, TypeError) as e:
+            raise QuestDBError(
+                QuestDBErrorCode.ConfigError,
+                f'Invalid value for config key {key!r}: {value!r}') from e
+    return (Protocol.parse(service), typed_params)
 
 
 cdef str conf_str_value(object value):
@@ -3949,7 +3954,7 @@ cdef bint _dataframe_columnar_force_drop_after_error(
         try:
             _dataframe_columnar_sync(conn)
             return False
-        except Exception:
+        except BaseException:
             pass
     return column_sender_must_close(conn)
 
@@ -5246,6 +5251,10 @@ cdef class Client:
           ``UInt32`` to ``LONG``, and ``UInt64`` values up to
           ``i64::MAX`` are accepted as ``LONG``. Larger ``UInt64`` values are
           rejected because QuestDB QWP-WS encodes integers as signed ``i64``.
+          Signed ``int8``/``int16`` land as QuestDB ``INT``; the row-oriented
+          :meth:`Sender.dataframe` instead widens every integer to ``LONG``, so
+          ingest a given table through a single path to avoid a first-write
+          column-type mismatch.
         - **String / Symbol**: object-dtype ``str``, ``pa.string()``,
           ``pa.large_string()``, ``pd.CategoricalDtype`` of strings.
         - **Timestamp**: NumPy ``datetime64`` units accepted by pandas and

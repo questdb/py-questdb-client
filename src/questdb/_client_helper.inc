@@ -1,5 +1,5 @@
 #pragma once
-// This file is included into `ingress.c`.
+// This file is included into `_client.c`.
 
 
 // Cython idiosyncrasy workaround.

@@ -12,10 +12,10 @@ Breaking changes
 ~~~~~~~~~~~~~~~~~
 
 - The public API now lives at the top level of the ``questdb`` package:
-  ``from questdb import Sender, Buffer, Client, QueryResult, ...``. The
-  ``questdb.ingress`` module has been removed (the compiled module is now the
-  private ``questdb._client``); update imports from ``questdb.ingress`` to
-  ``questdb``.
+  ``from questdb import Sender, Buffer, Client, QueryResult, ...`` (the compiled
+  module is now the private ``questdb._client``). Importing ``questdb.ingress``
+  still works through a compatibility shim that emits a ``DeprecationWarning``;
+  update imports from ``questdb.ingress`` to ``questdb``.
 - ``IngressError`` is renamed to :class:`QuestDBError`, ``IngressErrorCode`` to
   :class:`QuestDBErrorCode`, and ``IngressServerRejectionError`` to
   :class:`QuestDBServerRejectionError` (the names now also cover the query
@@ -94,7 +94,8 @@ Adds :meth:`Client.dataframe`, ingesting pandas / polars / pyarrow and
 any Arrow C Data Interface object over QWP/WebSocket. A
 ``schema_overrides`` keyword reclassifies columns as ``symbol``,
 ``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
-('geohash', 20)}``).
+('geohash', 20)}``). A ``max_rows_per_batch`` keyword (default 16384)
+bounds the rows sent per columnar batch.
 
 The designated-timestamp argument ``at`` is the timestamp column itself,
 given by name (``str``) or position (``int``); unlike

@@ -3140,7 +3140,8 @@ cdef void_int _dataframe_serialize_cell(
 
 cdef void _dataframe_col_advance(col_t* col) noexcept nogil:
     # Branchless version of:
-    #     cdef bint new_chunk = cursor.offset == <size_t>cursor.chunk.length
+    #     cdef bint new_chunk = cursor.offset == \
+    #         <size_t>(cursor.chunk.offset + cursor.chunk.length)
     #     if new_chunk == 0:
     #         cursor.chunk_index += 1
     #         cursor.chunk += 1  # pointer advance
@@ -3154,7 +3155,7 @@ cdef void _dataframe_col_advance(col_t* col) noexcept nogil:
     cdef col_cursor_t* cursor = &col.cursor
     cdef size_t new_chunk  # disguised bint. Either 0 or 1.
     cursor.offset += 1
-    new_chunk = cursor.offset == <size_t>cursor.chunk.length
+    new_chunk = cursor.offset == <size_t>(cursor.chunk.offset + cursor.chunk.length)
     cursor.chunk_index += new_chunk
     cursor.chunk += new_chunk
     # Note: We get away with this because we've allocated one extra blank chunk.
