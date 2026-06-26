@@ -3756,13 +3756,17 @@ cdef void_int _dataframe_columnar_append_at(
 
 
 cdef int _geohash_override_dtype(col_source_t source) noexcept:
-    if source == col_source_t.col_source_i8_numpy:
+    if (source == col_source_t.col_source_u8_numpy
+            or source == col_source_t.col_source_i8_numpy):
         return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i8
-    if source == col_source_t.col_source_i16_numpy:
+    if (source == col_source_t.col_source_u16_numpy
+            or source == col_source_t.col_source_i16_numpy):
         return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i16
-    if source == col_source_t.col_source_i32_numpy:
+    if (source == col_source_t.col_source_u32_numpy
+            or source == col_source_t.col_source_i32_numpy):
         return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i32
-    if source == col_source_t.col_source_i64_numpy:
+    if (source == col_source_t.col_source_u64_numpy
+            or source == col_source_t.col_source_i64_numpy):
         return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i64
     return -1
 
@@ -4679,8 +4683,11 @@ cdef object _capsule_get_dict_string_column_names(object sliceable):
 
 cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     """Translate `symbols` into a list of
-    (name_bytes, column_sender_arrow_override_symbol, arg) tuples
-    matching the shape returned by _validate_schema_overrides. Returns:
+    (name_bytes, kind, arg) tuples matching the shape returned by
+    _validate_schema_overrides. `kind` is `column_sender_arrow_override_symbol`
+    to mark a column as SYMBOL or `column_sender_arrow_override_not_symbol`
+    to force a dict-encoded column to VARCHAR; `arg` is unused (0) for both.
+    Returns:
 
     - []   for None / 'auto' (no overrides, Rust default applies —
            Dictionary columns auto-classify as SymbolDict).
@@ -4689,15 +4696,12 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     - None if resolution requires introspection not available on the
            input; caller falls back to Manual plan.
 
-    arg=0 in the tuple means "mark as SYMBOL"; arg=1 means "force
-    NOT-SYMBOL" (Rust decodes dict to VARCHAR on emit). See
-    column_sender.h `column_sender_arrow_override::arg`.
-
     Raises QuestDBError(BadDataFrame) when an explicitly-named symbols
     entry targets a non-string column (matches Manual plan semantics).
     """
     cdef list out
-    cdef int kind_int = <int>column_sender_arrow_override_symbol
+    cdef int symbol_kind = <int>column_sender_arrow_override_symbol
+    cdef int not_symbol_kind = <int>column_sender_arrow_override_not_symbol
     cdef object col_names
     cdef object entry
     cdef object name
@@ -4715,7 +4719,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
             return None
         out = []
         for entry in col_names:
-            out.append((entry.encode('utf-8'), kind_int, 1))
+            out.append((entry.encode('utf-8'), not_symbol_kind, 0))
         return out
 
     if symbols is True:
@@ -4724,7 +4728,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
             return None
         out = []
         for entry in col_names:
-            out.append((entry.encode('utf-8'), kind_int, 0))
+            out.append((entry.encode('utf-8'), symbol_kind, 0))
         return out
 
     if not isinstance(symbols, (list, tuple)):
@@ -4760,18 +4764,17 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
                 f'Bad argument `symbols`: column {name!r} is not a '
                 f'strings column.')
         listed.add(name)
-        out.append((name.encode('utf-8'), kind_int, 0))
+        out.append((name.encode('utf-8'), symbol_kind, 0))
 
     # Match the row/numpy planner: an explicit symbols list marks only the
     # listed columns as symbols; every other dict-encoded (categorical)
-    # column falls through to a plain VARCHAR field (arg=1, force
-    # NOT-SYMBOL) rather than being auto-symbolized.
+    # column is forced to a plain VARCHAR field rather than auto-symbolized.
     dict_names = _capsule_get_dict_string_column_names(sliceable)
     if dict_names is None:
         return None
     for name in dict_names:
         if name not in listed:
-            out.append((name.encode('utf-8'), kind_int, 1))
+            out.append((name.encode('utf-8'), not_symbol_kind, 0))
     return out
 
 

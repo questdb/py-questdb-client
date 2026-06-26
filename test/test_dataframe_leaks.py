@@ -2,7 +2,9 @@ import sys
 sys.dont_write_bytecode = True
 import ctypes
 import gc
+import ipaddress
 import unittest
+import uuid
 
 
 def _limit_malloc_arenas():
@@ -159,11 +161,11 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
 class TestPyobjColumnarLeak(unittest.TestCase):
     """Guards the calloc'd ``pyobj_built_t`` builders
-    (``_dataframe_columnar_build_{str,int,float,bool}_pyobj``) reached by
-    ``Client.dataframe`` for object-dtype columns: every native buffer
-    (data, validity bitmap, str byte arena) must be freed on the success
-    and all-valid (bitmap-dropped) paths, and the pooled connection must be
-    returned on every call."""
+    (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes}_pyobj``)
+    reached by ``Client.dataframe`` for object-dtype columns: every native
+    buffer (data, validity bitmap, str byte arena) must be freed on the
+    success and all-valid (bitmap-dropped) paths, and the pooled connection
+    must be returned on every call."""
 
     ROWS = 2048
 
@@ -181,6 +183,9 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         ints = list(range(n))
         floats = [i * 0.5 for i in range(n)]
         bools = pd.Series([bool(i & 1) for i in range(n)], dtype=object)
+        uuids = [uuid.UUID(int=i) for i in range(n)]
+        ips = [ipaddress.IPv4Address(i) for i in range(n)]
+        blobs = [b'value_%06d' % i for i in range(n)]
         frames = []
         for null_step in (0, 7):
             frames.append(pd.DataFrame({
@@ -189,6 +194,9 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 'i': col(ints, null_step),
                 'f': col(floats, null_step),
                 'b': bools,
+                'u': col(uuids, null_step),
+                'ip': col(ips, null_step),
+                'by': col(blobs, null_step),
             }))
         return frames
 

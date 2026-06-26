@@ -13,9 +13,9 @@ Breaking changes
 
 - The public API now lives at the top level of the ``questdb`` package:
   ``from questdb import Sender, Buffer, Client, QueryResult, ...`` (the compiled
-  module is now the private ``questdb._client``). Importing ``questdb.ingress``
-  still works through a compatibility shim that emits a ``DeprecationWarning``;
-  update imports from ``questdb.ingress`` to ``questdb``.
+  module is now the private ``questdb._client``). The ``questdb.ingress``
+  module has been removed; update imports from ``questdb.ingress`` to
+  ``questdb``.
 - ``IngressError`` is renamed to :class:`QuestDBError`, ``IngressErrorCode`` to
   :class:`QuestDBErrorCode`, and ``IngressServerRejectionError`` to
   :class:`QuestDBServerRejectionError` (the names now also cover the query

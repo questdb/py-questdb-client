@@ -4021,6 +4021,51 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
              ['us-west', 'beta', 2],
              ['us-east', 'gamma', 3]])
 
+    def test_arrow_symbols_false_forces_dict_columns_to_varchar(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        dict_type = pa.dictionary(pa.int32(), pa.string())
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                [1700000000_000000, 1700000001_000000, 1700000002_000000],
+                pa.timestamp('us', tz='UTC')),
+            'region': self._arrow_series(
+                ['us-east', 'us-west', 'us-east'], dict_type),
+            'note': self._arrow_series(
+                ['alpha', 'beta', 'gamma'], dict_type),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts', symbols=False)
+
+        resp = self.qdb_plain.retry_check_table(table, min_rows=3)
+        col_types = {c['name']: c['type'] for c in resp['columns']}
+        self.assertEqual(col_types['region'], 'VARCHAR')
+        self.assertEqual(col_types['note'], 'VARCHAR')
+
+    def test_arrow_partial_symbol_list_demotes_unlisted_dict_to_varchar(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        dict_type = pa.dictionary(pa.int32(), pa.string())
+        df = pd.DataFrame({
+            'ts': self._arrow_series(
+                [1700000000_000000, 1700000001_000000, 1700000002_000000],
+                pa.timestamp('us', tz='UTC')),
+            'region': self._arrow_series(
+                ['us-east', 'us-west', 'us-east'], dict_type),
+            'note': self._arrow_series(
+                ['alpha', 'beta', 'gamma'], dict_type),
+        })
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(
+                df, table_name=table, at='ts', symbols=['region'])
+
+        resp = self.qdb_plain.retry_check_table(table, min_rows=3)
+        col_types = {c['name']: c['type'] for c in resp['columns']}
+        self.assertEqual(col_types['region'], 'SYMBOL')
+        self.assertEqual(col_types['note'], 'VARCHAR')
+
     def test_ipv4_string_coercion_is_unsupported(self):
         """Unlike UUID (where the server parses VARCHAR strings
         into UUIDs), QuestDB does NOT currently support VARCHAR →

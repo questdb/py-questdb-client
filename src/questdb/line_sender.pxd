@@ -943,6 +943,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         column_sender_arrow_override_ipv4 = 1
         column_sender_arrow_override_char = 2
         column_sender_arrow_override_geohash = 3
+        column_sender_arrow_override_not_symbol = 4
 
     cdef struct column_sender_arrow_override:
         const char* column
@@ -1026,11 +1027,6 @@ cdef extern from "questdb/egress/reader.h":
 
     void reader_error_free(
         reader_error* error
-        ) noexcept nogil
-
-    reader* reader_from_conf(
-        line_sender_utf8 config,
-        reader_error** err_out
         ) noexcept nogil
 
     void reader_close(

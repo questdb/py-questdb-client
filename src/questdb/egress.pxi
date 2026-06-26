@@ -587,6 +587,10 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
     cdef object py_msg
     cdef bytes full
     if prod.exhausted:
+        # A prior error left a diagnostic pinned; keep surfacing it rather
+        # than reporting a clean end-of-stream to a consumer that pulls again.
+        if prod.last_error != NULL:
+            return -1
         return 0
     if prod.cursor_handle is None:
         _qs_set_error(prod, b'cursor is closed', 16)
@@ -1115,16 +1119,16 @@ cdef object _numpy_geohash_chunk(
         'reader_batch_column_data')
     stride = cd.value_stride
     if stride == 1:
-        dtype = np.dtype(np.int8)
+        dtype = np.dtype(np.uint8)
         target = 1
     elif stride == 2:
-        dtype = np.dtype(np.int16)
+        dtype = np.dtype(np.uint16)
         target = 2
     elif stride == 3 or stride == 4:
-        dtype = np.dtype(np.int32)
+        dtype = np.dtype(np.uint32)
         target = 4
     elif stride >= 5 and stride <= 8:
-        dtype = np.dtype(np.int64)
+        dtype = np.dtype(np.uint64)
         target = 8
     else:
         raise QuestDBError(
