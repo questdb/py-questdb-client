@@ -103,7 +103,5 @@ questdb
     :annotation:
     :no-value:
 
-.. autoclass:: questdb.TaggedEnum
-   :members:
-   :undoc-members:
-   :show-inheritance:
+.. autodata:: questdb.WARN_HIGH_RECONNECTS
+    :annotation:

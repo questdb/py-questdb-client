@@ -5,8 +5,8 @@ Changelog
 
 =========
 
-Unreleased
-----------
+5.0.0
+-----
 
 Breaking changes
 ~~~~~~~~~~~~~~~~~
@@ -109,8 +109,9 @@ Errors
 
 Adds :class:`UnsupportedDataFrameShapeError` (raised when a DataFrame
 cannot be expressed on the QWP columnar path) and the
-:class:`QuestDBErrorCode` members ``ServerRejection``,
-``ArrowUnsupportedColumnKind``, ``ArrowIngest`` and ``Cancelled``.
+:class:`QuestDBErrorCode` members ``ServerRejection``, ``RoleMismatch``,
+``ArrowUnsupportedColumnKind``, ``ArrowIngest``, ``FailoverRetry``,
+``FailoverWouldDuplicate`` and ``Cancelled``.
 :class:`QuestDBError` gains a ``qwp_ws_error`` property exposing the
 structured :class:`QwpWsError` view on a server-side QWP/WebSocket
 rejection.

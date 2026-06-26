@@ -1205,12 +1205,13 @@ cdef ssize_t _dataframe_resolve_at(
 
 cdef void_int _dataframe_alloc_chunks(
         size_t n_chunks, col_t* col) except -1:
-    col.setup.chunks.n_chunks = n_chunks
-    col.setup.chunks.chunks = <ArrowArray*>calloc(
-        col.setup.chunks.n_chunks + 1,  # See `_dataframe_col_advance` on why +1.
+    cdef ArrowArray* chunks = <ArrowArray*>calloc(
+        n_chunks + 1,  # See `_dataframe_col_advance` on why +1.
         sizeof(ArrowArray))
-    if col.setup.chunks.chunks == NULL:
+    if chunks == NULL:
         raise MemoryError()
+    col.setup.chunks.chunks = chunks
+    col.setup.chunks.n_chunks = n_chunks
 
 
 cdef void _dataframe_free_mapped_arrow(ArrowArray* arr) noexcept nogil:
@@ -3167,8 +3168,8 @@ cdef void_int _dataframe_handle_auto_flush(
             const auto_flush_t* af,
             line_sender_buffer* ls_buf,
             PyThreadState** gs) except -1:
-    cdef line_sender_error* flush_err
-    cdef line_sender_error* marker_err
+    cdef line_sender_error* flush_err = NULL
+    cdef line_sender_error* marker_err = NULL
     cdef bint flush_ok
     cdef bint marker_ok
     if (af.sender == NULL) or (not should_auto_flush(&af.mode, ls_buf, af.last_flush_ms[0])):

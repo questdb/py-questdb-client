@@ -127,7 +127,7 @@ cdef size_t _QWP_MAX_DEFERRED_ARROW_FRAMES = 100
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '4.1.0'
+VERSION = '5.0.0'
 
 WARN_HIGH_RECONNECTS = True
 
@@ -294,6 +294,12 @@ cdef inline object c_qwp_ws_error_view_to_raw(
 
 cdef inline object c_err_to_fields(line_sender_error* err):
     """Construct a ``SenderError`` from a C error, which will be freed."""
+    if err == NULL:
+        return (
+            QuestDBErrorCode.SocketError,
+            'Unknown error: the client library reported failure without '
+            'a diagnostic.',
+            None)
     cdef line_sender_error_code code = line_sender_error_get_code(err)
     cdef size_t c_len = 0
     cdef const char* c_msg = line_sender_error_msg(err, &c_len)
@@ -908,6 +914,7 @@ cdef class Buffer:
     cdef qdb_pystr_buf* _b
     cdef size_t _init_buf_size
     cdef size_t _max_name_len
+    cdef bint _qwp
     cdef object _row_complete_sender
 
     def __cinit__(self):
@@ -915,6 +922,7 @@ cdef class Buffer:
         self._b = NULL
         self._init_buf_size = 0
         self._max_name_len = 0
+        self._qwp = False
         self._row_complete_sender = None
 
     def __init__(
@@ -981,6 +989,7 @@ cdef class Buffer:
         reserve_buffer(self._impl, init_buf_size)
         self._init_buf_size = init_buf_size
         self._max_name_len = max_name_len
+        self._qwp = False
         self._row_complete_sender = None
 
     cdef inline _init_qwp_impl(self, size_t init_buf_size, size_t max_name_len):
@@ -989,6 +998,7 @@ cdef class Buffer:
         reserve_buffer(self._impl, init_buf_size)
         self._init_buf_size = init_buf_size
         self._max_name_len = max_name_len
+        self._qwp = True
         self._row_complete_sender = None
 
 
@@ -4380,6 +4390,12 @@ cdef void_int _capsule_consume_stream(
     cdef int rc
     cdef const char* stream_err
 
+    if (stream == NULL or stream.get_schema == NULL or
+            stream.get_next == NULL or stream.get_last_error == NULL):
+        raise TypeError(
+            '__arrow_c_stream__ returned a malformed arrow_array_stream '
+            'PyCapsule with NULL callbacks.')
+
     if c_schema.release == NULL:
         rc = stream.get_schema(stream, c_schema)
         if rc != 0:
@@ -6205,6 +6221,9 @@ cdef class Sender:
         reserve_buffer(buf._impl, self._init_buf_size)
         buf._init_buf_size = self._init_buf_size
         buf._max_name_len = line_sender_get_max_name_len(self._impl)
+        buf._qwp = (
+            _is_qwp_udp_protocol(self._c_protocol) or
+            _is_qwp_ws_protocol(self._c_protocol))
         return buf
 
     def new_buffer(self):
@@ -6579,6 +6598,7 @@ cdef class Sender:
                 'flush() can\'t be called: Sender is closed.')
         if buffer is not None:
             buffer._check_impl()
+            self._check_buffer_protocol(buffer)
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl
@@ -6625,6 +6645,17 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 f'{method}() is only supported for QWP/WebSocket senders.')
 
+    cdef inline void_int _check_buffer_protocol(self, Buffer buffer) except -1:
+        cdef bint need_qwp = (
+            _is_qwp_udp_protocol(self._c_protocol) or
+            _is_qwp_ws_protocol(self._c_protocol))
+        if buffer._qwp != need_qwp:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'Buffer protocol does not match the sender protocol. '
+                'Use Sender.new_buffer(), or Buffer.qwp()/Buffer.ilp() to '
+                'build a buffer matching the sender.')
+
     def flush_and_get_fsn(self, Buffer buffer=None):
         """
         Publish a QWP/WebSocket buffer locally, clear it on success, and return
@@ -6644,6 +6675,7 @@ cdef class Sender:
         self._check_qwp_ws('flush_and_get_fsn')
         if buffer is not None:
             buffer._check_impl()
+            self._check_buffer_protocol(buffer)
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl
@@ -6678,6 +6710,7 @@ cdef class Sender:
         self._check_qwp_ws('flush_and_keep_and_get_fsn')
         if buffer is not None:
             buffer._check_impl()
+            self._check_buffer_protocol(buffer)
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl

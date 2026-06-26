@@ -916,7 +916,9 @@ it durably applies them, so the client can confirm delivery.
   :func:`Sender.poll_qwp_ws_error` as :class:`QwpWsError` values
   (:func:`Sender.qwp_ws_errors_dropped` reports how many were dropped when no
   handler kept up). A diagnostic with a ``halt`` policy is terminal: the next
-  sender call raises :class:`QuestDBServerRejectionError`.
+  sender call raises :class:`QuestDBServerRejectionError`. The handler must
+  not call back into the same sender, must be cheap and non-blocking, and —
+  under ``qwp_ws_progress=background`` — may run on a background thread.
 
 * **Draining on close.** :func:`Sender.close_drain` waits for outstanding
   frames to be acknowledged before closing.

@@ -6,6 +6,8 @@
 # results without pyarrow. `to_arrow`, `to_pandas`, `iter_arrow`,
 # `iter_pandas` are convenience wrappers that lazy-import pyarrow.
 
+cimport numpy as cnp
+
 
 cdef inline object _reader_err_code_to_py(reader_error_code code):
     if code == reader_error_could_not_resolve_addr:
@@ -976,6 +978,13 @@ cdef object _numpy_fixed_chunk(
     return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
 
 
+cdef inline void_int _obj_chunk_set(
+        cnp.ndarray out, size_t r, object v) except -1:
+    # np.empty(dtype=object) initialises every slot to None, so null rows are
+    # left untouched and a mid-loop raise leaves the array safe to release.
+    cnp.PyArray_SETITEM(out, cnp.PyArray_GETPTR1(out, <cnp.npy_intp>r), v)
+
+
 cdef object _numpy_varlen_chunk(
         const reader_batch* batch,
         size_t col_idx,
@@ -990,6 +999,7 @@ cdef object _numpy_varlen_chunk(
     cdef size_t r
     cdef uint32_t start
     cdef uint32_t end
+    cdef cnp.ndarray out
     cdef bint is_binary = kind == reader_column_kind_binary
     _reader_check(
         reader_batch_column_data(batch, col_idx, &cd, &err), err,
@@ -1007,7 +1017,6 @@ cdef object _numpy_varlen_chunk(
     validity = cd.validity
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
-            out[r] = None
             continue
         start = offsets[r]
         end = offsets[r + 1]
@@ -1018,13 +1027,13 @@ cdef object _numpy_varlen_chunk(
                     <int>kind))
         if end > start:
             if is_binary:
-                out[r] = PyBytes_FromStringAndSize(
-                    <const char*>(data + start), <Py_ssize_t>(end - start))
+                _obj_chunk_set(out, r, PyBytes_FromStringAndSize(
+                    <const char*>(data + start), <Py_ssize_t>(end - start)))
             else:
-                out[r] = PyUnicode_FromStringAndSize(
-                    <const char*>(data + start), <Py_ssize_t>(end - start))
+                _obj_chunk_set(out, r, PyUnicode_FromStringAndSize(
+                    <const char*>(data + start), <Py_ssize_t>(end - start)))
         else:
-            out[r] = b'' if is_binary else u''
+            _obj_chunk_set(out, r, b'' if is_binary else u'')
     return out
 
 
@@ -1138,6 +1147,7 @@ cdef object _numpy_uuid_chunk(
     cdef size_t r
     cdef uint64_t lo
     cdef uint64_t hi
+    cdef cnp.ndarray out
     _reader_check(
         reader_batch_column_data(batch, col_idx, &cd, &err), err,
         'reader_batch_column_data')
@@ -1152,11 +1162,10 @@ cdef object _numpy_uuid_chunk(
     values = <const uint8_t*>cd.values
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
-            out[r] = None
             continue
         memcpy(&lo, values + r * 16, 8)
         memcpy(&hi, values + r * 16 + 8, 8)
-        out[r] = _uuid.UUID(int=((<object>hi) << 64) | (<object>lo))
+        _obj_chunk_set(out, r, _uuid.UUID(int=((<object>hi) << 64) | (<object>lo)))
     return out
 
 
@@ -1170,6 +1179,7 @@ cdef object _numpy_long256_chunk(
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
+    cdef cnp.ndarray out
     _reader_check(
         reader_batch_column_data(batch, col_idx, &cd, &err), err,
         'reader_batch_column_data')
@@ -1184,11 +1194,10 @@ cdef object _numpy_long256_chunk(
     values = <const uint8_t*>cd.values
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
-            out[r] = None
             continue
-        out[r] = int.from_bytes(
+        _obj_chunk_set(out, r, int.from_bytes(
             PyBytes_FromStringAndSize(<const char*>(values + r * 32), 32),
-            'little', signed=False)
+            'little', signed=False))
     return out
 
 
@@ -1205,6 +1214,7 @@ cdef object _numpy_decimal_chunk(
     cdef size_t r
     cdef size_t width
     cdef int scale
+    cdef cnp.ndarray out
     _reader_check(
         reader_batch_column_data(batch, col_idx, &cd, &err), err,
         'reader_batch_column_data')
@@ -1221,14 +1231,12 @@ cdef object _numpy_decimal_chunk(
     scale = cd.decimal_scale
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
-            out[r] = None
             continue
         unscaled = int.from_bytes(
             PyBytes_FromStringAndSize(
                 <const char*>(values + r * width), <Py_ssize_t>width),
             'little', signed=True)
-        digits = tuple(int(c) for c in str(abs(unscaled)))
-        out[r] = Decimal((1 if unscaled < 0 else 0, digits, -scale))
+        _obj_chunk_set(out, r, Decimal(f'{unscaled}e{-scale}'))
     return out
 
 
@@ -1252,6 +1260,7 @@ cdef object _numpy_array_chunk(
     cdef uint32_t sstart
     cdef uint32_t send
     cdef Py_ssize_t blen
+    cdef cnp.ndarray out
     if kind != reader_column_kind_double_array:
         raise QuestDBError(
             QuestDBErrorCode.InvalidApiCall,
@@ -1274,10 +1283,14 @@ cdef object _numpy_array_chunk(
     shape_offsets = ad.shape_offsets
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
-            out[r] = None
             continue
         dstart = data_offsets[r]
         dend = data_offsets[r + 1]
+        if dend < dstart or <uint64_t>dend > <uint64_t>ad.data_len:
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
+                'corrupt array data offsets in column kind 0x{:02X}'.format(
+                    <int>kind))
         blen = <Py_ssize_t>(dend - dstart)
         if blen > 0:
             flat = np.frombuffer(
@@ -1287,11 +1300,16 @@ cdef object _numpy_array_chunk(
             flat = np.empty(0, dtype=np.float64)
         sstart = shape_offsets[r]
         send = shape_offsets[r + 1]
+        if send < sstart or <uint64_t>send > <uint64_t>ad.shapes_len:
+            raise QuestDBError(
+                QuestDBErrorCode.ServerFlushError,
+                'corrupt array shape offsets in column kind 0x{:02X}'.format(
+                    <int>kind))
         if send > sstart:
-            out[r] = flat.reshape(
-                tuple(shapes[sstart + k] for k in range(send - sstart)))
+            _obj_chunk_set(out, r, flat.reshape(
+                tuple(shapes[sstart + k] for k in range(send - sstart))))
         else:
-            out[r] = flat
+            _obj_chunk_set(out, r, flat)
     return out
 
 
@@ -1428,11 +1446,16 @@ cdef object _FROM_CODES_HAS_VALIDATE = None
 
 
 cdef object _symbol_from_codes(object pd, object arr, object dtype):
-    # SYMBOL codes come straight off the QWP wire — every code is a valid index
-    # into the dict (or -1 for null) — so skip pandas' O(rows) bounds
-    # re-validation. `validate=` exists since pandas 1.1; older pandas keeps the
-    # checked path. `dtype=` reuses one cached category Index across columns and
-    # batches (vs `categories=`, which rebuilds it every call).
+    # Bounds-check the wire codes against the dict once (a vectorised C-level
+    # reduction), then skip pandas' O(rows) Python re-validation. `validate=`
+    # exists since pandas 1.1; older pandas keeps the checked path. `dtype=`
+    # reuses one cached category Index across columns and batches (vs
+    # `categories=`, which rebuilds it every call).
+    cdef Py_ssize_t n_cats = len(dtype.categories)
+    if arr.size and <Py_ssize_t>int(arr.max()) >= n_cats:
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
+            'corrupt symbol codes: code out of dictionary range')
     global _FROM_CODES_HAS_VALIDATE
     if _FROM_CODES_HAS_VALIDATE is None:
         import inspect
@@ -1926,6 +1949,12 @@ class QueryResult:
     ``iter_pandas``, or the ``__arrow_c_stream__`` PyCapsule protocol)
     consumes the underlying cursor; the second consumption raises
     ``QuestDBError``.
+
+    **Thread affinity**: the underlying cursor is bound to the thread that
+    created it (via ``Client.query``). Create, consume, ``cancel``,
+    ``close``, and drop the ``QueryResult`` on that same thread; handing it
+    to another thread is undefined behaviour even with external
+    synchronisation.
 
     ``__arrow_c_stream__`` is native — the cursor's record batches are
     exposed directly through the Arrow C Data Interface, so polars /
