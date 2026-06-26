@@ -298,22 +298,33 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
 # connection. So ``https://attacker.evil\@idp.good/token`` validates as host
 # ``idp.good`` (passing the issuer-origin pin) while urllib connects to the whole
 # ``attacker.evil\@idp.good``. A real credential-endpoint authority never carries
-# userinfo, a backslash, whitespace or a control char, so reject them — fail
-# closed — mirroring the host hygiene already enforced in
-# ``_adapters._ILLEGAL_HOST_CHARS`` and ``_render._SAFE_HOST_RE``.
+# userinfo, a non-ASCII character, a backslash, whitespace or a control char, so
+# reject them — fail closed — mirroring the host hygiene already enforced in
+# ``_adapters._ILLEGAL_HOST_CHARS`` and ``_render._SAFE_HOST_RE``. (Non-ASCII is
+# checked with ``str.isascii`` in the function, not this regex.)
 _UNSAFE_AUTHORITY_RE = re.compile(r'[\\\s\x00-\x1f\x7f]')
 
 
 def _reject_confusable_authority(url: str, *, label: str) -> None:
     """Reject a credential URL whose authority urllib may resolve unlike parsed."""
     netloc = safe_urlparse(url)[0].netloc
-    if '@' in netloc or _UNSAFE_AUTHORITY_RE.search(netloc):
+    # A non-ASCII authority is rejected too: a real endpoint host is plain ASCII
+    # (a DNS name, an xn-- punycode label, or an IP literal), a raw non-ASCII host
+    # is a homoglyph/confusable spoofing vector (the renderer already distrusts
+    # it for display), AND http.client can't even encode it — it would otherwise
+    # raise a raw UnicodeEncodeError from the transport rather than a typed error.
+    if ('@' in netloc or not netloc.isascii()
+            or _UNSAFE_AUTHORITY_RE.search(netloc)):
         raise OidcConfigError(
             f'The OIDC {label} URL {url!r} has an unsafe authority (userinfo '
-            "'@', a backslash, whitespace, or a control character). A real "
-            'endpoint host never contains these, so this indicates a malformed '
-            'or tampered configuration; refusing to send credentials to a host '
-            'the HTTP transport may resolve differently than the one validated.')
+            "'@', a non-ASCII character, a backslash, whitespace, or a control "
+            'character). A real endpoint host is plain ASCII (a DNS name, an '
+            'xn-- punycode label, or an IP literal) and never contains these, so '
+            'this indicates a malformed or tampered configuration; refusing to '
+            'send credentials to a host the HTTP transport may resolve '
+            'differently than the one validated, or that a confusable/homoglyph '
+            'host could misrepresent. Pass the punycode (xn--) form for an '
+            'internationalized domain.')
 
 
 def validate_endpoint_origins(

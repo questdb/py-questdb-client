@@ -779,10 +779,21 @@ class OidcDeviceAuth:
         self._renderer.on_prompt(resp)
         self._maybe_open_browser(resp)
         tokens = self._poll_for_token(resp)
-        claims = (_decode_jwt_claims(tokens.id_token)
-                  or _decode_jwt_claims(tokens.access_token))
-        identity = _identity_from_claims(claims)
-        self._renderer.on_success(identity, self._display_lifetime(tokens, claims))
+        # The grant has completed and `tokens` is valid. Rendering the success
+        # message (identity + remaining lifetime) is purely cosmetic and must
+        # NEVER abort an authorized sign-in: a hostile JWT (e.g. a non-finite or
+        # huge `exp`) or a custom renderer that raises would otherwise discard a
+        # token the user already authorized — and, since _store runs only after
+        # this returns, force a fresh prompt (and re-crash) on every later
+        # token() call. Best-effort, mirroring _maybe_open_browser.
+        try:
+            claims = (_decode_jwt_claims(tokens.id_token)
+                      or _decode_jwt_claims(tokens.access_token))
+            identity = _identity_from_claims(claims)
+            self._renderer.on_success(
+                identity, self._display_lifetime(tokens, claims))
+        except Exception:
+            pass
         return tokens
 
     def _display_lifetime(
@@ -792,12 +803,16 @@ class OidcDeviceAuth:
         # re-validated at least hourly — reporting that would under-state a token
         # that genuinely lives longer. Prefer the JWT `exp` claim (the
         # authoritative token expiry); fall back to the clamped value for an
-        # opaque token with no exp. Bounded to ~1y so a hostile/garbage exp
-        # (incl. inf/nan, which fail the comparison) can't overflow on_success's
-        # int(round(...)).
+        # opaque token with no exp. Bounded to ~1y, with the float() conversion
+        # guarded, so a hostile/garbage exp can't break on_success's
+        # int(round(...)): inf/nan fail the bound below, and a huge int (e.g.
+        # 10**400) that overflows float() is caught.
         exp = claims.get('exp')
         if isinstance(exp, (int, float)) and not isinstance(exp, bool):
-            remaining = float(exp) - self._now()
+            try:
+                remaining = float(exp) - self._now()
+            except (OverflowError, ValueError):
+                remaining = -1.0  # fall through to the clamped token expiry
             if 0 < remaining <= 366 * 24 * 3600:
                 return remaining
         return max(0.0, tokens.expires_at - self._now())

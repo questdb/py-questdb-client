@@ -41,7 +41,9 @@ import http.client
 import ipaddress
 import json
 import os
+import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -182,6 +184,39 @@ def _opener(ctx: Optional[ssl.SSLContext]) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(*handlers)
 
 
+def _underlying_socket(resp: Any):
+    """
+    Best-effort: the raw socket behind an http.client response / ``HTTPError``.
+
+    The deadline watchdog in :func:`_read_body` uses it to break a read that is
+    blocked past the deadline. Returns ``None`` if the socket can't be located
+    (a non-socket stream, or an unexpected stdlib layout) — the caller then
+    relies on the between-reads deadline check alone (the pre-watchdog
+    behavior), so a layout change degrades safely rather than crashing.
+    """
+    obj = resp
+    # HTTPError -> HTTPResponse -> BufferedReader (.raw is a SocketIO) -> socket.
+    for _ in range(5):
+        if obj is None:
+            break
+        sock = (getattr(getattr(obj, 'raw', None), '_sock', None)
+                or getattr(obj, '_sock', None))
+        if sock is not None:
+            return sock
+        obj = getattr(obj, 'fp', None)
+    return None
+
+
+def _shutdown_socket(sock: Any) -> None:
+    # Force a read blocked past the deadline to return/raise. shutdown() (not
+    # close()) is what actually unblocks a thread parked in recv(); an error here
+    # (socket already closed, or not connected) is irrelevant to that goal.
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
 def _read_body(resp: Any, *, max_bytes: int, deadline: float) -> bytes:
     """
     Read a response body bounded by a total byte cap and a wall-clock deadline.
@@ -190,31 +225,72 @@ def _read_body(resp: Any, *, max_bytes: int, deadline: float) -> bytes:
     past the caller's timeout (urllib's timeout is per-socket-read, not a
     whole-read bound) nor exhaust memory with an unbounded body.
     """
-    # Read via read1(): it returns after a SINGLE underlying socket read, so the
-    # deadline check below actually runs between reads. resp.read(n) on an
-    # http.client response instead blocks until it has buffered the full n bytes
-    # (or hits EOF), so a server dribbling one byte per socket-timeout window
-    # would keep one read(_READ_CHUNK) blocked indefinitely — the per-socket
-    # timeout keeps resetting and the deadline is never reached. read1 is
-    # provided by http.client.HTTPResponse and (by delegation) urllib's
-    # HTTPError; fall back to read() for any stream that lacks it.
+    # read1() returns after a SINGLE underlying socket read on a Content-Length
+    # body, so the deadline check below runs between reads. But read1() alone is
+    # NOT sufficient: for a *chunked* body it calls http.client's readline() to
+    # parse each chunk-size line, and readline() loops over socket reads until it
+    # sees a newline — so a server that dribbles the size line one byte per
+    # socket-timeout window (never terminating it) keeps a single read1() blocked
+    # for up to _MAXLINE (~hours), and this loop's deadline check never runs. The
+    # per-leg socket timeout doesn't fire either (each dribbled byte resets it).
+    # Guard that with a watchdog that shuts the socket down at the deadline: the
+    # blocked read then returns/raises and is mapped to a typed OidcNetworkError
+    # below, instead of hanging the calling thread (which holds the acquisition
+    # lock). read1 is provided by http.client.HTTPResponse and (by delegation)
+    # urllib's HTTPError; fall back to read() for any stream that lacks it.
     read = getattr(resp, 'read1', None) or resp.read
+    sock = _underlying_socket(resp)
+    timer = None
+    if sock is not None:
+        timer = threading.Timer(
+            max(0.0, deadline - _monotonic()), _shutdown_socket, (sock,))
+        timer.daemon = True
+        timer.start()
     chunks = []
     total = 0
-    while True:
-        if _monotonic() > deadline:
-            raise OidcNetworkError(
-                'Timed out reading the response body; the server is too slow '
-                'or is dribbling data.')
-        chunk = read(_READ_CHUNK)
-        if not chunk:
-            return b''.join(chunks)
-        total += len(chunk)
-        if total > max_bytes:
-            raise OidcNetworkError(
-                f'Response body exceeded the {max_bytes}-byte limit; refusing '
-                'to buffer an unbounded response.')
-        chunks.append(chunk)
+    try:
+        while True:
+            if _monotonic() > deadline:
+                raise OidcNetworkError(
+                    'Timed out reading the response body; the server is too '
+                    'slow or is dribbling data.')
+            try:
+                chunk = read(_READ_CHUNK)
+            except OidcNetworkError:
+                raise
+            except (OSError, http.client.HTTPException, ValueError) as e:
+                # The watchdog shut the socket down at the deadline to break a
+                # stalled read (a chunked size-line dribble surfaces here as an
+                # IncompleteRead / a bad chunk size / a socket error); or a
+                # genuine transport failure occurred mid-body. Either way it is a
+                # network problem, not a usable response — keep the typed-error
+                # contract rather than leak a raw socket/decode exception.
+                if _monotonic() > deadline:
+                    raise OidcNetworkError(
+                        'Timed out reading the response body; the server is too '
+                        'slow or is dribbling data.') from e
+                raise OidcNetworkError(
+                    f'Failed while reading the response body: {e}') from e
+            if not chunk:
+                # An empty read is a clean end-of-body — UNLESS the watchdog
+                # tore the socket down at the deadline, which on a Content-Length
+                # body surfaces as EOF (not an exception). Treat a post-deadline
+                # EOF as the timeout it is, so a dribbled body isn't mistaken for
+                # a complete one and returned silently truncated.
+                if _monotonic() > deadline:
+                    raise OidcNetworkError(
+                        'Timed out reading the response body; the server is too '
+                        'slow or is dribbling data.')
+                return b''.join(chunks)
+            total += len(chunk)
+            if total > max_bytes:
+                raise OidcNetworkError(
+                    f'Response body exceeded the {max_bytes}-byte limit; '
+                    'refusing to buffer an unbounded response.')
+            chunks.append(chunk)
+    finally:
+        if timer is not None:
+            timer.cancel()
 
 
 def request(
@@ -239,22 +315,40 @@ def request(
     _require_secure(url, insecure)
     body: Optional[bytes] = data
     req_headers = {'User-Agent': _USER_AGENT, 'Accept': 'application/json'}
-    if form is not None:
-        body = urllib.parse.urlencode(
-            {k: v for k, v in form.items() if v is not None}).encode('utf-8')
-        req_headers['Content-Type'] = 'application/x-www-form-urlencoded'
-    if headers:
-        req_headers.update(headers)
-
-    req = urllib.request.Request(
-        url, data=body, headers=req_headers, method=method.upper())
     try:
+        # Build the request INSIDE the try. urlencode(...).encode('utf-8') on a
+        # form value carrying a lone surrogate — a JSON string a hostile IdP can
+        # return as a device_code / refresh_token / scope, which passes the
+        # isinstance(str) coercion guards — and http.client's encode of a
+        # non-ASCII URL host both raise a raw UnicodeEncodeError. Previously the
+        # encode and Request() ran before this try, so that escaped the
+        # typed-error contract. A non-ASCII credential-endpoint authority is also
+        # rejected up-front by _reject_confusable_authority; catching here is the
+        # backstop covering every other path (the /settings and IdP-discovery
+        # URLs, whose hosts that check never sees).
+        if form is not None:
+            body = urllib.parse.urlencode(
+                {k: v for k, v in form.items() if v is not None}).encode('utf-8')
+            req_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+        if headers:
+            req_headers.update(headers)
+        req = urllib.request.Request(
+            url, data=body, headers=req_headers, method=method.upper())
         with _opener(ctx).open(req, timeout=timeout) as resp:
             return HttpResponse(
                 getattr(resp, 'status', resp.getcode()),
                 _read_body(resp, max_bytes=_MAX_RESPONSE_BYTES,
                            deadline=_monotonic() + timeout),
                 resp.headers)
+    except UnicodeError as e:
+        # A non-ASCII URL host or an unencodable request field (e.g. a lone
+        # surrogate) — keep it within the typed-error contract instead of leaking
+        # a raw UnicodeEncodeError from urlencode().encode() / http.client.
+        raise OidcConfigError(
+            f'Could not encode the request to {url!r}: {e}. The URL host or a '
+            'request field contains a non-ASCII or unencodable character (e.g. a '
+            'lone surrogate), indicating a malformed or tampered configuration '
+            'or server response.') from e
     except urllib.error.HTTPError as e:
         # 4xx/5xx still carry a (possibly JSON) body to inspect. Bound the read
         # (same cap/deadline), map a mid-body read failure to a network error,

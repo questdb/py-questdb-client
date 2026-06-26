@@ -664,6 +664,31 @@ class TestDeviceFlow(AuthTestBase):
         self.assertLessEqual(auth._tokens.expires_at - self._clock.now(),
                              _MAX_EXPIRES_IN)
 
+    def test_hostile_jwt_exp_does_not_abort_signin(self):
+        # M3: _display_lifetime ("expires in N min") is cosmetic but runs on the
+        # success path. A hostile JWT exp — a huge int that overflows float() —
+        # must NOT abort an already-completed sign-in; otherwise the token the
+        # user authorized is discarded (the cache store runs only after the flow
+        # returns) and every later token() re-prompts and re-crashes. token()
+        # must still return the token.
+        auth = self.make_auth()
+        id_tok = _jwt({'sub': 'alice', 'exp': 10 ** 400})
+        self.state.token_script = [(200, {
+            'access_token': 'a', 'id_token': id_tok, 'refresh_token': 'r',
+            'expires_in': 3600, 'scope': 'openid groups'})]
+        self.assertEqual(auth.token(), id_tok)   # groups mode -> id_token
+
+    def test_raising_success_renderer_does_not_abort_signin(self):
+        # M3: rendering the success message is best-effort — a custom renderer
+        # whose on_success raises must NOT discard a token the user already
+        # authorized. The sign-in completes and token() returns.
+        class _Boom(Renderer):
+            def on_success(self, identity, expires_in):
+                raise RuntimeError('renderer blew up')
+
+        auth = self.make_auth(renderer=_Boom())
+        self.assertEqual(auth.token(), ID_TOKEN)
+
     def test_poll_honors_retry_after(self):
         # Issue 8: a slow_down poll response carrying Retry-After backs off by
         # that many seconds (clamped), not the fixed +5s.
@@ -2834,6 +2859,31 @@ class TestEndpointValidation(unittest.TestCase):
         # A legitimate IPv6-literal authority is NOT flagged as confusable.
         self._validate('https://[::1]:443/token', 'https://[::1]:443/device')
 
+    def test_non_ascii_authority_endpoint_rejected(self):
+        # M2: a non-ASCII endpoint host is rejected fail-closed on every
+        # construction path. It is a homoglyph/confusable spoofing vector (the
+        # renderer already distrusts it for display), and http.client cannot even
+        # encode it — it would otherwise reach the transport and raise a raw
+        # UnicodeEncodeError instead of a typed error. An IDN must be given in its
+        # ASCII xn-- punycode form.
+        from questdb.auth._discovery import _reject_confusable_authority
+        for url in ('https://bаd.example/token',          # Cyrillic 'а'
+                    'https://idp.exämple.com/token'):       # 'ä'
+            with self.assertRaises(OidcConfigError):
+                _reject_confusable_authority(url, label='token endpoint')
+            with self.assertRaises(OidcConfigError):   # public co-location entry
+                self._validate(url, url)
+            with self.assertRaises(OidcConfigError):   # and the full constructor
+                OidcDeviceAuth(
+                    client_id='questdb',
+                    device_authorization_endpoint=url,
+                    token_endpoint=url,
+                    renderer=Renderer())
+        # An ASCII xn-- punycode authority (how an IDN must be supplied) is NOT
+        # flagged — isascii() admits it.
+        self._validate('https://xn--bcher-kva.example/token',
+                       'https://xn--bcher-kva.example/device')
+
     def test_confusable_issuer_rejected(self):
         # M1 (defense-in-depth): a confusable issuer authority would make the
         # issuer-origin pin compare against the wrong host. With explicit
@@ -3190,6 +3240,21 @@ class TestTransportSecurity(unittest.TestCase):
             request('GET', 'https://questdb.example.com:notaport/settings',
                     timeout=5)
 
+    def test_unencodable_request_maps_to_config_error(self):
+        # M1/M2: a lone surrogate in a form field (a JSON string a hostile IdP
+        # can return as a device_code / refresh_token / scope — it passes the
+        # isinstance(str) coercion guards) makes urlencode().encode('utf-8')
+        # raise; a non-ASCII URL host makes http.client's encode raise. Both must
+        # surface as a typed OidcConfigError, not a raw UnicodeEncodeError
+        # escaping the contract (the encode/Request now run inside request()'s
+        # try). Neither reaches the network, so no server is needed.
+        from questdb.auth._http import request
+        with self.assertRaises(OidcConfigError):   # surrogate in the form body
+            request('POST', 'https://idp.example/token',
+                    form={'device_code': '\ud800'}, timeout=5)
+        with self.assertRaises(OidcConfigError):   # non-ASCII host (backstop path)
+            request('GET', 'https://bаd.example/settings', timeout=5)
+
     def test_require_secure_rejects_malformed_ipv6(self):
         # _require_secure routes through safe_urlparse, so a malformed IPv6
         # endpoint raises OidcConfigError instead of a bare ValueError (urlparse
@@ -3294,6 +3359,78 @@ class TestTransportSecurity(unittest.TestCase):
             'request() hung on a dribbling server: the whole-read wall-clock '
             'deadline never fired (M1 regression — _read_body must read via '
             'read1()).')
+        self.assertIsInstance(result.get('error'), OidcNetworkError)
+
+    def test_read_body_aborts_real_socket_chunked_dribble(self):
+        # Regression for C1, against the REAL socket stack. read1() returns after
+        # one socket read on a Content-Length body (the test above), but on a
+        # CHUNKED body it calls http.client's readline() to parse each chunk-size
+        # line, and readline() loops over socket reads until it sees a newline.
+        # A server that dribbles the size line one byte at a time, never
+        # terminating it, keeps a single read1() blocked for up to _MAXLINE
+        # (~hours) — the between-reads deadline never runs and the per-socket
+        # timeout keeps resetting — hanging the calling thread (which holds the
+        # acquisition lock). _read_body's deadline watchdog must shut the socket
+        # down at the deadline and surface a typed OidcNetworkError.
+        import socket
+        from questdb.auth import _http
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def serve():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(65536)  # consume the request line/headers
+                # Announce chunked, then dribble the chunk-SIZE line one hex
+                # digit at a time with NO terminating CRLF, each well inside the
+                # per-socket timeout window so urllib's per-read timeout never
+                # fires.
+                conn.sendall(
+                    b'HTTP/1.1 200 OK\r\n'
+                    b'Content-Type: application/json\r\n'
+                    b'Transfer-Encoding: chunked\r\n\r\n')
+                while not stop.is_set():
+                    try:
+                        conn.sendall(b'a')
+                    except OSError:
+                        break
+                    stop.wait(0.1)
+            finally:
+                conn.close()
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+
+        result = {}
+
+        def call():
+            try:
+                _http.request(
+                    'GET', f'http://127.0.0.1:{port}/x', timeout=1.0)
+                result['returned'] = True
+            except Exception as e:  # noqa: BLE001 - record for the assert below
+                result['error'] = e
+
+        t = threading.Thread(target=call, daemon=True)
+        t.start()
+        t.join(8.0)
+        hung = t.is_alive()            # capture before cleanup unblocks it
+        stop.set()
+        srv.close()
+        server_thread.join(2.0)
+
+        self.assertFalse(
+            hung,
+            'request() hung on a chunked size-line dribble: the deadline '
+            'watchdog never fired (C1 regression).')
         self.assertIsInstance(result.get('error'), OidcNetworkError)
 
     def test_bad_ca_bundle_raises_config_error(self):
