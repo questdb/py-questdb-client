@@ -123,12 +123,13 @@ ACCESS_TOKEN = _jwt({'sub': 'user-1', 'scope': 'openid'})
 
 
 @contextlib.contextmanager
-def _raw_response_server(status, content_type, body):
+def _raw_response_server(status, content_type, body, extra_headers=None):
     """A throwaway HTTP server that returns one fixed (status, type, body).
 
     Used to exercise the transport's handling of responses the scripted mock
     IdP can't produce (non-JSON 2xx, non-dict JSON, non-2xx) on the token /
-    device / settings / discovery endpoints. Yields the base URL.
+    device / settings / discovery endpoints. ``extra_headers`` adds response
+    headers (e.g. ``Retry-After``). Yields the base URL.
     """
     class _H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -138,6 +139,8 @@ def _raw_response_server(status, content_type, body):
             self.send_response(status)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(body)))
+            for _k, _v in (extra_headers or {}).items():
+                self.send_header(_k, _v)
             self.end_headers()
             self.wfile.write(body)
 
@@ -434,6 +437,26 @@ class TestDeviceFlow(AuthTestBase):
         # 5 -> (+5) 10 -> slow_down w/ Retry-After:1 stays >= 10+5 = 15, never
         # dropping back to the 5s floor.
         self.assertEqual(self._clock.sleeps, [5, 10, 15])
+
+    def test_non_json_429_retry_after_honored_in_poll(self):
+        # m2: a non-JSON 429 from a proxy/WAF now carries its Retry-After
+        # (post_form attaches it to the OidcError), so the poll loop's exception
+        # arm backs off by that value rather than the fixed +5s step.
+        self.state.token_script = [(200, None)]  # success once actually polled
+        auth = self.make_auth()
+        real = auth._idp_post
+        polls = {'n': 0}
+
+        def flaky(url, form):
+            if url == auth.config.token_endpoint:
+                polls['n'] += 1
+                if polls['n'] == 1:
+                    raise OidcError('proxy 429', status=429, retry_after=30)
+            return real(url, form)
+
+        auth._idp_post = flaky
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertIn(30, self._clock.sleeps)   # honored Retry-After, not +5
 
     def test_transient_network_error_during_poll_keeps_polling(self):
         # A dropped connection / DNS blip / timeout on a single poll must not
@@ -2459,6 +2482,31 @@ class TestConcurrency(AuthTestBase):
         # Still usable.
         self.assertEqual(insts[0].token(), ID_TOKEN)
 
+    def test_stale_local_token_adopts_fresh_shared_cache_token(self):
+        # m1: when this instance holds a STALE (non-None, expired) self._tokens
+        # while ANOTHER instance sharing the process-global cache has stored a
+        # fresh valid token, the slow path must adopt the cached fresh token
+        # rather than run a redundant refresh / sign-in. (Before the fix the
+        # promotion reloaded the shared cache only when self._tokens was None, so
+        # a stale local token shadowed the fresher cached one.)
+        clock = FakeClock()
+        a = self.make_auth(clock=clock)
+        b = self.make_auth(clock=clock)
+        self.assertEqual(a.cache_key, b.cache_key)
+        now = clock.now()
+        # a has a stale local token (with a refresh_token it would otherwise use):
+        a._tokens = TokenSet(
+            access_token='old', id_token='old-id', refresh_token='r-old',
+            expires_at=now - 10)
+        # b stored a fresh valid token in the shared cache meanwhile:
+        b._cache.store(b.cache_key, TokenSet(
+            access_token='fresh-access', id_token=ID_TOKEN,
+            refresh_token='r-new', issued_at=now, expires_at=now + 3600))
+        # a.token() adopts the fresh cached token: no refresh, no device flow.
+        self.assertEqual(a.token(), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 0)
+        self.assertEqual(self.state.device_requests, 0)
+
 
 class TestAdapters(unittest.TestCase):
     """PG-wire connection adapters: tested via injected fake modules (the real
@@ -3205,6 +3253,18 @@ class TestTransportSecurity(unittest.TestCase):
             with self.assertRaises(OidcError) as cm:
                 post_form(raw + '/token', {'grant_type': 'x'})
         self.assertEqual(cm.exception.status, 503)
+
+    def test_post_form_attaches_retry_after_to_non_json_error(self):
+        # m2: a non-JSON 429/503 carrying a Retry-After header surfaces that value
+        # on the raised OidcError (mirroring the JSON path's _PostResult), so a
+        # poll backs off by the server's value rather than the fixed +5s step.
+        from questdb.auth._http import post_form
+        with _raw_response_server(429, 'text/plain', b'slow down',
+                                  {'Retry-After': '30'}) as raw:
+            with self.assertRaises(OidcError) as cm:
+                post_form(raw + '/token', {'grant_type': 'x'})
+        self.assertEqual(cm.exception.status, 429)
+        self.assertEqual(cm.exception.retry_after, 30)
 
     def test_incomplete_error_body_maps_to_network_error(self):
         # A 4xx/5xx with a truncated CHUNKED body (the server announces a chunk,
@@ -4182,6 +4242,17 @@ class TestRendererSecurity(unittest.TestCase):
                          'https://idp.example.com/device')
         self.assertIn('<a href="https://idp.example.com/device"',
                       _render_link('https://idp.example.com/device'))
+
+    def test_display_url_normalizes_host_with_malformed_port(self):
+        # m3: parts.port raises ValueError on a junk (non-integer) port. That
+        # must NOT abort host normalization, or a homoglyph host paired with a
+        # junk port would be shown raw -- the very spoof _display_url reveals. The
+        # host is still IDNA/punycode-normalized; the unrenderable port is dropped.
+        from questdb.auth._render import _display_url
+        out = _display_url('https://аpple.com:bad/device')  # Cyrillic 'а'
+        self.assertNotIn('а', out)     # homoglyph revealed, not echoed raw
+        self.assertIn('xn--', out)          # shown in punycode
+        self.assertIn('/device', out)       # path preserved
 
     def test_displayed_and_opened_target_do_not_diverge(self):
         # A control / zero-width char stripped from the on-screen link must NOT

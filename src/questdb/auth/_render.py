@@ -220,7 +220,6 @@ def _display_url(url: Optional[str]) -> str:
         parts = urllib.parse.urlparse(text)
         scheme = (parts.scheme or '').lower()
         host = parts.hostname
-        port = parts.port
     except ValueError:
         return text
     if scheme not in ('http', 'https') or not host:
@@ -238,6 +237,15 @@ def _display_url(url: Optional[str]) -> str:
             # rather than let an invisible homoglyph through unchanged.
             ascii_host = host.encode('ascii', 'backslashreplace').decode('ascii')
     host_part = f'[{ascii_host}]' if ':' in ascii_host else ascii_host  # IPv6
+    # Read the port separately and defensively: parts.port raises ValueError for
+    # a malformed (non-integer / out-of-range) port. That must NOT abort host
+    # normalization — otherwise a homoglyph host paired with a junk port would be
+    # shown raw (the very spoof this reveals). A junk port can't be rendered, so
+    # omit it; the host (what matters for spoofing) is still IDNA-normalized.
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
     netloc = f'{host_part}:{port}' if port is not None else host_part
     return urllib.parse.urlunparse(parts._replace(netloc=netloc))
 

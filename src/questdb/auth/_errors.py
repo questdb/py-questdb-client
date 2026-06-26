@@ -35,7 +35,8 @@ from ._render import _strip_control
 class OidcError(Exception):
     """Base class for every error raised by :mod:`questdb.auth`."""
 
-    def __init__(self, *args, status: Optional[int] = None):
+    def __init__(self, *args, status: Optional[int] = None,
+                 retry_after: Optional[int] = None):
         # Strip terminal/bidi/zero-width control characters from every string
         # message argument before it can reach a display sink. Error messages
         # routinely interpolate untrusted IdP fields (error_description, response
@@ -54,6 +55,10 @@ class OidcError(Exception):
         # loop and silent refresh can tell a terminal 4xx (e.g. a WAF error
         # page) from a transient 5xx/429/network blip.
         self.status = status
+        # Parsed Retry-After (delta-seconds) off a non-JSON 429/503 error body,
+        # so the poll loop can honor it the same way the JSON path does (via
+        # _PostResult.retry_after). None when absent / not applicable.
+        self.retry_after = retry_after
 
 
 class OidcConfigError(OidcError):

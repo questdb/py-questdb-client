@@ -597,13 +597,20 @@ class OidcDeviceAuth:
             # for it (bounds the process-global maps; see MemoryCache.release).
             generation = self._cache_generation()
             try:
-                # Promote a cached token under the lock (even expired, so
-                # _acquire can reuse its refresh_token). Here, not on the fast
-                # path, so every write to self._tokens stays serialized.
-                if self._tokens is None:
-                    cached = self._cache.load(self.cache_key)
-                    if cached is not None:
-                        self._tokens = cached
+                # Promote a cached token under the lock, consulting the shared
+                # store even when self._tokens is already set: another instance
+                # sharing the process-global cache may have acquired or refreshed
+                # a token since this one's self._tokens went stale, so adopt that
+                # fresh one instead of running a redundant refresh / sign-in. When
+                # we have nothing, adopt whatever is cached (even expired) so
+                # _acquire can reuse its refresh_token. Not on the fast path, so
+                # every write to self._tokens stays serialized.
+                cached = self._cache.load(self.cache_key)
+                if cached is not None and (
+                        self._tokens is None
+                        or (cached.is_valid(self._now())
+                            and self._has_required_token(cached))):
+                    self._tokens = cached
                 tokens = self._valid_cached()
                 if tokens is not None:
                     return tokens
@@ -969,9 +976,11 @@ class OidcDeviceAuth:
                 # poll again rather than discard the sign-in (the deadline bounds
                 # the total wait; a genuine JSON rejection arrives below).
                 if getattr(e, 'status', None) == 429:
-                    # No JSON body here (a non-JSON 429 from a proxy/WAF), so no
-                    # Retry-After is surfaced; fall back to the +5s step.
-                    interval = _backoff_interval(interval, None)
+                    # A non-JSON 429 (proxy/WAF). Honor a Retry-After header if
+                    # post_form parsed one off the error response, else the +5s
+                    # step (clamped to the poll-interval bounds either way).
+                    interval = _backoff_interval(
+                        interval, getattr(e, 'retry_after', None))
                 continue
 
             status, body = result

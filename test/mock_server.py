@@ -132,7 +132,15 @@ class _QuietHTTPServer(hs.HTTPServer):
     raises ConnectionResetError outside of any request handler's try/except.
     """
     def handle_error(self, request, client_address):
-        if isinstance(sys.exc_info()[1], ConnectionError):
+        # Suppress ONLY the noise from a client that went away mid-request
+        # (BrokenPipeError on Unix; ConnectionResetError / ConnectionAbortedError
+        # on Windows, incl. the keep-alive read of the next request line, which
+        # raises outside any handler's try/except). Any other error -- including
+        # a ConnectionRefusedError or a genuine handler bug -- still prints, so a
+        # real failure isn't hidden.
+        if isinstance(sys.exc_info()[1],
+                      (BrokenPipeError, ConnectionResetError,
+                       ConnectionAbortedError)):
             return
         super().handle_error(request, client_address)
 

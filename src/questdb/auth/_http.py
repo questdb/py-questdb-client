@@ -472,16 +472,19 @@ def post_form(
         if resp.ok:
             raise OidcError(
                 f'Expected JSON from {url}, got: {resp.text()[:200]}',
-                status=resp.status)
+                status=resp.status, retry_after=retry_after)
         # Non-JSON error body: attach the HTTP status so callers (poll loop /
-        # silent refresh) can tell a terminal 4xx from a transient 5xx/429.
+        # silent refresh) can tell a terminal 4xx from a transient 5xx/429, and
+        # the parsed Retry-After so a non-JSON 429/503 backs off by the server's
+        # value rather than the fixed +5s step.
         raise OidcError(
             f'HTTP {resp.status} from {url}: {resp.text()[:200]}',
-            status=resp.status)
+            status=resp.status, retry_after=retry_after)
     if not isinstance(parsed, dict):
         # Attach the status (mirroring the non-JSON branches) so a non-object
         # body on a terminal 4xx — e.g. a JSON array from a non-conformant IdP
         # — fails the poll loop fast instead of polling on to "code expired".
         raise OidcError(
-            f'Unexpected JSON shape from {url}: {parsed!r}', status=resp.status)
+            f'Unexpected JSON shape from {url}: {parsed!r}',
+            status=resp.status, retry_after=retry_after)
     return _PostResult(resp.status, parsed, retry_after)

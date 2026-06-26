@@ -65,12 +65,21 @@ class OidcConfig:
     """
 
     client_id: str
+    """The OIDC public-client id registered with the identity provider."""
     token_endpoint: str
+    """IdP token endpoint — where the device-code and refresh grants are POSTed."""
     device_authorization_endpoint: str
+    """IdP device-authorization endpoint (RFC 8628 §3.1)."""
     scope: str = 'openid'
+    """Space-separated scopes; ``openid`` is added automatically in groups mode."""
     groups_in_token: bool = False
+    """When true, present the ``id_token`` (groups encoded in it) rather than the
+    ``access_token`` — mirroring QuestDB's own selection."""
     audience: Optional[str] = None
+    """Optional ``audience`` sent on the device-code / refresh requests (some IdPs,
+    e.g. Auth0, require it to mint a token QuestDB accepts)."""
     issuer: Optional[str] = None
+    """Optional out-of-band IdP pin (its origin / issuer path); see :ref:`oidc_auth`."""
 
 
 def _as_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:

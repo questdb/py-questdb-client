@@ -98,6 +98,9 @@ See the :ref:`oidc_auth` guide for an overview.
 .. autoexception:: questdb.auth.OidcConfigError
    :show-inheritance:
 
+.. autoexception:: questdb.auth.OidcNetworkError
+   :show-inheritance:
+
 .. autoexception:: questdb.auth.OidcInteractionRequired
    :show-inheritance:
 
@@ -105,7 +108,4 @@ See the :ref:`oidc_auth` guide for an overview.
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcTimeoutError
-   :show-inheritance:
-
-.. autoexception:: questdb.auth.OidcNetworkError
    :show-inheritance:
