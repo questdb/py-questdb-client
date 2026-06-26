@@ -143,8 +143,12 @@ def sqlalchemy_engine(
     always authenticate with a valid, auto-refreshed token. Requires
     ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
 
-    Sign in once up front (``auth.token()``) before the pool opens connections,
-    so threads don't race the interactive prompt.
+    Sign in once up front (``auth.token()``) before the pool opens connections.
+    The per-connection injection is **non-interactive**: it reuses and silently
+    refreshes the cached token, but never launches a browser prompt from a pool
+    thread. If no token has been acquired yet it raises
+    :class:`OidcInteractionRequired` rather than blocking the pool on an
+    interactive sign-in.
 
     :param auth: An :class:`OidcDeviceAuth`, e.g. from
         :meth:`OidcDeviceAuth.from_questdb`.
@@ -183,7 +187,10 @@ def sqlalchemy_engine(
 
     @event.listens_for(engine, 'do_connect')
     def _provide_token(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
-        cparams['password'] = auth.token()
+        # Non-interactive: reuse / silently refresh the up-front token, but never
+        # run an interactive device flow from a pool thread (it would block the
+        # pool). Raises OidcInteractionRequired if no token was acquired first.
+        cparams['password'] = auth._token(allow_interactive=False)
 
     return engine
 

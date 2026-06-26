@@ -176,7 +176,9 @@ def _http_status_is_transient(status: Optional[int]) -> bool:
     return status is not None and (status >= 500 or status == 429)
 
 
-def _backoff_interval(interval: int, retry_after: Optional[int]) -> int:
+def _backoff_interval(
+        interval: int, retry_after: Optional[int],
+        *, at_least_increment: bool = False) -> int:
     """
     The next poll interval after a 429 / ``slow_down``.
 
@@ -184,8 +186,16 @@ def _backoff_interval(interval: int, retry_after: Optional[int]) -> int:
     8628 §3.5 +5s slow-down step. Clamped to ``[_MIN_POLL_INTERVAL,
     _MAX_POLL_INTERVAL]`` so a hostile/huge value can't pin the polling thread —
     the device-code deadline still bounds the total wait.
+
+    ``at_least_increment`` enforces RFC 8628 §3.5 for ``slow_down``: the interval
+    MUST increase by at least 5, so a contradictory ``Retry-After`` *lower* than
+    the current interval can't make the client poll faster right after the IdP
+    told it to slow down. (A plain ``429``/``5xx`` keeps honoring ``Retry-After``
+    verbatim — there the server's value is authoritative, not a slow-down step.)
     """
     target = retry_after if retry_after is not None else interval + 5
+    if at_least_increment:
+        target = max(target, interval + 5)
     return min(_MAX_POLL_INTERVAL, max(_MIN_POLL_INTERVAL, target))
 
 
@@ -456,7 +466,18 @@ class OidcDeviceAuth:
         token (``acl.oidc.groups.encoded.in.token=true``), else the
         ``access_token`` — mirroring QuestDB's own selection logic.
         """
-        return self._select(self._obtain_tokens())
+        return self._token()
+
+    def _token(self, *, allow_interactive: bool = True) -> str:
+        # Internal token accessor. allow_interactive=False does the fast-path /
+        # silent-refresh work but refuses to START the interactive device flow,
+        # raising OidcInteractionRequired instead. Used by the SQLAlchemy pool
+        # callback (see _adapters.sqlalchemy_engine), where running a browser
+        # prompt on a pool thread would block the pool — the user is expected to
+        # sign in once up front, and the pool then reuses / silently refreshes
+        # that token.
+        return self._select(
+            self._obtain_tokens(allow_interactive=allow_interactive))
 
     def headers(self) -> Dict[str, str]:
         """Return ``{"Authorization": "Bearer <token>"}``."""
@@ -549,7 +570,7 @@ class OidcDeviceAuth:
             'Device authorization completed but the IdP returned no '
             'access_token.')
 
-    def _obtain_tokens(self) -> TokenSet:
+    def _obtain_tokens(self, *, allow_interactive: bool = True) -> TokenSet:
         # Fast path: return a valid token without the lock, so a caller with a
         # usable token never blocks behind another thread's refresh/sign-in.
         # READ-ONLY — never writes self._tokens; every write to that field is
@@ -586,7 +607,8 @@ class OidcDeviceAuth:
                 tokens = self._valid_cached()
                 if tokens is not None:
                     return tokens
-                return self._acquire(generation)
+                return self._acquire(
+                    generation, allow_interactive=allow_interactive)
             finally:
                 self._cache.release(self.cache_key)
 
@@ -617,10 +639,14 @@ class OidcDeviceAuth:
             return tokens
         return None
 
-    def _acquire(self, generation: int) -> TokenSet:
+    def _acquire(
+            self, generation: int, *,
+            allow_interactive: bool = True) -> TokenSet:
         # Holds self._lock. Try a silent refresh, else run the device flow.
         # `generation` was captured before the cache read in _obtain_tokens;
         # _store drops its write if a concurrent clear() bumped it since.
+        # A silent refresh runs regardless of allow_interactive; only the
+        # interactive device-flow fallback below is gated by it.
         tokens = self._tokens
         if tokens is not None and tokens.refresh_token:
             try:
@@ -652,6 +678,18 @@ class OidcDeviceAuth:
             # lands `fresh` (unless a genuine concurrent clear() intervenes).
             self._tokens = None
             self._cache.evict(self.cache_key)
+
+        if not allow_interactive:
+            # A fresh interactive sign-in would be required, but this caller
+            # forbids it — it runs on a connection-pool thread, where a browser
+            # prompt would block the pool (see _adapters.sqlalchemy_engine).
+            raise OidcInteractionRequired(
+                'A token must be acquired by an interactive sign-in, but this '
+                'request disallows it (it runs on a connection-pool thread, '
+                'where a browser prompt would block the pool). Call '
+                'auth.token() once on the main thread before opening pooled '
+                'connections; the pool then reuses and silently refreshes that '
+                'token.')
 
         fresh = self._run_device_flow()
         self._store(fresh, generation)
@@ -987,7 +1025,10 @@ class OidcDeviceAuth:
             if error == 'authorization_pending':
                 continue
             if error == 'slow_down':
-                interval = _backoff_interval(interval, retry_after)
+                # RFC 8628 §3.5: slow_down MUST raise the interval. Never let a
+                # contradictory low Retry-After reduce it below current + 5.
+                interval = _backoff_interval(
+                    interval, retry_after, at_least_increment=True)
                 continue
             if error == 'expired_token':
                 self._renderer.on_failure(

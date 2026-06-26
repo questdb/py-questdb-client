@@ -80,15 +80,23 @@ class _FakeAuth:
     _ctx = None
 
     def __init__(self, token='TKN'):
-        self._token = token
+        self._value = token
         self.calls = 0
 
     def token(self):
         self.calls += 1
-        return self._token
+        return self._value
+
+    def _token(self, *, allow_interactive=True):
+        # The SQLAlchemy adapter fetches the per-connection token through this
+        # internal accessor with allow_interactive=False (it runs on a pool
+        # thread, where an interactive prompt would block the pool). Mirror
+        # OidcDeviceAuth and count it like token().
+        self.calls += 1
+        return self._value
 
     def headers(self):
-        return {'Authorization': f'Bearer {self._token}'}
+        return {'Authorization': f'Bearer {self._value}'}
 
 
 class _ChunkStream:
@@ -399,6 +407,33 @@ class TestDeviceFlow(AuthTestBase):
         auth.token()
         # interval starts at 5, +5 after slow_down.
         self.assertEqual(self._clock.sleeps, [5, 10])
+
+    def test_slow_down_retry_after_never_decreases_interval(self):
+        # M6 / RFC 8628 §3.5: slow_down MUST raise the poll interval. A
+        # contradictory LOW Retry-After on a slow_down must not reduce it below
+        # current + 5 (which would make the client poll faster right after the IdP
+        # told it to slow down). A plain 429/5xx still honors Retry-After verbatim
+        # (test_poll_honors_retry_after); this is the slow_down-specific rule.
+        from questdb.auth._http import _PostResult
+        auth = self.make_auth()
+        real = auth._idp_post
+        n = {'tok': 0}
+
+        def fake(url, form):
+            if url.endswith('/token'):
+                n['tok'] += 1
+                if n['tok'] == 1:
+                    return _PostResult(400, {'error': 'slow_down'}, None)  # 5->10
+                if n['tok'] == 2:
+                    return _PostResult(400, {'error': 'slow_down'}, 1)  # low RA
+                return real(url, form)                                  # success
+            return real(url, form)
+
+        auth._idp_post = fake
+        self.assertEqual(auth.token(), ID_TOKEN)
+        # 5 -> (+5) 10 -> slow_down w/ Retry-After:1 stays >= 10+5 = 15, never
+        # dropping back to the 5s floor.
+        self.assertEqual(self._clock.sleeps, [5, 10, 15])
 
     def test_transient_network_error_during_poll_keeps_polling(self):
         # A dropped connection / DNS blip / timeout on a single poll must not
@@ -1352,6 +1387,27 @@ class TestRefresh(AuthTestBase):
         self.assertEqual(token, ID_TOKEN)
         self.assertEqual(self.state.refresh_requests, 1)
         self.assertEqual(self.state.device_requests, 0)  # no re-prompt
+
+    def test_noninteractive_token_refuses_device_flow(self):
+        # M5: the SQLAlchemy pool callback fetches the token with
+        # allow_interactive=False so a browser prompt never blocks a pool thread.
+        # With nothing cached and no refresh token, it must raise a clear
+        # OidcInteractionRequired WITHOUT starting the device flow.
+        auth = self.make_auth()
+        with self.assertRaises(OidcInteractionRequired):
+            auth._token(allow_interactive=False)
+        self.assertEqual(self.state.device_requests, 0)        # flow never ran
+        self.assertEqual(len(self.state.token_requests), 0)
+
+    def test_noninteractive_token_still_silently_refreshes(self):
+        # M5: a non-interactive caller (a pool thread) still performs a SILENT
+        # refresh of an expired token — only the interactive device flow is
+        # refused, never the refresh. No prompt.
+        auth = self.make_auth()
+        self._seed_expired(auth)
+        self.assertEqual(auth._token(allow_interactive=False), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(self.state.device_requests, 0)
 
     def test_skew_window_triggers_proactive_refresh(self):
         # The point of the cache+skew design: a token still within its lifetime
@@ -2335,6 +2391,73 @@ class TestConcurrency(AuthTestBase):
         self.assertEqual(_MEMORY_INFLIGHT.get(auth.cache_key, 0), 0)
         # The auth is still usable afterwards.
         self.assertEqual(auth.token(), ID_TOKEN)
+
+    def test_cross_instance_clear_stress(self):
+        # M4: the single-instance stress test above cannot exercise the
+        # cross-instance generation/inflight CAS — one instance's clear() and its
+        # own acquisition serialize on the same self._lock. The race the CAS
+        # actually guards is a clear() on ONE instance bumping the generation
+        # while ANOTHER instance's store_if_current is in flight (separate locks,
+        # one shared process-global store) — the SQLAlchemy/psycopg pool case.
+        # Drive several instances sharing one cache_key under real contention:
+        # workers acquire on every instance while a clearer clears them. Asserts
+        # no torn read / exception / deadlock, every served token is the right
+        # kind, the cache serves the steady state, and the process-global
+        # in-flight & generation bookkeeping does not leak. (Lock order is always
+        # instance-lock -> _MEMORY_LOCK on every path, so there is no inversion to
+        # deadlock on.)
+        clock = _ConcurrentClock()
+        n_inst = 4
+        insts = [self.make_auth(clock=clock, open_browser=False)
+                 for _ in range(n_inst)]
+        key = insts[0].cache_key
+        self.assertTrue(all(a.cache_key == key for a in insts))
+
+        n_workers = 6
+        iters = 80
+        n_clears = 40
+        errors = []
+        start = threading.Barrier(n_workers + 1 + 1)  # workers + clearer + main
+
+        def worker(wid):
+            start.wait()
+            try:
+                for i in range(iters):
+                    if insts[(wid + i) % n_inst].token() != ID_TOKEN:
+                        errors.append('wrong token kind served')
+                        return
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        def clearer():
+            start.wait()
+            try:
+                for i in range(n_clears):
+                    insts[i % n_inst].clear()   # clears under a DIFFERENT lock
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(w,))
+                   for w in range(n_workers)]
+        threads.append(threading.Thread(target=clearer))
+        for t in threads:
+            t.start()
+        start.wait()   # release everyone at once for maximum contention
+        for t in threads:
+            t.join(30)
+        for t in threads:
+            self.assertFalse(t.is_alive(), 'a thread deadlocked under contention')
+        self.assertEqual(errors, [], f'errors under contention: {errors[:3]}')
+        # The shared cache + each instance's fast path serve the steady state, so
+        # device flows stay far below the total token() calls. (Cross-instance CAN
+        # double-prompt across separate locks, so this is looser than the
+        # single-instance "exactly once".)
+        self.assertLess(self.state.device_requests, n_workers * iters // 2)
+        # No leaked process-global bookkeeping once the storm settles.
+        self.assertEqual(_MEMORY_INFLIGHT.get(key, 0), 0)
+        self.assertNotIn(key, _MEMORY_GENERATION)
+        # Still usable.
+        self.assertEqual(insts[0].token(), ID_TOKEN)
 
 
 class TestAdapters(unittest.TestCase):

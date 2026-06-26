@@ -180,7 +180,11 @@ Two helpers wire the auto-refreshed token into PG-wire as the ``_sso`` password
 
 * :func:`~questdb.auth.sqlalchemy_engine` — a SQLAlchemy ``Engine`` that injects
   a fresh token for every new connection, so a pool keeps working as the token
-  rotates.
+  rotates. The per-connection injection is non-interactive (it reuses and
+  silently refreshes the up-front token); sign in once with ``auth.token()``
+  before opening connections, or it raises
+  :class:`~questdb.auth.OidcInteractionRequired` rather than launching a browser
+  prompt from a pool thread.
 * :func:`~questdb.auth.psycopg_connect` — a raw psycopg / psycopg2 connection
   (token captured at connect time).
 
