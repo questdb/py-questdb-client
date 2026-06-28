@@ -414,7 +414,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                         qi.QuestDBError,
-                        'exceeds max_buf_size'):
+                        'exceeds max(_buf_size|imum configured allowed size)'):
                     client.dataframe(df, table_name='trades', at='ts')
             finally:
                 client.close()
@@ -423,9 +423,11 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         self.assertEqual(stats['errors'], [])
         # Three data chunks fit before the oversized final chunk fails
-        # locally. Error cleanup then emits one sync frame so those deferred
-        # chunks are committed before dataframe() returns.
-        self.assertEqual(stats['qwp1_frames'], 4)
+        # locally. In store-and-forward mode each flush sends a non-deferred
+        # (already-committed) QWP1 frame, and the closing sync only waits for
+        # ACKs without emitting a separate commit frame, so three chunks ==
+        # three QWP1 frames.
+        self.assertEqual(stats['qwp1_frames'], 3)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

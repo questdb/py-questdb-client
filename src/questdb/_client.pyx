@@ -3917,7 +3917,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
         chunk, at_col, at_prebuilt, row_offset, row_count)
 
 
-cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
+cdef void_int _dataframe_columnar_sync(sf_column_sender* conn) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
@@ -3927,9 +3927,10 @@ cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = column_sender_sync(
+    ok = sf_column_sender_wait(
         conn,
         column_sender_ack_level.column_sender_ack_level_ok,
+        0,  # timeout_millis: 0 = wait indefinitely (no-progress deadline)
         &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
@@ -3940,7 +3941,7 @@ cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
 
 
 cdef bint _dataframe_columnar_force_drop_after_error(
-        column_sender* conn,
+        sf_column_sender* conn,
         bint flushed,
         bint flush_attempted,
         bint sync_attempted) noexcept:
@@ -3953,14 +3954,14 @@ cdef bint _dataframe_columnar_force_drop_after_error(
     if conn == NULL:
         return False
     if not flush_attempted:
-        return column_sender_must_close(conn)
-    if flushed and not sync_attempted and not column_sender_must_close(conn):
+        return sf_column_sender_must_close(conn)
+    if flushed and not sync_attempted and not sf_column_sender_must_close(conn):
         try:
             _dataframe_columnar_sync(conn)
             return False
         except BaseException:
             pass
-    return column_sender_must_close(conn)
+    return sf_column_sender_must_close(conn)
 
 
 cdef bint _dataframe_columnar_is_deferred_capacity_error(
@@ -3976,7 +3977,7 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
 
 
 cdef void_int _dataframe_columnar_flush(
-        column_sender* conn,
+        sf_column_sender* conn,
         column_sender_chunk* chunk,
         bint retry_after_sync) except -1:
     cdef line_sender_error* err = NULL
@@ -3991,7 +3992,7 @@ cdef void_int _dataframe_columnar_flush(
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = column_sender_flush(conn, chunk, &err)
+    ok = sf_column_sender_flush(conn, chunk, &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
@@ -4010,7 +4011,7 @@ cdef void_int _dataframe_columnar_flush(
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
-        ok = column_sender_flush(conn, chunk, &err)
+        ok = sf_column_sender_flush(conn, chunk, &err)
         _ensure_has_gil(&gs)
         if _dataframe_columnar_count_io_stats:
             _dataframe_columnar_flush_calls += 1
@@ -4022,7 +4023,7 @@ cdef void_int _dataframe_columnar_flush(
 
 
 cdef void_int _dataframe_arrow_flush_batch(
-        column_sender* conn,
+        sf_column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         ArrowSchema* schema,
@@ -4040,11 +4041,11 @@ cdef void_int _dataframe_arrow_flush_batch(
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
     if ts_column != NULL:
-        ok = column_sender_flush_arrow_batch_at_column(
+        ok = sf_column_sender_flush_arrow_batch_at_column(
             conn, table, array, schema, ts_column[0],
             overrides, overrides_len, &err)
     else:
-        ok = column_sender_flush_arrow_batch_server_stamped(
+        ok = sf_column_sender_flush_arrow_batch_server_stamped(
             conn, table, array, schema,
             overrides, overrides_len, &err)
     _ensure_has_gil(&gs)
@@ -4128,7 +4129,7 @@ def _bench_dataframe_flush_arrow_batch(
         object conf=None,
         size_t iterations=1):
     """
-    Internal benchmark hook for `column_sender_flush_arrow_batch_server_stamped`
+    Internal benchmark hook for `sf_column_sender_flush_arrow_batch_server_stamped`
     FFI.
 
     `arrow_source` must expose the Arrow PyCapsule Interface
@@ -4144,7 +4145,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef size_t col_count = 0
     cdef size_t completed = 0
     cdef questdb_db* db = NULL
-    cdef column_sender* conn = NULL
+    cdef sf_column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef qdb_pystr_buf* b = NULL
     cdef PyThreadState* gs = NULL
@@ -4204,7 +4205,7 @@ def _bench_dataframe_flush_arrow_batch(
             c_ts_column_ptr = &c_ts_column
 
         _ensure_doesnt_have_gil(&gs)
-        conn = questdb_db_borrow_column_sender(db, &err)
+        conn = questdb_db_borrow_sf_column_sender(db, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -4217,7 +4218,7 @@ def _bench_dataframe_flush_arrow_batch(
             _dataframe_columnar_sync(conn)
             completed = iterations
         finally:
-            questdb_db_return_column_sender(db, conn)
+            questdb_db_return_sf_column_sender(db, conn)
     finally:
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
@@ -4374,7 +4375,7 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
 
 
 cdef void_int _capsule_consume_stream(
-        column_sender* conn,
+        sf_column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -4902,7 +4903,7 @@ cdef bint _dataframe_client_try_capsule_path(
         size_t max_rows_per_batch,
         object schema_overrides) except -1:
     cdef qdb_pystr_buf* b = NULL
-    cdef column_sender* conn = NULL
+    cdef sf_column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
     cdef object sliceable = None
@@ -5011,9 +5012,9 @@ cdef bint _dataframe_client_try_capsule_path(
 
         _ensure_doesnt_have_gil(&gs)
         if budget_ms == 0:
-            conn = questdb_db_borrow_column_sender(db, &err)
+            conn = questdb_db_borrow_sf_column_sender(db, &err)
         else:
-            conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
+            conn = questdb_db_borrow_sf_column_sender_with_retry(db, budget_ms, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -5051,9 +5052,9 @@ cdef bint _dataframe_client_try_capsule_path(
         _ensure_has_gil(&gs)
         if conn != NULL:
             if force_drop_conn:
-                questdb_db_drop_column_sender(db, conn)
+                questdb_db_drop_sf_column_sender(db, conn)
             else:
-                questdb_db_return_column_sender(db, conn)
+                questdb_db_return_sf_column_sender(db, conn)
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
         if c_overrides != NULL:
@@ -5063,7 +5064,7 @@ cdef bint _dataframe_client_try_capsule_path(
 
 
 cdef void_int _capsule_consume_stream_with_hint(
-        column_sender* conn,
+        sf_column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -5361,7 +5362,7 @@ cdef class Client:
             object at,
             size_t max_rows_per_batch):
         cdef column_sender_chunk* chunk = NULL
-        cdef column_sender* conn = NULL
+        cdef sf_column_sender* conn = NULL
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
         cdef bint flushed = False
@@ -5394,9 +5395,9 @@ cdef class Client:
 
             _ensure_doesnt_have_gil(&gs)
             if budget_ms == 0:
-                conn = questdb_db_borrow_column_sender(db, &err)
+                conn = questdb_db_borrow_sf_column_sender(db, &err)
             else:
-                conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
+                conn = questdb_db_borrow_sf_column_sender_with_retry(db, budget_ms, &err)
             _ensure_has_gil(&gs)
             if conn == NULL:
                 raise c_err_to_py(err)
@@ -5440,9 +5441,9 @@ cdef class Client:
             _ensure_has_gil(&gs)
             if conn != NULL:
                 if force_drop_conn:
-                    questdb_db_drop_column_sender(db, conn)
+                    questdb_db_drop_sf_column_sender(db, conn)
                 else:
-                    questdb_db_return_column_sender(db, conn)
+                    questdb_db_return_sf_column_sender(db, conn)
             if chunk != NULL:
                 column_sender_chunk_free(chunk)
             # The plan is rebuilt on each failover attempt; release this
@@ -6771,12 +6772,16 @@ cdef class Sender:
     def await_acked_fsn(self, fsn, timeout_millis):
         """
         Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
+
+        Returns ``True`` once every frame published so far (which includes
+        ``fsn``) has been acknowledged, or ``False`` if the no-progress
+        timeout elapsed before the acknowledgement watermark reached ``fsn``.
         """
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
         cdef uint64_t c_fsn
         cdef uint64_t c_timeout_millis
-        cdef cbool reached = False
+        cdef line_sender_qwpws_fsn acked
         cdef bint ok = False
 
         self._check_qwp_ws('await_acked_fsn')
@@ -6791,13 +6796,36 @@ cdef class Sender:
         c_fsn = fsn
         c_timeout_millis = timeout_millis
 
+        # Fast path: the completion watermark may already cover ``fsn``.
+        if not line_sender_qwpws_acked_fsn(self._impl, &acked, &err):
+            raise c_err_to_py(err)
+        if acked.has_value and acked.value >= c_fsn:
+            return True
+
+        # `line_sender_qwpws_wait` drains every frame published so far (a
+        # superset of ``fsn``) up to the "ok" ack level. The no-progress
+        # deadline (`timeout_millis`; 0 == wait indefinitely) surfaces as a
+        # `line_sender_error_failover_retry`, which we translate back into the
+        # historical ``reached == False`` return rather than raising.
         _ensure_doesnt_have_gil(&gs)
-        ok = line_sender_qwpws_await_acked_fsn(
-            self._impl, c_fsn, c_timeout_millis, &reached, &err)
+        ok = line_sender_qwpws_wait(
+            self._impl,
+            line_sender_qwpws_ack_level.line_sender_qwpws_ack_level_ok,
+            c_timeout_millis,
+            &err)
         _ensure_has_gil(&gs)
         if not ok:
+            if line_sender_error_get_code(err) == \
+                    line_sender_error_failover_retry:
+                line_sender_error_free(err)
+                return False
             raise c_err_to_py(err)
-        return bool(reached)
+
+        # Re-read the watermark now that the wait has drained in-flight frames.
+        err = NULL
+        if not line_sender_qwpws_acked_fsn(self._impl, &acked, &err):
+            raise c_err_to_py(err)
+        return bool(acked.has_value and acked.value >= c_fsn)
 
     def drive_once(self):
         """
