@@ -4254,6 +4254,23 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertIn('xn--', out)          # shown in punycode
         self.assertIn('/device', out)       # path preserved
 
+    def test_display_url_neutralizes_unparseable_confusable_host(self):
+        # M2: a confusable that NFKC-folds to a URL delimiter (fullwidth solidus
+        # U+FF0F -> '/', '@' U+FF20, '#' U+FF03, '?' U+FF1F) makes urlparse raise,
+        # so the host can't be normalized. The fail-open path must NOT echo the
+        # raw confusable (it would read as the trusted host 'login.questdb.io'
+        # while a browser resolves 'evil.example' after the fold); it escapes the
+        # non-ASCII to a visible \uXXXX, and the URL is never clickable / opened.
+        from questdb.auth._render import _display_url, _safe_target, _render_link
+        for cp in (0xFF0F, 0xFF20, 0xFF03, 0xFF1F):
+            raw = f'https://login.questdb.io{chr(cp)}@evil.example/device'
+            shown = _display_url(raw)
+            self.assertNotIn(chr(cp), shown)            # confusable not echoed raw
+            self.assertIn(f'\\u{cp:04x}', shown)        # made visible instead
+            self.assertIn('evil.example', shown)        # real authority legible
+            self.assertIsNone(_safe_target(raw))        # never clickable / opened
+            self.assertNotIn('<a ', _render_link(raw))  # inert escaped text only
+
     def test_displayed_and_opened_target_do_not_diverge(self):
         # A control / zero-width char stripped from the on-screen link must NOT
         # survive into the URL actually opened or QR-encoded: the display, the

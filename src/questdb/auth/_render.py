@@ -199,6 +199,19 @@ def _safe_target(value: Optional[str]) -> Optional[str]:
     return _safe_link_url(_strip_control(value))
 
 
+def _ascii_visible(text: str) -> str:
+    """
+    Escape every non-ASCII char to a visible ``\\uXXXX`` so a confusable /
+    homoglyph can't slip through a display path unchanged. ASCII is left intact.
+
+    Used wherever :func:`_display_url` can't normalize the host — a netloc urllib
+    refuses to parse (a confusable that NFKC-folds to a URL delimiter), a
+    non-``http(s)`` / hostless value, or an IDNA-unencodable label — so the raw
+    value is never echoed verbatim.
+    """
+    return text.encode('ascii', 'backslashreplace').decode('ascii')
+
+
 def _display_url(url: Optional[str]) -> str:
     """
     A verification URL rendered safe to *show* as text.
@@ -211,7 +224,11 @@ def _display_url(url: Optional[str]) -> str:
     host the browser would actually resolve. Clickability is decided
     independently by :func:`_safe_target` (which rejects a non-ASCII host
     outright); this governs only the visible text. A non-``http(s)`` / hostless
-    value is returned control-stripped but otherwise unchanged.
+    value — or one whose authority urllib refuses to parse (a confusable that
+    NFKC-folds to a URL delimiter, e.g. a fullwidth solidus ``U+FF0F``) — is
+    returned control-stripped with any non-ASCII escaped to a visible
+    ``\\uXXXX`` (:func:`_ascii_visible`), so a homoglyph can't masquerade as a
+    trusted host even on this fail-open path.
     """
     text = _strip_control(url)
     if not text:
@@ -221,9 +238,16 @@ def _display_url(url: Optional[str]) -> str:
         scheme = (parts.scheme or '').lower()
         host = parts.hostname
     except ValueError:
-        return text
+        # The authority carries a confusable that NFKC-folds to a URL delimiter
+        # (fullwidth solidus U+FF0F -> '/', U+FF20 -> '@', ...), so urlparse
+        # refuses it and the host can't be normalized. Echoing it raw would show
+        # a host that reads as trusted while a browser resolves the real one
+        # after the fold; make the non-ASCII visible instead.
+        return _ascii_visible(text)
     if scheme not in ('http', 'https') or not host:
-        return text  # nothing host-like to normalize (opaque / relative)
+        # Nothing host-like to normalize (opaque / relative); still neutralize any
+        # non-ASCII so a confusable can't pass through this path unchanged.
+        return _ascii_visible(text)
     if host.isascii():
         ascii_host = host
     else:
@@ -235,7 +259,7 @@ def _display_url(url: Optional[str]) -> str:
         except (UnicodeError, ValueError):
             # IDNA can't encode it (an illegal label); make the bytes visible
             # rather than let an invisible homoglyph through unchanged.
-            ascii_host = host.encode('ascii', 'backslashreplace').decode('ascii')
+            ascii_host = _ascii_visible(host)
     host_part = f'[{ascii_host}]' if ':' in ascii_host else ascii_host  # IPv6
     # Read the port separately and defensively: parts.port raises ValueError for
     # a malformed (non-integer / out-of-range) port. That must NOT abort host
