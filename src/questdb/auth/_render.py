@@ -310,8 +310,11 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
 # that silently misses additions: control (Cc), format (Cf: bidi / zero-width /
 # soft hyphen / tag chars / the deprecated U+206x), unassigned (Cn),
 # private-use (Co), surrogates (Cs) and line/paragraph separators (Zl/Zp).
-# Spaces (Zs) and combining marks (Mn, e.g. accents) are kept so a legitimate
-# URL/identity still renders.
+# The ordinary ASCII space (U+0020, itself category Zs) and combining marks
+# (Mn, e.g. accents) are kept so a legitimate identity still renders; every
+# OTHER space separator (NBSP U+00A0, ideographic space U+3000, ...) is folded
+# to a plain space below, since an invisible-as-space char is a known phishing
+# primitive (it can hide trailing text in a user_code / identity / error).
 _STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Zl', 'Zp'})
 # Invisible characters Unicode classifies as letters (category Lo), so the rule
 # above won't catch them, but they render as nothing and are used to hide/spoof
@@ -338,10 +341,21 @@ def _strip_control(text: Optional[str]) -> str:
         return ''
     if not isinstance(text, str):
         text = str(text)
-    return ''.join(
-        ch for ch in text
-        if ch not in _STRIP_EXTRA
-        and unicodedata.category(ch) not in _STRIP_CATEGORIES)
+    out = []
+    for ch in text:
+        if ch in _STRIP_EXTRA:
+            continue
+        category = unicodedata.category(ch)
+        if category in _STRIP_CATEGORIES:
+            continue
+        # Fold an exotic space separator (NBSP, ideographic space, ...) to a
+        # plain ASCII space: it renders invisible-as-space and can hide trailing
+        # text, but the ordinary U+0020 of a legitimate identity must survive.
+        if category == 'Zs' and ch != ' ':
+            out.append(' ')
+        else:
+            out.append(ch)
+    return ''.join(out)
 
 
 def format_prompt(resp: Dict[str, Any]) -> str:

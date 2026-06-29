@@ -92,6 +92,26 @@ See the :ref:`oidc_auth` guide for an overview.
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.auth.FileTokenStore
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.TokenStore
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.TokenStoreKey
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.PersistedToken
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoexception:: questdb.auth.OidcError
    :show-inheritance:
 

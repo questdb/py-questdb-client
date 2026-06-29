@@ -38,10 +38,14 @@ Run directly::
 import base64
 import contextlib
 import importlib.util
+import io
 import json
 import os
+import shutil
 import sys
+import tempfile
 import threading
+import time
 import types
 import unittest
 import http.server
@@ -53,6 +57,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from questdb.auth import (  # noqa: E402
+    FileTokenStore,
     OidcDeviceAuth,
     OidcError,
     OidcConfigError,
@@ -60,7 +65,10 @@ from questdb.auth import (  # noqa: E402
     OidcTimeoutError,
     OidcInteractionRequired,
     OidcNetworkError,
+    PersistedToken,
     TokenSet,
+    TokenStore,
+    TokenStoreKey,
     sqlalchemy_engine,
     psycopg_connect,
 )
@@ -68,6 +76,9 @@ from questdb.auth._cache import (  # noqa: E402
     MemoryCache, _MEMORY_GENERATION, _MEMORY_INFLIGHT, _MEMORY_STORE)
 from questdb.auth._render import Renderer  # noqa: E402
 from questdb.auth._adapters import _require_host  # noqa: E402
+from questdb.auth._store import (  # noqa: E402
+    TOKEN_STORE_DIR_ENV, _CANONICAL_PREFIX, _MIN_LOCK_STALE, _SCHEMA_VERSION,
+    _canonical_endpoint, _millis_to_seconds, _seconds_to_millis)
 
 _HAS_PG_DRIVER = (
     importlib.util.find_spec('psycopg') is not None
@@ -1236,6 +1247,39 @@ class TestDeviceFlow(AuthTestBase):
         self.assertEqual(auth._tokens.id_token, array_token)
         self.assertIsNone(auth._tokens.sub)
 
+    def test_corrupt_jwt_middle_segment_does_not_crash(self):
+        # A 3-segment token whose middle segment is invalid base64, or decodes to
+        # non-UTF-8 / non-JSON bytes (a malformed or hostile id_token), must
+        # degrade to no-claims rather than crash the best-effort identity decode
+        # (the binascii.Error / UnicodeDecodeError / ValueError arms). See
+        # _decode_jwt_claims.
+        from questdb.auth._device import _decode_jwt_claims
+
+        def seg(raw):
+            return base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
+
+        for bad in (
+                'aaa.A.sig',                                  # bad base64 length
+                f'aaa.{seg(bytes([0x80, 0x81, 0x82]))}.sig',  # non-UTF-8 bytes
+                f'aaa.{seg(b"not json")}.sig'):               # valid text, not JSON
+            self.assertEqual(_decode_jwt_claims(bad), {})
+
+    def test_select_raises_config_error_when_required_kind_absent(self):
+        # _select is the final gate before a token is handed to QuestDB. Every
+        # caller already checks _has_required_token, so its own OidcConfigError
+        # branch is defense-in-depth -- but assert it directly: in groups mode a
+        # TokenSet without an id_token, and otherwise one without an
+        # access_token, must raise a clear config error (not return None/empty).
+        groups_auth = self.make_auth(groups_in_token=True)
+        with self.assertRaises(OidcConfigError) as cm:
+            groups_auth._select(
+                TokenSet(access_token=ACCESS_TOKEN, id_token=None))
+        self.assertIn('id_token', str(cm.exception))
+        access_auth = self.make_auth(groups_in_token=False)
+        with self.assertRaises(OidcConfigError) as cm:
+            access_auth._select(TokenSet(access_token=None))
+        self.assertIn('access_token', str(cm.exception))
+
     def test_non_string_token_fields_do_not_crash(self):
         # A buggy/hostile IdP returning a non-string access_token / id_token (a
         # JSON number/bool/object) must not crash token() with a raw
@@ -2379,6 +2423,26 @@ class TestConcurrency(AuthTestBase):
             cache.store_if_current(key, TokenSet(access_token='T2'), gen2))
         self.assertIsNotNone(cache.load(key))
 
+    def test_evict_does_not_bump_generation_unlike_clear(self):
+        # evict() drops the cached token WITHOUT bumping the clear()-generation,
+        # so the SAME acquisition that evicted its own unusable token can still
+        # land its replacement; clear() bumps it, so a store captured before the
+        # clear is dropped. This is the distinction the refresh-then-resign path
+        # relies on (_acquire evicts the doomed token, then _store the fresh one).
+        cache = MemoryCache()
+        key = 'k'
+        gen = cache.generation(key)                    # acquisition begins
+        cache.evict(key)                               # drop our own bad token
+        self.assertTrue(                               # replacement still lands
+            cache.store_if_current(key, TokenSet(access_token='new'), gen))
+        self.assertEqual(cache.load(key).access_token, 'new')
+        # Contrast: a clear() with the same in-flight generation DOES drop a
+        # store captured before it.
+        cache.clear(key)
+        self.assertFalse(
+            cache.store_if_current(key, TokenSet(access_token='x'), gen))
+        cache.release(key)
+
     def test_generation_pruned_when_no_acquisition_in_flight(self):
         # M8: the per-key clear()-generation must not accumulate forever. After a
         # clear() and a completed re-acquisition (no acquisition left in flight),
@@ -3016,6 +3080,18 @@ class TestConfigHelpers(unittest.TestCase):
                          'https://h:9000/settings')
         self.assertEqual(_settings_url('https://h:9000/base/#frag'),
                          'https://h:9000/base/settings')
+
+    def test_settings_url_requires_explicit_scheme(self):
+        # A scheme-less QuestDB URL ("questdb.example.com:9000") mis-parses --
+        # urllib reads the host as the scheme -- so _settings_url rejects it with
+        # a clear typed error up front, rather than letting it surface much later
+        # as a confusing "insecure URL (scheme 'questdb.example.com')" from
+        # _require_secure. A non-http(s) scheme is rejected for the same reason.
+        from questdb.auth._discovery import _settings_url
+        for bad in ('questdb.example.com:9000', 'h:9000',
+                    'ftp://h:9000', '//h:9000'):
+            with self.assertRaises(OidcConfigError):
+                _settings_url(bad)
 
     def test_settings_config_ignores_user_writable_preferences(self):
         # QuestDB /settings nests server-authoritative values under "config"
@@ -3867,22 +3943,33 @@ class TestTransportSecurity(unittest.TestCase):
             self.assertEqual(cm.exception.status, 400)
 
     def test_get_json_non_2xx_raises_oidc_error(self):
-        # A non-2xx /settings or discovery response must surface as OidcError.
-        # See M4.
+        # A non-2xx /settings or discovery response must surface as a typed
+        # OidcError SUBCLASS matching the cause (mirroring how _refresh /
+        # _poll_for_token classify post_form): a 5xx/429 is transient ->
+        # OidcNetworkError, a 4xx/3xx is a config problem -> OidcConfigError. The
+        # HTTP status is attached either way so a retry caller can classify
+        # terminal-vs-transient the same way. See M4.
         from questdb.auth import _http
         with _raw_response_server(500, 'text/plain', b'boom') as b:
-            with self.assertRaises(OidcError) as cm:
+            with self.assertRaises(OidcNetworkError) as cm:
                 _http.get_json(b + '/settings', timeout=5)
-        # The HTTP status is attached (mirroring post_form) so a future retry
-        # caller can classify terminal-vs-transient the same way.
         self.assertEqual(cm.exception.status, 500)
+        with _raw_response_server(429, 'text/plain', b'slow') as b:
+            with self.assertRaises(OidcNetworkError) as cm:
+                _http.get_json(b + '/settings', timeout=5)
+        self.assertEqual(cm.exception.status, 429)
+        with _raw_response_server(404, 'text/plain', b'nope') as b:
+            with self.assertRaises(OidcConfigError) as cm:
+                _http.get_json(b + '/settings', timeout=5)
+        self.assertEqual(cm.exception.status, 404)
 
     def test_get_json_non_json_2xx_raises_oidc_error(self):
-        # A 2xx /settings or discovery body that isn't JSON must surface as
-        # OidcError, not a raw JSONDecodeError. See M4.
+        # A 2xx /settings or discovery body that isn't JSON (an HTML login/error
+        # page, the wrong URL) is a configuration problem -> OidcConfigError, not
+        # a raw JSONDecodeError. See M4.
         from questdb.auth import _http
         with _raw_response_server(200, 'text/html', b'<html>x</html>') as b:
-            with self.assertRaises(OidcError) as cm:
+            with self.assertRaises(OidcConfigError) as cm:
                 _http.get_json(
                     b + '/.well-known/openid-configuration', timeout=5)
         self.assertEqual(cm.exception.status, 200)  # status attached
@@ -4334,6 +4421,42 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertNotIn(chr(0x202e), text)
         self.assertIn('idp.example.com', text)
 
+    def test_strip_control_folds_exotic_whitespace_to_ascii_space(self):
+        # An invisible-as-space separator (NBSP, ideographic space, ...) is a
+        # phishing primitive: it can pad a user_code / identity / error to hide
+        # trailing text that looks like a normal gap. _strip_control folds every
+        # non-ASCII Zs to a plain U+0020, while the ordinary ASCII space of a
+        # legitimate identity survives untouched.
+        from questdb.auth._render import _strip_control
+        for cp in (0x00a0, 0x2000, 0x2007, 0x202f, 0x205f, 0x3000):
+            self.assertEqual(_strip_control('A' + chr(cp) + 'B'), 'A B',
+                             f'U+{cp:04X} not folded to a plain space')
+        # A hidden-text payload no longer reads as a clean four-char code.
+        self.assertEqual(
+            _strip_control('WXYZ' + chr(0x3000) * 4 + 'DELETE-ME'),
+            'WXYZ    DELETE-ME')
+        # Ordinary ASCII spaces (and accented names) are preserved.
+        self.assertEqual(_strip_control('Alice Smith'), 'Alice Smith')
+        self.assertEqual(_strip_control('café'), 'café')
+
+    def test_format_prompt_renders_complete_uri_line(self):
+        # The plain-text prompt shows verification_uri_complete on its own
+        # "(or open directly: ...)" line when present, and omits the line when
+        # absent. The complete URL is IDNA-normalized like the main link.
+        from questdb.auth._render import format_prompt
+        with_complete = format_prompt({
+            'user_code': 'WXYZ',
+            'verification_uri': 'https://idp.example.com/device',
+            'verification_uri_complete':
+                'https://idp.example.com/device?user_code=WXYZ'})
+        self.assertIn('or open directly', with_complete)
+        self.assertIn(
+            'https://idp.example.com/device?user_code=WXYZ', with_complete)
+        without = format_prompt({
+            'user_code': 'WXYZ',
+            'verification_uri': 'https://idp.example.com/device'})
+        self.assertNotIn('or open directly', without)
+
     def test_oidc_error_sanitizes_message_and_fields(self):
         # OidcError strips control/bidi chars from its message centrally, so no
         # raise site can leak an ANSI/bidi sequence into an uncaught traceback (a
@@ -4536,6 +4659,873 @@ class TestRendererSecurity(unittest.TestCase):
 
         _Cap().on_prompt(resp)                                  # must not raise
         self.assertNotIn('<a ', captured['html'])               # no link, non-str
+
+
+# A known cross-language hash vector: the lowercase-hex SHA-256 of the canonical
+# identity string for this exact identity, computed independently from the frozen
+# contract. The Java client MUST produce the same hash for the same identity, so
+# both clients address one file. A change here is a breaking on-disk-format change.
+_CONTRACT_KEY = TokenStoreKey(
+    'questdb', 'https://idp.example.com:443/token',
+    'https://idp.example.com:443/device', 'openid', None, False)
+_CONTRACT_HASH = 'bb24451046d9646892338e3cd193581c782267fe1a7a444a57277a2d2a1c5fd8'
+
+
+class TestFileTokenStore(unittest.TestCase):
+    """The default file-backed store, exercised directly (no device flow)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.store = FileTokenStore.at(self.dir)
+        self.key = TokenStoreKey(
+            'questdb', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', None, False)
+
+    def _pt(self, **kw):
+        base = dict(access_token='AT', id_token='IT', refresh_token='RT',
+                    expires_at=1_003_600.0, token_ttl=3600.0)
+        base.update(kw)
+        return PersistedToken(**base)
+
+    def _file(self, key=None):
+        return os.path.join(self.dir, (key or self.key).hash() + '.json')
+
+    def test_round_trip(self):
+        self.store.save(self.key, self._pt())
+        got = self.store.load(self.key)
+        self.assertEqual(
+            (got.access_token, got.id_token, got.refresh_token),
+            ('AT', 'IT', 'RT'))
+        self.assertEqual(got.expires_at, 1_003_600.0)
+        self.assertEqual(got.token_ttl, 3600.0)
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(self.store.load(self.key))
+
+    def test_hash_matches_cross_language_contract(self):
+        # Freeze the on-disk file-name contract so the Java client and this one
+        # address the same file. See _CONTRACT_HASH.
+        self.assertEqual(_CONTRACT_KEY.hash(), _CONTRACT_HASH)
+        self.assertEqual(len(self.key.hash()), 64)
+        self.assertTrue(all(c in '0123456789abcdef' for c in self.key.hash()))
+
+    def test_canonical_endpoint(self):
+        # scheme/host lower-cased, port explicit, path defaulted to '/'.
+        self.assertEqual(
+            _canonical_endpoint('https://Idp.Example.com/as/token'),
+            'https://idp.example.com:443/as/token')
+        self.assertEqual(
+            _canonical_endpoint('http://idp:9000'), 'http://idp:9000/')
+        self.assertEqual(
+            _canonical_endpoint('https://idp:443/x'), 'https://idp:443/x')
+        # An IPv6 literal keeps its brackets, so the host:port boundary is
+        # unambiguous and matches the bracketed form the Java client renders
+        # (otherwise the two clients hash the same endpoint differently).
+        self.assertEqual(
+            _canonical_endpoint('https://[::1]:9000/token'),
+            'https://[::1]:9000/token')
+        self.assertEqual(
+            _canonical_endpoint('https://[FE80::1]/token'),
+            'https://[fe80::1]:443/token')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX permissions')
+    def test_permissions_are_owner_only(self):
+        self.store.save(self.key, self._pt())
+        self.assertEqual(os.stat(self._file()).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX permissions')
+    def test_preexisting_loose_dir_is_tightened(self):
+        os.chmod(self.dir, 0o755)
+        self.store.save(self.key, self._pt())
+        self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+
+    def test_atomic_write_leaves_no_tmp(self):
+        self.store.save(self.key, self._pt())
+        self.store.save(self.key, self._pt(refresh_token='RT2'))
+        self.assertEqual(
+            [n for n in os.listdir(self.dir) if n.endswith('.tmp')], [])
+        self.assertEqual(self.store.load(self.key).refresh_token, 'RT2')
+
+    def test_oversized_file_ignored(self):
+        with open(self._file(), 'wb') as fh:
+            fh.write(b'{' + b' ' * (1 << 20))  # > _MAX_FILE_BYTES
+        self.assertIsNone(self.store.load(self.key))
+
+    def test_empty_file_ignored(self):
+        open(self._file(), 'wb').close()
+        self.assertIsNone(self.store.load(self.key))
+
+    def test_garbage_file_ignored(self):
+        with open(self._file(), 'w') as fh:
+            fh.write('not json {{{')
+        self.assertIsNone(self.store.load(self.key))
+
+    def test_non_object_json_ignored(self):
+        with open(self._file(), 'w') as fh:
+            fh.write('[1, 2, 3]')
+        self.assertIsNone(self.store.load(self.key))
+
+    def test_wrong_schema_version_ignored(self):
+        with open(self._file(), 'w') as fh:
+            json.dump({'v': 2, 'client_id': 'questdb',
+                       'token_endpoint': 'https://idp:443/token',
+                       'device_authorization_endpoint':
+                           'https://idp:443/device',
+                       'scope': 'openid', 'groups_in_token': False,
+                       'refresh_token': 'RT'}, fh)
+        self.assertIsNone(self.store.load(self.key))
+
+    def test_fingerprint_mismatch_ignored(self):
+        # A file copied/renamed to a different identity's name still carries the
+        # original fingerprint; the in-file re-check rejects it (defence in depth
+        # against a hash collision), independent of the file-name hash.
+        other = TokenStoreKey(
+            'other', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', None, False)
+        self.store.save(self.key, self._pt())
+        shutil.copy(self._file(self.key), self._file(other))
+        self.assertIsNone(self.store.load(other))
+
+    def test_audience_null_omitted_and_literal_null_roundtrips(self):
+        # A None audience is omitted (not written as JSON null), and a token that
+        # is literally the string "null" round-trips verbatim.
+        self.store.save(self.key, self._pt(refresh_token='null'))
+        with open(self._file()) as fh:
+            raw = fh.read()
+        self.assertNotIn('"audience"', raw)
+        self.assertEqual(self.store.load(self.key).refresh_token, 'null')
+
+    def test_audience_in_fingerprint_roundtrips(self):
+        key = TokenStoreKey(
+            'questdb', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', 'api://billing', False)
+        self.store.save(key, self._pt())
+        with open(self._file(key)) as fh:
+            self.assertIn('"audience"', fh.read())
+        self.assertIsNotNone(self.store.load(key))
+        # A different audience is a different identity (different file).
+        other = TokenStoreKey(
+            'questdb', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', 'api://other', False)
+        self.assertIsNone(self.store.load(other))
+
+    def test_absent_token_fields_read_back_as_none(self):
+        self.store.save(self.key, self._pt(access_token=None, id_token=None))
+        got = self.store.load(self.key)
+        self.assertIsNone(got.access_token)
+        self.assertIsNone(got.id_token)
+        self.assertEqual(got.refresh_token, 'RT')
+
+    def test_clear_removes_file_and_is_idempotent(self):
+        self.store.save(self.key, self._pt())
+        self.store.clear(self.key)
+        self.assertIsNone(self.store.load(self.key))
+        self.store.clear(self.key)  # no-op, must not raise
+
+    def test_constructor_validates_args(self):
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore('')
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore(self.dir, lock_acquire_budget=0)
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore(self.dir, lock_stale=-1)
+        # lock_stale must EXCEED the worst-case live hold, not merely be
+        # positive: a tiny window would let a peer steal a LIVE holder's lock
+        # mid-refresh. A positive-but-too-small value, and the boundary itself,
+        # are rejected; a value above the floor is accepted.
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore(self.dir, lock_stale=1)
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore(self.dir, lock_stale=_MIN_LOCK_STALE)
+        FileTokenStore(self.dir, lock_stale=_MIN_LOCK_STALE + 1)  # ok
+
+    def test_at_default_location_honours_env(self):
+        with mock.patch.dict(os.environ, {TOKEN_STORE_DIR_ENV: self.dir}):
+            store = FileTokenStore.at_default_location()
+        store.save(self.key, self._pt())
+        self.assertTrue(os.path.exists(self._file()))
+
+    def test_at_default_location_unresolvable_home_raises(self):
+        # With no env override and no resolvable home (HOME/USERPROFILE unset and
+        # no passwd entry, e.g. a distroless container), expanduser('~') returns
+        # the literal '~'. Joining onto it would create a surprise RELATIVE '~'
+        # directory under cwd, so fail clearly and point at the env override.
+        env = {k: v for k, v in os.environ.items() if k != TOKEN_STORE_DIR_ENV}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch('os.path.expanduser', return_value='~'):
+            with self.assertRaises(OidcConfigError) as cm:
+                FileTokenStore.at_default_location()
+        self.assertIn(TOKEN_STORE_DIR_ENV, str(cm.exception))
+
+    def test_repr_hides_secrets(self):
+        text = repr(self._pt(access_token='SECRET-AT', refresh_token='SECRET-RT'))
+        self.assertNotIn('SECRET-AT', text)
+        self.assertNotIn('SECRET-RT', text)
+
+    def test_in_lock_runs_action_and_releases(self):
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+        seen = {}
+
+        def action():
+            seen['held'] = os.path.exists(lock)
+            return 'result'
+
+        self.assertEqual(self.store.in_lock(self.key, action), 'result')
+        self.assertTrue(seen['held'])           # held for the whole action
+        self.assertFalse(os.path.exists(lock))  # released afterwards
+
+    def test_in_lock_releases_on_exception(self):
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+
+        def boom():
+            raise OidcError('boom')
+
+        with self.assertRaises(OidcError):
+            self.store.in_lock(self.key, boom)
+        self.assertFalse(os.path.exists(lock))  # released despite the exception
+
+    def test_in_lock_degrades_when_lock_is_held(self):
+        store = FileTokenStore(
+            self.dir, lock_acquire_budget=0.1, lock_stale=600)
+        os.makedirs(self.dir, exist_ok=True)
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+        open(lock, 'w').close()  # a live peer holds it
+        ran = []
+        store.in_lock(self.key, lambda: ran.append(1))
+        self.assertEqual(ran, [1])             # degraded: ran without the lock
+        self.assertTrue(os.path.exists(lock))  # peer's lock left untouched
+
+    def test_in_lock_steals_a_stale_lock(self):
+        # lock_stale must clear _MIN_LOCK_STALE; back-date the lock well past it
+        # (os.utime, instant) rather than use a tiny window, so the lock reads as
+        # abandoned without a real wait.
+        store = FileTokenStore(
+            self.dir, lock_acquire_budget=1.0, lock_stale=300)
+        os.makedirs(self.dir, exist_ok=True)
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+        open(lock, 'w').close()
+        os.utime(lock, (time.time() - 100_000, time.time() - 100_000))  # stale
+        seen = {}
+        store.in_lock(self.key, lambda: seen.setdefault(
+            'held', os.path.exists(lock)))
+        self.assertTrue(seen['held'])           # stole it and re-created
+        self.assertFalse(os.path.exists(lock))  # released afterwards
+
+    def test_concurrent_steal_stays_exclusive_two_threads(self):
+        # Two threads racing to break ONE stale lock must not both run at once:
+        # the atomic rename-aside steal re-checks staleness on the moved file and
+        # restores a peer's FRESH lock instead of deleting it (a blind os.remove
+        # would let the slower thread delete the winner's just-created lock and
+        # both believe they won). With two threads there is no third to exploit
+        # the brief restore window, so exclusion here is reliable. (Perfect
+        # exclusion under pathological N-way concurrent stealing is best-effort by
+        # design — a file lock can't guarantee it without OS support; the
+        # no-stale-lock serialization property is covered by
+        # test_in_lock_serializes_concurrent_acquirers, and no-hang/no-leak under
+        # heavier steal contention by the test below.)
+        store = FileTokenStore(
+            self.dir, lock_acquire_budget=2.0, lock_stale=300)
+        os.makedirs(self.dir, exist_ok=True)
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+        open(lock, 'w').close()
+        os.utime(lock, (time.time() - 100_000, time.time() - 100_000))  # stale
+        counter_lock = threading.Lock()
+        active = [0]
+        max_seen = [0]
+        ran = [0]
+
+        def action():
+            with counter_lock:
+                active[0] += 1
+                max_seen[0] = max(max_seen[0], active[0])
+            time.sleep(0.02)
+            with counter_lock:
+                active[0] -= 1
+                ran[0] += 1
+
+        threads = [threading.Thread(
+            target=lambda: store.in_lock(self.key, action)) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertEqual(ran[0], 2)             # both actions ran
+        self.assertEqual(max_seen[0], 1)        # never two at once
+        self.assertFalse(os.path.exists(lock))  # released; no leftover
+
+    def test_concurrent_steal_does_not_hang_or_leak(self):
+        # Many threads racing to break ONE stale lock must not deadlock, must all
+        # eventually run, and must leave no lock or `.stale.` temp file behind
+        # (the steal renames aside and either removes a confirmed-stale file or
+        # restores a fresh one — never orphaning a temp). This stresses the steal
+        # path under contention; exclusion under that contention is best-effort
+        # (see the two-thread test above), so this asserts the guarantees that
+        # always hold.
+        store = FileTokenStore(
+            self.dir, lock_acquire_budget=10.0, lock_stale=300)
+        os.makedirs(self.dir, exist_ok=True)
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+        open(lock, 'w').close()
+        os.utime(lock, (time.time() - 100_000, time.time() - 100_000))  # stale
+        ran = [0]
+        counter_lock = threading.Lock()
+
+        def action():
+            with counter_lock:
+                ran[0] += 1
+            time.sleep(0.01)
+
+        threads = [threading.Thread(
+            target=lambda: store.in_lock(self.key, action)) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertFalse(any(t.is_alive() for t in threads))  # no deadlock
+        self.assertEqual(ran[0], 8)                           # all ran
+        self.assertFalse(os.path.exists(lock))                # lock cleaned up
+        self.assertEqual(                                     # no temp leak
+            [n for n in os.listdir(self.dir) if '.stale.' in n], [])
+
+    def test_steal_recheck_does_not_delete_a_lock_that_became_fresh(self):
+        # The core of the atomic steal, tested deterministically: if a lock is
+        # judged stale by the acquire-loop check but turns out FRESH by the time
+        # it is moved aside (a peer recreated it — exactly the TOCTOU the original
+        # blind os.remove(lock) mishandled), it must be restored, never deleted,
+        # and we must NOT acquire over the live peer. Drive that race with a
+        # stubbed _is_stale: "stale" to the first (acquire-loop) check, "fresh" to
+        # the post-rename re-check.
+        store = FileTokenStore(
+            self.dir, lock_acquire_budget=0.2, lock_stale=300)
+        os.makedirs(self.dir, exist_ok=True)
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+        with open(lock, 'w') as f:
+            f.write('PEER')  # a peer's fresh (live) lock, with a marker
+        calls = [0]
+
+        def fake_is_stale(_):
+            calls[0] += 1
+            return calls[0] == 1  # stale to the acquire check, fresh on re-check
+
+        with mock.patch.object(store, '_is_stale', fake_is_stale):
+            held = store._acquire_lock(lock)
+        self.assertFalse(held)                 # deferred to the peer, did not steal
+        self.assertTrue(os.path.exists(lock))  # peer's live lock not destroyed
+        with open(lock) as f:
+            self.assertEqual(f.read(), 'PEER')  # restored intact, not overwritten
+
+    def test_in_lock_serializes_concurrent_acquirers(self):
+        # The O_CREAT|O_EXCL lock file must actually serialize two real threads
+        # sharing one store + key: with an acquire budget generous relative to
+        # the tiny holds (so neither degrades to the lock-free path), no two
+        # actions ever overlap. This exercises the serialization PROPERTY the
+        # lock exists for, which the other in_lock tests (single-threaded, with a
+        # hand-placed lock file) do not.
+        store = FileTokenStore(self.dir, lock_acquire_budget=10.0, lock_stale=600)
+        os.makedirs(self.dir, exist_ok=True)
+        counter_lock = threading.Lock()
+        active = [0]
+        max_seen = [0]
+        ran = [0]
+
+        def action():
+            with counter_lock:
+                active[0] += 1
+                max_seen[0] = max(max_seen[0], active[0])
+            time.sleep(0.02)
+            with counter_lock:
+                active[0] -= 1
+                ran[0] += 1
+
+        threads = [threading.Thread(target=lambda: store.in_lock(self.key, action))
+                   for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(ran[0], 6)         # all actions ran
+        self.assertEqual(max_seen[0], 1)    # never two at once
+
+    def test_non_finite_and_negative_millis(self):
+        # json.loads accepts bare NaN / Infinity; a hand-edited or hostile file
+        # must not smuggle a non-finite timestamp into the expiry math. Non-finite
+        # reads as 0.0 (expired); a finite negative value passes through (it is
+        # rejected later by TokenSet.is_valid, which treats expires_at <= 0 as
+        # expired), and non-numeric / bool read as 0.0.
+        self.assertEqual(_millis_to_seconds(float('nan')), 0.0)
+        self.assertEqual(_millis_to_seconds(float('inf')), 0.0)
+        self.assertEqual(_millis_to_seconds(float('-inf')), 0.0)
+        self.assertEqual(_millis_to_seconds(-5000), -5.0)
+        self.assertEqual(_millis_to_seconds('x'), 0.0)
+        self.assertEqual(_millis_to_seconds(True), 0.0)
+        # End to end: a file with an Infinity expiry loads as expired (0.0), not
+        # as a token valid forever.
+        with open(self._file(), 'w') as fh:
+            fh.write('{"v":1,"client_id":"questdb",'
+                     '"token_endpoint":"https://idp:443/token",'
+                     '"device_authorization_endpoint":"https://idp:443/device",'
+                     '"scope":"openid","groups_in_token":false,'
+                     '"refresh_token":"RT","access_token":"AT","id_token":"IT",'
+                     '"expires_at_millis":Infinity,"token_ttl_millis":Infinity}')
+        got = self.store.load(self.key)
+        self.assertEqual(got.expires_at, 0.0)
+        self.assertEqual(got.token_ttl, 0.0)
+
+    def test_seconds_to_millis_maps_non_finite_to_zero(self):
+        # Inverse of _millis_to_seconds: a finite value scales to millis; a
+        # non-finite / non-numeric / bool maps to 0 (expired), so the serializer
+        # can't raise a raw OverflowError/ValueError on it.
+        self.assertEqual(_seconds_to_millis(3.6), 3600)
+        self.assertEqual(_seconds_to_millis(0.0), 0)
+        self.assertEqual(_seconds_to_millis(-5.0), -5000)
+        self.assertEqual(_seconds_to_millis(float('inf')), 0)
+        self.assertEqual(_seconds_to_millis(float('-inf')), 0)
+        self.assertEqual(_seconds_to_millis(float('nan')), 0)
+        self.assertEqual(_seconds_to_millis('x'), 0)
+        self.assertEqual(_seconds_to_millis(True), 0)
+
+    def test_save_non_finite_expiry_does_not_raise(self):
+        # PersistedToken is public, so a direct caller can pass a non-finite
+        # expiry. save() must keep the OidcError contract (not raise a raw
+        # OverflowError from int(round(inf)) / ValueError from round(nan)) and
+        # store it as expired (0), symmetric with the load side.
+        self.store.save(self.key, self._pt(
+            expires_at=float('inf'), token_ttl=float('nan')))
+        got = self.store.load(self.key)
+        self.assertEqual(got.expires_at, 0.0)
+        self.assertEqual(got.token_ttl, 0.0)
+        self.assertEqual(got.refresh_token, 'RT')  # the rest still round-trips
+
+    def test_schema_version_and_canonical_prefix_are_linked(self):
+        # The on-disk 'v' field and the hash-prefix version are derived from one
+        # constant, so they can't drift apart on a future format bump.
+        self.assertEqual(_CANONICAL_PREFIX, f'questdb-oidc-token-v{_SCHEMA_VERSION}')
+
+    def test_round_trip_ipv6_endpoint(self):
+        # An IPv6-endpoint identity round-trips: the bracketed canonical form is
+        # stored and re-matched on load.
+        key = TokenStoreKey(
+            'questdb', 'https://[::1]:443/token', 'https://[::1]:443/device',
+            'openid', None, False)
+        self.store.save(key, self._pt())
+        self.assertEqual(self.store.load(key).refresh_token, 'RT')
+
+
+class _FakeStore(TokenStore):
+    """An in-memory TokenStore for the auth-level persistence tests.
+
+    Persists a single PersistedToken across simulated restarts and counts the
+    SPI calls, so a test can assert that a restart resumed without a device flow.
+    """
+
+    def __init__(self):
+        self.saved = None
+        self.saves = 0
+        self.loads = 0
+        self.clears = 0
+        self.in_locks = 0
+        self.fail_save = False
+        self.fail_clear = False
+        self.fail_in_lock = False
+        # Optional override: load_fn(loads_count) -> PersistedToken | None, so a
+        # test can model a peer that refreshes between two loads.
+        self.load_fn = None
+
+    def load(self, key):
+        self.loads += 1
+        if self.load_fn is not None:
+            return self.load_fn(self.loads)
+        return self.saved
+
+    def save(self, key, token):
+        self.saves += 1
+        if self.fail_save:
+            raise OidcError('simulated disk failure')
+        self.saved = token
+
+    def clear(self, key):
+        self.clears += 1
+        if self.fail_clear:
+            raise OidcError('simulated clear failure')
+        self.saved = None
+
+    def in_lock(self, key, action):
+        self.in_locks += 1
+        if self.fail_in_lock:
+            # Model a custom store whose lock backend fails. The contract says a
+            # raised store failure is non-fatal; OidcDeviceAuth must degrade, not
+            # abort token().
+            raise OidcError('simulated lock failure')
+        return action()
+
+
+class _CountingFileStore(FileTokenStore):
+    """The REAL FileTokenStore, counting in_lock entries.
+
+    Lets an auth-level test assert that a coordinated refresh persists the
+    rotated token INLINE (one in_lock for the whole read-refresh-write) rather
+    than re-acquiring the lock it already holds for the nested save — the
+    _store_lock_held guard. _FakeStore can't catch that regression: it no-ops the
+    real lock.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.in_lock_calls = 0
+
+    def in_lock(self, key, action):
+        self.in_lock_calls += 1
+        return super().in_lock(key, action)
+
+
+class TestPersistence(AuthTestBase):
+    """OidcDeviceAuth wired to a TokenStore (opt-in persistence)."""
+
+    def _restart(self):
+        # Simulate a process restart: the on-disk/fake store survives, but the
+        # process-global in-memory cache does not — so the next instance must
+        # resume from the store, not the shared MemoryCache.
+        _MEMORY_STORE.clear()
+        _MEMORY_GENERATION.clear()
+        _MEMORY_INFLIGHT.clear()
+
+    def _reset_server_counters(self):
+        self.state.device_requests = 0
+        self.state.token_requests = []
+        self.state.refresh_requests = 0
+        self.state.refresh_forms = []
+
+    def test_sign_in_persists_token(self):
+        store = _FakeStore()
+        auth = self.make_auth(token_store=store)
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(store.saves, 1)
+        self.assertEqual(store.saved.refresh_token, 'REFRESH-1')
+        self.assertEqual(store.saved.id_token, ID_TOKEN)
+
+    def test_no_store_means_no_persistence(self):
+        # Default behaviour is unchanged: no store, nothing persisted.
+        auth = self.make_auth()
+        self.assertIsNone(auth._token_store)
+        self.assertIsNone(auth._store_key)
+        self.assertEqual(auth.token(), ID_TOKEN)
+
+    def test_restart_with_valid_token_is_zero_network(self):
+        store = _FakeStore()
+        self.make_auth(token_store=store).token()  # sign in, persist
+        self._restart()
+        self._reset_server_counters()
+        # Fresh instance + fresh clock: the persisted token is still valid.
+        auth = self.make_auth(token_store=store, clock=FakeClock())
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.device_requests, 0)   # no re-prompt
+        self.assertEqual(self.state.token_requests, [])   # no poll
+        self.assertEqual(self.state.refresh_requests, 0)  # no refresh either
+
+    def test_restart_with_expired_token_refreshes_silently(self):
+        store = _FakeStore()
+        self.make_auth(token_store=store).token()  # sign in, persist
+        self._restart()
+        self._reset_server_counters()
+        # The persisted access/id token has expired, but the refresh token is
+        # valid: resume with one silent refresh, never the device flow.
+        late = FakeClock()
+        late.wall += 10_000
+        auth = self.make_auth(token_store=store, clock=late)
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.device_requests, 0)   # no re-prompt
+        self.assertEqual(self.state.refresh_requests, 1)  # silent refresh
+        self.assertGreaterEqual(store.in_locks, 1)        # coordinated refresh
+        self.assertEqual(
+            self.state.refresh_forms[0]['refresh_token'], 'REFRESH-1')
+
+    def test_token_works_as_first_call_after_restore(self):
+        # No explicit sign-in: token() is the entry point and resumes from disk.
+        store = _FakeStore()
+        self.make_auth(token_store=store).token()
+        self._restart()
+        self._reset_server_counters()
+        auth = self.make_auth(token_store=store, clock=FakeClock())
+        self.assertEqual(auth.token(), ID_TOKEN)  # straight from the store
+        self.assertEqual(self.state.device_requests, 0)
+
+    def test_non_rotating_refresh_writes_once(self):
+        store = _FakeStore()
+        clock = FakeClock()
+        auth = self.make_auth(token_store=store, clock=clock)
+        auth.token()
+        self.assertEqual(store.saves, 1)
+        # Expire the cached token; the default refresh returns the SAME refresh
+        # token, so the file is not rewritten (the on-disk one is still valid).
+        clock.wall += 10_000
+        auth.token()
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(store.saves, 1)  # no rewrite on a non-rotating refresh
+
+    def test_rotating_refresh_rewrites_file(self):
+        store = _FakeStore()
+        clock = FakeClock()
+        auth = self.make_auth(token_store=store, clock=clock)
+        auth.token()
+        self.assertEqual(store.saves, 1)
+        self.state.refresh_response = (200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'refresh_token': 'REFRESH-2',  # rotated
+            'token_type': 'Bearer', 'expires_in': 3600})
+        clock.wall += 10_000
+        auth.token()
+        self.assertEqual(store.saves, 2)  # rewritten with the rotated token
+        self.assertEqual(store.saved.refresh_token, 'REFRESH-2')
+
+    def test_transient_refresh_error_propagates_through_lock(self):
+        # A transient 5xx during a coordinated (lock-held) refresh surfaces as
+        # OidcNetworkError — the refresh token is kept for a retry, not discarded
+        # into a needless re-prompt — and never falls through to the device flow.
+        store = _FakeStore()
+        clock = FakeClock()
+        auth = self.make_auth(token_store=store, clock=clock)
+        auth.token()                    # sign in, persist
+        clock.wall += 10_000            # expire the access/id token
+        self.state.refresh_response = (503, {'error': 'server_error'})
+        with self.assertRaises(OidcNetworkError):
+            auth.token()
+        self.assertEqual(self.state.device_requests, 1)  # only the sign-in
+        self.assertGreaterEqual(store.in_locks, 1)
+
+    def test_clear_removes_persisted_entry_and_reprompts(self):
+        store = _FakeStore()
+        auth = self.make_auth(token_store=store)
+        auth.token()
+        self.assertEqual(store.saves, 1)
+        auth.clear()
+        self.assertEqual(store.clears, 1)
+        self.assertIsNone(store.saved)
+        # A fresh instance after the clear finds nothing and re-prompts.
+        self._restart()
+        self._reset_server_counters()
+        self.make_auth(token_store=store).token()
+        self.assertEqual(self.state.device_requests, 1)
+        self.assertEqual(store.saves, 2)  # the new sign-in persists again
+
+    def test_save_failure_is_non_fatal(self):
+        store = _FakeStore()
+        store.fail_save = True
+        auth = self.make_auth(token_store=store)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(auth.token(), ID_TOKEN)  # valid despite save failing
+        self.assertEqual(store.saves, 1)              # attempted
+        self.assertIn('token store save failed', err.getvalue())
+
+    def test_load_failure_is_non_fatal(self):
+        store = _FakeStore()
+
+        def boom(_):
+            raise OidcError('simulated read failure')
+
+        store.load_fn = boom
+        auth = self.make_auth(token_store=store)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(auth.token(), ID_TOKEN)  # falls back to device flow
+        self.assertEqual(self.state.device_requests, 1)
+        self.assertIn('token store load failed', err.getvalue())
+
+    def test_persisted_token_with_control_char_is_rejected(self):
+        # The file is attacker-writable: a served token carrying a control char
+        # (a CR/LF injection vector) is rejected and the entry ignored, falling
+        # back to a fresh sign-in rather than routing it onto the wire.
+        store = _FakeStore()
+        store.saved = PersistedToken(
+            access_token=ACCESS_TOKEN, id_token='bad\x01id-token',
+            refresh_token='REFRESH-1',
+            expires_at=FakeClock().now() + 3600, token_ttl=3600.0)
+        self._restart()
+        self._reset_server_counters()
+        auth = self.make_auth(token_store=store, clock=FakeClock())  # groups mode
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.device_requests, 1)  # rejected -> device flow
+
+    def test_coordinated_refresh_adopts_peer_rotation(self):
+        # Under the cross-process lock, re-reading the store sees a peer's freshly
+        # rotated token and adopts it instead of POSTing a (now revoked) refresh.
+        store = _FakeStore()
+        now = FakeClock().now()
+        expired = PersistedToken(
+            access_token=ACCESS_TOKEN, id_token=ID_TOKEN,
+            refresh_token='REFRESH-1', expires_at=now - 10, token_ttl=3600.0)
+        fresh = PersistedToken(
+            access_token=ACCESS_TOKEN, id_token=ID_TOKEN,
+            refresh_token='REFRESH-2', expires_at=now + 3600, token_ttl=3600.0)
+        # 1st load (lazy) sees the expired entry; 2nd load (re-read under the
+        # lock) sees the peer's fresh, rotated entry.
+        store.load_fn = lambda n: expired if n == 1 else fresh
+        auth = self.make_auth(token_store=store, clock=FakeClock())
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 0)  # adopted, no network
+        self.assertEqual(store.in_locks, 1)
+        self.assertEqual(auth._tokens.refresh_token, 'REFRESH-2')
+
+    def test_timeout_cap_rejected(self):
+        # The HTTP timeout is capped so a slow refresh can't outlast the file
+        # store's lock-staleness window.
+        with self.assertRaises(OidcConfigError):
+            self.make_auth(timeout=300)
+
+    def test_store_key_built_from_canonical_config(self):
+        store = _FakeStore()
+        auth = self.make_auth(token_store=store, groups_in_token=True)
+        key = auth._store_key
+        self.assertEqual(key.client_id, 'questdb')
+        self.assertTrue(key.token_endpoint.endswith('/token'))
+        # Explicit numeric port in the authority (a bare ':' would also match the
+        # scheme, so assert a port follows the host).
+        self.assertRegex(key.token_endpoint, r'://[^/]+:\d+/')
+        self.assertTrue(key.groups_in_token)
+        # 'openid' is auto-added in groups mode and is part of the identity.
+        self.assertIn('openid', key.scope)
+
+    def test_control_char_in_served_token_rejected_access_mode(self):
+        # The served-token character screen must also fire when the server does
+        # NOT expect groups in the token: token() then serves the access_token, so
+        # a control char there (a CR/LF / header-injection vector) must reject the
+        # whole entry and fall back to a fresh sign-in. Mirrors the groups-mode
+        # test, covering the other branch of the served-kind selection.
+        store = _FakeStore()
+        store.saved = PersistedToken(
+            access_token='bad\x01access-token', id_token=ID_TOKEN,
+            refresh_token='REFRESH-1',
+            expires_at=FakeClock().now() + 3600, token_ttl=3600.0)
+        self._restart()
+        self._reset_server_counters()
+        auth = self.make_auth(
+            token_store=store, groups_in_token=False, clock=FakeClock())
+        self.assertEqual(auth.token(), ACCESS_TOKEN)
+        self.assertEqual(self.state.device_requests, 1)  # rejected -> device flow
+
+    def test_clear_failure_is_non_fatal(self):
+        # A store that raises on clear() must not break OidcDeviceAuth.clear():
+        # it warns to stderr and carries on (the in-memory/process cache is still
+        # cleared). Mirrors save/load being best-effort.
+        store = _FakeStore()
+        store.fail_clear = True
+        auth = self.make_auth(token_store=store)
+        auth.token()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            auth.clear()  # must not raise despite the store failing
+        self.assertEqual(store.clears, 1)
+        self.assertIn('token store clear failed', err.getvalue())
+
+    def test_disk_persist_skipped_when_generation_bumped(self):
+        # The disk save honors the same clear()-generation as the shared-cache
+        # write: if a concurrent clear() bumped the generation between the cache
+        # CAS and the save, _save_if_current skips it, so the file the clear()
+        # deleted is not resurrected.
+        store = _FakeStore()
+        auth = self.make_auth(token_store=store)
+        auth.token()                       # sign in, persist once
+        self.assertEqual(store.saves, 1)
+        key = auth.cache_key
+        # A concurrent clear() bumps the generation while an acquisition is in
+        # flight (generation() marks it in-flight, so clear() bumps, not prunes).
+        stale = auth._cache.generation(key)
+        auth._cache.clear(key)
+        try:
+            auth._save_if_current(stale, 'SOME-RT')
+        finally:
+            auth._cache.release(key)
+        self.assertEqual(store.saves, 1)   # save skipped: clear() won
+        # Sanity: with the current generation it WOULD save.
+        current = auth._cache.generation(key)
+        try:
+            auth._save_if_current(current, 'SOME-RT2')
+        finally:
+            auth._cache.release(key)
+        self.assertEqual(store.saves, 2)
+
+    # -- end-to-end with the REAL FileTokenStore --------------------------------
+    # The tests above wire a _FakeStore whose in_lock no-ops, so the real
+    # on-disk file, the cross-process lock, and the under-lock save are never
+    # exercised together through OidcDeviceAuth. These drive the real store.
+
+    def _file_store_dir(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def test_real_file_store_round_trips_across_restart(self):
+        d = self._file_store_dir()
+        auth = self.make_auth(token_store=FileTokenStore.at(d))
+        self.assertEqual(auth.token(), ID_TOKEN)       # sign in, persist to disk
+        json_files = [n for n in os.listdir(d) if n.endswith('.json')]
+        self.assertEqual(len(json_files), 1)           # one file on disk
+        self._restart()                                # drop the in-memory cache
+        self._reset_server_counters()
+        auth2 = self.make_auth(
+            token_store=FileTokenStore.at(d), clock=FakeClock())
+        self.assertEqual(auth2.token(), ID_TOKEN)      # resumed from disk
+        self.assertEqual(self.state.device_requests, 0)   # no re-prompt
+        self.assertEqual(self.state.refresh_requests, 0)  # token still valid
+
+    def test_real_file_store_rotating_refresh_saves_inline_under_lock(self):
+        # A rotating refresh persists the rotated token through the REAL lock via
+        # the coordinated path, saving INLINE rather than re-acquiring the lock it
+        # already holds. Assert the rotated token reached disk AND that the
+        # refresh took exactly ONE further in_lock (the coordination); a
+        # _store_lock_held regression would re-enter in_lock for the nested save.
+        d = self._file_store_dir()
+        store = _CountingFileStore.at(d)
+        clock = FakeClock()
+        auth = self.make_auth(token_store=store, clock=clock)
+        auth.token()                                   # sign in: 1 in_lock (save)
+        self.assertEqual(store.in_lock_calls, 1)
+        self.state.refresh_response = (200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'refresh_token': 'REFRESH-2', 'token_type': 'Bearer',
+            'expires_in': 3600})
+        clock.wall += 10_000                           # expire -> coordinated
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(store.in_lock_calls, 2)       # +1 coordination, save inline
+        self.assertEqual(
+            store.load(auth._store_key).refresh_token, 'REFRESH-2')  # on disk
+
+    # -- custom-store in_lock failures are best-effort (non-fatal) --------------
+
+    def test_in_lock_failure_is_non_fatal_on_sign_in(self):
+        # A custom store whose in_lock raises (its lock backend failed) must not
+        # break a completed sign-in: persistence is best-effort, so token() warns
+        # and returns the valid in-memory token. (The bundled FileTokenStore
+        # degrades internally and never raises here.)
+        store = _FakeStore()
+        store.fail_in_lock = True
+        auth = self.make_auth(token_store=store)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertIn('token store', err.getvalue())
+
+    def test_in_lock_failure_degrades_refresh_to_lock_free(self):
+        # If in_lock raises on the coordinated-refresh path, degrade to a
+        # lock-free refresh rather than abort: the silent refresh still happens
+        # and token() is served, never a needless device-flow re-prompt. Also
+        # exercises the second guarded site (the save's in_lock then fails too and
+        # is swallowed).
+        store = _FakeStore()
+        clock = FakeClock()
+        auth = self.make_auth(token_store=store, clock=clock)
+        auth.token()                       # sign in (in_lock still works)
+        store.fail_in_lock = True          # now the lock backend fails
+        clock.wall += 10_000               # expire -> needs a refresh
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 1)  # refreshed lock-free
+        self.assertEqual(self.state.device_requests, 1)   # only the sign-in
+        self.assertIn('token store', err.getvalue())
 
 
 if __name__ == '__main__':

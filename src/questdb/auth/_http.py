@@ -390,19 +390,26 @@ def get_json(
         'GET', url, headers=headers, timeout=timeout, ctx=ctx,
         insecure=insecure)
     if not resp.ok:
-        # Attach the HTTP status (mirroring post_form) so a future retry caller
-        # can tell a terminal 4xx from a transient 5xx/429 the same way the poll
-        # loop / silent refresh do. Today's callers (fetch_settings, IdP
-        # discovery) are one-shot and ignore it; this keeps the contract uniform.
-        raise OidcError(
-            f'HTTP {resp.status} from {url}: {resp.text()[:200]}',
-            status=resp.status)
+        # Map to the OidcError SUBCLASS that matches the cause, so a caller can
+        # `except OidcConfigError` / `except OidcNetworkError` around
+        # from_questdb() the same way _refresh / _poll_for_token classify
+        # post_form's errors: a 5xx/429 is a transient server / rate-limit issue,
+        # anything else (a 4xx/3xx from /settings or IdP discovery — a wrong URL,
+        # OIDC not advertised, an auth gate) is a configuration one. The HTTP
+        # status is attached either way (mirroring post_form) so a future retry
+        # caller can still classify terminal-vs-transient uniformly.
+        msg = f'HTTP {resp.status} from {url}: {resp.text()[:200]}'
+        if resp.status >= 500 or resp.status == 429:
+            raise OidcNetworkError(msg, status=resp.status)
+        raise OidcConfigError(msg, status=resp.status)
     try:
         return resp.json()
     except (ValueError, UnicodeDecodeError, RecursionError) as e:
-        # RecursionError (deeply-nested JSON) isn't a ValueError, so catch it
-        # explicitly to keep the typed contract.
-        raise OidcError(
+        # A non-JSON body where OIDC JSON was expected (an HTML login/error page
+        # from a proxy, or the wrong URL) is a configuration problem, not a
+        # transport one. RecursionError (deeply-nested JSON) isn't a ValueError,
+        # so catch it explicitly to keep the typed contract.
+        raise OidcConfigError(
             f'Invalid JSON from {url}: {e}', status=resp.status) from e
 
 

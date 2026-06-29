@@ -13,6 +13,7 @@ loop), so it is not part of the automated example suite.
 import sys
 
 from questdb.auth import (
+    FileTokenStore,
     OidcDeviceAuth,
     OidcError,
     psycopg_connect,
@@ -53,6 +54,22 @@ def pg_wire(url: str = QUESTDB_URL):
         with conn.cursor() as cur:
             cur.execute('SELECT count() FROM trades')
             print(cur.fetchone())
+
+
+def persist_across_restarts(url: str = QUESTDB_URL) -> OidcDeviceAuth:
+    """Survive a process restart without prompting again.
+
+    By default the token is in-memory only, so a restarted kernel / script
+    re-runs the device flow. Pass a ``token_store`` to persist it: the restarted
+    process resumes from the saved refresh token (a silent token-endpoint call)
+    instead of re-prompting. ``FileTokenStore`` writes one file per identity
+    under ``~/.questdb/oidc-tokens/`` (``0600``, owner-only); supply your own
+    ``TokenStore`` to back it with an OS keychain for at-rest encryption.
+    """
+    auth = OidcDeviceAuth.from_questdb(
+        url, token_store=FileTokenStore.at_default_location())
+    auth.token()  # prompts the first time; silent on later runs / after restart
+    return auth
 
 
 def bring_your_own_client(url: str = QUESTDB_URL):

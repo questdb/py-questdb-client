@@ -30,6 +30,7 @@ import base64
 import binascii
 import json
 import math
+import sys
 import threading
 import time
 import webbrowser
@@ -47,6 +48,12 @@ from ._errors import (
     OidcTimeoutError,
 )
 from ._http import build_ssl_context, post_form, safe_urlparse
+from ._store import (
+    PersistedToken,
+    TokenStore,
+    TokenStoreKey,
+    _canonical_endpoint,
+)
 from ._render import (
     Renderer,
     _safe_target,
@@ -67,6 +74,13 @@ REFRESH_GRANT = 'refresh_token'
 # token is re-validated at least hourly.
 _DEFAULT_EXPIRES_IN = 300   # token TTL fallback (absent/invalid/<=0)
 _MAX_EXPIRES_IN = 3600      # cap on the token TTL
+
+# Upper bound on the configurable per-request HTTP timeout (seconds). A
+# token-endpoint round-trip never needs longer, and bounding it keeps a refresh
+# held under the FileTokenStore cross-process lock safely shorter than that
+# store's lock-staleness window, so a slow refresh's live lock is not stolen by a
+# peer. Matches the Java client's 120s cap.
+_MAX_TIMEOUT = 120
 
 # Clamp the device-authorization timing fields (RFC 8628): a hostile/buggy
 # response must not time the flow out before its first poll, pin the polling
@@ -228,6 +242,35 @@ def _validate_positive_number(value: Any, name: str) -> None:
             f'got {value!r}')
 
 
+def _validate_timeout(value: Any) -> None:
+    """Require ``timeout`` to be positive, finite, and within :data:`_MAX_TIMEOUT`.
+
+    The cap mirrors the Java client: a token-endpoint round-trip never needs
+    longer, and a larger value could let a slow refresh outlast the
+    :class:`~questdb.auth.FileTokenStore` cross-process lock's staleness window,
+    so a peer could steal a live holder's lock mid-refresh.
+    """
+    _validate_positive_number(value, 'timeout')
+    if value > _MAX_TIMEOUT:
+        raise OidcConfigError(
+            f'timeout must not exceed {_MAX_TIMEOUT} seconds; a token-endpoint '
+            'round-trip never needs longer, and a larger value could let a slow '
+            "refresh outlast the token store's cross-process lock staleness "
+            'window.')
+
+
+def _has_only_token_chars(token: str) -> bool:
+    """True if every character of ``token`` is printable ASCII (0x20–0x7e).
+
+    A real OAuth token is printable ASCII; a control or non-ASCII character would
+    be smuggled verbatim into an ``Authorization: Bearer`` header or a PG-wire
+    ``_sso`` password (a decoded CR/LF is a header-injection vector), so a token
+    loaded from the attacker-writable persistence file is rejected unless it
+    passes this check.
+    """
+    return all(0x20 <= ord(c) <= 0x7e for c in token)
+
+
 class OidcDeviceAuth:
     """
     Acquire and refresh an OIDC token via the device authorization grant.
@@ -241,6 +284,14 @@ class OidcDeviceAuth:
     it silently and synchronously once it nears expiry (no background thread).
     Acquisition is serialized so concurrent callers don't double-prompt, while a
     valid cached token is returned without blocking on another's sign-in.
+
+    Token state is in-memory only by default and does not survive a process
+    restart. Pass a ``token_store`` (e.g.
+    :meth:`FileTokenStore.at_default_location()
+    <questdb.auth.FileTokenStore.at_default_location>`) to persist it, so a
+    restarted process resumes from the saved refresh token — one silent
+    token-endpoint round-trip — instead of running the device flow again. See
+    :ref:`oidc_auth`.
 
     **Concurrency note.** The lock is held for a whole interactive sign-in (up
     to the device-code lifetime, ~30 min): a caller with a *valid* cached token
@@ -291,6 +342,7 @@ class OidcDeviceAuth:
             renderer: Optional[Renderer] = None,
             default_interval: int = 5,
             timeout: float = 30,
+            token_store: Optional[TokenStore] = None,
             _clock=None):  # injectable time source for testing
         # Validate types up front so a bad-typed arg raises the module's typed
         # error, not a bare AttributeError/TypeError surfacing later from
@@ -323,7 +375,7 @@ class OidcDeviceAuth:
         # socket call; a non-numeric value would otherwise escape as a bare
         # TypeError rather than the typed error this block exists to raise.
         _validate_positive_number(default_interval, 'default_interval')
-        _validate_positive_number(timeout, 'timeout')
+        _validate_timeout(timeout)
 
         # Sending the id_token requires the ``openid`` scope.
         if groups_in_token and 'openid' not in scope.split():
@@ -382,6 +434,31 @@ class OidcDeviceAuth:
         # instance's token()/clear() — into a clear error instead of a deadlock.
         self._lock_owner: Optional[int] = None
         self._tokens: Optional[TokenSet] = None
+        # Opt-in token persistence (default None == in-memory only, the previous
+        # behaviour). Key any persisted entry by the identity it belongs to:
+        # canonicalise the endpoints (lower-case scheme/host, explicit port) and
+        # use the already-normalised audience, so the hash matches across
+        # processes and language clients sharing this identity.
+        self._token_store = token_store
+        self._store_key: Optional[TokenStoreKey] = None if token_store is None \
+            else TokenStoreKey(
+                client_id=self.config.client_id,
+                token_endpoint=_canonical_endpoint(self.config.token_endpoint),
+                device_authorization_endpoint=_canonical_endpoint(
+                    self.config.device_authorization_endpoint),
+                scope=self.config.scope,
+                audience=self.config.audience,
+                groups_in_token=self.config.groups_in_token)
+        # Load the persisted entry at most once per instance (even if it yields
+        # nothing), so a missing or bad file is not re-read on every call.
+        self._store_load_attempted = False
+        # The refresh token last written to the store, so _persist_if_rotated()
+        # can skip the hot refresh path when the IdP does not rotate it.
+        self._last_persisted_refresh_token: Optional[str] = None
+        # True while the store's cross-process lock is held for a coordinated
+        # refresh (the in_lock action), so the disk save performed under it does
+        # not re-acquire our own lock. Read only inside that action.
+        self._store_lock_held = False
         clock = _clock or _SYSTEM_CLOCK
         self._sleep = clock.sleep
         self._monotonic = clock.monotonic
@@ -409,6 +486,7 @@ class OidcDeviceAuth:
             renderer: Optional[Renderer] = None,
             default_interval: int = 5,
             timeout: float = 30,
+            token_store: Optional[TokenStore] = None,
             _clock=None) -> 'OidcDeviceAuth':  # injectable time source
         """
         Build an :class:`OidcDeviceAuth` by discovering config from QuestDB.
@@ -424,13 +502,19 @@ class OidcDeviceAuth:
         from a server-supplied endpoint, so a tampered ``/settings`` cannot
         redirect the device-code / refresh-token POSTs. See :ref:`oidc_auth`.
         Raises :class:`OidcConfigError` if the configuration can't be resolved.
+
+        Pass ``token_store=`` (e.g.
+        :meth:`FileTokenStore.at_default_location()
+        <questdb.auth.FileTokenStore.at_default_location>`) to persist the token
+        so a restarted process resumes from the saved refresh token instead of
+        prompting again; the default is in-memory only.
         """
         # Validate before resolve_config consumes `timeout` on its /settings and
         # discovery HTTP calls (which run before cls() would validate it), so a
         # bad timeout fails fast with the typed error rather than a bare
         # TypeError from urllib.
         _validate_positive_number(default_interval, 'default_interval')
-        _validate_positive_number(timeout, 'timeout')
+        _validate_timeout(timeout)
         ctx = build_ssl_context(ca_bundle)
         cfg = resolve_config(
             questdb_url=url,
@@ -460,6 +544,7 @@ class OidcDeviceAuth:
             renderer=renderer,
             default_interval=default_interval,
             timeout=timeout,
+            token_store=token_store,
             _clock=_clock)
 
     # -- public API ---------------------------------------------------------
@@ -539,6 +624,23 @@ class OidcDeviceAuth:
             try:
                 self._tokens = None
                 self._cache.clear(self.cache_key)
+                self._last_persisted_refresh_token = None
+                if self._token_store is not None:
+                    try:
+                        # Delete the file under the store's per-identity lock so a
+                        # concurrent in-flight _store on another instance (which
+                        # sees the generation just bumped by _cache.clear above)
+                        # can't resurrect it: that save re-checks the generation
+                        # under the same lock and skips (see _save_if_current).
+                        self._token_store.in_lock(
+                            self._store_key,
+                            lambda: self._token_store.clear(self._store_key))
+                    except Exception as e:
+                        # Best-effort: a store failure must not break clear().
+                        self._warn_persistence('clear', e)
+                    # Don't reload the entry we just removed on the next
+                    # token() / sign-in.
+                    self._store_load_attempted = True
             finally:
                 self._lock_owner = None
 
@@ -641,6 +743,12 @@ class OidcDeviceAuth:
                 # MemoryCache.release).
                 generation = self._cache_generation()
                 try:
+                    # First call with a token store: seed self._tokens from the
+                    # persisted entry (once), so a restart resumes from a saved
+                    # refresh token instead of re-prompting. Adopts into this
+                    # instance only; the shared cache and disk are written by
+                    # _store after an acquisition.
+                    self._maybe_load_from_store()
                     # Promote a cached token under the lock, consulting the
                     # shared store even when self._tokens is already set: another
                     # instance sharing the process-global cache may have acquired
@@ -703,24 +811,15 @@ class OidcDeviceAuth:
         # interactive device-flow fallback below is gated by it.
         tokens = self._tokens
         if tokens is not None and tokens.refresh_token:
-            try:
-                refreshed = self._refresh(tokens)
-            except OidcNetworkError:
-                # Transient: the refresh token is still valid, so the interactive
-                # flow (same network) wouldn't help and would needlessly
-                # re-prompt. Surface it; the cached token is kept for a retry.
-                raise
-            except OidcError:
-                # Refresh token rejected (expired/revoked) or unusable response:
-                # fall through to a fresh interactive sign-in.
-                pass
-            else:
-                # Accept only a refresh that yields the kind we need: some IdPs
-                # don't re-issue the id_token on refresh, so fall through rather
-                # than cache an unusable response and loop on every call.
-                if self._has_required_token(refreshed):
-                    self._store(refreshed, generation)
-                    return refreshed
+            # A token store serialises the read-refresh-write across processes
+            # (and adopts a peer's just-rotated refresh token) through its
+            # per-identity lock; without one this is a plain silent refresh.
+            # OidcNetworkError propagates (the refresh token is still valid, so
+            # the interactive flow — same network — wouldn't help and would
+            # needlessly re-prompt; the cached token is kept for a retry).
+            refreshed = self._try_refresh_coordinated(tokens, generation)
+            if refreshed is not None:
+                return refreshed
             # The refresh path is exhausted: the refresh_token is proven useless
             # (rejected, or the IdP won't re-issue the required kind), so the
             # device flow below is the only way forward. Drop the stale token —
@@ -756,11 +855,255 @@ class OidcDeviceAuth:
         # that bumped the generation drops the write, so clear() isn't silently
         # undone.
         self._tokens = tokens
-        self._cache.store_if_current(self.cache_key, tokens, generation)
+        stored = self._cache.store_if_current(self.cache_key, tokens, generation)
+        # Persist on the same condition as the shared-cache write, and re-check
+        # that condition again under the store lock right before the disk write
+        # (see _save_if_current): a concurrent clear() that bumped the generation
+        # and deleted the file between the CAS above and the save must not be
+        # undone by re-creating the file. _persist_if_rotated then skips a
+        # non-rotated refresh so the hot path doesn't rewrite the file every few
+        # minutes.
+        if stored:
+            self._persist_if_rotated(generation)
 
     def _cache_generation(self) -> int:
         # Per-key clear()-generation for the cross-instance CAS in _store.
         return self._cache.generation(self.cache_key)
+
+    # -- persistence (opt-in TokenStore) ------------------------------------
+
+    def _try_refresh_coordinated(
+            self, tokens: TokenSet, generation: int) -> Optional[TokenSet]:
+        # Returns the stored refreshed TokenSet, or None to fall through to the
+        # device flow; raises OidcNetworkError on a transient failure (the caller
+        # keeps the still-valid refresh token and retries later). With a token
+        # store, serialise the read-refresh-write across processes — and adopt a
+        # peer's just-rotated refresh token — through the store's per-identity
+        # lock; without one, just run the refresh.
+        if self._token_store is None:
+            return self._try_refresh_locally(tokens, generation)
+        # Mark the store lock as held for the duration of the in_lock action, so
+        # the disk save it performs (via _store -> _persist_if_rotated ->
+        # _save_if_current) writes directly rather than re-acquiring our own lock
+        # (which would deadlock/degrade on it). The flag is only read inside the
+        # action, i.e. while the lock is genuinely held.
+        self._store_lock_held = True
+        try:
+            return self._token_store.in_lock(
+                self._store_key, lambda: self._refresh_under_lock(generation))
+        except OidcNetworkError:
+            # The refresh itself hit a transient error (raised by the action, not
+            # the store): propagate so the caller keeps the still-valid refresh
+            # token and retries later, never a needless re-prompt.
+            raise
+        except Exception as e:
+            # A custom store's lock backend failed (the bundled FileTokenStore
+            # degrades internally and never raises here). Persistence is
+            # best-effort, so warn and fall through to a lock-free refresh below
+            # rather than abort an otherwise-valid sign-in.
+            self._warn_persistence('lock', e)
+        finally:
+            self._store_lock_held = False
+        # Reached only when in_lock raised a non-network store failure above: the
+        # flag is now cleared, so this lock-free refresh's own persist takes its
+        # normal lock-acquiring path.
+        return self._try_refresh_locally(tokens, generation)
+
+    def _try_refresh_locally(
+            self, tokens: TokenSet, generation: int) -> Optional[TokenSet]:
+        try:
+            refreshed = self._refresh(tokens)
+        except OidcNetworkError:
+            # Transient: the refresh token is still valid, so propagate for a
+            # retry rather than fall through to a needless interactive re-prompt.
+            raise
+        except OidcError:
+            # Refresh token rejected (expired/revoked) or unusable response: fall
+            # through to a fresh interactive sign-in.
+            return None
+        # Accept only a refresh that yields the kind we need: some IdPs don't
+        # re-issue the id_token on refresh, so fall through rather than cache an
+        # unusable response and loop on every call.
+        if self._has_required_token(refreshed):
+            self._store(refreshed, generation)
+            return refreshed
+        return None
+
+    def _refresh_under_lock(self, generation: int) -> Optional[TokenSet]:
+        # Runs inside the store's cross-process lock. Re-read the store first: a
+        # peer sharing this identity may have refreshed (and rotated the refresh
+        # token) since our last load. Adopt a fresher entry and skip the network
+        # when it already yields a valid token; otherwise refresh with the
+        # freshest known refresh token (the one just adopted, so a rotated token
+        # is not replayed).
+        #
+        # Only re-read when the in-memory refresh token still matches what we
+        # last persisted. If they differ, a previous save failed (persistence is
+        # best-effort), so the in-memory token is newer than the on-disk one;
+        # re-adopting would regress it to the stale — and, on a rotating IdP,
+        # already-revoked — on-disk token and force a needless re-prompt. In that
+        # case keep the in-memory token and refresh with it.
+        tokens = self._tokens
+        if tokens is None:
+            return None
+        if tokens.refresh_token == self._last_persisted_refresh_token:
+            try:
+                fresh = self._token_store.load(self._store_key)
+            except Exception as e:
+                self._warn_persistence('load', e)
+                fresh = None
+            if self._adopt(fresh):
+                adopted = self._tokens
+                if (adopted is not None and adopted.is_valid(self._now())
+                        and self._has_required_token(adopted)):
+                    # A peer already refreshed; skip the network and seed the
+                    # shared cache from the adopted token.
+                    self._store(adopted, generation)
+                    return adopted
+                # Adopted but stale: refresh with its (possibly rotated) token.
+                tokens = self._tokens
+        return self._try_refresh_locally(tokens, generation)
+
+    def _maybe_load_from_store(self) -> None:
+        if self._token_store is None or self._store_load_attempted:
+            return
+        # Attempt the disk read once per instance, even if it yields nothing, so
+        # a missing or bad file is not re-read on every call.
+        self._store_load_attempted = True
+        try:
+            persisted = self._token_store.load(self._store_key)
+        except Exception as e:
+            # Best-effort: a store read failure must not break sign-in.
+            self._warn_persistence('load', e)
+            return
+        self._adopt(persisted)
+
+    def _adopt(self, persisted: Optional[PersistedToken]) -> bool:
+        # Build a usable TokenSet from a persisted entry and make it this
+        # instance's view, returning whether it was adopted. Used by the lazy
+        # load and by the re-read inside the cross-process lock.
+        if persisted is None:
+            return False
+        tokens = self._tokenset_from_persisted(persisted)
+        if tokens is None:
+            return False
+        self._tokens = tokens
+        # It is already on disk, so a later non-rotating refresh must not rewrite
+        # the file.
+        self._last_persisted_refresh_token = tokens.refresh_token
+        return True
+
+    def _tokenset_from_persisted(
+            self, persisted: PersistedToken) -> Optional[TokenSet]:
+        # The file is attacker-writable, so treat the served token (the one
+        # token() puts verbatim into an Authorization header or a PG-wire
+        # password) as untrusted: reject a control/non-ASCII char — and the whole
+        # entry — rather than route a tampered credential onto the wire. A null
+        # served token is unusable.
+        access_token = _str_or_none(persisted.access_token)
+        id_token = _str_or_none(persisted.id_token)
+        refresh_token = _str_or_none(persisted.refresh_token)
+        served = id_token if self.config.groups_in_token else access_token
+        if not served or not _has_only_token_chars(served):
+            return None
+        # The file is attacker-writable (and may have been written under a skewed
+        # clock), so bound how long the loaded token is trusted exactly as a
+        # token from the wire: never past _MAX_EXPIRES_IN from now. Capping (not
+        # flooring) the expiry preserves an already-expired entry, so a stale
+        # access token still falls through to a refresh rather than being served
+        # forever.
+        now = self._now()
+        max_life = float(_MAX_EXPIRES_IN)
+        ttl = max(0.0, min(persisted.token_ttl, max_life))
+        expires_at = min(persisted.expires_at, now + max_life)
+        # issued_at lets TokenSet.is_valid() cap the skew at half a short
+        # lifetime, exactly as a wire token does.
+        issued_at = expires_at - ttl
+        claims = (_decode_jwt_claims(id_token)
+                  or _decode_jwt_claims(access_token))
+        return TokenSet(
+            access_token=access_token,
+            id_token=id_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            issued_at=issued_at,
+            token_type='Bearer',
+            scope=self.config.scope,
+            sub=_str_or_none(claims.get('sub')))
+
+    def _snapshot(self) -> PersistedToken:
+        # A PersistedToken mirroring the current in-memory token. token_ttl is the
+        # lifetime the expiry was derived from (expires_at - issued_at), mirroring
+        # how a wire response sets them; falls back to 0 when issued_at is unknown.
+        t = self._tokens
+        ttl = max(0.0, t.expires_at - t.issued_at) if t.issued_at else 0.0
+        return PersistedToken(
+            access_token=t.access_token,
+            id_token=t.id_token,
+            refresh_token=t.refresh_token,
+            expires_at=t.expires_at,
+            token_ttl=ttl)
+
+    def _persist_if_rotated(self, generation: int) -> None:
+        if self._token_store is None:
+            return
+        # Persist on a new or rotated refresh token (the interactive sign-in, or
+        # a provider that rotates the refresh token on every refresh); skip when
+        # it is unchanged, so the hot refresh path does not rewrite the file every
+        # few minutes. The on-disk access token then goes stale, which costs only
+        # one silent refresh on the next restart. With no refresh token there is
+        # nothing worth persisting (a restart could not resume from it anyway).
+        refresh_token = self._tokens.refresh_token if self._tokens else None
+        if refresh_token == self._last_persisted_refresh_token:
+            return
+        # Serialise the disk write against a concurrent clear()'s file delete
+        # through the store's per-identity lock, so the two side effects can't
+        # interleave into a resurrected file (clear() deletes under the same
+        # lock). The coordinated-refresh path already holds that lock, so persist
+        # inline there rather than deadlock/degrade re-acquiring it; the
+        # interactive sign-in path (no lock held) acquires it here.
+        if self._store_lock_held:
+            self._save_if_current(generation, refresh_token)
+        else:
+            # in_lock itself is best-effort: a custom store whose lock backend
+            # raises must not fail an otherwise-valid sign-in (the in-memory token
+            # is good regardless, and _save_if_current already swallows a save
+            # failure). The bundled FileTokenStore degrades internally and never
+            # raises here; this guards a custom TokenStore.
+            try:
+                self._token_store.in_lock(
+                    self._store_key,
+                    lambda: self._save_if_current(generation, refresh_token))
+            except Exception as e:
+                self._warn_persistence('save', e)
+
+    def _save_if_current(
+            self, generation: int, refresh_token: Optional[str]) -> None:
+        # Runs under the store's per-identity lock. Re-check the clear()-generation
+        # captured for this acquisition: a clear() (here or on another instance
+        # sharing the process-global cache) that bumped it AND deleted the file
+        # since our store_if_current must win, so skip the save rather than
+        # resurrect the file the user just cleared. clear() deletes the file under
+        # this same lock, so the re-check and the save are atomic against it.
+        if not self._cache.is_current(self.cache_key, generation):
+            return
+        try:
+            self._token_store.save(self._store_key, self._snapshot())
+            self._last_persisted_refresh_token = refresh_token
+        except Exception as e:
+            # Best-effort: a save failure never fails an otherwise-valid sign-in;
+            # the token is valid in memory regardless.
+            self._warn_persistence('save', e)
+
+    def _warn_persistence(self, operation: str, cause: Exception) -> None:
+        # Best-effort persistence: report to stderr and carry on with the
+        # in-memory token. The store never puts token bytes in its messages, so
+        # this cannot leak the secret.
+        detail = str(cause)
+        sys.stderr.write(
+            f'questdb client: OIDC token store {operation} failed; continuing '
+            f'without persistence'
+            + (f' [{detail}]' if detail else '') + '\n')
 
     def _tokenset_from_response(self, body: Dict[str, Any]) -> TokenSet:
         expires_in = _int_or_default(

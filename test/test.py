@@ -46,6 +46,8 @@ from test_auth import (
     TestConfigHelpers,
     TestEndpointValidation,
     TestCacheKey,
+    TestFileTokenStore,
+    TestPersistence,
     TestTransportSecurity,
     TestRendererSecurity,
 )

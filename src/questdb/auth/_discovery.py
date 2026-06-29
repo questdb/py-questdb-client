@@ -544,6 +544,18 @@ def resolve_config(
             'explicitly (token_endpoint=..., device_authorization_endpoint=...), '
             'or connect to QuestDB over https so /settings is authenticated.')
 
+    # Vet the issuer authority up front — BEFORE it is used to build the IdP
+    # discovery URL below. A confusable issuer (urllib's parse-vs-connect
+    # divergence, e.g. r"https://attacker.evil\@idp.good") would otherwise drive
+    # a .well-known GET to the unvetted host before the issuer-pin block far
+    # below rejects it. That GET carries no credential and the pin block would
+    # still abort, so this is hardening, not a fix — but failing before any
+    # network call is cheaper, and it guarantees the pin block's
+    # _normalized_origin(issuer) compares against the host the transport
+    # actually connects to.
+    if issuer:
+        _reject_confusable_authority(issuer, label='issuer')
+
     # Fall back to IdP discovery when QuestDB doesn't advertise the device
     # (and/or token) endpoint. This contacts the IdP, so it is held to
     # https/loopback (insecure=False) regardless of the QuestDB flag.
@@ -614,9 +626,9 @@ def resolve_config(
     # outside the issuer path), so pinning them would reject a legitimate IdP.
     # The co-location check in OidcDeviceAuth.__init__ still applies on top.
     if issuer:
-        # The pin compares each /settings endpoint's origin against the issuer's;
-        # a confusable issuer authority would pin to the wrong host, so vet it too.
-        _reject_confusable_authority(issuer, label='issuer')
+        # The issuer authority was vetted up front (above, before discovery), so
+        # _normalized_origin here compares each /settings endpoint's origin
+        # against the same host the transport would connect to.
         issuer_origin = _normalized_origin(issuer)
         for label, url, from_settings, confirmed_by_idp in (
                 ('token endpoint', token_endpoint, token_from_settings,

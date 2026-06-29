@@ -192,3 +192,19 @@ class MemoryCache:
                 return False
             _MEMORY_STORE[key] = replace(tokens)
             return True
+
+    def is_current(self, key: str, generation: int) -> bool:
+        """
+        True if no :meth:`clear` bumped ``key``'s generation since ``generation``.
+
+        The read-only companion to :meth:`store_if_current`, for a caller that has
+        already committed the in-memory write but must perform a *second*,
+        non-atomic side effect (persisting the token to disk): it re-checks this
+        immediately before that side effect — under the store's own lock — so a
+        ``clear()`` that landed in between (and deleted the persisted file) is
+        still honored and the side effect is skipped rather than resurrecting the
+        file. Same generation semantics as :meth:`store_if_current`: an in-flight
+        acquisition keeps a bumped generation alive, so this observes it.
+        """
+        with _MEMORY_LOCK:
+            return _MEMORY_GENERATION.get(key, 0) == generation

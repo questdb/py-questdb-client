@@ -61,9 +61,16 @@ from ._errors import (
     OidcDeviceFlowError,
     OidcTimeoutError,
 )
+from ._store import (
+    FileTokenStore,
+    PersistedToken,
+    TokenStore,
+    TokenStoreKey,
+)
 from ._adapters import sqlalchemy_engine, psycopg_connect
 
 __all__ = [
+    'FileTokenStore',
     'OidcConfig',
     'OidcConfigError',
     'OidcDeviceAuth',
@@ -72,7 +79,10 @@ __all__ = [
     'OidcInteractionRequired',
     'OidcNetworkError',
     'OidcTimeoutError',
+    'PersistedToken',
     'TokenSet',
+    'TokenStore',
+    'TokenStoreKey',
     'psycopg_connect',
     'sqlalchemy_engine',
 ]

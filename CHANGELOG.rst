@@ -42,8 +42,18 @@ Highlights:
   Google: ``accounts.google.com`` issuer, ``oauth2.googleapis.com`` endpoints),
   while still pinning endpoints advertised over an untrusted ``/settings``
   channel to the issuer.
-* In-process token cache with silent refresh (tokens are never written to
-  disk).
+* In-process token cache with silent refresh; in-memory only by default (no
+  token ever written to disk).
+* Opt-in **token persistence** (:class:`~questdb.auth.FileTokenStore`, passed as
+  ``token_store=``) so a restarted process resumes from a saved refresh token
+  instead of prompting again. The default file store keeps one owner-only
+  (``0600``) plaintext file per identity under ``~/.questdb/oidc-tokens/``,
+  written atomically and coordinated across processes with a lock file; supply a
+  custom :class:`~questdb.auth.TokenStore` to back it with an OS keychain. The
+  on-disk format is a language-neutral contract shared with the Java client. The
+  per-request ``timeout`` is capped at 120s (matching the Java client) so a slow
+  refresh held under the file store's cross-process lock can't outlast its
+  staleness window; a larger value raises ``OidcConfigError`` at construction.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the auto-refreshed token into
   PG-wire as the ``_sso`` password.

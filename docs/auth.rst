@@ -160,9 +160,66 @@ is raised instead, so you can retry without being needlessly re-prompted. A lock
 serializes refresh so parallel cells/threads don't double-prompt.
 
 The token is held in a process-global, in-memory cache, so re-running a cell
-reuses it instead of re-prompting; a kernel restart re-prompts once. Tokens are
-deliberately never written to disk: an interactive sign-in is cheap relative to
-the risk of a refresh token sitting in a plaintext file at rest.
+reuses it instead of re-prompting; a kernel restart re-prompts once. By default
+nothing is written to disk — opt into persistence (below) to survive a restart.
+
+Persisting the token across restarts
+-------------------------------------
+
+By default the token lives in memory only, so a restarted process (a fresh
+kernel, a re-run script, a new container) has to run the device flow again. Pass
+a ``token_store`` to persist it; the restarted process then resumes from the
+saved refresh token — a silent call to the token endpoint — instead of prompting
+again:
+
+.. code-block:: python
+
+    from questdb.auth import OidcDeviceAuth, FileTokenStore
+
+    auth = OidcDeviceAuth.from_questdb(
+        "https://questdb.example.com:9000",
+        token_store=FileTokenStore.at_default_location())
+    auth.token()  # prompts the first time; after a restart it refreshes silently
+
+:meth:`~questdb.auth.FileTokenStore.at_default_location` writes one file per
+identity under ``~/.questdb/oidc-tokens/`` (override the directory with the
+``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable). The file name is a
+hash of the endpoints, client id, scope, audience and groups-in-token mode, so
+tokens for different servers or identities never collide. After a restart,
+:meth:`~questdb.auth.OidcDeviceAuth.token` also works as the *first* call — no
+explicit sign-in needed — which suits a long-lived adapter such as
+:func:`~questdb.auth.sqlalchemy_engine`.
+:meth:`~questdb.auth.OidcDeviceAuth.clear` removes the persisted entry and forces
+a fresh sign-in next time.
+
+The token is stored as **plaintext JSON protected by file permissions** —
+``0600`` file, ``0700`` directory on POSIX systems (Linux, macOS), the same
+approach ``gcloud``, ``aws`` and ``gh`` take. On Windows these POSIX permissions
+cannot be enforced, so the file relies on the user-profile directory's default
+ACL and the client prints a one-line warning to ``stderr`` the first time it
+cannot enforce them. Enabling persistence therefore writes a long-lived refresh
+token to disk: anyone who can read the file holds a credential until it expires
+or is revoked. To encrypt it at rest, implement your own
+:class:`~questdb.auth.TokenStore` (backed by an OS keychain or a secrets manager)
+and pass that instead of :class:`~questdb.auth.FileTokenStore`. A persisted file
+is treated as **untrusted input** on load — a tampered, corrupt, oversized, or
+identity-mismatched entry is ignored (the client falls back to a refresh or an
+interactive sign-in), and the bearer token it serves (put verbatim into an
+``Authorization`` header or the PG-wire ``_sso`` password) is rejected if it
+carries control or non-ASCII characters, so a tampered credential is never placed
+on the wire.
+
+:class:`~questdb.auth.FileTokenStore` is safe to share between processes that
+sign in as the same identity: each update is written atomically (so a concurrent
+reader never sees a half-written credential), and when the identity provider
+rotates the refresh token on each refresh, the read-refresh-write is serialized
+across processes with a lock file so they don't race each other into an
+unnecessary re-prompt. That coordination is **best-effort**: under heavy
+contention, or if the lock can't be taken, a process falls back to refreshing
+without it — still integrity-safe (the atomic write stands), just uncoordinated
+for that one refresh, which on a rotating-refresh IdP may cost an extra sign-in.
+The on-disk format is a language-neutral contract, so the Java QuestDB client and
+this one can share the same file.
 
 Non-interactive contexts
 -------------------------
@@ -247,6 +304,12 @@ Security notes
   authorization endpoint (so it must be discovered from the IdP), ``issuer=`` is
   **required** for exactly this reason — the helper refuses to guess the
   discovery origin from the server-supplied token endpoint.
+* **Token persistence is opt-in and off by default.** Passing a ``token_store``
+  writes a long-lived refresh token to disk; :class:`~questdb.auth.FileTokenStore`
+  protects it with owner-only file permissions (``0600``/``0700``) rather than
+  encryption. A persisted file is validated as untrusted input on load and the
+  served bearer token is rejected if it carries control / non-ASCII characters.
+  See `Persisting the token across restarts`_.
 * Adapters avoid logging the token / PG DSN. Avoid logging them yourself.
 * Standard proxy / CA settings (``HTTPS_PROXY``, ``REQUESTS_CA_BUNDLE``,
   ``SSL_CERT_FILE``) are honoured for the IdP / discovery transport; you can
