@@ -6,7 +6,7 @@ stages:
     jobs:
       - job: linux_arm64
         pool: hetzner-incus-arm
-        timeoutInMinutes: 90
+        timeoutInMinutes: 120
         condition: eq(variables['System.PullRequest.IsFork'], 'false')
         steps:
           - checkout: self
@@ -27,7 +27,7 @@ stages:
 
       - job: linux_x64_cpython_manylinux_x86_64
         pool: {vmImage: 'ubuntu-latest'}
-        timeoutInMinutes: 90
+        timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -44,7 +44,7 @@ stages:
 
       - job: linux_x64_cpython_musllinux
         pool: {vmImage: 'ubuntu-latest'}
-        timeoutInMinutes: 90
+        timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -61,7 +61,7 @@ stages:
 
       - job: linux_x64_pypy
         pool: {vmImage: 'ubuntu-latest'}
-        timeoutInMinutes: 90
+        timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -79,7 +79,7 @@ stages:
 
       - job: macos_x64
         pool: {vmImage: 'macOS-14'}
-        timeoutInMinutes: 90
+        timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -94,7 +94,7 @@ stages:
 
       - job: windows_i686
         pool: {vmImage: 'windows-2025'}
-        timeoutInMinutes: 90
+        timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
           - bash: |
@@ -124,7 +124,7 @@ stages:
 
       - job: windows_x86_64
         pool: {vmImage: 'windows-2025'}
-        timeoutInMinutes: 90
+        timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
           - bash: |
