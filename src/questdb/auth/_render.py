@@ -167,6 +167,15 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     # value we return (and hand to the href / webbrowser.open()), not the
     # untrimmed original.
     url = url.strip()
+    # urlparse() also silently REMOVES tab/newline/CR from anywhere in the URL
+    # before parsing, so a value carrying them would be vetted as its stripped
+    # form yet returned (→ the href / webbrowser.open() / QR) with them intact —
+    # the value vetted would not equal the value returned. Reject such a URL so
+    # the invariant holds even when this is called directly. (Production always
+    # passes a _strip_control'd value via _safe_target, which removes these
+    # already, so this never fires there; it closes the standalone footgun.)
+    if any(c in url for c in '\t\n\r'):
+        return None
     try:
         parts = urllib.parse.urlparse(url)
         scheme = (parts.scheme or '').lower()

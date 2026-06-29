@@ -2778,6 +2778,22 @@ class TestAdapters(unittest.TestCase):
             _require_host('https://db.example.com:9000', 'questdb.example.com'),
             'questdb.example.com')
 
+    def test_require_host_unbrackets_explicit_ipv6(self):
+        # m2: psycopg / SQLAlchemy take a BARE address. The URL-derived path is
+        # already unbracketed by urlparse, but an explicit host="[::1]" override
+        # used to reach the driver bracketed (→ a confusing connection failure on
+        # a copy-pasted IPv6 literal). Both paths must yield the bare address.
+        self.assertEqual(_require_host('https://[::1]:9000'), '::1')          # URL
+        self.assertEqual(
+            _require_host('https://db:9000', '[::1]'), '::1')                 # override
+        self.assertEqual(
+            _require_host('https://db:9000', '[2001:db8::1]'), '2001:db8::1')
+        # A bare (unbracketed) literal is unchanged, and junk inside brackets is
+        # still caught by the illegal-char guard after stripping.
+        self.assertEqual(_require_host('https://db:9000', '::1'), '::1')
+        with self.assertRaises(OidcConfigError):
+            _require_host('https://db:9000', '[evil;sslmode=disable]')
+
     def test_pg_port_validation(self):
         # A non-integer pg_port (e.g. a port read from an env var without int())
         # must surface as OidcConfigError, not a bare ValueError / driver error
@@ -3843,6 +3859,25 @@ class TestRendererSecurity(unittest.TestCase):
                 'https://xn--nxasmm1c.example/device',
                 'https://accounts.google.com/o/oauth2/device/code'):
             self.assertEqual(_safe_link_url(url), url, f'should accept {url!r}')
+
+    def test_safe_link_url_rejects_interior_tab_newline_cr(self):
+        # m1: urlparse() silently REMOVES tab/newline/CR from the URL before
+        # parsing, so _safe_link_url would otherwise VET the stripped form yet
+        # RETURN the original (→ href / browser / QR) with the bytes intact — the
+        # value vetted would not equal the value returned/clicked. It must return
+        # None so that invariant holds when called directly.
+        from questdb.auth._render import _safe_link_url, _safe_target
+        for url in ('https://idp.example\t.com/device',   # tab splits host label
+                    'https://idp.example.com/de\tvice',    # tab in path
+                    'https://idp.example.com\n/device',    # newline
+                    'https://idp.example.com\r/device'):   # CR
+            self.assertIsNone(_safe_link_url(url), f'should reject {url!r}')
+        # The production entry point (_safe_target) strips control chars first, so
+        # a raw response value carrying them is sanitized to a single vetted target
+        # rather than rejected — display, browser and QR all see the same clean URL.
+        self.assertEqual(
+            _safe_target('https://idp.example.com\n/device'),
+            'https://idp.example.com/device')
 
     def test_render_link_inert_for_dangerous_scheme(self):
         from questdb.auth._render import _render_link

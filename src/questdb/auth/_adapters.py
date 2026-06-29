@@ -88,6 +88,14 @@ def _require_host(url: str, host: Optional[str] = None) -> str:
             f'The QuestDB URL {url!r} has no host. Use a URL with an explicit '
             'host (e.g. "https://questdb.example.com:9000"), or pass host=... '
             'to the adapter.')
+    # An explicit host="[::1]" override arrives bracketed; the URL-derived path is
+    # already unbracketed (urlparse strips the brackets off an IPv6 literal). The
+    # drivers take a BARE address, so strip a single surrounding [...] here too,
+    # keeping the "returned host is unbracketed" contract for both paths. Done
+    # before the illegal-char check so it validates the bare host handed to the
+    # driver (and any junk inside the brackets is still caught).
+    if resolved.startswith('[') and resolved.endswith(']') and len(resolved) > 2:
+        resolved = resolved[1:-1]
     if _ILLEGAL_HOST_CHARS.search(resolved):
         raise OidcConfigError(
             f'The QuestDB host {resolved!r} contains an illegal character '

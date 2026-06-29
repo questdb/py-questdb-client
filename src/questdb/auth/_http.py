@@ -451,7 +451,7 @@ def post_form(
         headers: Optional[Mapping[str, str]] = None,
         timeout: float = _DEFAULT_TIMEOUT,
         ctx: Optional[ssl.SSLContext] = None,
-        insecure: bool = False) -> tuple[int, Dict[str, Any]]:
+        insecure: bool = False) -> '_PostResult':
     """
     POST a form-url-encoded body and parse the JSON response.
 
