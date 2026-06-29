@@ -40,7 +40,7 @@ class TokenSet:
     IdP tokens plus their expiry.
 
     ``frozen`` because the lock-free fast path in
-    :class:`~questdb.auth._device.OidcDeviceAuth` reads a published ``TokenSet``
+    :class:`~questdb.auth.OidcDeviceAuth` reads a published ``TokenSet``
     without a lock, which is safe only if its fields never change; use
     :func:`dataclasses.replace` for a modified copy. The secret fields are
     excluded from ``repr`` so a token can't leak into a log or traceback.

@@ -1188,6 +1188,30 @@ class TestDeviceFlow(AuthTestBase):
         auth = self.make_auth()
         self.assertEqual(auth.token(), nested)
 
+    def test_non_object_jwt_payload_does_not_crash(self):
+        # A well-formed (3-part) JWT whose base64 payload decodes to valid JSON
+        # that is NOT an object — a list / string / number from a buggy or
+        # hostile IdP — must read as no-claims, not crash. _decode_jwt_claims
+        # guards this with `isinstance(claims, dict)`; without it, claims.get()
+        # in _tokenset_from_response (sub) and _identity_from_claims would raise
+        # AttributeError on the SUCCESS path, discarding an already-authorized
+        # token and re-prompting on every later token() call. See
+        # _decode_jwt_claims.
+        from questdb.auth._device import _decode_jwt_claims
+        for payload in ([1, 2, 3], 'a-string', 42, 3.5):
+            self.assertEqual(_decode_jwt_claims(_jwt(payload)), {})
+        # End-to-end: the IdP returns an id_token whose payload is a JSON array;
+        # the success-path identity decode must degrade to no-identity and the
+        # token must still be returned and cached.
+        array_token = _jwt([1, 2, 3])
+        self.state.token_script = [(200, {
+            'id_token': array_token, 'token_type': 'Bearer',
+            'expires_in': 3600})]
+        auth = self.make_auth()
+        self.assertEqual(auth.token(), array_token)
+        self.assertEqual(auth._tokens.id_token, array_token)
+        self.assertIsNone(auth._tokens.sub)
+
     def test_non_string_token_fields_do_not_crash(self):
         # A buggy/hostile IdP returning a non-string access_token / id_token (a
         # JSON number/bool/object) must not crash token() with a raw

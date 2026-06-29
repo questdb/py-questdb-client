@@ -58,7 +58,7 @@ _K_AUDIENCE = 'acl.oidc.audience'
 class OidcConfig:
     """Resolved OIDC parameters needed to run the device flow.
 
-    ``frozen`` because :class:`~questdb.auth._device.OidcDeviceAuth` reads
+    ``frozen`` because :class:`~questdb.auth.OidcDeviceAuth` reads
     ``self.config`` (and the ``cache_key`` derived from it) on the lock-free
     fast path; the fields are set once at construction and never reassigned, so
     freezing makes that immutability structural rather than convention.

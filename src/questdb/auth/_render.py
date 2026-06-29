@@ -68,7 +68,7 @@ def _kernel_allows_stdin() -> bool:
     is no human to authorize, and an input request would raise
     ``StdinNotImplementedError``. ipykernel records the current request's value
     on the kernel as ``_allow_stdin``; read it so the device flow fails fast with
-    :class:`~questdb.auth._errors.OidcInteractionRequired` instead of polling to
+    :class:`~questdb.auth.OidcInteractionRequired` instead of polling to
     the device-code deadline. papermill sets no environment variable (its
     ``PAPERMILL_*_PATH`` values are opt-in *notebook parameters*, not
     ``os.environ`` entries), so the kernel's stdin flag — not an env var — is the
@@ -332,7 +332,7 @@ def _strip_control(text: Optional[str]) -> str:
     IdP put in an ``error`` field) is coerced through ``str()`` rather than
     raising. This sanitizer runs on untrusted input from several sites and must
     never raise — a ``TypeError`` here would escape the module's typed-error
-    contract (see :class:`~questdb.auth._errors.OidcDeviceFlowError`).
+    contract (see :class:`~questdb.auth.OidcDeviceFlowError`).
     """
     if not text:
         return ''
