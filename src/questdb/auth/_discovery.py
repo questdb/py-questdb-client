@@ -313,6 +313,18 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
 # checked with ``str.isascii`` in the function, not this regex.)
 _UNSAFE_AUTHORITY_RE = re.compile(r'[\\\s\x00-\x1f\x7f]')
 
+# Tab / newline / CR are SILENTLY REMOVED by urllib.parse.urlparse() from
+# anywhere in the URL before it produces ``.netloc`` (CPython's
+# ``_UNSAFE_URL_BYTES_TO_REMOVE``, implementing the WHATWG "tab/newline removal"
+# rule). The transport — ``http.client`` via ``urllib.request.Request(url).host``
+# — KEEPS them, so the netloc we validate diverges from the host urllib connects
+# to: ``https://idp\tevil/token`` parses with host ``idpevil`` (or a *trusted*
+# host, if the byte splits one a check relies on) while urllib targets the raw
+# ``idp\tevil``. Because urlparse drops these before _UNSAFE_AUTHORITY_RE (which
+# does list ``\s``/``\x00-\x1f``) ever sees them, they must be caught on the RAW
+# url instead. A legitimate credential endpoint never contains them anywhere.
+_URL_STRIPPED_BYTES = ('\t', '\n', '\r')
+
 
 def _reject_confusable_authority(url: str, *, label: str) -> None:
     """Reject a credential URL whose authority urllib may resolve unlike parsed."""
@@ -322,7 +334,13 @@ def _reject_confusable_authority(url: str, *, label: str) -> None:
     # is a homoglyph/confusable spoofing vector (the renderer already distrusts
     # it for display), AND http.client can't even encode it — it would otherwise
     # raise a raw UnicodeEncodeError from the transport rather than a typed error.
-    if ('@' in netloc or not netloc.isascii()
+    # The _URL_STRIPPED_BYTES check runs on the RAW url, not netloc, because
+    # urlparse has already removed those bytes from netloc (see above) — without
+    # it, a tab/newline/CR in the authority would slip this guard yet still reach
+    # the transport, the exact validated-vs-connected divergence this exists to
+    # stop.
+    if (any(b in url for b in _URL_STRIPPED_BYTES)
+            or '@' in netloc or not netloc.isascii()
             or _UNSAFE_AUTHORITY_RE.search(netloc)):
         raise OidcConfigError(
             f'The OIDC {label} URL {url!r} has an unsafe authority (userinfo '

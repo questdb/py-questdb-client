@@ -3117,6 +3117,35 @@ class TestEndpointValidation(unittest.TestCase):
         self._validate('https://xn--bcher-kva.example/token',
                        'https://xn--bcher-kva.example/device')
 
+    def test_tab_newline_cr_authority_rejected(self):
+        # M1: urllib.parse.urlparse() SILENTLY REMOVES tab/newline/CR from the URL
+        # before producing .netloc, while the transport (http.client via
+        # urllib.request.Request.host) keeps them — so the host validated diverges
+        # from the host connected to. The dangerous case is a byte that SPLITS a
+        # trusted host: 'https://idp\tgood/token' parses with hostname 'idpgood'
+        # via .netloc, but 'https://idp.goo\td/token' can leave the validated host
+        # equal to a trusted name while urllib targets the raw bytes. These must be
+        # rejected fail-closed on every construction path; _UNSAFE_AUTHORITY_RE
+        # never sees them (urlparse stripped them first), so the guard checks the
+        # RAW url.
+        from questdb.auth._discovery import _reject_confusable_authority
+        for url in ('https://idp.good\tevil.example/token',   # tab merges labels
+                    'https://idp\t.good/token',               # tab splits a host
+                    'https://idp.good\nevil.example/token',   # newline
+                    'https://idp.good\revil.example/token'):  # CR
+            with self.assertRaises(OidcConfigError):
+                _reject_confusable_authority(url, label='token endpoint')
+            with self.assertRaises(OidcConfigError):   # public co-location entry
+                self._validate(url, url)
+            with self.assertRaises(OidcConfigError):   # and the full constructor
+                OidcDeviceAuth(
+                    client_id='questdb',
+                    device_authorization_endpoint=url,
+                    token_endpoint=url,
+                    renderer=Renderer())
+        # A clean ASCII authority is NOT flagged.
+        self._validate('https://idp.good/token', 'https://idp.good/device')
+
     def test_confusable_issuer_rejected(self):
         # M1 (defense-in-depth): a confusable issuer authority would make the
         # issuer-origin pin compare against the wrong host. With explicit
