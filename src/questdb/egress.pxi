@@ -30,6 +30,8 @@ cdef inline object _reader_err_code_to_py(reader_error_code code):
         return QuestDBErrorCode.FailoverWouldDuplicate
     if code == reader_error_role_mismatch:
         return QuestDBErrorCode.RoleMismatch
+    if code == reader_error_connect_timeout:
+        return QuestDBErrorCode.ConnectTimeout
     # Map every other reader-specific code (handshake, protocol, invalid
     # bind, schema drift, no schema, server-side errors, etc.) to
     # ServerFlushError as a broad bucket. Refine later as users surface
@@ -1957,14 +1959,17 @@ def _debug_egress_pool_stats(client):
     Not part of the public API.
     """
     cdef Client c = client
-    cdef questdb_db* db = c._db
-    if db == NULL:
+    cdef questdb_db* db
+    try:
+        db = c._begin_db_use('_debug_egress_pool_stats')
+    except QuestDBError:
         return None
-    # FFI exposes the counts via the Rust QuestDb methods; we surface
-    # them through the diagnostic-only `dbg_` reader-pool accessors.
-    return (
-        questdb_db_dbg_reader_in_use_count(db),
-        questdb_db_dbg_reader_free_count(db))
+    try:
+        return (
+            questdb_db_dbg_reader_in_use_count(db),
+            questdb_db_dbg_reader_free_count(db))
+    finally:
+        c._end_db_use()
 
 
 class QueryResult:

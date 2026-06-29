@@ -170,6 +170,7 @@ class QuestDBErrorCode(Enum):
     ArrowUnsupportedColumnKind = line_sender_error_arrow_unsupported_column_kind
     ArrowIngest = line_sender_error_arrow_ingest
     FailoverRetry = line_sender_error_failover_retry
+    ConnectTimeout = line_sender_error_connect_timeout
     # Python-only sentinels with no backing line_sender_error_code. They sit
     # in a reserved high band, permanently disjoint from the small contiguous
     # FFI code space, so no appended line_sender_error_* variant can ever
@@ -269,6 +270,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.ArrowIngest
     elif code == line_sender_error_failover_retry:
         return QuestDBErrorCode.FailoverRetry
+    elif code == line_sender_error_connect_timeout:
+        return QuestDBErrorCode.ConnectTimeout
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -1729,8 +1732,9 @@ cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     Convert a timedelta to milliseconds.
     """
     cdef int64_t millis = (
-        (timedelta.microseconds // 1000) +
-        (int(timedelta.total_seconds()) * 1000))
+        <int64_t>timedelta.days * 86_400_000 +
+        <int64_t>timedelta.seconds * 1000 +
+        timedelta.microseconds // 1000)
     if millis < 0:
         raise ValueError(
             f'Negative timedelta not allowed: {timedelta!r}.')
@@ -1978,6 +1982,7 @@ class QwpWsErrorPolicy(TaggedEnum):
 
 @dataclass(frozen=True)
 class QwpWsError:
+    """Structured QWP/WebSocket server diagnostic."""
     category: QwpWsErrorCategory
     applied_policy: QwpWsErrorPolicy
     status: Optional[int]
@@ -3049,7 +3054,9 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                 raise MemoryError()
         for i in range(row_count):
             cell = access[i]
-            if isinstance(<object>cell, datetime_cls):
+            if _dataframe_is_null_pyobj(cell):
+                b.has_nulls = True
+            elif isinstance(<object>cell, datetime_cls):
                 dt = <object>cell
                 if dt.tzinfo is None:
                     # Fast path: C-level field extraction + Howard
@@ -3077,8 +3084,6 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                         + delta.microseconds)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
-            elif _dataframe_is_null_pyobj(cell):
-                b.has_nulls = True
             else:
                 raise QuestDBError(
                     QuestDBErrorCode.BadDataFrame,
@@ -3799,21 +3804,32 @@ cdef object _dataframe_normalize_at_timestamp(object df, object at):
     # columnar resolver's source override (the shared classifier rejects
     # non-ns/us tz units first), so widen them to us here. ArrowDtype ms/s
     # is widened to micros in Rust by the millis/seconds designated-ts FFI.
-    cdef object dtype, new_dtype, out
-    if not isinstance(at, str) or not _is_pandas_dataframe_object(df):
+    cdef object dtype, new_dtype, out, at_name
+    if not _is_pandas_dataframe_object(df):
+        return df
+    if isinstance(at, str):
+        at_name = at
+    elif isinstance(at, int) and not isinstance(at, bool):
+        try:
+            at_name = df.columns[at]
+        except Exception:
+            return df
+        if not isinstance(at_name, str):
+            return df
+    else:
         return df
     _dataframe_may_import_deps()
     try:
-        if at not in df.columns:
+        if at_name not in df.columns:
             return df
-        dtype = df[at].dtype
+        dtype = df[at_name].dtype
     except Exception:
         return df
     if not isinstance(dtype, _PANDAS.DatetimeTZDtype) or dtype.unit not in ('s', 'ms'):
         return df
     new_dtype = _PANDAS.DatetimeTZDtype('us', dtype.tz)
     out = df.copy(deep=False)
-    out[at] = df[at].astype(new_dtype)
+    out[at_name] = df[at_name].astype(new_dtype)
     out.attrs = dict(df.attrs)
     return out
 
@@ -3942,25 +3958,23 @@ cdef void_int _dataframe_columnar_sync(sf_column_sender* conn) except -1:
 cdef bint _dataframe_columnar_force_drop_after_error(
         sf_column_sender* conn,
         bint flushed,
-        bint flush_attempted,
         bint sync_attempted) noexcept:
-    # Exceptions during a dataframe publish can leave in-flight deferred
-    # frames on the connection. If rows were flushed and the closing sync was
-    # not attempted yet, one defensive sync can make the connection reusable.
-    # Otherwise the connection only needs dropping when the sender latched it
-    # terminal: a validation/capacity failure writes no bytes and leaves the
-    # pooled connection reusable.
+    # A flush leaves deferred frames the next borrower would commit unless a
+    # clean sync confirmed them, so the connection is only reusable when no
+    # flush succeeded (drop solely on a latched terminal state) or when a sync
+    # then succeeds. A transient failover does not latch `must_close`, so the
+    # decision cannot key on it alone.
     if conn == NULL:
         return False
-    if not flush_attempted:
+    if not flushed:
         return sf_column_sender_must_close(conn)
-    if flushed and not sync_attempted and not sf_column_sender_must_close(conn):
+    if not sync_attempted and not sf_column_sender_must_close(conn):
         try:
             _dataframe_columnar_sync(conn)
             return False
-        except BaseException:
-            pass
-    return sf_column_sender_must_close(conn)
+        except Exception:
+            return True
+    return True
 
 
 cdef bint _dataframe_columnar_is_deferred_capacity_error(
@@ -4777,9 +4791,11 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
                 if col_names is None:
                     return None
             idx = <int>entry
+            if idx < 0:
+                idx += len(col_names)
             if idx < 0 or idx >= len(col_names):
                 raise ValueError(
-                    f'symbols index {idx} out of range '
+                    f'symbols index {entry} out of range '
                     f'(have {len(col_names)} columns).')
             name = col_names[idx]
         else:
@@ -5078,7 +5094,7 @@ cdef bint _dataframe_client_try_capsule_path(
             _dataframe_columnar_sync(conn)
         except:
             force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                conn, any_flushed, flush_attempted, sync_attempted)
+                conn, any_flushed, sync_attempted)
             raise
 
         return True
@@ -5408,7 +5424,6 @@ cdef class Client:
         cdef bint flushed = False
         cdef bint sync_attempted = False
         cdef bint force_drop_conn = False
-        cdef bint flush_attempted = False
         cdef size_t rows_per_chunk
         cdef size_t row_offset
         cdef size_t chunk_rows
@@ -5461,7 +5476,6 @@ cdef class Client:
                         chunk,
                         row_offset,
                         chunk_rows)
-                    flush_attempted = True
                     _dataframe_columnar_flush(
                         conn,
                         chunk,
@@ -5474,7 +5488,7 @@ cdef class Client:
                 _dataframe_columnar_sync(conn)
             except:
                 force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                    conn, flushed, flush_attempted, sync_attempted)
+                    conn, flushed, sync_attempted)
                 raise
 
             return self
@@ -5859,6 +5873,10 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if max_buf_size is not None:
+            if not _is_int_not_bool(max_buf_size):
+                raise TypeError(
+                    '"max_buf_size" must be an int, '
+                    f'not {_fqn(type(max_buf_size))}')
             c_max_buf_size = max_buf_size
             if not line_sender_opts_max_buf_size(self._opts, c_max_buf_size, &err):
                 raise c_err_to_py(err)
@@ -5894,11 +5912,19 @@ cdef class Sender:
                     f'not {_fqn(type(retry_max_backoff))}')
 
         if request_min_throughput is not None:
+            if not _is_int_not_bool(request_min_throughput):
+                raise TypeError(
+                    '"request_min_throughput" must be an int, '
+                    f'not {_fqn(type(request_min_throughput))}')
             c_request_min_throughput = request_min_throughput
             if not line_sender_opts_request_min_throughput(self._opts, c_request_min_throughput, &err):
                 raise c_err_to_py(err)
 
         if max_name_len is not None:
+            if not _is_int_not_bool(max_name_len):
+                raise TypeError(
+                    '"max_name_len" must be an int, '
+                    f'not {_fqn(type(max_name_len))}')
             c_max_name_len = max_name_len
             if not line_sender_opts_max_name_len(self._opts, c_max_name_len, &err):
                 raise c_err_to_py(err)
@@ -6754,6 +6780,8 @@ cdef class Sender:
         ok = line_sender_qwpws_flush_and_get_fsn(sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
         if not ok:
+            if c_buf == self._buffer._impl:
+                line_sender_buffer_clear(c_buf)
             raise c_err_to_py(err)
         if c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
@@ -6790,6 +6818,8 @@ cdef class Sender:
             sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
         if not ok:
+            if c_buf == self._buffer._impl:
+                line_sender_buffer_clear(c_buf)
             raise c_err_to_py(err)
         if c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000

@@ -1249,6 +1249,32 @@ class TestPandasBase:
                     self.version, np_df, table_name='tbl',
                     at=qi.ServerTimestamp))
 
+        def test_datetime_pyobj_column_with_nat_is_null(self):
+            ts = dt.datetime(2021, 1, 1, 12, 0, 0)
+            obj_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b', 'c']),
+                'ts': pd.Series([ts, pd.NaT, None], dtype=object)})
+            np_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b', 'c']),
+                'ts': pd.Series([ts, pd.NaT, pd.NaT]).astype('datetime64[us]')})
+            obj_buf = _dataframe(
+                self.version, obj_df, table_name='tbl', at=qi.ServerTimestamp)
+            self.assertNotIn(b'0001-01-01', obj_buf)
+            self.assertEqual(
+                obj_buf,
+                _dataframe(
+                    self.version, np_df, table_name='tbl',
+                    at=qi.ServerTimestamp))
+
+        def test_datetime_pyobj_column_all_nat_is_null(self):
+            obj_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b']),
+                'ts': pd.Series([pd.NaT, pd.NaT], dtype=object)})
+            buf = _dataframe(
+                self.version, obj_df, table_name='tbl', at=qi.ServerTimestamp)
+            self.assertNotIn(b'ts=', buf)
+            self.assertNotIn(b'0001-01-01', buf)
+
         def test_decimal_pyobj_column(self):
             decimals = [
                 Decimal('123.45'),

@@ -797,16 +797,18 @@ cdef object _NUMPY_DATETIME64 = None
 cdef object _NUMPY_OBJECT = None
 cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
+cdef object _PANDAS_NAT = None  # pandas.NaT
 cdef object _PYARROW = None  # module object, if available or None
 
 cdef int64_t _NAT = INT64_MIN  # pandas NaT
+cdef object _EPOCH_AWARE_UTC = None  # datetime(1970, 1, 1, tzinfo=utc)
 
 cdef bint _dataframe_count_row_path_emissions = False
 cdef uint64_t _dataframe_row_path_emissions = 0
 
 
 cdef object _dataframe_may_import_deps():
-    global _NUMPY, _PANDAS, _PANDAS_NA
+    global _NUMPY, _PANDAS, _PANDAS_NA, _PANDAS_NAT, _EPOCH_AWARE_UTC
     global _NUMPY_BOOL
     global _NUMPY_UINT8
     global _NUMPY_INT8
@@ -847,6 +849,9 @@ cdef object _dataframe_may_import_deps():
     _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
+    _PANDAS_NAT = pandas.NaT
+    _EPOCH_AWARE_UTC = datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 cdef object _dataframe_require_pyarrow():
@@ -976,7 +981,9 @@ cdef void_int _dataframe_check_column_is_str(
     cdef str inferred_descr = ""
     if not source in _STR_SOURCES:
         if isinstance(pandas_col.dtype, _NUMPY_OBJECT):
-            inferred_descr = f' (inferred type: {_PYOBJ_SOURCE_DESCR[source]})'
+            inferred_descr = (
+                f' (inferred type: '
+                f'{_PYOBJ_SOURCE_DESCR.get(source, "unknown")})')
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
             err_msg_prefix + 
@@ -1431,6 +1438,7 @@ cdef inline bint _dataframe_is_null_pyobj(PyObject* obj) noexcept:
     return (
         (obj == Py_None) or
         (obj == <PyObject*>_PANDAS_NA) or
+        (obj == <PyObject*>_PANDAS_NAT) or
         _dataframe_is_float_nan(obj))
 
 # noinspection PyUnreachableCode
@@ -2752,7 +2760,7 @@ cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
             + <int64_t>PyDateTime_DATE_GET_SECOND(dt) * 1_000_000
             + <int64_t>PyDateTime_DATE_GET_MICROSECOND(dt))
     else:
-        delta = dt - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        delta = dt - _EPOCH_AWARE_UTC
         micros = <int64_t>(
             delta.days * 86_400_000_000
             + delta.seconds * 1_000_000

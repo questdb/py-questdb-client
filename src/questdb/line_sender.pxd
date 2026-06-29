@@ -53,7 +53,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_arrow_unsupported_column_kind,
         line_sender_error_arrow_ingest,
         line_sender_error_failover_retry,
-        line_sender_error_role_mismatch
+        line_sender_error_role_mismatch,
+        line_sender_error_connect_timeout
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,
@@ -1014,6 +1015,7 @@ cdef extern from "questdb/egress/reader.h":
         reader_error_schema_drift = 20
         reader_error_no_schema = 21
         reader_error_arrow_export = 22
+        reader_error_connect_timeout = 23
 
     cdef enum reader_arrow_batch_result:
         reader_arrow_batch_ok = 0
