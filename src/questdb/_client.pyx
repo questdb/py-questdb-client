@@ -4046,7 +4046,7 @@ cdef void_int _dataframe_arrow_flush_batch(
             conn, table, array, schema, ts_column[0],
             overrides, overrides_len, &err)
     else:
-        ok = sf_column_sender_flush_arrow_batch_server_stamped(
+        ok = sf_column_sender_flush_arrow_batch_at_now(
             conn, table, array, schema,
             overrides, overrides_len, &err)
     _ensure_has_gil(&gs)
@@ -4130,7 +4130,7 @@ def _bench_dataframe_flush_arrow_batch(
         object conf=None,
         size_t iterations=1):
     """
-    Internal benchmark hook for `sf_column_sender_flush_arrow_batch_server_stamped`
+    Internal benchmark hook for `sf_column_sender_flush_arrow_batch_at_now`
     FFI.
 
     `arrow_source` must expose the Arrow PyCapsule Interface
@@ -4675,6 +4675,14 @@ cdef object _capsule_get_dict_string_column_names(object sliceable):
             if (isinstance(dtype, _PANDAS.CategoricalDtype)
                     and _capsule_pandas_dtype_is_string_like(dtype)):
                 out.append(name)
+            elif isinstance(dtype, _PANDAS.ArrowDtype):
+                _dataframe_require_pyarrow()
+                field_type = dtype.pyarrow_dtype
+                if _PYARROW.types.is_dictionary(field_type):
+                    value_type = field_type.value_type
+                    if (_PYARROW.types.is_string(value_type)
+                            or _PYARROW.types.is_large_string(value_type)):
+                        out.append(name)
         return out
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         out = []

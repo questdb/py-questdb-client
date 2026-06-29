@@ -955,7 +955,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         uint32_t kind
         uint32_t arg
 
-    bint sf_column_sender_flush_arrow_batch_server_stamped(
+    bint sf_column_sender_flush_arrow_batch_at_now(
         sf_column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,

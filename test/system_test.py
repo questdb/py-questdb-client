@@ -3901,7 +3901,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertIn('null', reasons)
         self._assert_table_empty(table)
 
-    def test_arrow_timestamp_field_null_rejected_before_publish(self):
+    def test_arrow_timestamp_field_null_is_ingested(self):
+        """Only the designated ``at`` timestamp is validated; a
+        non-designated TIMESTAMP *field* column is passed through, so a
+        null field timestamp is ingested as NULL (not rejected)."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
@@ -3915,13 +3918,19 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'v': self._arrow_series([1, 2], pa.int64()),
         })
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.QuestDBError) as cm:
-                client.dataframe(df, table_name=table, at='ts')
-        self.assertIn('event_ts', str(cm.exception))
-        self.assertIn('null', str(cm.exception).lower())
-        self._assert_table_empty(table)
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT event_ts FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(
+            got.column('event_ts').cast(pa.int64()).to_pylist(),
+            [1700000002_000000, None])
 
-    def test_arrow_timestamp_field_negative_rejected_before_publish(self):
+    def test_arrow_timestamp_field_negative_is_ingested(self):
+        """Only the designated ``at`` timestamp rejects pre-epoch values;
+        a non-designated TIMESTAMP *field* column is passed through, so a
+        negative (pre-1970) field timestamp is ingested verbatim."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
@@ -3935,11 +3944,14 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'v': self._arrow_series([1, 2], pa.int64()),
         })
         with qi.Client.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.QuestDBError) as cm:
-                client.dataframe(df, table_name=table, at='ts')
-        self.assertIn('event_ts', str(cm.exception))
-        self.assertIn('unix epoch', str(cm.exception).lower())
-        self._assert_table_empty(table)
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        with qi.Client.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT event_ts FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(
+            got.column('event_ts').cast(pa.int64()).to_pylist(),
+            [-1, 1700000002_000000])
 
     def test_arrow_multi_chunk_buffer_reuse_boundary_rows(self):
         import pyarrow as pa
@@ -4829,11 +4841,10 @@ class _FakeStatusServer:
 
 class TestEgressFailoverRoleNegotiation(unittest.TestCase):
     """Reader connect-time role/auth failover, ported from Java's
-    ``QwpQueryClientMultiHostFailoverTest``. The pool is opened eagerly by
-    ``Client.from_conf`` (``questdb_db_connect``), so the connect walk -- and
-    any role/auth error -- surfaces there rather than at ``query()`` (Java's
-    explicit ``connect()``). These run against in-process fakes only and need
-    no QuestDB instance."""
+    ``QwpQueryClientMultiHostFailoverTest``. The pool opens lazily, so the
+    connect walk -- and any role/auth error -- surfaces on the first borrow
+    (``Client.query()``), not at ``Client.from_conf``. These run against
+    in-process fakes only and need no QuestDB instance."""
 
     def _server(self, status_code, role_header=None):
         srv = _FakeStatusServer(status_code, role_header)
@@ -4858,8 +4869,10 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [replica, auth],
             auth_timeout_ms=2000, failover='off', target='any')
+        client = qi.Client.from_conf(conf)
+        self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
-            qi.Client.from_conf(conf)
+            client.query('SELECT 1')
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.AuthError)
         self.assertIn('401', str(cm.exception))
         self.assertGreaterEqual(replica.connections, 1)
@@ -4878,15 +4891,17 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2],
             auth_timeout_ms=2000, failover='off', target='any')
+        client = qi.Client.from_conf(conf)
+        self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
-            qi.Client.from_conf(conf)
+            client.query('SELECT 1')
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.RoleMismatch)
         self.assertIn('REPLICA', str(cm.exception))
         self.assertGreaterEqual(r1.connections, 1)
         self.assertGreaterEqual(r2.connections, 1)
 
     def test_connect_does_not_double_walk_on_first_failure(self):
-        """With ``failover=off`` the initial connect walks the address list
+        """With ``failover=off`` the first borrow walks the address list
         exactly once: each role-rejecting endpoint is probed a single time
         before the walk fails terminally -- no re-walking the list."""
         r1 = self._server(421, 'X-QuestDB-Role: REPLICA')
@@ -4895,8 +4910,10 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2, r3],
             auth_timeout_ms=2000, failover='off', target='any')
+        client = qi.Client.from_conf(conf)
+        self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
-            qi.Client.from_conf(conf)
+            client.query('SELECT 1')
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.RoleMismatch)
         self.assertEqual(r1.connections, 1)
         self.assertEqual(r2.connections, 1)
