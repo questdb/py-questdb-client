@@ -54,7 +54,23 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_arrow_ingest,
         line_sender_error_failover_retry,
         line_sender_error_role_mismatch,
-        line_sender_error_connect_timeout
+        line_sender_error_connect_timeout,
+        # Query / reader (egress) categories, unified into this enum (20..34).
+        line_sender_error_handshake_error,
+        line_sender_error_unsupported_server,
+        line_sender_error_protocol_error,
+        line_sender_error_invalid_bind,
+        line_sender_error_server_schema_mismatch,
+        line_sender_error_server_parse_error,
+        line_sender_error_server_internal_error,
+        line_sender_error_server_security_error,
+        line_sender_error_limit_exceeded,
+        line_sender_error_server_limit_exceeded,
+        line_sender_error_cancelled,
+        line_sender_error_failover_would_duplicate,
+        line_sender_error_schema_drift,
+        line_sender_error_no_schema,
+        line_sender_error_arrow_export
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,
@@ -988,34 +1004,12 @@ cdef extern from "questdb/egress/reader.h":
     cdef struct reader_cursor:
         pass
 
-    cdef struct reader_error:
-        pass
-
-    cdef enum reader_error_code:
-        reader_error_could_not_resolve_addr = 0
-        reader_error_config_error = 1
-        reader_error_invalid_api_call = 2
-        reader_error_socket_error = 3
-        reader_error_tls_error = 4
-        reader_error_handshake_error = 5
-        reader_error_auth_error = 6
-        reader_error_unsupported_server = 7
-        reader_error_role_mismatch = 8
-        reader_error_protocol_error = 9
-        reader_error_invalid_utf8 = 10
-        reader_error_invalid_bind = 11
-        reader_error_server_schema_mismatch = 12
-        reader_error_server_parse_error = 13
-        reader_error_server_internal_error = 14
-        reader_error_server_security_error = 15
-        reader_error_limit_exceeded = 16
-        reader_error_server_limit_exceeded = 17
-        reader_error_cancelled = 18
-        reader_error_failover_would_duplicate = 19
-        reader_error_schema_drift = 20
-        reader_error_no_schema = 21
-        reader_error_arrow_export = 22
-        reader_error_connect_timeout = 23
+    # The reader shares the client's single unified error object and code
+    # enum: `reader_error` / `reader_error_code` are back-compat aliases of
+    # `line_sender_error` / `line_sender_error_code` (see reader.h). Decode
+    # reader errors through the shared `c_err_code_to_py`.
+    ctypedef line_sender_error reader_error
+    ctypedef line_sender_error_code reader_error_code
 
     cdef enum reader_arrow_batch_result:
         reader_arrow_batch_ok = 0

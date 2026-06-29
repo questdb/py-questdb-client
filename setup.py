@@ -150,7 +150,7 @@ def cargo_build():
     # `insecure-skip-verify` exposes `tls_verify=unsafe_off`, which disables TLS
     # certificate verification. It must never be compiled into shipped wheels;
     # opt in explicitly (test harnesses, MITM debugging) via the env var.
-    features = ['confstr-ffi', 'sync-reader-ws', 'arrow']
+    features = ['confstr-ffi', 'sync-reader-qwp-ws', 'arrow']
     if os.environ.get('QUESTDB_INSECURE_SKIP_VERIFY') == '1':
         features.append('insecure-skip-verify')
     subprocess.check_call(

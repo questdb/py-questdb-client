@@ -10,33 +10,13 @@ cimport numpy as cnp
 
 
 cdef inline object _reader_err_code_to_py(reader_error_code code):
-    if code == reader_error_could_not_resolve_addr:
-        return QuestDBErrorCode.CouldNotResolveAddr
-    if code == reader_error_config_error:
-        return QuestDBErrorCode.ConfigError
-    if code == reader_error_invalid_api_call:
-        return QuestDBErrorCode.InvalidApiCall
-    if code == reader_error_socket_error:
-        return QuestDBErrorCode.SocketError
-    if code == reader_error_tls_error:
-        return QuestDBErrorCode.TlsError
-    if code == reader_error_auth_error:
-        return QuestDBErrorCode.AuthError
-    if code == reader_error_invalid_utf8:
-        return QuestDBErrorCode.InvalidUtf8
-    if code == reader_error_cancelled:
-        return QuestDBErrorCode.Cancelled
-    if code == reader_error_failover_would_duplicate:
-        return QuestDBErrorCode.FailoverWouldDuplicate
-    if code == reader_error_role_mismatch:
-        return QuestDBErrorCode.RoleMismatch
-    if code == reader_error_connect_timeout:
-        return QuestDBErrorCode.ConnectTimeout
-    # Map every other reader-specific code (handshake, protocol, invalid
-    # bind, schema drift, no schema, server-side errors, etc.) to
-    # ServerFlushError as a broad bucket. Refine later as users surface
-    # concrete distinctions.
-    return QuestDBErrorCode.ServerFlushError
+    # The error model is unified: `reader_error_code` is an alias of
+    # `line_sender_error_code`, so reader errors decode through the single
+    # shared map. Every reader category now has its own `QuestDBErrorCode`
+    # member (handshake, protocol, invalid bind, schema drift, the
+    # server-side errors, ...) instead of the former `ServerFlushError`
+    # bucket.
+    return c_err_code_to_py(code)
 
 
 cdef inline object _reader_err_to_py(reader_error* err):

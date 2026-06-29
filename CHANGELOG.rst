@@ -20,6 +20,17 @@ Breaking changes
   :class:`QuestDBErrorCode`, and ``IngressServerRejectionError`` to
   :class:`QuestDBServerRejectionError` (the names now also cover the query
   egress path, which raises the same types).
+- The error model is unified across ingestion and queries. Query/reader
+  failures now surface their own :class:`QuestDBErrorCode` members
+  (``HandshakeError``, ``UnsupportedServer``, ``ProtocolError``,
+  ``InvalidBind``, ``ServerSchemaMismatch``, ``ServerParseError``,
+  ``ServerInternalError``, ``ServerSecurityError``, ``LimitExceeded``,
+  ``ServerLimitExceeded``, ``SchemaDrift``, ``NoSchema``, ``ArrowExport``)
+  rather than being bucketed under ``ServerFlushError``; ``Cancelled`` and
+  ``FailoverWouldDuplicate`` are now backed by real FFI codes (their numeric
+  ``.value`` changed accordingly — compare by member identity, e.g.
+  ``err.code is QuestDBErrorCode.Cancelled``, which is the stable contract,
+  not by integer). Existing member names are unchanged.
 
 Features
 ~~~~~~~~

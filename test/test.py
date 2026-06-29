@@ -162,37 +162,31 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(err.qwp_ws_error.category, qi.QwpWsErrorCategory.ParseError)
 
     def test_python_only_error_codes_do_not_overlap_ffi_codes(self):
-        code_values = [code.value for code in qi.QuestDBErrorCode]
-
-        self.assertEqual(len(code_values), len(set(code_values)))
-        # Iterating the enum skips aliases, so the check above passes even
-        # when two members share a value (the duplicate silently becomes an
-        # alias of the first). ``__members__`` includes aliases; an equal
-        # count proves no member collided onto another's value -- e.g. a new
-        # FFI code landing on a synthetic ``failover_retry + N`` sentinel.
+        # The error model is unified: every reader/query code (Cancelled,
+        # FailoverWouldDuplicate, the server-side codes, ...) is now a real
+        # FFI code in the contiguous low range. ``BadDataFrame`` is the sole
+        # Python-only code, parked in a reserved high band strictly above
+        # every FFI code so an appended FFI variant can never collide.
+        members = qi.QuestDBErrorCode.__members__
+        values = [c.value for c in members.values()]
+        # ``__members__`` includes aliases; equal counts prove no member
+        # collided onto another's value.
         self.assertEqual(
-            len(qi.QuestDBErrorCode.__members__),
-            len(list(qi.QuestDBErrorCode)),
+            len(values), len(set(values)),
             'QuestDBErrorCode has aliased members (value collision)')
-        # RoleMismatch mirrors its FFI code; the synthetic Python-only codes
-        # sit strictly above it.
-        self.assertGreater(
-            qi.QuestDBErrorCode.BadDataFrame.value,
-            qi.QuestDBErrorCode.RoleMismatch.value)
-        self.assertGreater(
-            qi.QuestDBErrorCode.BadDataFrame.value,
-            qi.QuestDBErrorCode.ArrowIngest.value)
-        self.assertGreater(
+        ffi_values = [
+            c.value for name, c in members.items() if name != 'BadDataFrame']
+        self.assertTrue(
+            all(v < qi.QuestDBErrorCode.BadDataFrame.value for v in ffi_values),
+            'an FFI code is not below the BadDataFrame sentinel band')
+        # Codes that were Python-only sentinels before unification are now
+        # contiguous FFI codes (below the sentinel band).
+        self.assertLess(
             qi.QuestDBErrorCode.Cancelled.value,
-            qi.QuestDBErrorCode.ArrowIngest.value)
-        # FailoverRetry mirrors the FFI ingress code (17); the synthetic
-        # Python-only codes sit above it and stay distinct.
-        self.assertGreater(
-            qi.QuestDBErrorCode.FailoverRetry.value,
-            qi.QuestDBErrorCode.ArrowIngest.value)
-        self.assertGreater(
+            qi.QuestDBErrorCode.BadDataFrame.value)
+        self.assertLess(
             qi.QuestDBErrorCode.FailoverWouldDuplicate.value,
-            qi.QuestDBErrorCode.FailoverRetry.value)
+            qi.QuestDBErrorCode.BadDataFrame.value)
 
     def test_unsupported_dataframe_shape_error_carries_failures(self):
         err = qi.UnsupportedDataFrameShapeError(

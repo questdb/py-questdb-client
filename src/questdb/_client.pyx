@@ -171,15 +171,28 @@ class QuestDBErrorCode(Enum):
     ArrowIngest = line_sender_error_arrow_ingest
     FailoverRetry = line_sender_error_failover_retry
     ConnectTimeout = line_sender_error_connect_timeout
-    # Python-only sentinels with no backing line_sender_error_code. They sit
-    # in a reserved high band, permanently disjoint from the small contiguous
-    # FFI code space, so no appended line_sender_error_* variant can ever
-    # collide with (and silently alias) them. Compared by identity; their
-    # numeric value is never sent over FFI.
+    # Query / reader (egress) categories. The error model is unified across
+    # ingest and query, so these are real FFI codes (no longer bucketed).
+    HandshakeError = line_sender_error_handshake_error
+    UnsupportedServer = line_sender_error_unsupported_server
+    ProtocolError = line_sender_error_protocol_error
+    InvalidBind = line_sender_error_invalid_bind
+    ServerSchemaMismatch = line_sender_error_server_schema_mismatch
+    ServerParseError = line_sender_error_server_parse_error
+    ServerInternalError = line_sender_error_server_internal_error
+    ServerSecurityError = line_sender_error_server_security_error
+    LimitExceeded = line_sender_error_limit_exceeded
+    ServerLimitExceeded = line_sender_error_server_limit_exceeded
+    Cancelled = line_sender_error_cancelled
+    FailoverWouldDuplicate = line_sender_error_failover_would_duplicate
+    SchemaDrift = line_sender_error_schema_drift
+    NoSchema = line_sender_error_no_schema
+    ArrowExport = line_sender_error_arrow_export
+    # Python-only sentinel with no backing FFI code: raised by the Cython
+    # DataFrame-shape validation path. Sits in a reserved high band, disjoint
+    # from the contiguous FFI code space, so an appended FFI variant can never
+    # collide with it. Compared by identity; never sent over FFI.
     BadDataFrame = 0x10000
-    Cancelled = 0x10001
-    # Egress-only (reader_error_code 19); not a line_sender_error_code.
-    FailoverWouldDuplicate = 0x10002
 
     def __str__(self) -> str:
         """Return the name of the enum."""
@@ -272,6 +285,36 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.FailoverRetry
     elif code == line_sender_error_connect_timeout:
         return QuestDBErrorCode.ConnectTimeout
+    elif code == line_sender_error_handshake_error:
+        return QuestDBErrorCode.HandshakeError
+    elif code == line_sender_error_unsupported_server:
+        return QuestDBErrorCode.UnsupportedServer
+    elif code == line_sender_error_protocol_error:
+        return QuestDBErrorCode.ProtocolError
+    elif code == line_sender_error_invalid_bind:
+        return QuestDBErrorCode.InvalidBind
+    elif code == line_sender_error_server_schema_mismatch:
+        return QuestDBErrorCode.ServerSchemaMismatch
+    elif code == line_sender_error_server_parse_error:
+        return QuestDBErrorCode.ServerParseError
+    elif code == line_sender_error_server_internal_error:
+        return QuestDBErrorCode.ServerInternalError
+    elif code == line_sender_error_server_security_error:
+        return QuestDBErrorCode.ServerSecurityError
+    elif code == line_sender_error_limit_exceeded:
+        return QuestDBErrorCode.LimitExceeded
+    elif code == line_sender_error_server_limit_exceeded:
+        return QuestDBErrorCode.ServerLimitExceeded
+    elif code == line_sender_error_cancelled:
+        return QuestDBErrorCode.Cancelled
+    elif code == line_sender_error_failover_would_duplicate:
+        return QuestDBErrorCode.FailoverWouldDuplicate
+    elif code == line_sender_error_schema_drift:
+        return QuestDBErrorCode.SchemaDrift
+    elif code == line_sender_error_no_schema:
+        return QuestDBErrorCode.NoSchema
+    elif code == line_sender_error_arrow_export:
+        return QuestDBErrorCode.ArrowExport
     else:
         raise ValueError('Internal error converting error code.')
 
