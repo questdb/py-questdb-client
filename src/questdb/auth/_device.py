@@ -859,6 +859,35 @@ class OidcDeviceAuth:
 
     # -- device flow (RFC 8628) ---------------------------------------------
 
+    def _render_safe(self, callback, *args) -> None:
+        """Invoke a renderer callback best-effort, swallowing renderer bugs.
+
+        The on_prompt / on_waiting / on_failure callbacks are cosmetic and must
+        never abort the flow or mask the authoritative typed error. A custom
+        ``renderer`` is user code: were one of its callbacks to raise an ordinary
+        exception (a buggy display backend), it would otherwise replace the
+        OidcDeviceFlowError / OidcTimeoutError describing the real sign-in outcome
+        with its own exception, breaking the module's typed-error contract (every
+        failure path raises an OidcError subclass). The built-in renderers already
+        swallow their own I/O errors (TerminalRenderer._write); this extends the
+        same guarantee to every callback, including a user-supplied one.
+
+        An ``OidcError`` is deliberately NOT swallowed: a renderer callback that
+        re-enters this instance's token()/clear() trips _guard_reentrancy, which
+        raises OidcError to signal the (otherwise deadlocking) misuse — that
+        signal must reach the caller, not be silently dropped. (on_success is
+        wrapped inline instead, and swallows even an OidcError, because nothing
+        cosmetic may discard the token the user already authorized — and its guard
+        must also cover the JWT-claim / lifetime computation evaluated before the
+        call.)
+        """
+        try:
+            callback(*args)
+        except OidcError:
+            raise
+        except Exception:
+            pass
+
     def _run_device_flow(self) -> TokenSet:
         if not self._is_interactive():
             raise OidcInteractionRequired(
@@ -868,7 +897,7 @@ class OidcDeviceAuth:
                 'client-credentials grant for non-interactive contexts.')
 
         resp = self._request_device_code()
-        self._renderer.on_prompt(resp)
+        self._render_safe(self._renderer.on_prompt, resp)
         self._maybe_open_browser(resp)
         tokens = self._poll_for_token(resp)
         # The grant has completed and `tokens` is valid. Rendering the success
@@ -982,13 +1011,14 @@ class OidcDeviceAuth:
         while True:
             remaining = deadline - self._monotonic()
             if remaining <= 0:
-                self._renderer.on_failure(
+                self._render_safe(
+                    self._renderer.on_failure,
                     'Code expired — run the cell again to retry.')
                 raise OidcTimeoutError(
                     'The device code expired before authorization completed. '
                     'Run the sign-in again.',
                     error='expired_token')
-            self._renderer.on_waiting(remaining)
+            self._render_safe(self._renderer.on_waiting, remaining)
             # Never sleep past the deadline (remaining > 0 here).
             self._sleep(min(interval, remaining))
 
@@ -1009,7 +1039,8 @@ class OidcDeviceAuth:
                 # return and _NoRedirect won't follow — instead of polling on to
                 # a misleading "code expired".
                 if _http_status_is_terminal(getattr(e, 'status', None)):
-                    self._renderer.on_failure(
+                    self._render_safe(
+                        self._renderer.on_failure,
                         'Sign-in failed: the identity provider rejected the '
                         'request.')
                     raise OidcDeviceFlowError(
@@ -1052,7 +1083,8 @@ class OidcDeviceAuth:
                 # misconfiguration, not a transient poll state. Raise a terminal
                 # error rather than cache an unusable token and silently re-run
                 # the whole flow on every later token() call.
-                self._renderer.on_failure(
+                self._render_safe(
+                    self._renderer.on_failure,
                     'Sign-in failed: the identity provider did not return the '
                     'token this server requires.')
                 raise self._missing_required_token_error()
@@ -1075,7 +1107,8 @@ class OidcDeviceAuth:
             # an OAuth error field can't be mistaken for a live poll state and
             # polled on to a misleading "code expired".
             if 300 <= status < 400:
-                self._renderer.on_failure(
+                self._render_safe(
+                    self._renderer.on_failure,
                     'Sign-in failed: the identity provider rejected the request.')
                 raise OidcDeviceFlowError(
                     'Device flow failed: the IdP returned an unexpected '
@@ -1092,7 +1125,8 @@ class OidcDeviceAuth:
                     interval, retry_after, at_least_increment=True)
                 continue
             if error == 'expired_token':
-                self._renderer.on_failure(
+                self._render_safe(
+                    self._renderer.on_failure,
                     'Code expired — run the cell again to retry.')
                 raise OidcTimeoutError(
                     'The device code expired before authorization completed. '
@@ -1100,7 +1134,8 @@ class OidcDeviceAuth:
                     error=error)
             # access_denied or any other terminal error.
             description = body.get('error_description') or error or 'unknown error'
-            self._renderer.on_failure(f'Sign-in failed: {description}')
+            self._render_safe(
+                self._renderer.on_failure, f'Sign-in failed: {description}')
             raise OidcDeviceFlowError(
                 f'Device flow failed: {description}',
                 status=status,

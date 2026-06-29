@@ -771,6 +771,30 @@ class TestDeviceFlow(AuthTestBase):
         auth = self.make_auth(renderer=_Boom())
         self.assertEqual(auth.token(), ID_TOKEN)
 
+    def test_raising_failure_renderer_does_not_mask_typed_error(self):
+        # The on_prompt/on_waiting/on_failure callbacks are best-effort too: a
+        # custom renderer whose on_failure raises must NOT replace the
+        # authoritative OidcDeviceFlowError describing the real sign-in outcome
+        # with its own exception (which would break the typed-error contract —
+        # every failure path raises an OidcError subclass). The caller still sees
+        # the access_denied error, not the renderer's RuntimeError.
+        class _Boom(Renderer):
+            def on_failure(self, message):
+                raise RuntimeError('renderer blew up')
+
+        self.state.token_script = [
+            (400, {'error': 'access_denied',
+                   'error_description': 'user said no'}),
+        ]
+        auth = self.make_auth(renderer=_Boom())
+        with self.assertRaises(OidcDeviceFlowError) as cm:
+            auth.token()
+        self.assertEqual(cm.exception.error, 'access_denied')
+        # And the non-reentrant acquisition lock is released (no state corruption).
+        self.assertIsNone(auth._lock_owner)
+        self.assertTrue(auth._lock.acquire(blocking=False))
+        auth._lock.release()
+
     def test_poll_honors_retry_after(self):
         # Issue 8: a slow_down poll response carrying Retry-After backs off by
         # that many seconds (clamped), not the fixed +5s.
@@ -3185,6 +3209,32 @@ class TestEndpointValidation(unittest.TestCase):
                     renderer=Renderer())
         # A clean ASCII authority is NOT flagged.
         self._validate('https://idp.good/token', 'https://idp.good/device')
+
+    def test_percent_authority_rejected(self):
+        # A '%' in a credential-endpoint authority is rejected fail-closed on
+        # every construction path: a real endpoint host never carries one. It is
+        # either an IPv6 zone-id (e.g. 'fe80::1%eth0', an on-host link-local
+        # artifact, never a way to reach a remote IdP) or percent-encoding (which
+        # urlparse keeps in .hostname but a resolver/transport may decode,
+        # diverging the validated host from the connected one). This mirrors the
+        # host hygiene in _adapters._ILLEGAL_HOST_CHARS and _render._SAFE_HOST_RE,
+        # which both reject '%' too.
+        from questdb.auth._discovery import _reject_confusable_authority
+        for url in ('https://[fe80::1%25eth0]/token',   # IPv6 zone-id (%25 == %)
+                    'https://idp%2egood.evil/token'):    # percent-encoded host
+            with self.assertRaises(OidcConfigError):
+                _reject_confusable_authority(url, label='token endpoint')
+            with self.assertRaises(OidcConfigError):   # public co-location entry
+                self._validate(url, url)
+            with self.assertRaises(OidcConfigError):   # and the full constructor
+                OidcDeviceAuth(
+                    client_id='questdb',
+                    device_authorization_endpoint=url,
+                    token_endpoint=url,
+                    renderer=Renderer())
+        # A plain (zone-id-free) IPv6 literal authority is NOT flagged.
+        self._validate('https://[fe80::1]:443/token',
+                       'https://[fe80::1]:443/device')
 
     def test_confusable_issuer_rejected(self):
         # M1 (defense-in-depth): a confusable issuer authority would make the

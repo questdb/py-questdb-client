@@ -71,7 +71,9 @@ class OidcConfig:
     device_authorization_endpoint: str
     """IdP device-authorization endpoint (RFC 8628 §3.1)."""
     scope: str = 'openid'
-    """Space-separated scopes; ``openid`` is added automatically in groups mode."""
+    """Space-separated scopes. Stored verbatim; ``openid`` is added automatically
+    by :class:`~questdb.auth.OidcDeviceAuth` (not by this dataclass) in groups
+    mode, since presenting the ``id_token`` requires it."""
     groups_in_token: bool = False
     """When true, present the ``id_token`` (groups encoded in it) rather than the
     ``access_token`` — mirroring QuestDB's own selection."""
@@ -307,11 +309,14 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
 # connection. So ``https://attacker.evil\@idp.good/token`` validates as host
 # ``idp.good`` (passing the issuer-origin pin) while urllib connects to the whole
 # ``attacker.evil\@idp.good``. A real credential-endpoint authority never carries
-# userinfo, a non-ASCII character, a backslash, whitespace or a control char, so
-# reject them — fail closed — mirroring the host hygiene already enforced in
-# ``_adapters._ILLEGAL_HOST_CHARS`` and ``_render._SAFE_HOST_RE``. (Non-ASCII is
-# checked with ``str.isascii`` in the function, not this regex.)
-_UNSAFE_AUTHORITY_RE = re.compile(r'[\\\s\x00-\x1f\x7f]')
+# userinfo, a non-ASCII character, a backslash, whitespace, a control char, or a
+# ``%`` (percent-encoding, or an IPv6 zone-id such as ``fe80::1%eth0`` — an
+# on-host link-local artifact, never a way to reach a remote IdP), so reject them
+# — fail closed — mirroring the host hygiene already enforced in
+# ``_adapters._ILLEGAL_HOST_CHARS`` and ``_render._SAFE_HOST_RE`` (both of which
+# also reject ``%``). (Non-ASCII is checked with ``str.isascii`` in the function,
+# not this regex.)
+_UNSAFE_AUTHORITY_RE = re.compile(r'[\\\s\x00-\x1f\x7f%]')
 
 # Tab / newline / CR are SILENTLY REMOVED by urllib.parse.urlparse() from
 # anywhere in the URL before it produces ``.netloc`` (CPython's
@@ -344,8 +349,9 @@ def _reject_confusable_authority(url: str, *, label: str) -> None:
             or _UNSAFE_AUTHORITY_RE.search(netloc)):
         raise OidcConfigError(
             f'The OIDC {label} URL {url!r} has an unsafe authority (userinfo '
-            "'@', a non-ASCII character, a backslash, whitespace, or a control "
-            'character). A real endpoint host is plain ASCII (a DNS name, an '
+            "'@', a non-ASCII character, a backslash, whitespace, a control "
+            "character, or '%'). A real endpoint host is plain ASCII (a DNS "
+            'name, an '
             'xn-- punycode label, or an IP literal) and never contains these, so '
             'this indicates a malformed or tampered configuration; refusing to '
             'send credentials to a host the HTTP transport may resolve '
