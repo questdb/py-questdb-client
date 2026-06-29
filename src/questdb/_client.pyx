@@ -58,8 +58,7 @@ from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t, uint32_t, \
     uintptr_t, INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, qsort
 from libc.string cimport strncmp, memset, memcpy, strlen
-from libc.math cimport isnan
-# from libc.stdio cimport stderr, fprintf
+from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
 from cpython.datetime cimport (
@@ -178,7 +177,7 @@ class QuestDBErrorCode(Enum):
     # numeric value is never sent over FFI.
     BadDataFrame = 0x10000
     Cancelled = 0x10001
-    # Egress-only (reader_error_code 21); not a line_sender_error_code.
+    # Egress-only (reader_error_code 19); not a line_sender_error_code.
     FailoverWouldDuplicate = 0x10002
 
     def __str__(self) -> str:
@@ -515,7 +514,7 @@ cdef int64_t datetime_to_micros(cp_datetime dt):
     Convert a :class:`datetime.datetime` to microseconds since the epoch.
     """
     return (
-        <int64_t>(dt.timestamp()) *
+        <int64_t>floor(dt.timestamp()) *
         <int64_t>(1000000) +
         <int64_t>(dt.microsecond))
 
@@ -525,7 +524,7 @@ cdef int64_t datetime_to_nanos(cp_datetime dt):
     Convert a `datetime.datetime` to nanoseconds since the epoch.
     """
     return (
-        <int64_t>(dt.timestamp()) *
+        <int64_t>floor(dt.timestamp()) *
         <int64_t>(1000000000) +
         <int64_t>(dt.microsecond * 1000))
 
@@ -3979,7 +3978,8 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
 cdef void_int _dataframe_columnar_flush(
         sf_column_sender* conn,
         column_sender_chunk* chunk,
-        bint retry_after_sync) except -1:
+        bint retry_after_sync,
+        bint* committed_prefix) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_error_code err_code
     cdef bint ok = False
@@ -4008,6 +4008,7 @@ cdef void_int _dataframe_columnar_flush(
         line_sender_error_free(err)
         err = NULL
         _dataframe_columnar_sync(conn)
+        committed_prefix[0] = True
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
@@ -4152,6 +4153,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef bytes conf_bytes
     cdef bint any_flushed = False
     cdef bint flush_attempted = False
+    cdef bint committed_prefix = False
     cdef size_t deferred_since_sync = 0
     cdef line_sender_table_name c_table_name
     cdef line_sender_column_name c_ts_column
@@ -4214,7 +4216,7 @@ def _bench_dataframe_flush_arrow_batch(
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
                     &c_schema, NULL, 0, &any_flushed, &flush_attempted,
-                    &deferred_since_sync)
+                    &deferred_since_sync, &committed_prefix)
             _dataframe_columnar_sync(conn)
             completed = iterations
         finally:
@@ -4384,7 +4386,8 @@ cdef void_int _capsule_consume_stream(
         size_t c_overrides_len,
         bint* any_flushed,
         bint* flush_attempted,
-        size_t* deferred_since_sync) except -1:
+        size_t* deferred_since_sync,
+        bint* committed_prefix) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
     # call (this function populates it via get_schema), reused as-is on
     # subsequent calls (Arrow C Data Interface guarantees slices of the
@@ -4430,6 +4433,7 @@ cdef void_int _capsule_consume_stream(
             flush_attempted[0] = True
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)
+                committed_prefix[0] = True
                 deferred_since_sync[0] = 0
             _dataframe_arrow_flush_batch(
                 conn, c_table_name, &batch, c_schema, c_ts_column_ptr,
@@ -4505,6 +4509,24 @@ cdef object _capsule_get_column_names(object sliceable):
     if names is not None:
         return list(names)
     return None
+
+
+cdef object _capsule_at_index_to_name(object sliceable, int idx):
+    """Resolve an integer `at` column index (negative allowed) to its name,
+    mirroring the numpy path's `_bind_col_index`."""
+    cdef object names = _capsule_get_column_names(sliceable)
+    cdef int orig = idx
+    cdef int n
+    if names is None:
+        raise TypeError(
+            'Cannot resolve an integer `at` index for this Arrow-native '
+            'input; pass the designated timestamp column name as a str.')
+    n = <int>len(names)
+    if idx < 0:
+        idx += n
+    if idx < 0 or idx >= n:
+        raise IndexError(f'Bad argument `at`: {orig} index out of range')
+    return names[idx]
 
 
 cdef bint _capsule_polars_dtype_is_string_like(object dtype) except -1:
@@ -4901,7 +4923,8 @@ cdef bint _dataframe_client_try_capsule_path(
         object symbols,
         object at,
         size_t max_rows_per_batch,
-        object schema_overrides) except -1:
+        object schema_overrides,
+        bint* committed_prefix) except -1:
     cdef qdb_pystr_buf* b = NULL
     cdef sf_column_sender* conn = NULL
     cdef line_sender_error* err = NULL
@@ -4969,10 +4992,13 @@ cdef bint _dataframe_client_try_capsule_path(
         at_is_column = False
     elif isinstance(at, str):
         at_is_column = True
+    elif isinstance(at, int) and not isinstance(at, bool):
+        at = _capsule_at_index_to_name(sliceable, at)
+        at_is_column = True
     else:
         raise TypeError(
-            'at must be a column name str, ServerTimestamp, or None '
-            'for Arrow-native DataFrame input.')
+            'at must be a column name str, int index, ServerTimestamp, or '
+            'None for Arrow-native DataFrame input.')
 
     # An empty frame is a no-op: emit nothing and skip symbol-shape
     # validation, which is moot with zero rows.
@@ -5025,7 +5051,7 @@ cdef bint _dataframe_client_try_capsule_path(
                     conn, sliceable, c_table_name, c_ts_column_ptr,
                     &c_schema, c_overrides, c_overrides_len,
                     &any_flushed, &flush_attempted, &deferred_since_sync,
-                    max_rows_per_batch, False)
+                    committed_prefix, max_rows_per_batch, False)
             else:
                 offset = 0
                 while offset < total_rows:
@@ -5038,7 +5064,7 @@ cdef bint _dataframe_client_try_capsule_path(
                         conn, row_slice, c_table_name, c_ts_column_ptr,
                         &c_schema, c_overrides, c_overrides_len,
                         &any_flushed, &flush_attempted, &deferred_since_sync,
-                        max_rows_per_batch, True)
+                        committed_prefix, max_rows_per_batch, True)
                     offset += chunk_rows
             sync_attempted = True
             _dataframe_columnar_sync(conn)
@@ -5074,6 +5100,7 @@ cdef void_int _capsule_consume_stream_with_hint(
         bint* any_flushed,
         bint* flush_attempted,
         size_t* deferred_since_sync,
+        bint* committed_prefix,
         size_t max_rows_per_batch,
         bint can_slice) except -1:
     cdef str hint
@@ -5081,7 +5108,7 @@ cdef void_int _capsule_consume_stream_with_hint(
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr, c_schema,
             c_overrides, c_overrides_len, any_flushed, flush_attempted,
-            deferred_since_sync)
+            deferred_since_sync, committed_prefix)
     except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
             if can_slice:
@@ -5115,10 +5142,7 @@ cdef bint _is_batch_too_large_error(object exc):
 
 cdef class Client:
     """
-    Pooled QWP/WebSocket client.
-
-    This is the ownership surface for the #148 `questdb_db` pool. DataFrame
-    ingestion will borrow `column_sender` handles from this pool.
+    Pooled QWP/WebSocket client for dataframe ingestion and query egress.
     """
     cdef questdb_db* _db
     cdef object _conf_str
@@ -5161,7 +5185,7 @@ cdef class Client:
         """
         Construct a pooled client from a QWP/WebSocket configuration string.
 
-        The underlying #148 pool is opened eagerly by `questdb_db_connect`.
+        The underlying connection pool is opened eagerly by `questdb_db_connect`.
         Include ``sf_dir=...`` to opt the columnar dataframe path into
         store-and-forward mode; without ``sf_dir`` dataframe ingestion uses the
         direct QWP/WebSocket column sender.
@@ -5297,6 +5321,7 @@ cdef class Client:
         cdef uint64_t budget_ms = 0
         cdef double deadline = 0.0
         cdef double remaining = 0.0
+        cdef bint committed_prefix = False
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
@@ -5325,17 +5350,23 @@ cdef class Client:
                             symbols,
                             at,
                             max_rows_per_batch,
-                            schema_overrides):
+                            schema_overrides,
+                            &committed_prefix):
                         return self
                     return self._dataframe_numpy_publish(
                         db, budget_ms, b, &plan, df, table_name,
-                        table_name_col, symbols, at, max_rows_per_batch)
+                        table_name_col, symbols, at, max_rows_per_batch,
+                        &committed_prefix)
                 except QuestDBError as exc:
                     # FailoverRetry = transient flush/sync; SocketError = a
                     # re-borrow that has not reached a live primary yet.
                     if exc.code not in (
                             QuestDBErrorCode.FailoverRetry,
                             QuestDBErrorCode.SocketError):
+                        raise
+                    # An intermediate sync already durably committed a prefix of
+                    # this frame; restarting from row 0 would duplicate it.
+                    if committed_prefix:
                         raise
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
@@ -5360,7 +5391,8 @@ cdef class Client:
             object table_name_col,
             object symbols,
             object at,
-            size_t max_rows_per_batch):
+            size_t max_rows_per_batch,
+            bint* committed_prefix):
         cdef column_sender_chunk* chunk = NULL
         cdef sf_column_sender* conn = NULL
         cdef line_sender_error* err = NULL
@@ -5425,7 +5457,8 @@ cdef class Client:
                     _dataframe_columnar_flush(
                         conn,
                         chunk,
-                        row_offset != 0)
+                        row_offset != 0,
+                        committed_prefix)
                     flushed = True
                     row_offset += chunk_rows
 
@@ -5654,6 +5687,10 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if max_datagram_size is not None:
+            if not _is_qwp_udp_protocol(self._c_protocol):
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    '"max_datagram_size" is only supported for QWP/UDP senders.')
             if not isinstance(max_datagram_size, int) or isinstance(max_datagram_size, bool):
                 raise TypeError(
                     '"max_datagram_size" must be a positive int, '
@@ -5668,6 +5705,10 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if multicast_ttl is not None:
+            if not _is_qwp_udp_protocol(self._c_protocol):
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    '"multicast_ttl" is only supported for QWP/UDP senders.')
             if not isinstance(multicast_ttl, int) or isinstance(multicast_ttl, bool):
                 raise TypeError(
                     '"multicast_ttl" must be an int (0-255), '
@@ -5682,6 +5723,10 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if qwp_ws_progress is not None:
+            if not _is_qwp_ws_protocol(self._c_protocol):
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    '"qwp_ws_progress" is only supported for QWP/WebSocket senders.')
             try:
                 c_qwp_ws_progress = QwpWsProgress.parse(qwp_ws_progress).c_value
             except ValueError:
@@ -6662,12 +6707,16 @@ cdef class Sender:
         cdef bint need_qwp = (
             _is_qwp_udp_protocol(self._c_protocol) or
             _is_qwp_ws_protocol(self._c_protocol))
-        if buffer._qwp != need_qwp:
+        if need_qwp and not buffer._qwp:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'Buffer protocol does not match the sender protocol. '
-                'Use Sender.new_buffer(), or Buffer.qwp()/Buffer.ilp() to '
-                'build a buffer matching the sender.')
+                'QWP sender requires a QWP buffer. Use Sender.new_buffer() '
+                'or Buffer.qwp() to build a matching buffer.')
+        if buffer._qwp and not need_qwp:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'ILP sender requires an ILP buffer. Use Sender.new_buffer() '
+                'or Buffer.ilp() to build a matching buffer.')
 
     def flush_and_get_fsn(self, Buffer buffer=None):
         """

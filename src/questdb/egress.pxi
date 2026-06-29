@@ -2239,7 +2239,7 @@ class QueryResult:
         fail on its next pump with
         ``QuestDBErrorCode.InvalidApiCall``.
         """
-        cdef _CursorHandle handle = self._cursor_handle
+        cdef _CursorHandle handle = self._cancel_handle
         self._cursor_handle = None
         self._cancel_handle = None
         self._consumed = True

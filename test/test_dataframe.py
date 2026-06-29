@@ -169,6 +169,23 @@ class TestPandasBase:
                     'Expected pandas'):
                 _dataframe(self.version, [], at=qi.ServerTimestamp)
 
+        def test_row_path_rejects_columnar_only_object_columns(self):
+            import uuid
+            import ipaddress
+            cases = {
+                'bytes': b'\x00\x01',
+                'UUID': uuid.uuid4(),
+                'IPv4Address': ipaddress.IPv4Address('1.2.3.4'),
+            }
+            for descr, value in cases.items():
+                df = pd.DataFrame({'a': [value]})
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        f'{descr} objects, which are only supported on the '
+                        'columnar Client.dataframe'):
+                    _dataframe(self.version, df, table_name='t',
+                               at=qi.ServerTimestamp)
+
         def test_no_table_name(self):
             with self.assertRaisesRegex(qi.QuestDBError,
                     'Must specify at least one of'):

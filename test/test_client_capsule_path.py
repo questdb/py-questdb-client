@@ -71,6 +71,48 @@ class TestCapsulePathPyArrow(unittest.TestCase):
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_pyarrow_designated_ts_by_int_index(self):
+        schema = pa.schema([
+            pa.field('symbol', pa.string()),
+            pa.field('price', pa.float64()),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'symbol': ['ETH-USD', 'BTC-USD'],
+            'price':  [2615.54, 67234.12],
+            'ts':     [_ts_us(2025, 1, 1, 12, 0, 0),
+                       _ts_us(2025, 1, 1, 12, 0, 1)],
+        }, schema=schema)
+        for at in (2, -1):
+            with QwpAckServer() as server:
+                client = qi.Client.from_conf(_client_conf(server.port))
+                try:
+                    client.dataframe(table, table_name='trades', at=at)
+                finally:
+                    client.close()
+                stats = server.snapshot()
+            self.assertEqual(stats['errors'], [])
+            self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_pyarrow_at_int_index_out_of_range(self):
+        schema = pa.schema([
+            pa.field('v', pa.int64()),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'v':  [1],
+            'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(IndexError, 'index out of range'):
+                    client.dataframe(table, table_name='oob', at=5)
+            finally:
+                client.close()
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_pyarrow_record_batch_via_table_from_batches(self):
         schema = pa.schema([
             pa.field('seq', pa.int64()),

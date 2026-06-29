@@ -1588,7 +1588,7 @@ class TestWithDatabase(unittest.TestCase):
         buf.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
         with self._mk_qwpudp_sender() as sender:
             with self.assertRaisesRegex(
-                    qi.QuestDBError, 'QWP/UDP sender requires a QWP buffer'):
+                    qi.QuestDBError, 'QWP sender requires a QWP buffer'):
                 sender.flush(buf)
 
     def test_qwp_udp_buffer_rejected_by_http(self):
