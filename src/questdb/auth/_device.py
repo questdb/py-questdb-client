@@ -249,7 +249,8 @@ class OidcDeviceAuth:
     pool), sign in once up front — call :meth:`token` once on the main thread
     before the pool opens connections. (A custom ``renderer``'s callbacks run
     while this lock is held, so they must not call back into the same instance's
-    :meth:`token` / :meth:`clear` — the lock is not reentrant.)
+    :meth:`token` / :meth:`clear`; doing so raises :class:`OidcError` rather than
+    deadlocking, since the lock is not reentrant.)
 
     .. code-block:: python
 
@@ -375,6 +376,11 @@ class OidcDeviceAuth:
         # on the fast path, so a valid cached token never blocks behind a
         # sign-in.
         self._lock = threading.Lock()
+        # Thread id holding self._lock during an acquisition (set under the lock,
+        # cleared in the finally). Read lock-free by _guard_reentrancy to turn a
+        # same-thread re-entry — a custom renderer callback calling back into this
+        # instance's token()/clear() — into a clear error instead of a deadlock.
+        self._lock_owner: Optional[int] = None
         self._tokens: Optional[TokenSet] = None
         clock = _clock or _SYSTEM_CLOCK
         self._sleep = clock.sleep
@@ -502,15 +508,17 @@ class OidcDeviceAuth:
         """
         c = self.config
         scope = ' '.join(sorted(c.scope.split())) if c.scope else ''
-        # Normalize the issuer like the token endpoint (lower-case scheme/host,
+        # Normalize the issuer and token endpoint alike (lower-case scheme/host,
         # drop a default port) and strip a trailing slash, so a discovered
-        # "https://idp/" and an explicit "https://idp" — or a stray :443 / case
-        # difference — don't yield different keys and force an avoidable
-        # re-prompt. The realm path is kept (multi-tenant issuers differ by it).
+        # "https://idp/token/" and an explicit "https://idp/token" — or a stray
+        # :443 / case difference — don't yield different keys and force an
+        # avoidable re-prompt. The path is otherwise kept (multi-tenant realms
+        # differ by it); only a trailing slash, which never distinguishes an
+        # endpoint, is dropped.
         issuer = _normalize_url(c.issuer).rstrip('/') if c.issuer else ''
         return '\x1f'.join([
             issuer,
-            _normalize_url(c.token_endpoint),
+            _normalize_url(c.token_endpoint).rstrip('/'),
             c.client_id,
             scope,
             c.audience or '',
@@ -523,9 +531,16 @@ class OidcDeviceAuth:
         # ANOTHER instance sharing the process-global store can't repopulate the
         # entry (its _store sees the bumped generation and drops the write).
         # Resets the local/process cache only — does not revoke at the IdP.
+        # Refuse a same-thread re-entry (a renderer callback calling clear() on
+        # the instance whose sign-in it is rendering) rather than deadlock.
+        self._guard_reentrancy()
         with self._lock:
-            self._tokens = None
-            self._cache.clear(self.cache_key)
+            self._lock_owner = threading.get_ident()
+            try:
+                self._tokens = None
+                self._cache.clear(self.cache_key)
+            finally:
+                self._lock_owner = None
 
     # -- token lifecycle ----------------------------------------------------
 
@@ -570,6 +585,26 @@ class OidcDeviceAuth:
             'Device authorization completed but the IdP returned no '
             'access_token.')
 
+    def _guard_reentrancy(self) -> None:
+        # self._lock is non-reentrant and is held for the WHOLE acquisition,
+        # including the renderer callbacks invoked during the device flow
+        # (on_prompt / on_waiting / on_success / on_failure). A custom renderer
+        # whose callback calls back into THIS instance's token() / headers() /
+        # clear() would deadlock the calling thread for up to the device-code
+        # lifetime. Detect that same-thread re-entry (we are already the lock
+        # owner) and fail fast with a clear typed error instead of hanging. A
+        # different thread is unaffected — it legitimately waits behind the lock
+        # and can never observe its own id as the owner. The read is lock-free
+        # but safe: only the owning thread ever writes its own id, so the
+        # comparison against get_ident() is true only for a genuine re-entry.
+        if self._lock_owner == threading.get_ident():
+            raise OidcError(
+                'A renderer callback called back into the same OidcDeviceAuth '
+                'instance (token()/headers()/clear()) while its own sign-in was '
+                'in progress. The acquisition lock is not reentrant, so this '
+                'would deadlock; a renderer must not re-enter the instance whose '
+                'sign-in it is rendering.')
+
     def _obtain_tokens(self, *, allow_interactive: bool = True) -> TokenSet:
         # Fast path: return a valid token without the lock, so a caller with a
         # usable token never blocks behind another thread's refresh/sign-in.
@@ -586,38 +621,50 @@ class OidcDeviceAuth:
             return tokens
         # Slow path: serialize acquisition so concurrent callers don't overlap
         # refreshes or double-prompt; the loser re-checks and reuses the
-        # winner's token.
+        # winner's token. Refuse a same-thread re-entry (a renderer callback
+        # calling back into this instance) BEFORE blocking on the lock, so it
+        # raises instead of deadlocking on the non-reentrant lock.
+        self._guard_reentrancy()
         with self._lock:
-            # Capture the generation before reading/acquiring, so a racing
-            # clear() — including on another instance sharing the process-global
-            # MemoryCache (whose per-instance lock doesn't serialize against
-            # ours) — invalidates the store below instead of resurrecting the
-            # cleared entry. Paired with release() in the finally so the cache
-            # reclaims the per-key generation once no acquisition is in flight
-            # for it (bounds the process-global maps; see MemoryCache.release).
-            generation = self._cache_generation()
+            # Record ourselves as the lock owner so a re-entrant callback is
+            # detected (see _guard_reentrancy); the outer finally always clears
+            # it, even if the generation capture below raises.
+            self._lock_owner = threading.get_ident()
             try:
-                # Promote a cached token under the lock, consulting the shared
-                # store even when self._tokens is already set: another instance
-                # sharing the process-global cache may have acquired or refreshed
-                # a token since this one's self._tokens went stale, so adopt that
-                # fresh one instead of running a redundant refresh / sign-in. When
-                # we have nothing, adopt whatever is cached (even expired) so
-                # _acquire can reuse its refresh_token. Not on the fast path, so
-                # every write to self._tokens stays serialized.
-                cached = self._cache.load(self.cache_key)
-                if cached is not None and (
-                        self._tokens is None
-                        or (cached.is_valid(self._now())
-                            and self._has_required_token(cached))):
-                    self._tokens = cached
-                tokens = self._valid_cached()
-                if tokens is not None:
-                    return tokens
-                return self._acquire(
-                    generation, allow_interactive=allow_interactive)
+                # Capture the generation before reading/acquiring, so a racing
+                # clear() — including on another instance sharing the process-
+                # global MemoryCache (whose per-instance lock doesn't serialize
+                # against ours) — invalidates the store below instead of
+                # resurrecting the cleared entry. Paired with release() in the
+                # inner finally so the cache reclaims the per-key generation once
+                # no acquisition is in flight (bounds the maps; see
+                # MemoryCache.release).
+                generation = self._cache_generation()
+                try:
+                    # Promote a cached token under the lock, consulting the
+                    # shared store even when self._tokens is already set: another
+                    # instance sharing the process-global cache may have acquired
+                    # or refreshed a token since this one's self._tokens went
+                    # stale, so adopt that fresh one instead of running a
+                    # redundant refresh / sign-in. When we have nothing, adopt
+                    # whatever is cached (even expired) so _acquire can reuse its
+                    # refresh_token. Not on the fast path, so every write to
+                    # self._tokens stays serialized.
+                    cached = self._cache.load(self.cache_key)
+                    if cached is not None and (
+                            self._tokens is None
+                            or (cached.is_valid(self._now())
+                                and self._has_required_token(cached))):
+                        self._tokens = cached
+                    tokens = self._valid_cached()
+                    if tokens is not None:
+                        return tokens
+                    return self._acquire(
+                        generation, allow_interactive=allow_interactive)
+                finally:
+                    self._cache.release(self.cache_key)
             finally:
-                self._cache.release(self.cache_key)
+                self._lock_owner = None
 
     def _valid_cached(self) -> Optional[TokenSet]:
         # Read-only: reads the published field, falling back to the shared cache
@@ -975,12 +1022,17 @@ class OidcDeviceAuth:
                 # §3.4 expects polling to continue until the code expires, so
                 # poll again rather than discard the sign-in (the deadline bounds
                 # the total wait; a genuine JSON rejection arrives below).
-                if getattr(e, 'status', None) == 429:
-                    # A non-JSON 429 (proxy/WAF). Honor a Retry-After header if
-                    # post_form parsed one off the error response, else the +5s
-                    # step (clamped to the poll-interval bounds either way).
-                    interval = _backoff_interval(
-                        interval, getattr(e, 'retry_after', None))
+                err_status = getattr(e, 'status', None)
+                err_retry_after = getattr(e, 'retry_after', None)
+                if err_status == 429 or err_retry_after is not None:
+                    # A non-JSON 429/5xx (proxy/WAF). Honor a Retry-After header
+                    # if post_form parsed one off the error response, else (for a
+                    # 429) the RFC 8628 +5s step; clamped to the poll-interval
+                    # bounds either way. Mirrors the JSON-body arm below: a 429
+                    # backs off even without a header, while a transient 5xx
+                    # honors a Retry-After but keeps its cadence without one (a
+                    # server error isn't a rate-limit).
+                    interval = _backoff_interval(interval, err_retry_after)
                 continue
 
             status, body = result

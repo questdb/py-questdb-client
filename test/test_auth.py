@@ -526,6 +526,30 @@ class TestDeviceFlow(AuthTestBase):
         self.assertEqual(len(self.state.token_requests), 1)
         self.assertEqual(self._clock.sleeps, [5, 5, 10])
 
+    def test_non_json_5xx_retry_after_honored_in_poll(self):
+        # m1: a non-JSON 5xx from a proxy/WAF carries its Retry-After (post_form
+        # attaches it to the OidcError), so the poll loop's exception arm now
+        # backs off by that value -- matching the JSON-body 5xx path
+        # (test_poll_honors_retry_after_on_5xx) and the non-JSON 429 path.
+        # Previously only a non-JSON 429 honored it, so a 5xx carrying a
+        # Retry-After kept polling at the base interval.
+        self.state.token_script = [(200, None)]  # success once actually polled
+        auth = self.make_auth()
+        real = auth._idp_post
+        polls = {'n': 0}
+
+        def flaky(url, form):
+            if url == auth.config.token_endpoint:
+                polls['n'] += 1
+                if polls['n'] == 1:
+                    raise OidcError('proxy <html>503</html>', status=503,
+                                    retry_after=30)
+            return real(url, form)
+
+        auth._idp_post = flaky
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertIn(30, self._clock.sleeps)   # honored Retry-After, not base 5
+
     def test_non_json_4xx_during_poll_is_terminal(self):
         # A non-JSON 4xx during polling (an HTML/plain error page from a WAF or
         # reverse proxy in front of the IdP, or a non-conformant IdP) is a
@@ -2347,6 +2371,44 @@ class TestConcurrency(AuthTestBase):
         self.assertNotIn(a.cache_key, _MEMORY_GENERATION)   # reclaimed on release
         self.assertNotIn(a.cache_key, _MEMORY_INFLIGHT)
 
+    def test_renderer_reentrant_call_raises_not_deadlocks(self):
+        # m3: self._lock is held across the WHOLE sign-in, including the renderer
+        # callbacks. A custom renderer whose callback calls back into the SAME
+        # instance (here clear()) must fail fast with a typed OidcError, not
+        # deadlock on the non-reentrant lock. Run token() on a worker thread with
+        # a join timeout so a regression that re-introduces the deadlock fails
+        # the test instead of hanging the whole suite.
+        auth = self.make_auth()
+        outcome = {}
+
+        class _Reentrant(Renderer):
+            def on_prompt(self, resp):
+                auth.clear()  # re-enter the same instance mid-sign-in
+
+        auth._renderer = _Reentrant()
+
+        def run():
+            try:
+                auth.token()
+                outcome['result'] = 'returned'
+            except OidcError as e:
+                outcome['result'] = 'raised'
+                outcome['err'] = e
+            except BaseException as e:  # noqa: BLE001
+                outcome['result'] = 'other'
+                outcome['err'] = e
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), 'reentrant renderer deadlocked the lock')
+        self.assertEqual(outcome.get('result'), 'raised',
+                         f'expected OidcError, got {outcome!r}')
+        self.assertIn('reentrant', str(outcome['err']).lower())
+        # The lock owner is cleared after the aborted acquisition, so the
+        # instance is left usable (no leaked owner / held lock).
+        self.assertIsNone(auth._lock_owner)
+
     def test_token_clear_stress(self):
         # M3: drive the lock-free fast path and the generation/inflight CAS under
         # REAL thread contention. The other concurrency tests exercise the CAS
@@ -3204,6 +3266,16 @@ class TestCacheKey(unittest.TestCase):
                         'https://idp.example.com:443/'):
             self.assertEqual(base.cache_key,
                              self._auth(issuer=variant).cache_key, variant)
+
+    def test_token_endpoint_trailing_slash_does_not_change_key(self):
+        # m2: like the issuer, the token endpoint is trailing-slash-normalized in
+        # the cache key. A discovered "https://idp/token/" and an explicit
+        # "https://idp/token" are the same endpoint, so they must not split the
+        # key and force an avoidable re-prompt. (A different realm PATH still
+        # stays distinct -- see test_realm_path_distinguishes_key.)
+        base = self._auth(token_endpoint='https://idp.example.com/token')
+        slashed = self._auth(token_endpoint='https://idp.example.com/token/')
+        self.assertEqual(base.cache_key, slashed.cache_key)
 
     def test_issuer_realm_path_distinguishes_key(self):
         # A different realm PATH on the same host is a different issuer and must
