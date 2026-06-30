@@ -46,11 +46,13 @@ from __future__ import annotations
 
 import abc
 import contextlib
+import errno
 import hashlib
 import json
 import math
 import os
 import socket
+import stat
 import sys
 import tempfile
 import threading
@@ -271,13 +273,14 @@ class TokenStoreKey:
 
     The client id, the canonicalised token and device-authorization endpoints
     (see :func:`_canonical_endpoint`), the order-normalised scope (the
-    space-joined sorted token set), the optional audience, and whether the server
-    expects groups encoded in the token. A :class:`TokenStore` keys its entries by
-    this so a token minted for one server / identity provider / scope / audience
-    is never served to a process configured for another. The endpoint and scope
-    fields must be passed already normalised — exactly as
-    :class:`~questdb.auth.OidcDeviceAuth` builds them — so a directly-constructed
-    key matches the same identity the auth object computes.
+    space-joined sorted token set), the optional audience, whether the server
+    expects groups encoded in the token, and the optional out-of-band issuer pin.
+    A :class:`TokenStore` keys its entries by this so a token minted for one
+    server / identity provider / scope / audience is never served to a process
+    configured for another. The endpoint, scope and issuer fields must be passed
+    already normalised — exactly as :class:`~questdb.auth.OidcDeviceAuth` builds
+    them — so a directly-constructed key matches the same identity the auth
+    object computes.
 
     :meth:`hash` is a stable lowercase-hex SHA-256 over a canonical,
     NUL-separated rendering of the fields — a file name (or opaque key) that is
@@ -286,6 +289,16 @@ class TokenStoreKey:
     persisted entry. The fields are exposed (they are not secret) so a store can
     record and re-check them on load as a defence against a hash collision or a
     copied file.
+
+    ``issuer`` participates in that on-load identity re-check (see
+    :meth:`FileTokenStore.load` / ``_issuer_matches``) but **not** in
+    :meth:`hash`: it is excluded from the file name so the cross-language
+    addressing contract — and every existing token file — stays byte-identical,
+    while a session pinned to a different issuer still never adopts another's
+    token (two issuer-differing configs share a file but reject each other's
+    contents on load). This mirrors the in-memory
+    :attr:`~questdb.auth.OidcDeviceAuth.cache_key`, which also distinguishes the
+    issuer, so the in-memory and on-disk identities agree on that axis.
     """
 
     client_id: str
@@ -294,12 +307,22 @@ class TokenStoreKey:
     scope: str
     audience: Optional[str]
     groups_in_token: bool
+    # Optional out-of-band issuer pin. Default keeps existing positional
+    # construction (and the frozen cross-language file-name hash) unchanged.
+    issuer: Optional[str] = None
 
     def hash(self) -> str:
         """A stable lowercase-hex SHA-256 of the canonical identity string."""
         # NUL-separate the fields so no field value can be confused with a
         # separator (an OAuth client id, url, scope or audience never contains a
         # NUL). The prefix tags the domain and schema version.
+        #
+        # `issuer` is deliberately NOT folded in here: the file name is a frozen
+        # cross-language contract (the Java client mirrors it), so adding a field
+        # would change every entry's hash and break addressing. Issuer isolation
+        # is enforced on load instead (the in-file fingerprint re-check), which
+        # keeps the file name stable while still never serving one issuer's token
+        # to a session pinned to another.
         canonical = '\x00'.join((
             _CANONICAL_PREFIX,
             self.client_id or '',
@@ -487,20 +510,38 @@ class FileTokenStore(TokenStore):
     def load(self, key: TokenStoreKey) -> Optional[PersistedToken]:
         path = self._token_file(key)
         try:
-            size = os.stat(path).st_size
+            st = os.stat(path)
         except FileNotFoundError:
             return None
         except OSError as e:
+            # A path that is not a usable regular file — a symlink loop (ELOOP)
+            # or a non-directory path component (ENOTDIR) — is "no usable
+            # entry", not a fatal error: per load()'s contract, fall back to a
+            # refresh / interactive sign-in rather than raise. A genuine I/O or
+            # permission error (EACCES, EIO, ...) still surfaces as OidcError.
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                return None
             raise OidcError(
                 f'could not read the OIDC token store file: {e}') from e
+        # A directory (or other non-regular file) planted at the token path —
+        # by another tool, or a hostile co-tenant with write access to the store
+        # dir — is not a usable entry. Ignore it rather than fall through to
+        # open(), which would raise IsADirectoryError and escape load()'s "an
+        # unreadable entry returns None, not a fatal error" contract.
+        if not stat.S_ISREG(st.st_mode):
+            return None
         # An empty or implausibly large file is not a usable entry; ignore it
         # rather than read it into memory.
-        if size <= 0 or size > _MAX_FILE_BYTES:
+        if st.st_size <= 0 or st.st_size > _MAX_FILE_BYTES:
             return None
         try:
             with open(path, 'rb') as f:
                 data = f.read(_MAX_FILE_BYTES + 1)
         except FileNotFoundError:
+            return None
+        except IsADirectoryError:
+            # The regular file became a directory between the stat above and
+            # this open (a TOCTOU); treat it as no usable entry, as above.
             return None
         except OSError as e:
             raise OidcError(
@@ -638,6 +679,14 @@ class FileTokenStore(TokenStore):
         }
         if key.audience is not None:
             obj['audience'] = key.audience
+        # Persisted for the on-load identity re-check, not the file name (issuer
+        # is excluded from TokenStoreKey.hash to keep the cross-language file
+        # contract stable). Omitted when absent, like audience, so an entry
+        # written without an issuer pin reads back as None and matches a None
+        # key issuer — and an older/other client that doesn't write the field
+        # interoperates unchanged.
+        if key.issuer is not None:
+            obj['issuer'] = key.issuer
         obj['groups_in_token'] = key.groups_in_token
         if token.access_token is not None:
             obj['access_token'] = token.access_token
@@ -653,9 +702,14 @@ class FileTokenStore(TokenStore):
             self, key: TokenStoreKey, data: bytes) -> Optional[PersistedToken]:
         try:
             obj = json.loads(data)
-        except (ValueError, UnicodeDecodeError):
-            # Corrupt or truncated file: treat as no usable entry, fall back to
-            # refresh / interactive.
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # Corrupt, truncated, or deeply-nested file: treat as no usable
+            # entry, fall back to refresh / interactive. RecursionError (the
+            # attacker-writable file nests JSON deep enough to exhaust the
+            # decoder's stack) is not a ValueError, so list it explicitly —
+            # matching every other json.loads on untrusted input in this client
+            # (_decode_jwt_claims, _http.get_json / post_form) — so a hostile
+            # file makes load() return None rather than crash the caller.
             return None
         if not isinstance(obj, dict):
             return None
@@ -670,6 +724,7 @@ class FileTokenStore(TokenStore):
                 != key.device_authorization_endpoint
                 or obj.get('scope') != key.scope
                 or not _audience_matches(key.audience, obj.get('audience'))
+                or not _issuer_matches(key.issuer, obj.get('issuer'))
                 or bool(obj.get('groups_in_token')) != key.groups_in_token):
             return None
         return PersistedToken(
@@ -775,3 +830,19 @@ def _audience_matches(key_audience: Optional[str], file_audience: Any) -> bool:
     if key_audience is None:
         return file_audience is None
     return isinstance(file_audience, str) and file_audience == key_audience
+
+
+def _issuer_matches(key_issuer: Optional[str], file_issuer: Any) -> bool:
+    # Same contract as _audience_matches, for the out-of-band issuer pin. The
+    # file omits a null issuer entirely, so an absent (or hand-edited JSON null)
+    # field reads as None and matches a None key issuer; a present issuer must be
+    # an exact (already-normalised) string match, and a non-string file value
+    # never matches. This is the on-load half of issuer isolation: issuer is part
+    # of the identity re-check but NOT the file-name hash (see
+    # TokenStoreKey.hash), so two configs differing only by issuer pin share a
+    # file yet never adopt each other's token — a session pinned to one issuer
+    # rejects a token persisted under another (and an un-pinned session rejects
+    # an issuer-pinned token, and vice versa).
+    if key_issuer is None:
+        return file_issuer is None
+    return isinstance(file_issuer, str) and file_issuer == key_issuer

@@ -3525,6 +3525,29 @@ class TestCacheKey(unittest.TestCase):
             self._auth(
                 issuer='https://idp.example.com/realms/staging').cache_key)
 
+    def test_store_key_isolates_issuer_by_fingerprint_not_hash(self):
+        # M1: two sessions differing ONLY by issuer pin. The in-memory cache_key
+        # distinguishes them, and so does the on-disk identity -- but via the
+        # in-file issuer fingerprint, NOT the file-name hash (a frozen
+        # cross-language contract kept byte-stable). So they address the SAME
+        # file yet carry distinct issuer fingerprints and never adopt each
+        # other's token. The issuer is normalized identically on both sides
+        # (_normalize_url), so memory and disk agree on the issuer axis.
+        store = FileTokenStore.at(tempfile.mkdtemp())
+        a = self._auth(
+            issuer='https://idp.example.com/realms/a', token_store=store)
+        b = self._auth(
+            issuer='https://idp.example.com/realms/b', token_store=store)
+        self.assertNotEqual(a.cache_key, b.cache_key)               # memory: distinct
+        self.assertEqual(a._store_key.hash(), b._store_key.hash())  # same file name
+        self.assertNotEqual(                                        # distinct identity
+            a._store_key.issuer, b._store_key.issuer)
+        # Issuer spelling that doesn't change the security context (trailing
+        # slash / case / default port) must NOT split the on-disk identity
+        # either, exactly as it doesn't split cache_key.
+        c = self._auth(issuer='https://IDP.example.com/realms/a/', token_store=store)
+        self.assertEqual(a._store_key.issuer, c._store_key.issuer)
+
     def test_groups_in_token_distinguishes_key(self):
         # groups_in_token selects which token kind _select returns, so two
         # sessions differing ONLY in that mode must not collide on one cache
@@ -4897,6 +4920,25 @@ class TestRendererSecurity(unittest.TestCase):
             self.assertIsNone(_safe_target(raw))        # never clickable / opened
             self.assertNotIn('<a ', _render_link(raw))  # inert escaped text only
 
+    def test_display_url_neutralizes_idna_backslash_fold(self):
+        # A fullwidth reverse solidus U+FF3C (or small reverse solidus U+FE68)
+        # does NOT make urlparse raise (unlike the solidus / '@' / '#' / '?'
+        # confusables above), so it reaches the IDNA branch, where nameprep folds
+        # it to a literal '\'. A WHATWG/browser parser treats '\' as '/', so the
+        # displayed host would not be the one a browser resolves. It must be shown
+        # as a visible \uXXXX escape -- never a bare backslash -- and never made
+        # clickable / opened.
+        from questdb.auth._render import _display_url, _safe_target, _render_link
+        for cp in (0xFF3C, 0xFE68):
+            raw = f'https://login.questdb.io{chr(cp)}.attacker.example/auth'
+            shown = _display_url(raw)
+            self.assertNotIn(chr(cp), shown)             # confusable not echoed raw
+            self.assertIn(f'\\u{cp:04x}', shown)         # made visible instead
+            self.assertNotIn('questdb.io\\.', shown)     # no bare 'io\.' path-split
+            self.assertIn('attacker.example', shown)     # real authority legible
+            self.assertIsNone(_safe_target(raw))         # never clickable / opened
+            self.assertNotIn('<a ', _render_link(raw))   # inert escaped text only
+
     def test_displayed_and_opened_target_do_not_diverge(self):
         # A control / zero-width char stripped from the on-screen link must NOT
         # survive into the URL actually opened or QR-encoded: the display, the
@@ -5060,6 +5102,25 @@ class TestFileTokenStore(unittest.TestCase):
             fh.write('[1, 2, 3]')
         self.assertIsNone(self.store.load(self.key))
 
+    def test_directory_at_token_path_ignored(self):
+        # A directory (or other non-regular file) planted at the token-file path
+        # -- e.g. by a hostile co-tenant with write access to the store dir -- is
+        # not a usable entry. load() must return None (fall back to a fresh
+        # sign-in), not raise IsADirectoryError out of its documented contract.
+        os.mkdir(self._file())
+        self.assertIsNone(self.store.load(self.key))
+
+    def test_deeply_nested_json_file_ignored(self):
+        # The token file is attacker-writable. A deeply-nested JSON document
+        # (well under the size cap) makes json.loads raise RecursionError, which
+        # is not a ValueError; load() must still return None rather than let it
+        # escape the documented "unreadable entry -> None" contract.
+        depth = 60_000
+        with open(self._file(), 'w') as fh:
+            fh.write('[' * depth + ']' * depth)
+        self.assertLess(os.path.getsize(self._file()), 1 << 20)  # under the cap
+        self.assertIsNone(self.store.load(self.key))
+
     def test_wrong_schema_version_ignored(self):
         with open(self._file(), 'w') as fh:
             json.dump({'v': 2, 'client_id': 'questdb',
@@ -5103,6 +5164,33 @@ class TestFileTokenStore(unittest.TestCase):
             'questdb', 'https://idp:443/token', 'https://idp:443/device',
             'openid', 'api://other', False)
         self.assertIsNone(self.store.load(other))
+
+    def test_issuer_in_fingerprint_not_hash(self):
+        # M1: issuer participates in the on-load identity re-check but NOT the
+        # file-name hash, so two issuer-differing configs address the SAME file
+        # yet never adopt each other's token. (Contrast audience above, which IS
+        # in the hash, so a different audience is a different FILE.) This is the
+        # on-disk half of the issuer isolation the in-memory cache_key enforces.
+        key_x = TokenStoreKey(
+            'questdb', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', None, False, issuer='https://idp/realms/x')
+        key_y = TokenStoreKey(
+            'questdb', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', None, False, issuer='https://idp/realms/y')
+        # Same file name (issuer excluded from the hash), incl. the no-issuer key.
+        self.assertEqual(key_x.hash(), key_y.hash())
+        self.assertEqual(key_x.hash(), self.key.hash())
+        self.store.save(key_x, self._pt())
+        with open(self._file(key_x)) as fh:
+            self.assertIn('"issuer"', fh.read())
+        self.assertIsNotNone(self.store.load(key_x))   # same issuer: served
+        self.assertIsNone(self.store.load(key_y))      # other issuer: rejected
+        self.assertIsNone(self.store.load(self.key))   # un-pinned: rejected
+        # An un-pinned token is likewise not served to a pinned session.
+        self.store.save(self.key, self._pt())          # overwrite, no issuer field
+        with open(self._file(self.key)) as fh:
+            self.assertNotIn('"issuer"', fh.read())
+        self.assertIsNone(self.store.load(key_x))
 
     def test_absent_token_fields_read_back_as_none(self):
         self.store.save(self.key, self._pt(access_token=None, id_token=None))

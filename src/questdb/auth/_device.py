@@ -503,7 +503,15 @@ class OidcDeviceAuth:
                 # cache_key's _normalize_url renders them.
                 scope=_normalize_scope(self.config.scope),
                 audience=self.config.audience,
-                groups_in_token=self.config.groups_in_token)
+                groups_in_token=self.config.groups_in_token,
+                # Normalise the issuer exactly as cache_key does (_normalize_url),
+                # so the in-memory and on-disk identities agree on the issuer
+                # axis; None when unpinned. It feeds the on-load identity re-check
+                # (TokenStoreKey carries it for _parse_and_verify) but NOT the
+                # file-name hash, so a token pinned to one issuer is never served
+                # from disk to a session pinned to another.
+                issuer=(_normalize_url(self.config.issuer)
+                        if self.config.issuer else None))
         # Load the persisted entry at most once per instance (even if it yields
         # nothing), so a missing or bad file is not re-read on every call.
         self._store_load_attempted = False

@@ -269,6 +269,21 @@ def _display_url(url: Optional[str]) -> str:
             # IDNA can't encode it (an illegal label); make the bytes visible
             # rather than let an invisible homoglyph through unchanged.
             ascii_host = _ascii_visible(host)
+    # A host that still carries a URL-structural character after normalization —
+    # backslash, slash, '@', '?' or '#' — is ambiguous: RFC 3986 keeps it in the
+    # authority while a WHATWG/browser parser folds '\' to '/' and ends the host
+    # early, so the host shown here would not be the one a browser resolves (the
+    # very divergence this function exists to close). The IDNA fold can MINT one:
+    # a fullwidth reverse solidus U+FF3C (or small reverse solidus U+FE68) is
+    # category Po, so it survives _strip_control, passes urlparse (whose NFKC
+    # delimiter-reject covers '/ @ :' but not '\'), and nameprep folds it to a
+    # literal '\'. Don't render a clean-looking but ambiguous URL — fall back to
+    # the control-stripped text with every non-ASCII char escaped to a visible
+    # \uXXXX, so the confusable is shown as e.g. '＼', not as a bare '\'.
+    # (':' is excluded: an IPv6 literal legitimately carries it and is bracketed
+    # just below.)
+    if any(c in ascii_host for c in '\\/@?#'):
+        return _ascii_visible(text)
     host_part = f'[{ascii_host}]' if ':' in ascii_host else ascii_host  # IPv6
     # Read the port separately and defensively: parts.port raises ValueError for
     # a malformed (non-integer / out-of-range) port. That must NOT abort host

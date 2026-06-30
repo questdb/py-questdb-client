@@ -63,12 +63,17 @@ Highlights:
 
 See the :ref:`OIDC authentication guide <oidc_auth>` for details.
 
-Python Version Support
-~~~~~~~~~~~~~~~~~~~~~~~~
+Breaking Changes
+~~~~~~~~~~~~~~~~~
 
-* Corrected the minimum supported Python declared in ``setup.py`` to 3.10,
-  matching the floor already adopted in 4.1.0 (which dropped Python 3.9).
-  Installs on Python 3.8 / 3.9 are now correctly rejected.
+* The minimum supported Python is now **3.10**, raised from 3.8 in ``setup.py``.
+  Python 3.8 (end-of-life 2024-10) and 3.9 (end-of-life 2025-10) are no longer
+  supported, and ``pip`` will refuse to install this release on them. This
+  affects the whole ``questdb`` package, not only the new :mod:`questdb.auth`
+  module. This is the first release to enforce the floor: although the 4.1.0
+  changelog described dropping older versions, its ``setup.py`` still declared
+  ``>=3.8``, so 3.8 / 3.9 installs were not actually rejected until now. Users
+  still on 3.8 / 3.9 should pin to an earlier ``questdb`` release.
 
 4.1.0 (2025-11-28)
 ------------------
