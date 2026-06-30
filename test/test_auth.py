@@ -3567,6 +3567,22 @@ class TestCacheKey(unittest.TestCase):
         (ck6, sk6) = keys(token_ep='https://idp.example.com/token?tenant=b')
         self.assertNotEqual(ck5, ck6)
         self.assertNotEqual(sk5, sk6)
+        # (d) trailing SLASH *and* a query together (regression for M1): the old
+        # cache_key rstrip('/')-ed the whole rendered URL, so the slash hidden
+        # before the query survived in memory ('…/token/?t' stayed split from
+        # '…/token?t') while the store stripped it on the path and kept them one
+        # — the two keys disagreed. They must agree: same identity on BOTH sides.
+        (ck7, sk7) = keys(token_ep='https://idp.example.com/token?tenant=a')
+        (ck8, sk8) = keys(token_ep='https://idp.example.com/token/?tenant=a')
+        self.assertEqual(ck7, ck8)
+        self.assertEqual(sk7, sk8)
+        # (e) a slash that is part of a query VALUE must NOT be stripped (the old
+        # whole-string rstrip could chop it), so two distinct query values stay a
+        # different identity on BOTH sides.
+        (ck9, sk9) = keys(token_ep='https://idp.example.com/token?redirect=a/')
+        (ck10, sk10) = keys(token_ep='https://idp.example.com/token?redirect=a')
+        self.assertNotEqual(ck9, ck10)
+        self.assertNotEqual(sk9, sk10)
 
 
 class TestTransportSecurity(unittest.TestCase):
@@ -4043,6 +4059,116 @@ class TestTransportSecurity(unittest.TestCase):
                 build_ssl_context(bad)
         finally:
             os.unlink(bad)
+
+    def test_default_context_verifies_certificates(self):
+        # The single most load-bearing security default: every IdP credential
+        # POST (device-code, each poll, refresh) rides build_ssl_context(). It
+        # MUST verify the server certificate and check the hostname. A regression
+        # swapping in ssl._create_unverified_context(), or setting
+        # check_hostname=False / verify_mode=CERT_NONE, would silently expose
+        # every device-code and long-lived refresh-token POST to a MITM while
+        # breaking no other test. Assert the posture directly so such a
+        # regression fails here.
+        import ssl
+        from questdb.auth._http import build_ssl_context
+        ctx = build_ssl_context()  # no-arg: the production default path
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+
+    def test_untrusted_server_certificate_is_rejected(self):
+        # Behavioural companion to the unit assertion above: a real TLS handshake
+        # against a server presenting a cert the default trust store does not
+        # trust (a self-signed cert — what a MITM would present) MUST fail, and a
+        # custom CA context built to trust that cert MUST still verify + connect.
+        # Together these catch a verification regression that the configuration
+        # assertion alone could miss (e.g. a verify that is silently bypassed on
+        # the request path). The cert is generated fresh at runtime, so there is
+        # no embedded-cert expiry to rot the test.
+        try:
+            from datetime import datetime, timedelta, timezone
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+        except ImportError:
+            self.skipTest('cryptography not installed (handshake test skipped; '
+                          'test_default_context_verifies_certificates still '
+                          'guards the verification posture)')
+        import http.server
+        import ipaddress
+        import ssl
+        import threading
+        from questdb.auth._http import build_ssl_context, get_json
+
+        tmp = tempfile.mkdtemp()
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, 'localhost')])
+        now = datetime.now(timezone.utc)
+        cert = (x509.CertificateBuilder()
+                .subject_name(name).issuer_name(name)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(now - timedelta(days=1))
+                .not_valid_after(now + timedelta(days=3650))
+                .add_extension(
+                    x509.SubjectAlternativeName([
+                        x509.DNSName('localhost'),
+                        x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),
+                    critical=False)
+                .sign(key, hashes.SHA256()))
+        certfile = os.path.join(tmp, 'cert.pem')
+        with open(certfile, 'wb') as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(os.path.join(tmp, 'key.pem'), 'wb') as f:
+            f.write(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption()))
+        keyfile = os.path.join(tmp, 'key.pem')
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        class _QuietTLSServer(http.server.HTTPServer):
+            # A rejected handshake (the negative case below) is expected; don't
+            # let its traceback spam the test output.
+            def handle_error(self, request, client_address):
+                pass
+
+        sctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        sctx.load_cert_chain(certfile, keyfile)
+        httpd = _QuietTLSServer(('127.0.0.1', 0), _Handler)
+        httpd.socket = sctx.wrap_socket(httpd.socket, server_side=True)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            url = f'https://localhost:{port}/'
+            # Production default context trusts only system roots -> the
+            # self-signed cert fails verification -> typed network error.
+            with self.assertRaises(OidcNetworkError):
+                get_json(url, timeout=5)
+            # A context that DOES trust the cert must still verify + check
+            # hostname (never relaxed by adding a CA), and connect cleanly.
+            trusting = build_ssl_context(ca_bundle=certfile)
+            self.assertEqual(trusting.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(trusting.check_hostname)
+            self.assertEqual(get_json(url, ctx=trusting, timeout=5), {'ok': True})
+        finally:
+            httpd.shutdown()
+            t.join(10)
+            self.assertFalse(t.is_alive(), 'TLS test server thread did not stop')
+            httpd.server_close()
 
     def test_deeply_nested_json_raises_oidc_error(self):
         # A RecursionError from json.loads (a deeply-nested JSON body exhausts

@@ -649,16 +649,19 @@ class OidcDeviceAuth:
         c = self.config
         scope = _normalize_scope(c.scope)
         # Normalize the issuer and token endpoint alike (lower-case scheme/host,
-        # drop a default port) and strip a trailing slash, so a discovered
+        # drop a default port, strip a trailing path slash), so a discovered
         # "https://idp/token/" and an explicit "https://idp/token" — or a stray
         # :443 / case difference — don't yield different keys and force an
-        # avoidable re-prompt. The path is otherwise kept (multi-tenant realms
-        # differ by it); only a trailing slash, which never distinguishes an
-        # endpoint, is dropped.
-        issuer = _normalize_url(c.issuer).rstrip('/') if c.issuer else ''
+        # avoidable re-prompt. The trailing-slash stripping happens inside
+        # _normalize_url, on the PATH component, so it is correct even when a
+        # query follows ("…/token/?x") and never touches a slash inside a query
+        # value ("…?redirect=a/") — keeping these distinctions identical to the
+        # on-disk _canonical_endpoint. The path is otherwise kept (multi-tenant
+        # realms differ by it).
+        issuer = _normalize_url(c.issuer) if c.issuer else ''
         return '\x1f'.join([
             issuer,
-            _normalize_url(c.token_endpoint).rstrip('/'),
+            _normalize_url(c.token_endpoint),
             c.client_id,
             scope,
             c.audience or '',
@@ -1588,5 +1591,15 @@ def _normalize_url(url: str) -> str:
         netloc = f'{host}:{port}'
     else:
         netloc = host
+    # Strip a trailing slash from the PATH COMPONENT (not the rendered URL), so
+    # '…/token' and '…/token/' are one identity whether or not a query follows —
+    # exactly as the on-disk _canonical_endpoint does, keeping the in-memory
+    # cache_key and the on-disk store key in agreement on identity. rstrip('/')-ing
+    # the whole rendered string (what cache_key used to do) both missed a slash
+    # hidden before a query ('…/token/?x' stayed split from '…/token?x') and could
+    # strip a slash that is part of a query VALUE ('…?redirect=a/' wrongly collided
+    # with '…?redirect=a'); the store keeps the query verbatim, so either case made
+    # the two keys disagree. Doing it on the path component alone fixes both.
+    path = (parts.path or '').rstrip('/')
     query = f'?{parts.query}' if parts.query else ''
-    return f'{scheme}://{netloc}{parts.path}{query}'
+    return f'{scheme}://{netloc}{path}{query}'
