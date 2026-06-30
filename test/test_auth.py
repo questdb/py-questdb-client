@@ -990,6 +990,35 @@ class TestDeviceFlow(AuthTestBase):
         with self.assertRaises(OidcDeviceFlowError):
             auth.token()
 
+    def test_groups_mode_rejects_control_char_in_network_id_token(self):
+        # M3: a token straight from the (untrusted) IdP token endpoint is screened
+        # for control / non-ASCII chars exactly like a file-loaded one — a decoded
+        # CR/LF in the served token is an Authorization-header / _sso-password
+        # injection vector. groups mode serves the id_token, so a control char
+        # there must fail the grant terminally and cache nothing, not route a
+        # tampered credential onto the wire. (The persistence path already screens
+        # this; the network path must too, since the IdP is equally untrusted.)
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': 'bad\r\nid-token',
+            'refresh_token': 'REFRESH-1', 'token_type': 'Bearer',
+            'expires_in': 3600})]
+        auth = self.make_auth(groups_in_token=True)
+        with self.assertRaises(OidcDeviceFlowError):
+            auth.token()
+        self.assertIsNone(auth._tokens)  # nothing cached
+
+    def test_access_mode_rejects_control_char_in_network_access_token(self):
+        # M3, the OTHER served kind: with groups not in the token, token() serves
+        # the access_token, so a control char there must reject the grant too.
+        self.state.token_script = [(200, {
+            'access_token': 'bad\x00access', 'id_token': ID_TOKEN,
+            'refresh_token': 'REFRESH-1', 'token_type': 'Bearer',
+            'expires_in': 3600})]
+        auth = self.make_auth(groups_in_token=False)
+        with self.assertRaises(OidcDeviceFlowError):
+            auth.token()
+        self.assertIsNone(auth._tokens)
+
     def test_access_token_headers(self):
         auth = self.make_auth(groups_in_token=False)
         self.assertEqual(auth.headers(),
@@ -3491,6 +3520,40 @@ class TestCacheKey(unittest.TestCase):
             self._auth(groups_in_token=True).cache_key,
             self._auth(groups_in_token=False).cache_key)
 
+    def test_in_memory_and_on_disk_keys_agree_on_identity(self):
+        # Regression for M2: the in-memory cache_key and the on-disk
+        # TokenStoreKey.hash() must make the SAME identity distinctions, or a
+        # token cached under one key in memory could be served from a different
+        # one on disk (a wrong-identity serve), or a single identity could split
+        # across two store files (a needless re-prompt after restart). Check the
+        # three axes that used to diverge.
+        store = FileTokenStore.at(tempfile.mkdtemp())
+
+        def keys(scope='openid', token_ep='https://idp.example.com/token'):
+            a = OidcDeviceAuth(
+                client_id='c', token_endpoint=token_ep,
+                device_authorization_endpoint='https://idp.example.com/device',
+                scope=scope, token_store=store)
+            return a.cache_key, a._store_key.hash()
+
+        # (b) scope ORDER — the same identity on BOTH sides.
+        (ck1, sk1) = keys(scope='openid groups')
+        (ck2, sk2) = keys(scope='groups openid')
+        self.assertEqual(ck1, ck2)
+        self.assertEqual(sk1, sk2)
+        # (c) trailing SLASH — the same identity on BOTH sides.
+        (ck3, sk3) = keys(token_ep='https://idp.example.com/token')
+        (ck4, sk4) = keys(token_ep='https://idp.example.com/token/')
+        self.assertEqual(ck3, ck4)
+        self.assertEqual(sk3, sk4)
+        # (a) token-endpoint QUERY — a DIFFERENT identity on BOTH sides, so two
+        # query-distinguished tenants never collide onto one store file (which
+        # would serve one tenant's token to the other).
+        (ck5, sk5) = keys(token_ep='https://idp.example.com/token?tenant=a')
+        (ck6, sk6) = keys(token_ep='https://idp.example.com/token?tenant=b')
+        self.assertNotEqual(ck5, ck6)
+        self.assertNotEqual(sk5, sk6)
+
 
 class TestTransportSecurity(unittest.TestCase):
     def test_require_secure_policy(self):
@@ -5594,6 +5657,66 @@ class TestPersistence(AuthTestBase):
         self.assertEqual(self.state.refresh_requests, 1)  # refreshed lock-free
         self.assertEqual(self.state.device_requests, 1)   # only the sign-in
         self.assertIn('token store', err.getvalue())
+
+    def test_coordinated_refresh_uses_in_memory_token_when_newer_than_disk(self):
+        # M4 / _refresh_under_lock: when a prior save FAILED, the in-memory
+        # refresh token is NEWER than the last-persisted one. A coordinated
+        # refresh must then refresh with the in-memory token and must NOT re-read
+        # the store and regress to the stale on-disk token (which, on a rotating
+        # IdP, may already be revoked). Exercises the
+        # `refresh_token != _last_persisted_refresh_token` branch.
+        store = _FakeStore()
+        clock = FakeClock()
+        auth = self.make_auth(token_store=store, clock=clock)
+        auth.token()                                   # sign in: in-mem & disk RT-1
+        self.assertEqual(store.saved.refresh_token, 'REFRESH-1')
+
+        # First refresh rotates to REFRESH-2, but the save FAILS — so in-memory is
+        # REFRESH-2 while the store and _last_persisted_refresh_token stay -1.
+        self.state.refresh_response = (200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'refresh_token': 'REFRESH-2', 'token_type': 'Bearer',
+            'expires_in': 3600, 'scope': 'openid groups'})
+        store.fail_save = True
+        clock.wall += 10_000                           # expire -> refresh
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(auth._tokens.refresh_token, 'REFRESH-2')        # in-mem
+        self.assertEqual(auth._last_persisted_refresh_token, 'REFRESH-1')  # save failed
+        self.assertEqual(store.saved.refresh_token, 'REFRESH-1')         # disk stale
+
+        # Second refresh: in-memory (-2) != last-persisted (-1), so the coordinated
+        # path skips the under-lock re-read and refreshes with the in-memory -2,
+        # NOT the stale disk -1.
+        store.fail_save = False
+        self.state.refresh_response = (200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'refresh_token': 'REFRESH-3', 'token_type': 'Bearer',
+            'expires_in': 3600, 'scope': 'openid groups'})
+        loads_before = store.loads
+        clock.wall += 10_000                           # expire again -> refresh
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(
+            self.state.refresh_forms[-1]['refresh_token'], 'REFRESH-2')
+        self.assertEqual(store.loads, loads_before)    # re-read skipped
+        self.assertEqual(auth._tokens.refresh_token, 'REFRESH-3')
+
+    def test_clear_in_lock_failure_is_non_fatal(self):
+        # M4 / clear(): the file-delete runs under the store's cross-process lock.
+        # If the LOCK BACKEND itself raises (a custom store), clear() must warn and
+        # carry on — the in-memory cache is still cleared — not propagate. The
+        # existing clear-failure test covers clear() raising; this covers in_lock
+        # raising (the lock backend), the other guarded site.
+        store = _FakeStore()
+        auth = self.make_auth(token_store=store)
+        auth.token()
+        store.fail_in_lock = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            auth.clear()                       # in_lock raises; must not propagate
+        self.assertIn('token store clear failed', err.getvalue())
+        self.assertIsNone(auth._tokens)        # in-memory cache cleared regardless
+        self.assertEqual(store.clears, 0)      # clear() never reached (lock failed)
 
 
 if __name__ == '__main__':

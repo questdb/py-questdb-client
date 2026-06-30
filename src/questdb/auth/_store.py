@@ -182,11 +182,18 @@ def _seconds_to_millis(value: Any) -> int:
 def _canonical_endpoint(url: str) -> str:
     """Canonicalise an endpoint URL for the cross-language store-key hash.
 
-    ``scheme://host:port/path`` with the scheme and host lower-cased, the port
-    always explicit (the device-flow default 443/80 when absent), and the parsed
-    path (defaulting to ``/``). A stable rendering that hashes to the same
-    :class:`TokenStoreKey` across processes and language clients sharing this
-    identity. Mirrors the Java client's ``canonicalEndpoint``.
+    ``scheme://host:port/path?query`` with the scheme and host lower-cased, the
+    port always explicit (the device-flow default 443/80 when absent), a trailing
+    slash stripped from the path, and the query preserved. A stable rendering that
+    hashes to the same :class:`TokenStoreKey` across processes and language
+    clients sharing this identity, and — crucially — that makes the SAME identity
+    *distinctions* as the in-memory :attr:`OidcDeviceAuth.cache_key`
+    (``_normalize_url`` + ``_normalize_scope``), so a token is never keyed one way
+    in memory and a different way on disk. Mirrors the Java client's
+    ``canonicalEndpoint``; keep the two in step (the on-disk hash is a
+    cross-language contract). For the common case — no trailing slash, no query —
+    this rendering is byte-for-byte unchanged, so cross-language sharing is
+    unaffected there.
     """
     parts, explicit_port = safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
@@ -200,8 +207,19 @@ def _canonical_endpoint(url: str) -> str:
         host = f'[{host}]'
     default_port = {'https': 443, 'http': 80}.get(scheme)
     port = explicit_port if explicit_port is not None else default_port
-    path = parts.path or '/'
-    return f'{scheme}://{host}:{port}{path}'
+    # Strip a trailing slash (keeping at least '/'), so '…/token' and '…/token/'
+    # are ONE identity — matching cache_key, which rstrip('/')s. Without this the
+    # disk key splits one identity across two files on a trailing-slash spelling
+    # difference, forcing a needless re-prompt after a restart.
+    path = (parts.path or '/').rstrip('/') or '/'
+    # Keep the query: a token endpoint that differs only by query string is a
+    # different credential-routing target, so it must hash to a DIFFERENT file —
+    # matching cache_key, which keeps the query. Dropping it (the old behaviour)
+    # collided two distinct identities onto one file; _parse_and_verify then
+    # compared only the query-stripped endpoint, so it couldn't tell them apart
+    # and could serve one identity's token to the other.
+    query = f'?{parts.query}' if parts.query else ''
+    return f'{scheme}://{host}:{port}{path}{query}'
 
 
 @dataclass(frozen=True)
@@ -228,11 +246,15 @@ class PersistedToken:
 class TokenStoreKey:
     """The non-secret identity a persisted token belongs to.
 
-    The client id, the canonicalised token and device-authorization endpoints,
-    the scope, the optional audience, and whether the server expects groups
-    encoded in the token. A :class:`TokenStore` keys its entries by this so a
-    token minted for one server / identity provider / scope / audience is never
-    served to a process configured for another.
+    The client id, the canonicalised token and device-authorization endpoints
+    (see :func:`_canonical_endpoint`), the order-normalised scope (the
+    space-joined sorted token set), the optional audience, and whether the server
+    expects groups encoded in the token. A :class:`TokenStore` keys its entries by
+    this so a token minted for one server / identity provider / scope / audience
+    is never served to a process configured for another. The endpoint and scope
+    fields must be passed already normalised — exactly as
+    :class:`~questdb.auth.OidcDeviceAuth` builds them — so a directly-constructed
+    key matches the same identity the auth object computes.
 
     :meth:`hash` is a stable lowercase-hex SHA-256 over a canonical,
     NUL-separated rendering of the fields — a file name (or opaque key) that is

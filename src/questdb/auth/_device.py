@@ -116,6 +116,21 @@ def _str_or_none(value: Any) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _normalize_scope(scope: Optional[str]) -> str:
+    """A scope string as its order-insensitive canonical form: the space-joined
+    sorted token set (``''`` when empty/None).
+
+    Two configs differing only in scope ORDER (``'openid groups'`` vs
+    ``'groups openid'``) are the SAME identity, so they must share one in-memory
+    cache entry AND one on-disk token-store file. Used by BOTH
+    :attr:`OidcDeviceAuth.cache_key` and the :class:`~questdb.auth.TokenStoreKey`
+    built in ``__init__``, so the two can't disagree on what "the same scope"
+    means (a disagreement would split one identity across two store files, or —
+    worse, in the other direction — serve one identity's token to another).
+    """
+    return ' '.join(sorted(scope.split())) if scope else ''
+
+
 def _int_or_default(value: Any, default: int) -> int:
     """
     ``int(value)`` for an untrusted numeric field (``expires_in`` / ``interval``),
@@ -269,6 +284,26 @@ def _has_only_token_chars(token: str) -> bool:
     passes this check.
     """
     return all(0x20 <= ord(c) <= 0x7e for c in token)
+
+
+def _safe_token_or_none(value: Any) -> Optional[str]:
+    """A wire-bound credential token (``access_token``/``id_token``) from an
+    untrusted IdP response as a printable-ASCII ``str``, else ``None``.
+
+    Like :func:`_str_or_none`, but ALSO drops a token carrying a control or
+    non-ASCII character. That token is put verbatim into an
+    ``Authorization: Bearer`` header or a PG-wire ``_sso`` password, where a
+    decoded CR/LF is a header-injection vector. The IdP is untrusted (hostile or
+    MITM'd), exactly like the persistence file, so the network path applies the
+    same gate the file path already does in :meth:`_tokenset_from_persisted`
+    (via :func:`_has_only_token_chars`). A dropped token reads as absent, so a
+    missing required kind then raises the clear terminal error (see
+    :meth:`_select`) rather than routing a tampered credential onto the wire.
+    """
+    token = value if isinstance(value, str) else None
+    if token is not None and not _has_only_token_chars(token):
+        return None
+    return token
 
 
 class OidcDeviceAuth:
@@ -446,7 +481,11 @@ class OidcDeviceAuth:
                 token_endpoint=_canonical_endpoint(self.config.token_endpoint),
                 device_authorization_endpoint=_canonical_endpoint(
                     self.config.device_authorization_endpoint),
-                scope=self.config.scope,
+                # Order-normalise the scope exactly as cache_key does, so the
+                # in-memory and on-disk identities can't disagree (see
+                # _normalize_scope); the endpoints are canonicalised the same way
+                # cache_key's _normalize_url renders them.
+                scope=_normalize_scope(self.config.scope),
                 audience=self.config.audience,
                 groups_in_token=self.config.groups_in_token)
         # Load the persisted entry at most once per instance (even if it yields
@@ -592,7 +631,7 @@ class OidcDeviceAuth:
         correcting, but at the cost of avoidable refreshes / re-prompts).
         """
         c = self.config
-        scope = ' '.join(sorted(c.scope.split())) if c.scope else ''
+        scope = _normalize_scope(c.scope)
         # Normalize the issuer and token endpoint alike (lower-case scheme/host,
         # drop a default port) and strip a trailing slash, so a discovered
         # "https://idp/token/" and an explicit "https://idp/token" — or a stray
@@ -1115,13 +1154,19 @@ class OidcDeviceAuth:
         # Cap a long (or hostile) IdP-stated lifetime so a cached token is
         # re-validated at least hourly (matches the Java client).
         expires_in = min(expires_in, _MAX_EXPIRES_IN)
-        # Coerce the credential fields to str-or-None up front: a non-string
-        # token from a buggy/hostile IdP must read as absent rather than be
-        # stored, re-sent on a refresh, or emitted as ``Bearer <non-str>`` — and
-        # the best-effort JWT decode below must not see a non-string. A missing
-        # required kind then raises the clear terminal error (see _select).
-        access_token = _str_or_none(body.get('access_token'))
-        id_token = _str_or_none(body.get('id_token'))
+        # Coerce the credential fields up front: a non-string token from a
+        # buggy/hostile IdP must read as absent rather than be stored, re-sent on
+        # a refresh, or emitted as ``Bearer <non-str>`` — and the best-effort JWT
+        # decode below must not see a non-string. The wire-bound access/id tokens
+        # additionally go through _safe_token_or_none, which also drops a token
+        # carrying a control/non-ASCII char (a header / _sso-password injection
+        # vector): the IdP is untrusted, so the network path applies the same
+        # screen the persistence path already does. A dropped required kind then
+        # raises the clear terminal error (see _select). The refresh token is only
+        # ever re-sent url-encoded to the IdP (never onto a header), so it keeps
+        # the plain str-or-None coercion, matching _tokenset_from_persisted.
+        access_token = _safe_token_or_none(body.get('access_token'))
+        id_token = _safe_token_or_none(body.get('id_token'))
         refresh_token = _str_or_none(body.get('refresh_token'))
         claims = (_decode_jwt_claims(id_token)
                   or _decode_jwt_claims(access_token))
