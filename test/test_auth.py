@@ -3883,6 +3883,74 @@ class TestTransportSecurity(unittest.TestCase):
             'watchdog never fired (C1 regression).')
         self.assertIsInstance(result.get('error'), OidcNetworkError)
 
+    def test_request_aborts_real_socket_head_dribble(self):
+        # Regression for M1 (the HEAD read), against the REAL socket stack. The
+        # body watchdog above is armed inside _read_body, which runs only after
+        # open() returns; open() itself reads the status line + headers via
+        # http.client begin(), whose _read_status()/readline() loops over socket
+        # reads until it sees a newline. A server that dribbles the STATUS LINE
+        # one byte at a time, never terminating it, keeps open() blocked for up to
+        # _MAXLINE (~hours) — the per-socket timeout resets on each byte and the
+        # body watchdog is not armed yet — hanging the calling thread (which holds
+        # the acquisition lock). request()'s head watchdog must shut the socket
+        # down at the deadline and surface a typed OidcNetworkError.
+        import socket
+        from questdb.auth import _http
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def serve():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(65536)  # consume the request line/headers
+                # Dribble the STATUS LINE one byte at a time, never sending its
+                # terminating CRLF, each well inside the per-socket timeout window
+                # so urllib's per-read timeout never fires and begin()'s
+                # _read_status() stays blocked in readline().
+                while not stop.is_set():
+                    try:
+                        conn.sendall(b'a')
+                    except OSError:
+                        break
+                    stop.wait(0.1)
+            finally:
+                conn.close()
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+
+        result = {}
+
+        def call():
+            try:
+                _http.request(
+                    'GET', f'http://127.0.0.1:{port}/x', timeout=1.0)
+                result['returned'] = True
+            except Exception as e:  # noqa: BLE001 - record for the assert below
+                result['error'] = e
+
+        t = threading.Thread(target=call, daemon=True)
+        t.start()
+        t.join(8.0)
+        hung = t.is_alive()            # capture before cleanup unblocks it
+        stop.set()
+        srv.close()
+        server_thread.join(2.0)
+
+        self.assertFalse(
+            hung,
+            'request() hung on a status-line dribble: the head-read watchdog '
+            'never fired (M1 regression — the response head read is unbounded).')
+        self.assertIsInstance(result.get('error'), OidcNetworkError)
+
     def test_bad_ca_bundle_raises_config_error(self):
         # A missing or invalid CA bundle path (explicit or via env) must surface
         # as OidcConfigError, not a raw FileNotFoundError / ssl.SSLError. See M1.

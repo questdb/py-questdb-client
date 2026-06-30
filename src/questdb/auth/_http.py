@@ -175,11 +175,109 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _opener(ctx: Optional[ssl.SSLContext]) -> urllib.request.OpenerDirector:
+class _DeadlineSocket:
+    """Holds the live connection socket so an overall-deadline watchdog can break
+    a *head* read (status line + headers) that dribbles past the deadline.
+
+    ``urllib``'s timeout is per-socket-read, and ``http.client``'s
+    ``begin()``/``_read_status`` loops ``readline()`` over socket reads — so a
+    peer feeding the status/header bytes one per timeout window keeps a single
+    ``open()`` blocked for up to ``_MAXLINE`` (~64k) * timeout *per line*, pinning
+    the calling thread (which holds the acquisition lock). :func:`_read_body`
+    already guards the *body* this way; this guards the phase inside ``open()``
+    (everything after the socket connects), which ``_read_body``'s watchdog —
+    armed only once ``open()`` returns — cannot reach.
+
+    The socket is shut down at most once, and never after :meth:`release` (called
+    when ``open()`` returns or raises), so a timer that fires in the instant the
+    head read finishes can't tear down the healthy socket the body read is about
+    to use.
+    """
+
+    __slots__ = ('_sock', '_done', '_lock')
+
+    def __init__(self) -> None:
+        self._sock: Any = None
+        self._done = False
+        self._lock = threading.Lock()
+
+    def attach(self, sock: Any) -> None:
+        # Called from the opener's connection once it has connected. Ignored once
+        # the head phase is over, so a late connect can't re-arm a released guard.
+        with self._lock:
+            if not self._done:
+                self._sock = sock
+
+    def shutdown(self) -> None:
+        # The watchdog action. Shut the socket down (inside the lock, so it is
+        # mutually exclusive with release) to break a head read blocked past the
+        # deadline; a no-op once released.
+        with self._lock:
+            if self._done or self._sock is None:
+                return
+            _shutdown_socket(self._sock)
+
+    def release(self) -> None:
+        # The head read is over; stop guarding so the body read's own watchdog
+        # owns the socket without interference.
+        with self._lock:
+            self._done = True
+
+
+def _capturing_connection(base: type, watch: _DeadlineSocket) -> type:
+    # A connection class that hands its socket to `watch` the moment it connects,
+    # so the head-read watchdog (armed in `request`) can break a stalled status/
+    # header read. Built per request because `watch` is per request.
+    class _CapturingConnection(base):  # type: ignore[valid-type,misc]
+        def connect(self):
+            super().connect()
+            watch.attach(self.sock)
+
+    return _CapturingConnection
+
+
+class _CaptureMixin:
+    """Mixin for HTTP(S) handlers that swaps in a socket-capturing connection.
+
+    It overrides only ``do_open`` to wrap whatever connection class the stdlib
+    handler hands it, so the version-specific ``http_open``/``https_open`` logic
+    (TLS context / ``check_hostname`` handling, which differs across CPython
+    releases) runs unchanged — this layer only records the connection's socket
+    for the head-read watchdog, never touching TLS verification.
+    """
+
+    def __init__(self, watch: '_DeadlineSocket', *args, **kwargs):
+        self._watch = watch
+        super().__init__(*args, **kwargs)
+
+    def do_open(self, http_class, req, **kwargs):
+        return super().do_open(
+            _capturing_connection(http_class, self._watch), req, **kwargs)
+
+
+class _CapturingHTTPHandler(_CaptureMixin, urllib.request.HTTPHandler):
+    """``HTTPHandler`` whose connection captures its socket for the watchdog."""
+
+
+class _CapturingHTTPSHandler(_CaptureMixin, urllib.request.HTTPSHandler):
+    """``HTTPSHandler`` whose connection captures its socket for the watchdog."""
+
+
+def _opener(
+        ctx: Optional[ssl.SSLContext],
+        watch: Optional['_DeadlineSocket'] = None,
+) -> urllib.request.OpenerDirector:
     # build_opener keeps the default ProxyHandler (reads *_PROXY env vars) while
-    # letting us pin our own TLS context and forbid redirects.
+    # letting us pin our own TLS context and forbid redirects. When `watch` is
+    # given, swap in socket-capturing HTTP(S) handlers so the head-read watchdog
+    # can reach the connection socket; the capturing HTTPS handler forwards the
+    # same `ctx` (None => stdlib default context), so TLS verification is
+    # unchanged on either path.
     handlers: list = [_NoRedirect()]
-    if ctx is not None:
+    if watch is not None:
+        handlers.append(_CapturingHTTPHandler(watch))
+        handlers.append(_CapturingHTTPSHandler(watch, context=ctx))
+    elif ctx is not None:
         handlers.append(urllib.request.HTTPSHandler(context=ctx))
     return urllib.request.build_opener(*handlers)
 
@@ -334,7 +432,29 @@ def request(
             req_headers.update(headers)
         req = urllib.request.Request(
             url, data=body, headers=req_headers, method=method.upper())
-        with _opener(ctx).open(req, timeout=timeout) as resp:
+        # Bound the response HEAD read (status line + headers) by the same
+        # wall-clock as the body. urllib's timeout is per-socket-read and
+        # http.client's begin() loops readline() over reads, so without this a
+        # peer dribbling the status/header bytes one per timeout window keeps
+        # open() blocked for ~_MAXLINE * timeout per line — pinning this thread,
+        # which holds the acquisition lock. The capturing opener hands the
+        # connection socket to `watch` as soon as it connects; the watchdog shuts
+        # it down at the deadline to break such a stall (mapped to a typed
+        # OidcNetworkError by the handlers below). _read_body installs its own
+        # watchdog for the body that follows.
+        watch = _DeadlineSocket()
+        head_timer = threading.Timer(timeout, watch.shutdown)
+        head_timer.daemon = True
+        head_timer.start()
+        try:
+            resp = _opener(ctx, watch).open(req, timeout=timeout)
+        finally:
+            # Head read finished (returned or raised): stop guarding so the body
+            # read's own watchdog owns the socket, and a late timer fire can't
+            # tear down the healthy socket.
+            watch.release()
+            head_timer.cancel()
+        with resp:
             return HttpResponse(
                 getattr(resp, 'status', resp.getcode()),
                 _read_body(resp, max_bytes=_MAX_RESPONSE_BYTES,
