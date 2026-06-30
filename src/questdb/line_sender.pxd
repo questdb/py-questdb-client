@@ -70,7 +70,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_failover_would_duplicate,
         line_sender_error_schema_drift,
         line_sender_error_no_schema,
-        line_sender_error_arrow_export
+        line_sender_error_arrow_export,
+        line_sender_error_batch_too_large
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,

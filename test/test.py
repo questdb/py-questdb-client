@@ -188,6 +188,12 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QuestDBErrorCode.FailoverWouldDuplicate.value,
             qi.QuestDBErrorCode.BadDataFrame.value)
 
+    def test_default_max_chunk_rows_matches_core_literal(self):
+        # Pinned to the Rust core's DEFAULT_MAX_CHUNK_ROWS. Both sides hardcode
+        # the literal (the C ABI does not expose it), so this guards the Python
+        # side from silently drifting; the core has a matching compile-time pin.
+        self.assertEqual(qi.DEFAULT_MAX_CHUNK_ROWS, 16384)
+
     def test_unsupported_dataframe_shape_error_carries_failures(self):
         err = qi.UnsupportedDataFrameShapeError(
             'unsupported frame',
@@ -406,22 +412,24 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'max_buf_size=1000000;')
             client = qi.Client.from_conf(conf)
             try:
-                with self.assertRaisesRegex(
-                        qi.QuestDBError,
-                        'exceeds max(_buf_size|imum configured allowed size)'):
+                with self.assertRaises(qi.QuestDBError) as ctx:
                     client.dataframe(df, table_name='trades', at='ts')
             finally:
                 client.close()
 
             stats = server.snapshot()
 
+        # The 1.2 MB single row is irreducible: the column sender splits the
+        # oversized final chunk down to one row and still cannot fit it under
+        # the 1 MB cap, so it surfaces batch_too_large (asserted by code, not
+        # message text, to stay robust to wording changes).
+        self.assertEqual(ctx.exception.code, qi.QuestDBErrorCode.BatchTooLarge)
+        # The server saw no errors, and the earlier small-row chunks were
+        # synced before the late failure: at least the three full chunks
+        # reached the wire (splitting the final chunk may add more sub-frames,
+        # so this is a lower bound rather than an exact count).
         self.assertEqual(stats['errors'], [])
-        # Three data chunks fit before the oversized final chunk fails
-        # locally. In store-and-forward mode each flush sends a non-deferred
-        # (already-committed) QWP1 frame, and the closing sync only waits for
-        # ACKs without emitting a separate commit frame, so three chunks ==
-        # three QWP1 frames.
-        self.assertEqual(stats['qwp1_frames'], 3)
+        self.assertGreaterEqual(stats['qwp1_frames'], 3)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

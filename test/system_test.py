@@ -4000,6 +4000,67 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             got.column('price').to_pylist(),
             [value * 0.25 for value in expected_seq])
 
+    def test_dataframe_oversize_batch_splits_and_lands_all_rows(self):
+        """A batch larger than the negotiated cap is split by the column
+        sender into multiple cap-sized frames; every row must still land. A
+        tiny ``max_buf_size`` forces the split without a huge frame."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} (ts TIMESTAMP, seq LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        rows = 5000  # ~16 B/row -> ~80 KB, vs the 4096 B cap -> many frames
+        ts = pa.array(
+            [1_700_000_000_000_000 + i * 1_000_000 for i in range(rows)],
+            type=pa.timestamp('us', tz='UTC'))
+        seq = pa.array(list(range(rows)), type=pa.int64())
+        df = pd.DataFrame({
+            'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
+            'seq': pd.array(seq, dtype=pd.ArrowDtype(seq.type)),
+        })
+        conf = (f'qwpws::addr={self.qdb_plain.host}:'
+                f'{self.qdb_plain.http_server_port};max_buf_size=4096;')
+        with qi.Client.from_conf(conf) as client:
+            # One logical batch (max_rows_per_batch == rows) forces the core to
+            # split it, rather than the Python chunker pre-splitting by rows.
+            client.dataframe(df, table_name=table, at='ts',
+                             max_rows_per_batch=rows)
+        self.qdb_plain.retry_check_table(table, min_rows=rows)
+        with qi.Client.from_conf(conf) as client:
+            got = client.query(
+                f'SELECT count(), min(seq), max(seq) FROM {table}').to_arrow()
+        self.assertEqual(got.column(0).to_pylist(), [rows])
+        self.assertEqual(got.column(1).to_pylist(), [0])
+        self.assertEqual(got.column(2).to_pylist(), [rows - 1])
+
+    def test_dataframe_single_oversize_value_raises_batch_too_large(self):
+        """A single value larger than the cap is irreducible: the split
+        bottoms out and surfaces batch_too_large rather than silently
+        dropping data."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} (ts TIMESTAMP, v VARCHAR) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        big = 'x' * 8192  # one value > the 4096 cap
+        ts = pa.array(
+            [1_700_000_000_000_000, 1_700_000_001_000_000],
+            type=pa.timestamp('us', tz='UTC'))
+        v = pa.array(['small', big], type=pa.string())
+        df = pd.DataFrame({
+            'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
+            'v': pd.array(v, dtype=pd.ArrowDtype(v.type)),
+        })
+        conf = (f'qwpws::addr={self.qdb_plain.host}:'
+                f'{self.qdb_plain.http_server_port};max_buf_size=4096;')
+        with qi.Client.from_conf(conf) as client:
+            with self.assertRaises(qi.QuestDBError) as ctx:
+                client.dataframe(df, table_name=table, at='ts')
+        self.assertEqual(
+            ctx.exception.code, qi.QuestDBErrorCode.BatchTooLarge)
+
     def test_arrow_explicit_symbol_list_auto_creates_symbol_column(self):
         import pyarrow as pa
         self._require_qwp_ws()

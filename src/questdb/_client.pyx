@@ -122,6 +122,12 @@ cdef uint64_t _dataframe_columnar_flush_retry_syncs = 0
 
 cdef size_t _QWP_MAX_DEFERRED_ARROW_FRAMES = 100
 
+# Default rows per columnar batch. Only a pipelining-granularity default: the
+# column sender splits any frame exceeding the negotiated batch cap regardless
+# of this size. Mirrors the Rust core's `DEFAULT_MAX_CHUNK_ROWS`; both sides
+# pin the value in tests so it cannot drift. Keep them in sync when changing it.
+DEFAULT_MAX_CHUNK_ROWS = 16384
+
 
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
@@ -188,6 +194,7 @@ class QuestDBErrorCode(Enum):
     SchemaDrift = line_sender_error_schema_drift
     NoSchema = line_sender_error_no_schema
     ArrowExport = line_sender_error_arrow_export
+    BatchTooLarge = line_sender_error_batch_too_large
     # Python-only sentinel with no backing FFI code: raised by the Cython
     # DataFrame-shape validation path. Sits in a reserved high band, disjoint
     # from the contiguous FFI code space, so an appended FFI variant can never
@@ -315,6 +322,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.NoSchema
     elif code == line_sender_error_arrow_export:
         return QuestDBErrorCode.ArrowExport
+    elif code == line_sender_error_batch_too_large:
+        return QuestDBErrorCode.BatchTooLarge
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -5178,7 +5187,16 @@ cdef void_int _capsule_consume_stream_with_hint(
             deferred_since_sync, committed_prefix)
     except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
-            if can_slice:
+            if exc.code == QuestDBErrorCode.BatchTooLarge:
+                # The core already split the chunk as far as it can: a single
+                # row (table schema plus one row's values) still exceeds the
+                # server's per-batch cap, so a smaller batch cannot help.
+                hint = (
+                    'a single row exceeds the server per-batch cap '
+                    '(max_buf_size / the server X-QWP-Max-Batch-Size); reduce '
+                    'the size of individual values or raise the cap. '
+                    '`max_rows_per_batch` does not bound a single row.')
+            elif can_slice:
                 hint = (
                     f'reduce `max_rows_per_batch` (current: '
                     f'{max_rows_per_batch}) and retry.')
@@ -5200,6 +5218,10 @@ cdef bint _is_batch_too_large_error(object exc):
     cdef str msg
     if not isinstance(exc, QuestDBError):
         return False
+    if exc.code == QuestDBErrorCode.BatchTooLarge:
+        return True
+    # Fallback for encoder-level "too large" errors that carry no dedicated
+    # code (MAX_CHUNK_ROWS row-count overflow, an oversize single value).
     msg = str(exc).lower()
     return (
         ('row_count' in msg and ('exceeds' in msg or 'too large' in msg))
@@ -5307,7 +5329,7 @@ cdef class Client:
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[int, str],
-            max_rows_per_batch: int = 16384,
+            max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
             schema_overrides: Optional[Dict[str, object]] = None):
         """
         Ingest a dataframe through the pooled columnar QWP path.
