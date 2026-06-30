@@ -38,7 +38,12 @@ from dataclasses import replace
 from typing import Any, Dict, Optional
 
 from ._cache import MemoryCache, TokenSet
-from ._discovery import OidcConfig, resolve_config, validate_endpoint_origins
+from ._discovery import (
+    OidcConfig,
+    _reject_confusable_authority,
+    resolve_config,
+    validate_endpoint_origins,
+)
 from ._errors import (
     OidcConfigError,
     OidcDeviceFlowError,
@@ -435,6 +440,17 @@ class OidcDeviceAuth:
         validate_endpoint_origins(
             self.config.token_endpoint,
             self.config.device_authorization_endpoint)
+        # Vet the issuer authority here too. resolve_config does this on the
+        # from_questdb path (before it drives discovery); doing it in __init__ as
+        # well means the DIRECT constructor also fails fast at construction — like
+        # the endpoints do — for a confusable or malformed issuer (e.g. a bad
+        # port), instead of raising lazily from `cache_key` (which parses the
+        # issuer) on the first token() call. On the direct path the issuer feeds
+        # only cache bucketing, never credential routing, so this is fail-fast
+        # hygiene rather than a routing fix; it is idempotent with the
+        # from_questdb check.
+        if self.config.issuer:
+            _reject_confusable_authority(self.config.issuer, label='issuer')
 
         # `insecure` permits plaintext http only to QuestDB (e.g. local dev).
         # _idp_post always holds the IdP to https (or loopback http), so the

@@ -309,17 +309,36 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
 # format codepoint is covered automatically, rather than an enumerated regex
 # that silently misses additions: control (Cc), format (Cf: bidi / zero-width /
 # soft hyphen / tag chars / the deprecated U+206x), unassigned (Cn),
-# private-use (Co), surrogates (Cs) and line/paragraph separators (Zl/Zp).
-# The ordinary ASCII space (U+0020, itself category Zs) and combining marks
-# (Mn, e.g. accents) are kept so a legitimate identity still renders; every
-# OTHER space separator (NBSP U+00A0, ideographic space U+3000, ...) is folded
-# to a plain space below, since an invisible-as-space char is a known phishing
-# primitive (it can hide trailing text in a user_code / identity / error).
-_STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Zl', 'Zp'})
-# Invisible characters Unicode classifies as letters (category Lo), so the rule
-# above won't catch them, but they render as nothing and are used to hide/spoof
-# text: the Hangul fillers. Stripped explicitly.
-_STRIP_EXTRA = frozenset('\u115f\u1160\u3164\uffa0')
+# private-use (Co), surrogates (Cs), line/paragraph separators (Zl/Zp), and
+# ENCLOSING combining marks (Me, e.g. U+20E0 / U+0489) — which overlay the
+# preceding glyph (a circle/slash/keycap) and are never part of a legitimate
+# identity / URL / user_code.
+# The ordinary ASCII space (U+0020, itself category Zs), non-enclosing combining
+# marks (Mn accents — capped below — and Mc spacing marks, e.g. Indic vowel
+# signs) are kept so a legitimate identity still renders; every OTHER space
+# separator (NBSP U+00A0, ideographic space U+3000, ...) is folded to a plain
+# space below, since an invisible-as-space char is a known phishing primitive
+# (it can hide trailing text in a user_code / identity / error).
+_STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Me', 'Zl', 'Zp'})
+# Invisible characters the category rule above does NOT catch, stripped
+# explicitly:
+#  - the Hangul fillers (category Lo) — render as nothing, used to hide/spoof;
+#  - variation selectors VS1–VS16 (U+FE00–U+FE0F) and the supplement
+#    (U+E0100–U+E01EF) — category Mn (so the "keep accents" rule below would keep
+#    them), invisible, and able to carry hidden payload through a user_code / URL
+#    / identity or flip an adjacent glyph's text/emoji presentation.
+_STRIP_EXTRA = frozenset(
+    '\u115f\u1160\u3164\uffa0'
+    + ''.join(chr(c) for c in range(0xFE00, 0xFE10))
+    + ''.join(chr(c) for c in range(0xE0100, 0xE01F0)))
+
+# Cap consecutive non-spacing marks (category Mn) kept on one base character.
+# Mn marks stack vertically on the preceding glyph; a long run is a "Zalgo"
+# overrun that smears across adjacent prompt lines and can obscure the real
+# sign-in URL / code. A legitimate accented identity never needs more than a
+# couple (Hebrew nikud+cantillation, decomposed Vietnamese ≈ 2), so this is
+# generous for real text while neutralising a runaway stack.
+_MAX_COMBINING_RUN = 4
 
 
 def _strip_control(text: Optional[str]) -> str:
@@ -342,12 +361,28 @@ def _strip_control(text: Optional[str]) -> str:
     if not isinstance(text, str):
         text = str(text)
     out = []
+    combining_run = 0
     for ch in text:
         if ch in _STRIP_EXTRA:
+            # Stripped chars are transparent to the combining-run count below, so
+            # an attacker can't reset the cap by interleaving zero-width /
+            # variation-selector chars between stacked marks.
             continue
         category = unicodedata.category(ch)
         if category in _STRIP_CATEGORIES:
             continue
+        if category == 'Mn':
+            # Non-spacing marks stack on the preceding base; a long run is a
+            # "Zalgo" overrun that smears across adjacent prompt lines. Keep a
+            # short legitimate run (accents / diacritics), drop the overflow.
+            # (Enclosing marks Me are stripped above; variation selectors are in
+            # _STRIP_EXTRA — neither reaches here.)
+            combining_run += 1
+            if combining_run > _MAX_COMBINING_RUN:
+                continue
+            out.append(ch)
+            continue
+        combining_run = 0
         # Fold an exotic space separator (NBSP, ideographic space, ...) to a
         # plain ASCII space: it renders invisible-as-space and can hide trailing
         # text, but the ordinary U+0020 of a legitimate identity must survive.

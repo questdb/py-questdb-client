@@ -174,9 +174,32 @@ def _seconds_to_millis(value: Any) -> int:
         seconds = float(value)
     except (OverflowError, ValueError):
         return 0  # e.g. an int too large to convert to float
-    if not math.isfinite(seconds):
+    scaled = seconds * 1000.0
+    # Check finiteness AFTER the *1000 scale, not before: NaN/±Inf (json.loads
+    # accepts bare NaN/Infinity) AND a finite-but-huge value that overflows to inf
+    # only once scaled (e.g. 1e306 * 1000) both land here. Checking `seconds`
+    # alone would let the latter through, and int(round(inf)) then raises
+    # OverflowError — escaping the store's OidcError contract (PersistedToken is
+    # public, so a caller can pass such a value straight to save()).
+    if not math.isfinite(scaled):
         return 0
-    return int(round(seconds * 1000))
+    return int(round(scaled))
+
+
+def _is_finite_number(value: Any) -> bool:
+    """True if ``value`` is a finite real number (``int``/``float``).
+
+    A non-numeric type, ``NaN``, ``±Inf``, or an ``int`` too large to convert to
+    ``float`` (``math.isfinite`` raises ``OverflowError`` on it) all read as
+    ``False``, so a caller can reject a non-finite duration before it reaches the
+    lock-timing math. Mirrors ``_device._validate_positive_number``'s handling.
+    """
+    if not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, ValueError):
+        return False
 
 
 def _canonical_endpoint(url: str) -> str:
@@ -410,16 +433,24 @@ class FileTokenStore(TokenStore):
         """
         if not directory:
             raise OidcConfigError('the token store directory is required')
-        if not (lock_acquire_budget > 0):
+        # Require finite, positive timings. inf passes the bare `> 0` /
+        # `> _MIN_LOCK_STALE` comparisons — and an infinite staleness window means
+        # a crashed holder's lock is NEVER judged stale, so its identity degrades
+        # to lock-free coordination forever — so reject non-finite up front
+        # (nan already fails the comparisons, since `nan > x` is False). The
+        # finiteness check is first so it short-circuits before comparing a huge
+        # int (whose `math.isfinite` would itself raise).
+        if not (_is_finite_number(lock_acquire_budget) and lock_acquire_budget > 0):
             raise OidcConfigError(
-                'the token store lock_acquire_budget must be positive')
+                'the token store lock_acquire_budget must be a positive, finite '
+                'number of seconds')
         # A staleness window at or below the worst-case live hold makes a
         # freshly acquired lock look abandoned, so acquirers would steal each
-        # other's LIVE locks. Require it to exceed _MIN_LOCK_STALE (and so,
-        # transitively, to be positive).
-        if not (lock_stale > _MIN_LOCK_STALE):
+        # other's LIVE locks. Require it finite and above _MIN_LOCK_STALE (and so,
+        # transitively, positive).
+        if not (_is_finite_number(lock_stale) and lock_stale > _MIN_LOCK_STALE):
             raise OidcConfigError(
-                'the token store lock_stale must exceed '
+                'the token store lock_stale must be a finite number above '
                 f'{_MIN_LOCK_STALE:g} seconds (the worst-case time a live '
                 'holder can hold the lock during a refresh); a shorter window '
                 "would let a peer steal a live holder's lock mid-refresh.")

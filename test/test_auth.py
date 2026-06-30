@@ -3354,6 +3354,20 @@ class TestEndpointValidation(unittest.TestCase):
                 device_authorization_endpoint='https://idp.good/device',
                 issuer='https://idp.good@attacker.evil')
 
+    def test_issuer_validated_in_direct_constructor(self):
+        # The DIRECT OidcDeviceAuth(...) constructor — not only from_questdb /
+        # resolve_config — must vet the issuer authority, so a confusable or
+        # malformed issuer fails fast at construction (like the endpoints) instead
+        # of lazily from cache_key on the first token() call.
+        for bad in ('https://idp.good@attacker.evil',     # userinfo confusable
+                    'https://idp.example:99999999999'):    # malformed port
+            with self.assertRaises(OidcConfigError):
+                OidcDeviceAuth(
+                    client_id='c',
+                    token_endpoint='https://idp.good/token',
+                    device_authorization_endpoint='https://idp.good/device',
+                    scope='openid', issuer=bad)
+
     def test_endpoint_path_under_issuer(self):
         # M1: segment-aware path containment used to isolate path-based realms.
         from questdb.auth._discovery import _endpoint_path_under_issuer as under
@@ -4541,7 +4555,11 @@ class TestRendererSecurity(unittest.TestCase):
                    # format chars, the Tags block, unassigned code points,
                    # Arabic format marks and the other invisible Hangul fillers:
                    0x206a, 0x206f, 0x2065, 0xe0001, 0xe007f, 0x0600,
-                   0x1160, 0x3164, 0xffa0):
+                   0x1160, 0x3164, 0xffa0,
+                   # variation selectors (category Mn, invisible) and enclosing
+                   # combining marks (category Me, which overlay the preceding
+                   # glyph) — neither belongs in an identity / URL / user_code:
+                   0xfe0e, 0xfe0f, 0xe0100, 0x20e0, 0x0489):
             self.assertEqual(_strip_control('a' + chr(cp) + 'b'), 'ab',
                              f'U+{cp:04X} not stripped')
         # Legitimate text (incl. accents / CJK / printable ASCII) is preserved.
@@ -4551,6 +4569,24 @@ class TestRendererSecurity(unittest.TestCase):
             'verification_uri': 'https://idp.example.com/' + chr(0x202e)})
         self.assertNotIn(chr(0x202e), text)
         self.assertIn('idp.example.com', text)
+
+    def test_strip_control_caps_combining_run(self):
+        # A "Zalgo" stack — many non-spacing marks (Mn) on one base — smears over
+        # adjacent prompt lines and can obscure the sign-in URL/code. _strip_control
+        # keeps a short legitimate run and drops the overflow, while a normally
+        # accented identity (a mark or two) is preserved untouched.
+        from questdb.auth._render import _strip_control, _MAX_COMBINING_RUN
+        acute = chr(0x0301)  # COMBINING ACUTE ACCENT (category Mn)
+        self.assertEqual(
+            _strip_control('a' + acute * 50 + 'b'),
+            'a' + acute * _MAX_COMBINING_RUN + 'b')
+        # Interleaving zero-width chars must NOT reset the cap (a stripped char is
+        # transparent to the run), so the overflow is still dropped.
+        out = _strip_control('a' + (acute + chr(0x200b)) * 50 + 'b')
+        self.assertEqual(out.count(acute), _MAX_COMBINING_RUN)
+        # A legitimately accented identity is untouched.
+        self.assertEqual(_strip_control('e' + acute), 'e' + acute)
+        self.assertEqual(_strip_control('café 北京'), 'café 北京')
 
     def test_strip_control_folds_exotic_whitespace_to_ascii_space(self):
         # An invisible-as-space separator (NBSP, ideographic space, ...) is a
@@ -4971,6 +5007,13 @@ class TestFileTokenStore(unittest.TestCase):
         with self.assertRaises(OidcConfigError):
             FileTokenStore(self.dir, lock_stale=_MIN_LOCK_STALE)
         FileTokenStore(self.dir, lock_stale=_MIN_LOCK_STALE + 1)  # ok
+        # Non-finite timings slip the bare `> 0` / `> _MIN_LOCK_STALE` comparisons
+        # (inf > x is True) — and an infinite stale window means a crashed
+        # holder's lock is never reclaimed — so they must be rejected too.
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore(self.dir, lock_acquire_budget=float('inf'))
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore(self.dir, lock_stale=float('inf'))
 
     def test_at_default_location_honours_env(self):
         with mock.patch.dict(os.environ, {TOKEN_STORE_DIR_ENV: self.dir}):
@@ -5214,6 +5257,9 @@ class TestFileTokenStore(unittest.TestCase):
         self.assertEqual(_seconds_to_millis(float('inf')), 0)
         self.assertEqual(_seconds_to_millis(float('-inf')), 0)
         self.assertEqual(_seconds_to_millis(float('nan')), 0)
+        # Finite, but 1e306 * 1000 overflows to inf: the finiteness check must run
+        # AFTER the scale, else int(round(inf)) raises a raw OverflowError.
+        self.assertEqual(_seconds_to_millis(1e306), 0)
         self.assertEqual(_seconds_to_millis('x'), 0)
         self.assertEqual(_seconds_to_millis(True), 0)
 
