@@ -4013,14 +4013,15 @@ cdef bint _dataframe_columnar_force_drop_after_error(
         bint sync_attempted) noexcept:
     # A flush leaves deferred frames the next borrower would commit unless a
     # clean sync confirmed them, so the connection is only reusable when no
-    # flush succeeded (drop solely on a latched terminal state) or when a sync
-    # then succeeds. A transient failover does not latch `must_close`, so the
-    # decision cannot key on it alone.
+    # flush succeeded or when a sync then succeeds. When no flush succeeded we
+    # left nothing deferred and can return normally: the FFI return path itself
+    # closes (rather than recycles) a conn that latched a terminal transport or
+    # protocol error, so we don't need to force-drop those here.
     if conn == NULL:
         return False
     if not flushed:
-        return sf_column_sender_must_close(conn)
-    if not sync_attempted and not sf_column_sender_must_close(conn):
+        return False
+    if not sync_attempted:
         try:
             _dataframe_columnar_sync(conn)
             return False

@@ -756,10 +756,6 @@ cdef extern from "questdb/ingress/column_sender.h":
         questdb_db* db
         ) noexcept nogil
 
-    bint sf_column_sender_must_close(
-        const sf_column_sender* conn
-        ) noexcept nogil
-
     column_sender_chunk* column_sender_chunk_new(
         const char* table_name,
         size_t table_name_len,
