@@ -2754,6 +2754,39 @@ class TestConcurrency(AuthTestBase):
         self.assertEqual(self.state.refresh_requests, 0)
         self.assertEqual(self.state.device_requests, 0)
 
+    def test_promoted_cache_token_syncs_last_persisted_marker(self):
+        # m1: adopting a fresh token from the shared cache (a peer refreshed and
+        # ROTATED the refresh token) must also advance this instance's
+        # _last_persisted_refresh_token marker, exactly as _adopt does for a disk
+        # load. Otherwise a later coordinated refresh reads the stale marker: its
+        # `refresh_token == _last_persisted_refresh_token` gate wrongly concludes
+        # "our save failed, in-memory is newer than disk", skips the token-store
+        # re-read, and refreshes the peer-rotated (now revoked) token — forcing a
+        # needless re-prompt while the peer's valid refresh token sits on disk.
+        clock = FakeClock()
+        a = self.make_auth(clock=clock)
+        b = self.make_auth(clock=clock)
+        self.assertEqual(a.cache_key, b.cache_key)
+        now = clock.now()
+        # a last saw 'r-old' as persisted (e.g. from its own earlier sign-in) and
+        # now holds a stale local token still carrying it:
+        a._tokens = TokenSet(
+            access_token='old', id_token='old-id', refresh_token='r-old',
+            expires_at=now - 10)
+        a._last_persisted_refresh_token = 'r-old'
+        # b refreshed and rotated the refresh token into the shared cache:
+        b._cache.store(b.cache_key, TokenSet(
+            access_token='fresh-access', id_token=ID_TOKEN,
+            refresh_token='r-new', issued_at=now, expires_at=now + 3600))
+        # a.token() promotes the fresh cached token (no refresh / sign-in)...
+        self.assertEqual(a.token(), ID_TOKEN)
+        self.assertEqual(self.state.refresh_requests, 0)
+        self.assertEqual(self.state.device_requests, 0)
+        # ...and the persisted marker now tracks the ADOPTED refresh token, so a
+        # later _refresh_under_lock re-reads the store instead of replaying the
+        # revoked 'r-old'.
+        self.assertEqual(a._last_persisted_refresh_token, 'r-new')
+
 
 class TestAdapters(unittest.TestCase):
     """PG-wire connection adapters: tested via injected fake modules (the real

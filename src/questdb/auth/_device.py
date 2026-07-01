@@ -925,6 +925,18 @@ class OidcDeviceAuth:
                             or (cached.is_valid(self._now())
                                 and self._has_required_token(cached))):
                         self._tokens = cached
+                        # Adopting a token from the shared cache must also move the
+                        # "last persisted" marker, exactly as _adopt does for a disk
+                        # load: the shared cache and the token store are written
+                        # together by _store, so a cache token is believed to be on
+                        # disk. Without this, _refresh_under_lock's
+                        # `refresh_token == _last_persisted_refresh_token` gate would
+                        # misread this adopted (peer-rotated) token as "newer than
+                        # disk, our save failed" and skip the store re-read — then
+                        # refresh a token a peer has already rotated away (revoked)
+                        # and re-prompt, while the peer's valid refresh token sits
+                        # unused on disk.
+                        self._last_persisted_refresh_token = cached.refresh_token
                     tokens = self._valid_cached()
                     if tokens is not None:
                         return tokens
