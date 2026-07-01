@@ -1165,7 +1165,13 @@ class TestDeviceFlow(AuthTestBase):
                 # bare OverflowError, and a too-large int does the same; both
                 # must raise the typed error up front, not escape from urllib.
                 {'timeout': float('inf')}, {'timeout': float('-inf')},
-                {'timeout': 10 ** 1000}, {'default_interval': 10 ** 1000}):
+                {'timeout': 10 ** 1000}, {'default_interval': 10 ** 1000},
+                # An int with >4300 digits: the finite-check rejects it, but the
+                # error message must not repr() it — repr() on such an int itself
+                # raises ValueError (CPython's int->str limit), which would escape
+                # the typed-error contract. 10**1000 above is only 1001 digits,
+                # UNDER the limit, so it does not exercise this; 10**5000 does.
+                {'timeout': 10 ** 5000}, {'default_interval': 10 ** 5000}):
             with self.assertRaises(OidcConfigError):
                 OidcDeviceAuth(**{**good, **bad})
         # A float interval/timeout is fine (clamped / passed to the socket).
@@ -2892,6 +2898,47 @@ class TestConcurrency(AuthTestBase):
         # ...and the persisted marker now tracks the ADOPTED refresh token, so a
         # later _refresh_under_lock re-reads the store instead of replaying the
         # revoked 'r-old'.
+        self.assertEqual(a._last_persisted_refresh_token, 'r-new')
+
+    def test_peer_token_adopted_after_failed_refresh_avoids_reprompt(self):
+        # M2: OUR refresh_token is proven useless (rejected), but a peer instance
+        # sharing the process-global cache stored a VALID token for this identity
+        # while our refresh was in flight. _acquire must adopt and return that
+        # peer token rather than evict it and run a needless interactive device
+        # flow. (Before the fix _acquire dropped straight to the device flow,
+        # evicting the peer's fresh token and re-prompting the user.)
+        clock = FakeClock()
+        a = self.make_auth(clock=clock)
+        b = self.make_auth(clock=clock)
+        self.assertEqual(a.cache_key, b.cache_key)
+        now = clock.now()
+        # a holds a stale local token; the shared cache is empty, so a proceeds
+        # past the _obtain_tokens promotion into _acquire, where its refresh runs.
+        a._tokens = TokenSet(
+            access_token='old', id_token='old-id', refresh_token='r-old',
+            expires_at=now - 10)
+        peer_tok = TokenSet(
+            access_token='peer-access', id_token=ID_TOKEN,
+            refresh_token='r-new', issued_at=now, expires_at=now + 3600)
+
+        # Model the race deterministically: a's coordinated refresh fails (our
+        # token is rejected), and while it is "in flight" a peer stores a valid
+        # token into the shared cache.
+        def failed_refresh(tokens, generation):
+            b._cache.store(b.cache_key, peer_tok)
+            return None
+
+        a._try_refresh_coordinated = failed_refresh
+        self.assertEqual(a.token(), ID_TOKEN)
+        # No interactive device flow ran: the peer token was adopted, not evicted.
+        self.assertEqual(self.state.device_requests, 0)
+        # The peer token remains in the shared cache (a did not evict it).
+        cached = a._cache.load(a.cache_key)
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.id_token, ID_TOKEN)
+        self.assertEqual(cached.refresh_token, 'r-new')
+        # The adopted refresh token is tracked so a later coordinated refresh
+        # doesn't misread it as newer-than-disk (mirrors the promotion path).
         self.assertEqual(a._last_persisted_refresh_token, 'r-new')
 
 

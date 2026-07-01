@@ -258,9 +258,17 @@ def _validate_positive_number(value: Any, name: str) -> None:
             # (settimeout would raise its own OverflowError later).
             ok = False
     if not ok:
+        # repr() on an int with >4300 digits itself raises ValueError (CPython's
+        # integer-string-conversion limit, active on the 3.10 floor), which would
+        # escape the very typed-error contract this validation exists to uphold;
+        # fall back to a type description for such a pathological value so the
+        # raise stays an OidcConfigError.
+        try:
+            shown = repr(value)
+        except ValueError:
+            shown = f'a value of type {type(value).__name__}'
         raise OidcConfigError(
-            f'{name} must be a positive, finite number of seconds, '
-            f'got {value!r}')
+            f'{name} must be a positive, finite number of seconds, got {shown}')
 
 
 def _validate_timeout(value: Any) -> None:
@@ -994,15 +1002,30 @@ class OidcDeviceAuth:
             refreshed = self._try_refresh_coordinated(tokens, generation)
             if refreshed is not None:
                 return refreshed
-            # The refresh path is exhausted: the refresh_token is proven useless
-            # (rejected, or the IdP won't re-issue the required kind), so the
-            # device flow below is the only way forward. Drop the stale token —
-            # from this instance AND the shared cache — before the flow, so that
-            # if it then FAILS (non-interactive, user cancels, IdP rejects the
-            # device request) the doomed token isn't left cached to be reloaded
-            # and re-refreshed fruitlessly on every later token() call. evict()
-            # doesn't bump the clear()-generation, so the _store below still
-            # lands `fresh` (unless a genuine concurrent clear() intervenes).
+            # The refresh path is exhausted: OUR refresh_token is proven useless
+            # (rejected, or the IdP won't re-issue the required kind). Before
+            # falling through to an interactive sign-in, re-consult the shared
+            # cache: a peer instance sharing the process-global store may have
+            # acquired or refreshed a VALID token for this identity while we
+            # awaited our own (failed) refresh — adopt and return that rather than
+            # evict it and prompt the user needlessly. Read the backend directly
+            # (self._tokens still holds the stale token we are about to drop), and
+            # sync _last_persisted_refresh_token exactly as the _obtain_tokens
+            # adoption does so a later refresh of the adopted token isn't misread
+            # as newer-than-disk.
+            peer = self._cache.load(self.cache_key)
+            if (peer is not None and peer.is_valid(self._now())
+                    and self._has_required_token(peer)):
+                self._tokens = peer
+                self._last_persisted_refresh_token = peer.refresh_token
+                return peer
+            # No usable peer token: drop the stale one — from this instance AND
+            # the shared cache — before the flow, so that if it then FAILS
+            # (non-interactive, user cancels, IdP rejects the device request) the
+            # doomed token isn't left cached to be reloaded and re-refreshed
+            # fruitlessly on every later token() call. evict() doesn't bump the
+            # clear()-generation, so the _store below still lands `fresh` (unless
+            # a genuine concurrent clear() intervenes).
             self._tokens = None
             self._cache.evict(self.cache_key)
 
