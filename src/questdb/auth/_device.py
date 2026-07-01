@@ -62,6 +62,7 @@ from ._store import (
 from ._render import (
     Renderer,
     _safe_target,
+    _strip_control,
     _verification_uri,
     _verification_uri_complete,
     detect_interactive,
@@ -1482,25 +1483,36 @@ class OidcDeviceAuth:
             self.config.device_authorization_endpoint, form)
         # RFC 8628 §3.2 requires device_code, user_code AND a verification URI
         # (RFC spells it verification_uri; some IdPs, e.g. older Google, use
-        # verification_url). Require the URI too: without it the prompt would
-        # render a blank "Open  and enter code" gap, so its absence is a
-        # non-conformant response, not a usable one.
+        # verification_url). The user_code and verification URI are DISPLAYED, so
+        # require them non-blank AFTER control-stripping: a value of only control
+        # / zero-width / exotic-space characters is a non-empty string (so it
+        # passes _str_or_none) yet renders empty via _strip_control / _display_url,
+        # producing an "Open  and enter code:" prompt with nothing to act on.
+        # Gate on _verification_uri (exactly the value the renderer shows) so a
+        # response that would display blank is rejected as non-conformant rather
+        # than shown. The device_code is not displayed (it goes in the poll body),
+        # so it keeps the raw non-empty-string check; user_code still needs
+        # _str_or_none first so a non-string (a JSON number) can't be coerced
+        # visible by _strip_control's str() fallback.
+        verification_uri = _verification_uri(body)
         if (status == 200 and _str_or_none(body.get('device_code'))
                 and _str_or_none(body.get('user_code'))
-                and (_str_or_none(body.get('verification_uri'))
-                     or _str_or_none(body.get('verification_url')))):
+                and _strip_control(body.get('user_code')).strip()
+                and _strip_control(verification_uri).strip()):
             return body
         error = body.get('error')
         if status == 200:
-            # 200 but the guard above failed: a required field is missing or
+            # 200 but the guard above failed: a required field is missing,
             # non-string (coerced via _str_or_none, so a JSON number/list reads
             # as absent instead of being stringified into the prompt / poll
-            # request). A non-conformant body, not an HTTP failure — say so
-            # plainly rather than a contradictory "failed (HTTP 200)".
+            # request), or blank after control-stripping (only invisible chars,
+            # which would render an empty prompt). A non-conformant body, not an
+            # HTTP failure — say so plainly rather than a contradictory
+            # "failed (HTTP 200)".
             raise OidcDeviceFlowError(
-                'The IdP returned a 200 device-authorization response missing a '
-                'required field (device_code, user_code, or verification_uri); '
-                'cannot start the device flow.',
+                'The IdP returned a 200 device-authorization response with a '
+                'missing or blank required field (device_code, user_code, or '
+                'verification_uri); cannot start the device flow.',
                 status=status,
                 error=error,
                 error_description=body.get('error_description'))

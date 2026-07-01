@@ -37,11 +37,13 @@ Run directly::
 
 import base64
 import contextlib
+import errno
 import importlib.util
 import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -738,6 +740,39 @@ class TestDeviceFlow(AuthTestBase):
         self.state.device_response = {
             'device_code': 'DEV-CODE', 'user_code': 'WDJB-MJHT',
             'verification_url': 'https://idp.example.com/device',
+            'expires_in': 600, 'interval': 5}
+        self.state.token_script = [(200, None)]
+        self.assertEqual(self.make_auth().token(), ID_TOKEN)
+
+    def test_blank_after_strip_user_code_or_uri_is_rejected(self):
+        # A user_code / verification_uri of ONLY control / zero-width / exotic-
+        # space chars is a non-empty string (so it passes the _str_or_none guard)
+        # yet renders empty after _strip_control / _display_url — an
+        # "Open  and enter code:" prompt with nothing to act on. Such a response
+        # must be rejected as non-conformant (never started / polled), like a
+        # missing field, rather than shown blank.
+        for field, blank in (
+                ('user_code', '​​'),        # zero-width spaces
+                ('user_code', ' '),              # NBSP -> folds to blank
+                ('verification_uri', '​​'),  # zero-width only
+                ('verification_uri', '‮​')):  # bidi + zero-width
+            resp = {'device_code': 'DEV-CODE', 'user_code': 'WDJB-MJHT',
+                    'verification_uri': 'https://idp.example.com/device',
+                    'expires_in': 600, 'interval': 5}
+            resp[field] = blank
+            self.state.device_response = resp
+            with self.assertRaises(OidcDeviceFlowError,
+                                   msg=f'{field}={blank!r} not rejected') as cm:
+                self.make_auth().token()
+            self.assertIn('blank', str(cm.exception).lower())
+            self.assertEqual(self.state.token_requests, [])  # never polled
+            self.state.token_requests = []
+        # A real URL / code that merely carries a TRAILING zero-width char is
+        # still usable — the char is stripped, visible content remains — so the
+        # flow proceeds rather than over-rejecting.
+        self.state.device_response = {
+            'device_code': 'DEV-CODE', 'user_code': 'WDJB-MJHT​',
+            'verification_uri': 'https://idp.example.com/device​',
             'expires_in': 600, 'interval': 5}
         self.state.token_script = [(200, None)]
         self.assertEqual(self.make_auth().token(), ID_TOKEN)
@@ -2654,8 +2689,15 @@ class TestConcurrency(AuthTestBase):
         auth = self.make_auth(clock=clock, open_browser=False)
         # Seed a valid token so the steady state is the lock-free fast path; a
         # device flow then runs ONLY when a clear() has just emptied the cache.
+        # The seed's id_token is DISTINCT from the one the mock mints on a device
+        # flow (ID_TOKEN), so a served token distinguishes a stale cache-hit
+        # (SEED_ID) from a genuine re-acquisition (ID_TOKEN) — a seed == issued
+        # value would make `token() != ID_TOKEN` a tautology that a broken CAS
+        # (which drops the shared-cache write) could pass unnoticed.
+        SEED_ID = 'SEED-ID-TOKEN'
+        self.assertNotEqual(SEED_ID, ID_TOKEN)
         seed = TokenSet(
-            access_token='a', id_token=ID_TOKEN, refresh_token='r',
+            access_token='a', id_token=SEED_ID, refresh_token='r',
             issued_at=clock.now(), expires_at=clock.now() + 3600)
         auth._cache.store(auth.cache_key, seed)
 
@@ -2669,8 +2711,11 @@ class TestConcurrency(AuthTestBase):
             start.wait()
             try:
                 for _ in range(iters):
-                    if auth.token() != ID_TOKEN:
-                        errors.append('wrong token kind served')
+                    # Only the seed or the freshly-minted token are ever valid;
+                    # anything else is a torn / wrong-context / CAS-corrupted read.
+                    tok = auth.token()
+                    if tok not in (SEED_ID, ID_TOKEN):
+                        errors.append(f'unexpected token served: {tok!r}')
                         return
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
@@ -2701,7 +2746,11 @@ class TestConcurrency(AuthTestBase):
                            max(1, self.state.device_requests) * 10)
         # No leaked in-flight bookkeeping once the storm settles.
         self.assertEqual(_MEMORY_INFLIGHT.get(auth.cache_key, 0), 0)
-        # The auth is still usable afterwards.
+        # A final clear forces re-acquisition: the served token is now the FRESH
+        # mock id_token, DISTINCT from the seed — proving a cleared entry is
+        # genuinely re-acquired (not a stale seed served) and the CAS repopulated
+        # the shared cache with the fresh token.
+        auth.clear()
         self.assertEqual(auth.token(), ID_TOKEN)
 
     def test_cross_instance_clear_stress(self):
@@ -2724,6 +2773,16 @@ class TestConcurrency(AuthTestBase):
                  for _ in range(n_inst)]
         key = insts[0].cache_key
         self.assertTrue(all(a.cache_key == key for a in insts))
+        # Seed the shared cache with a token whose id_token is DISTINCT from the
+        # one the mock mints on a device flow (ID_TOKEN), so a served value tells
+        # a stale cache-hit (SEED_ID) apart from a re-acquisition (ID_TOKEN) — the
+        # seed == issued tautology would let a broken cross-instance CAS (which
+        # drops the shared-cache write) pass unnoticed.
+        SEED_ID = 'SEED-ID-TOKEN-XINST'
+        self.assertNotEqual(SEED_ID, ID_TOKEN)
+        insts[0]._cache.store(key, TokenSet(
+            access_token='a', id_token=SEED_ID, refresh_token='r',
+            issued_at=clock.now(), expires_at=clock.now() + 3600))
 
         n_workers = 6
         iters = 80
@@ -2735,8 +2794,11 @@ class TestConcurrency(AuthTestBase):
             start.wait()
             try:
                 for i in range(iters):
-                    if insts[(wid + i) % n_inst].token() != ID_TOKEN:
-                        errors.append('wrong token kind served')
+                    # Only the seed or a freshly-minted token are ever valid;
+                    # anything else is a torn / wrong-context / CAS-corrupted read.
+                    tok = insts[(wid + i) % n_inst].token()
+                    if tok not in (SEED_ID, ID_TOKEN):
+                        errors.append(f'unexpected token served: {tok!r}')
                         return
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
@@ -2768,7 +2830,10 @@ class TestConcurrency(AuthTestBase):
         # No leaked process-global bookkeeping once the storm settles.
         self.assertEqual(_MEMORY_INFLIGHT.get(key, 0), 0)
         self.assertNotIn(key, _MEMORY_GENERATION)
-        # Still usable.
+        # A final clear forces re-acquisition: the served token is now the FRESH
+        # mock id_token, DISTINCT from the seed — proving a cleared entry is
+        # re-acquired across instances (not a stale seed served).
+        insts[0].clear()
         self.assertEqual(insts[0].token(), ID_TOKEN)
 
     def test_stale_local_token_adopts_fresh_shared_cache_token(self):
@@ -3339,6 +3404,23 @@ class TestConfigHelpers(unittest.TestCase):
         # still tolerated at the top level.
         self.assertEqual(settings_config({'acl.oidc.client.id': 'q'}),
                          {'acl.oidc.client.id': 'q'})
+
+    def test_example_oidc_device_auth_imports(self):
+        # examples/oidc_device_auth.py is NOT in examples.manifest.yaml — it needs
+        # a live IdP and an interactive sign-in, so it can't run as a system test
+        # — hence nothing else import-checks it. Import it here (main() is guarded
+        # by __name__, so importing runs no I/O / sign-in) to catch a syntax error
+        # or public-API drift: a renamed/removed questdb.auth symbol in its
+        # top-level import would fail this test.
+        example = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'examples', 'oidc_device_auth.py')
+        self.assertTrue(os.path.exists(example), example)
+        spec = importlib.util.spec_from_file_location(
+            'oidc_device_auth_example', example)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # triggers `from questdb.auth import ...`
+        self.assertTrue(hasattr(module, 'main'))
 
 
 class TestEndpointValidation(unittest.TestCase):
@@ -5261,6 +5343,23 @@ class TestRendererSecurity(unittest.TestCase):
         _Cap().on_prompt(resp)                                  # must not raise
         self.assertNotIn('<a ', captured['html'])               # no link, non-str
 
+    def test_terminal_renderer_on_waiting_shows_countdown(self):
+        # The polling countdown is a display sink driven on every poll, yet no
+        # other test invokes TerminalRenderer.on_waiting. Pin that it renders the
+        # remaining time as MM:SS (via _fmt_mmss) so a regression in the terminal
+        # countdown surfaces. 90s -> "1:30"; a sub-minute value zero-pads.
+        from questdb.auth._render import TerminalRenderer
+        buf = io.StringIO()
+        r = TerminalRenderer(stream=buf)
+        r.on_waiting(90.0)
+        out = buf.getvalue()
+        self.assertIn('1:30', out)
+        self.assertIn('waiting', out.lower())
+        buf.truncate(0)
+        buf.seek(0)
+        r.on_waiting(5.0)
+        self.assertIn('0:05', buf.getvalue())
+
 
 # A known cross-language hash vector: the lowercase-hex SHA-256 of the canonical
 # identity string for this exact identity, computed independently from the frozen
@@ -5395,6 +5494,101 @@ class TestFileTokenStore(unittest.TestCase):
         self.assertEqual(
             [n for n in os.listdir(self.dir) if n.endswith('.tmp')], [])
         self.assertEqual(self.store.load(self.key).refresh_token, 'RT2')
+
+    def test_save_failure_leaves_no_tmp_and_raises(self):
+        # A mid-write failure — at fdopen (fd never wrapped), fsync (fd wrapped),
+        # or the atomic rename — must raise OidcError (persistence is best-effort;
+        # OidcDeviceAuth then continues with the in-memory token) AND remove its
+        # sibling temp file, so a crashed save never litters the store with a
+        # torn/partial .tmp credential and never closes the fd twice. Exercises
+        # the fd_owned / moved cleanup branches that a successful save can't.
+        for point in ('fdopen', 'fsync', 'replace'):
+            with self.subTest(point=point):
+                with mock.patch(f'questdb.auth._store.os.{point}',
+                                side_effect=OSError(errno.EIO, 'injected')):
+                    with self.assertRaises(OidcError):
+                        self.store.save(self.key, self._pt())
+                leftover = [n for n in os.listdir(self.dir)
+                            if n.endswith('.tmp')]
+                self.assertEqual(leftover, [], f'{point}: temp file leaked')
+                self.assertFalse(os.path.exists(self._file()),
+                                 f'{point}: target created despite failure')
+
+    def test_load_errno_routing(self):
+        # load()'s os.stat can fail for different reasons. A path that is not a
+        # usable regular file — a symlink loop (ELOOP) or a non-directory path
+        # component (ENOTDIR) — is "no usable entry": return None and fall back to
+        # a refresh / fresh sign-in. A genuine I/O or permission error (EACCES,
+        # EIO) is NOT recoverable by re-prompting, so it must surface as OidcError
+        # rather than be silently swallowed as "no token".
+        self.store.save(self.key, self._pt())
+        for err in (errno.ELOOP, errno.ENOTDIR):
+            with mock.patch('questdb.auth._store.os.stat',
+                            side_effect=OSError(err, os.strerror(err))):
+                self.assertIsNone(self.store.load(self.key),
+                                  f'errno {err} should read as no entry')
+        for err in (errno.EACCES, errno.EIO):
+            with mock.patch('questdb.auth._store.os.stat',
+                            side_effect=OSError(err, os.strerror(err))):
+                with self.assertRaises(OidcError):
+                    self.store.load(self.key)
+
+    def test_load_rejects_nonstring_audience_or_issuer_in_file(self):
+        # The token file is attacker-writable. A non-string audience / issuer
+        # (a JSON number/list from a hand-edited or hostile file) must never match
+        # the live identity: _audience_matches / _issuer_matches demand an exact
+        # string match (or both absent), so such a file is rejected (load -> None)
+        # rather than served as though the identity lined up.
+        for field in ('audience', 'issuer'):
+            self.store.save(self.key, self._pt())
+            with open(self._file()) as fh:
+                obj = json.loads(fh.read())
+            obj[field] = 12345  # non-string
+            with open(self._file(), 'w') as fh:
+                json.dump(obj, fh)
+            self.assertIsNone(self.store.load(self.key),
+                              f'non-string {field} should be rejected')
+
+    def test_load_keeps_control_char_refresh_token(self):
+        # Unlike the wire-bound access/id tokens (which OidcDeviceAuth screens with
+        # _safe_token_or_none because they go onto an Authorization header / _sso
+        # password, where a decoded CR/LF is an injection vector), the
+        # refresh_token is only ever url-encoded into the IdP token request, never
+        # a header — so the store loads it verbatim and the url-encoding at send
+        # time neutralizes any control char. Pin that deliberate asymmetry: a
+        # control char in the refresh_token is preserved, not silently dropped.
+        self.store.save(self.key, self._pt(refresh_token='r\r\ntoken'))
+        got = self.store.load(self.key)
+        self.assertEqual(got.refresh_token, 'r\r\ntoken')
+
+    def test_cross_process_save_load_round_trip(self):
+        # The file store's raison d'etre is cross-PROCESS (and cross-language)
+        # sharing — the rest of the suite exercises it only with threads in one
+        # interpreter. Save in a CHILD process, load in this one, over a real
+        # process boundary: proves the on-disk format a separate process writes is
+        # readable here (the restart-resume path, and the Java-interop contract,
+        # in miniature) rather than only within one address space.
+        script = (
+            'import sys\n'
+            'from questdb.auth import ('
+            'FileTokenStore, TokenStoreKey, PersistedToken)\n'
+            'k = TokenStoreKey("questdb", "https://idp:443/token",\n'
+            '    "https://idp:443/device", "openid", None, False)\n'
+            'FileTokenStore.at(sys.argv[1]).save(k, PersistedToken(\n'
+            '    access_token="AT", id_token="IT", refresh_token="XPROC-RT",\n'
+            '    expires_at=1003600.0, token_ttl=3600.0))\n')
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(p for p in sys.path if p)
+        res = subprocess.run(
+            [sys.executable, '-c', script, self.dir],
+            env=env, timeout=60, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0,
+                         f'child process failed: {res.stderr}')
+        got = self.store.load(self.key)
+        self.assertIsNotNone(
+            got, 'a token saved by another process was not loadable here')
+        self.assertEqual(got.refresh_token, 'XPROC-RT')
+        self.assertEqual(got.access_token, 'AT')
 
     def test_oversized_file_ignored(self):
         with open(self._file(), 'wb') as fh:
