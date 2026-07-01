@@ -112,6 +112,10 @@ See the :ref:`oidc_auth` guide for an overview.
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.auth.Renderer
+   :members:
+   :show-inheritance:
+
 .. autoexception:: questdb.auth.OidcError
    :show-inheritance:
 

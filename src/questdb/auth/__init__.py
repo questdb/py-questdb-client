@@ -53,6 +53,7 @@ lazily, only when used.
 from ._device import OidcDeviceAuth
 from ._discovery import OidcConfig
 from ._cache import TokenSet
+from ._render import Renderer
 from ._errors import (
     OidcError,
     OidcConfigError,
@@ -80,6 +81,7 @@ __all__ = [
     'OidcNetworkError',
     'OidcTimeoutError',
     'PersistedToken',
+    'Renderer',
     'TokenSet',
     'TokenStore',
     'TokenStoreKey',

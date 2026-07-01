@@ -446,19 +446,49 @@ def _fmt_minutes(seconds: float) -> int:
 
 
 class Renderer:
-    """No-op renderer interface; subclasses present the prompt to the user."""
+    """No-op renderer interface; subclasses present the prompt to the user.
+
+    Pass an instance as ``renderer=`` to :class:`~questdb.auth.OidcDeviceAuth`
+    to customise how the device-flow sign-in is shown (the built-ins are a
+    plain-text terminal renderer and a rich Jupyter one). Every callback is
+    optional — the base class no-ops each, so a subclass may override only the
+    ones it cares about.
+
+    **The callbacks receive untrusted, MITM-tamperable IdP fields**
+    (``verification_uri``, ``user_code``, error strings, a JWT-derived
+    identity). A custom renderer that writes them to a terminal or a notebook
+    DOM must sanitise them itself (the built-ins strip control/bidi/zero-width
+    characters and vet the verification host); echoing them raw re-opens the
+    prompt-spoofing surface the built-in renderers close.
+
+    **Concurrency.** The callbacks run while ``OidcDeviceAuth`` holds its
+    (non-reentrant) acquisition lock, so a callback must not call back into the
+    same instance's :meth:`~questdb.auth.OidcDeviceAuth.token` /
+    :meth:`~questdb.auth.OidcDeviceAuth.clear` (doing so raises rather than
+    deadlocks). Callbacks are best-effort: an exception raised by one is
+    swallowed and never aborts an otherwise-successful sign-in.
+    """
 
     def on_prompt(self, resp: Dict[str, Any]) -> None:
-        pass
+        """Show the sign-in prompt at the start of the device flow.
+
+        ``resp`` is the raw (untrusted) device-authorization response; the
+        verification URI and user code live under ``verification_uri`` /
+        ``verification_uri_complete`` / ``user_code``.
+        """
 
     def on_waiting(self, seconds_left: float) -> None:
-        pass
+        """Report progress while polling; ``seconds_left`` is the time
+        remaining before the device code expires."""
 
     def on_success(self, identity: Optional[str], expires_in: float) -> None:
-        pass
+        """Report a completed sign-in. ``identity`` is a best-effort,
+        unverified display name from the token's claims (or ``None``);
+        ``expires_in`` is the token's remaining lifetime in seconds."""
 
     def on_failure(self, message: str) -> None:
-        pass
+        """Report a failed or expired sign-in with a human-readable
+        ``message`` (which may interpolate an untrusted IdP error string)."""
 
 
 class TerminalRenderer(Renderer):
