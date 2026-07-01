@@ -1994,6 +1994,48 @@ class TestDiscovery(AuthTestBase):
         self.assertEqual(auth.config.device_authorization_endpoint,
                          self.base + '/device')
 
+    def test_discovery_doc_issuer_mismatch_rejected(self):
+        # RFC 8414 §3.3: the discovery document's own `issuer` MUST match the
+        # issuer it was fetched from. A document served at the pinned issuer's
+        # origin that self-declares a DIFFERENT issuer (a misconfigured or
+        # wrong-tenant IdP) is refused rather than having its cross-origin-trusted
+        # endpoints used to route the device-code / refresh-token POSTs.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.scope': 'openid',
+            'acl.oidc.token.endpoint': self.base + '/token',
+        }}
+        self.state.well_known = {
+            'issuer': 'https://other-tenant.example.com',
+            'token_endpoint': self.base + '/token',
+            'device_authorization_endpoint': self.base + '/device',
+        }
+        with self.assertRaises(OidcConfigError) as cm:
+            OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                       insecure=True, renderer=Renderer())
+        self.assertIn('issuer', str(cm.exception))
+
+    def test_discovery_doc_issuer_trailing_slash_tolerated(self):
+        # The issuer match is trailing-slash-insensitive, so a document that
+        # declares the issuer with a trailing slash (a common IdP spelling) is
+        # accepted rather than spuriously rejected.
+        self.state.settings = {'config': {
+            'acl.oidc.enabled': True,
+            'acl.oidc.client.id': 'questdb',
+            'acl.oidc.scope': 'openid',
+            'acl.oidc.token.endpoint': self.base + '/token',
+        }}
+        self.state.well_known = {
+            'issuer': self.base + '/',
+            'token_endpoint': self.base + '/token',
+            'device_authorization_endpoint': self.base + '/device',
+        }
+        auth = OidcDeviceAuth.from_questdb(self.base, issuer=self.base,
+                                           insecure=True, renderer=Renderer())
+        self.assertEqual(auth.config.device_authorization_endpoint,
+                         self.base + '/device')
+
     def test_device_fallback_without_issuer_is_rejected(self):
         # M4: QuestDB advertises the token endpoint but not the device
         # endpoint, and no issuer is pinned. Discovery would otherwise be
@@ -2944,7 +2986,10 @@ class TestAdapters(unittest.TestCase):
 
         t = threading.Thread(target=run)
         t.start()
-        t.join()
+        t.join(5)
+        # A bounded join + is_alive check so a per-connect fetch that blocks
+        # (regression) fails cleanly instead of hanging the suite.
+        self.assertFalse(t.is_alive(), 'per-connect token fetch did not return')
         self.assertIsInstance(box.get('exc'), OidcInteractionRequired)
         # The load-bearing half: it refused because the fetch was non-interactive.
         self.assertIs(auth.last_allow_interactive, False)
@@ -3081,12 +3126,14 @@ class TestAdapters(unittest.TestCase):
         # float('inf')/1e400 raise OverflowError (not ValueError) from int();
         # float('nan') raises ValueError. Both must map to OidcConfigError.
         for bad in ('not-a-port', None, '88a2', True, 0, 70000, -1,
+                    8812.9,  # a non-integral float would silently truncate
                     float('inf'), float('-inf'), float('nan'), 1e400):
             with self.subTest(pg_port=bad):
                 with self.assertRaises(OidcConfigError):
                     _coerce_port(bad)
         self.assertEqual(_coerce_port(8812), 8812)
         self.assertEqual(_coerce_port('5432'), 5432)   # str port coerced
+        self.assertEqual(_coerce_port(8812.0), 8812)   # integral float accepted
         # Both adapter entry points reject it up front (no driver required).
         for fn in (sqlalchemy_engine, psycopg_connect):
             with self.subTest(fn=fn.__name__):
@@ -5581,6 +5628,8 @@ class TestFileTokenStore(unittest.TestCase):
             t.start()
         for t in threads:
             t.join(timeout=30)
+        for t in threads:
+            self.assertFalse(t.is_alive(), 'a steal-contest thread deadlocked')
         self.assertEqual(ran[0], 2)             # both actions ran
         self.assertEqual(max_seen[0], 1)        # never two at once
         self.assertFalse(os.path.exists(lock))  # released; no leftover
@@ -5674,7 +5723,11 @@ class TestFileTokenStore(unittest.TestCase):
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(30)
+        # Bounded join + is_alive so a serialization/deadlock regression fails
+        # cleanly here instead of hanging the whole suite on an unbounded join.
+        for t in threads:
+            self.assertFalse(t.is_alive(), 'in_lock serialization deadlocked')
         self.assertEqual(ran[0], 6)         # all actions ran
         self.assertEqual(max_seen[0], 1)    # never two at once
 
@@ -5997,6 +6050,23 @@ class TestPersistence(AuthTestBase):
         auth = self.make_auth(token_store=store, clock=FakeClock())  # groups mode
         self.assertEqual(auth.token(), ID_TOKEN)
         self.assertEqual(self.state.device_requests, 1)  # rejected -> device flow
+
+    def test_persisted_non_served_token_is_screened(self):
+        # The persisted path screens BOTH wire-bindable tokens (parity with the
+        # network path), not just the served one. In groups mode a valid id_token
+        # is served, but a control-char access_token (non-served) is dropped to
+        # None in the loaded TokenSet rather than kept and re-persisted verbatim by
+        # _snapshot — so it can never reach a header / _sso password via a later
+        # mode change or a future adapter that reads it.
+        store = _FakeStore()
+        store.saved = PersistedToken(
+            access_token='bad\r\naccess', id_token=ID_TOKEN,
+            refresh_token='REFRESH-1',
+            expires_at=FakeClock().now() + 3600, token_ttl=3600.0)
+        auth = self.make_auth(token_store=store, clock=FakeClock())  # groups mode
+        self.assertEqual(auth.token(), ID_TOKEN)          # served id_token adopted
+        self.assertEqual(self.state.device_requests, 0)   # entry usable, no flow
+        self.assertIsNone(auth._tokens.access_token)      # non-served: screened
 
     def test_coordinated_refresh_adopts_peer_rotation(self):
         # Under the cross-process lock, re-reading the store sees a peer's freshly

@@ -107,6 +107,13 @@ def main(args):
 
     try_pip_install('fastparquet>=2023.10.1')
     try_pip_install('pyarrow')
+    # For the questdb.auth OIDC tests: the behavioural TLS-rejection test
+    # (test_untrusted_server_certificate_is_rejected) generates a self-signed
+    # cert at runtime and skips without `cryptography`. Install it so the real
+    # handshake path is exercised in CI, not just the static-posture assertion.
+    # try_ (not required): on a platform with no wheel the test simply skips, as
+    # it already does locally.
+    try_pip_install('cryptography')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or

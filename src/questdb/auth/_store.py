@@ -512,6 +512,10 @@ class FileTokenStore(TokenStore):
         return cls(os.path.join(home, '.questdb', 'oidc-tokens'))
 
     def load(self, key: TokenStoreKey) -> Optional[PersistedToken]:
+        """Load and identity-verify the persisted token for ``key`` (see
+        :meth:`TokenStore.load`). Returns ``None`` — never raises — for a
+        missing, oversized, unreadable, non-regular, or wrong-identity file, so
+        an unusable entry falls back to a refresh / interactive sign-in."""
         path = self._token_file(key)
         try:
             st = os.stat(path)
@@ -555,6 +559,12 @@ class FileTokenStore(TokenStore):
         return self._parse_and_verify(key, data)
 
     def save(self, key: TokenStoreKey, token: PersistedToken) -> None:
+        """Atomically persist ``token`` for ``key`` — write a sibling temp file
+        (mode ``0600``), fsync it, then ``os.replace`` it over the target — so a
+        concurrent reader in any process sees the whole old or whole new file,
+        never a torn credential. Raises :class:`~questdb.auth.OidcError` on an
+        I/O failure (which :class:`~questdb.auth.OidcDeviceAuth` treats as
+        non-fatal, continuing with the in-memory token)."""
         content = self._serialize(key, token)
         try:
             self._ensure_directory()
@@ -564,11 +574,17 @@ class FileTokenStore(TokenStore):
             fd, tmp = tempfile.mkstemp(
                 prefix=key.hash(), suffix='.tmp', dir=self._directory)
             moved = False
+            # os.fdopen takes ownership of fd and closes it on the `with` exit; if
+            # it were to raise BEFORE the wrapper is created (an unlikely
+            # allocation failure), fd would leak — so track whether ownership
+            # transferred and close it ourselves in the finally when it did not.
+            fd_owned = False
             try:
                 # Force the payload to disk before the rename, so a crash between
                 # the write and the atomic rename cannot leave the target
                 # pointing at unflushed (zero/partial) bytes.
                 with os.fdopen(fd, 'wb') as f:
+                    fd_owned = True
                     f.write(content)
                     f.flush()
                     os.fsync(f.fileno())
@@ -582,6 +598,9 @@ class FileTokenStore(TokenStore):
                 # fsynced (Windows).
                 self._fsync_directory()
             finally:
+                if not fd_owned:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
                 if not moved:
                     with contextlib.suppress(OSError):
                         os.remove(tmp)
@@ -591,6 +610,9 @@ class FileTokenStore(TokenStore):
                 f'{e}') from e
 
     def clear(self, key: TokenStoreKey) -> None:
+        """Remove the persisted entry for ``key``; a no-op when none exists.
+        Raises :class:`~questdb.auth.OidcError` only on an unexpected I/O error
+        (not for an already-absent file)."""
         try:
             os.remove(self._token_file(key))
         except FileNotFoundError:
@@ -600,6 +622,12 @@ class FileTokenStore(TokenStore):
                 f'could not remove the OIDC token store file: {e}') from e
 
     def in_lock(self, key: TokenStoreKey, action: Callable[[], Any]) -> Any:
+        """Run ``action`` under a per-identity ``O_CREAT|O_EXCL`` lock file (see
+        :meth:`TokenStore.in_lock`), so a refresh by another process sharing this
+        identity is serialised rather than raced. Steals a stale lock left by a
+        crashed holder, and degrades to running ``action`` without the lock —
+        integrity is still guarded by the atomic write — rather than stall a
+        sign-in if it cannot acquire one."""
         lock = None
         held = False
         try:
@@ -835,7 +863,14 @@ class FileTokenStore(TokenStore):
                 os.remove(private)
         else:
             # Moved a still-live lock by mistake; put it back. If the slot was
-            # retaken meanwhile, our private copy is redundant — drop it.
+            # retaken meanwhile, our private copy is redundant — drop it. (Edge
+            # case: if the genuine holder released and removed `lock` in the
+            # instant between our staleness re-check and this restore, we
+            # re-create an entry whose holder has already exited — a fresh-looking
+            # ORPHAN. It blocks no one incorrectly and the next acquirer reclaims
+            # it once it ages past lock_stale; for that window the identity
+            # degrades to lock-free coordination, the same best-effort fallback as
+            # running without the lock at all.)
             try:
                 os.replace(private, lock)
             except OSError:

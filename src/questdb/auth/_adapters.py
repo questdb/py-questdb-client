@@ -119,6 +119,14 @@ def _coerce_port(pg_port: Any) -> int:
     if isinstance(pg_port, bool):
         raise OidcConfigError(
             f'pg_port must be an integer port number, got {pg_port!r}.')
+    # A non-integral float silently truncates through int() (int(8812.9) == 8812)
+    # — never what the caller meant — so reject it explicitly. This also rejects
+    # inf/nan (is_integer() is False for both) with the clearer "integer port"
+    # message rather than the OverflowError/ValueError int() would raise. An
+    # integral float (8812.0) is still accepted as a convenience.
+    if isinstance(pg_port, float) and not pg_port.is_integer():
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.')
     try:
         port = int(pg_port)
     except (TypeError, ValueError, OverflowError) as e:

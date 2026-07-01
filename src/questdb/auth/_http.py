@@ -189,9 +189,13 @@ class _DeadlineSocket:
     armed only once ``open()`` returns — cannot reach.
 
     The socket is shut down at most once, and never after :meth:`release` (called
-    when ``open()`` returns or raises), so a timer that fires in the instant the
-    head read finishes can't tear down the healthy socket the body read is about
-    to use.
+    when ``open()`` returns or raises), so a timer that fires *after* the head
+    read finishes is a no-op. One narrow race is irreducible with a wall-clock
+    timer: a fire in the instant between ``open()`` returning and :meth:`release`
+    running can still tear the healthy socket down — but only when the head read
+    completes right at the deadline, and it surfaces as a typed
+    ``OidcNetworkError`` the caller retries (one wasted round-trip, never a wrong
+    or truncated token), so it degrades safely rather than corrupting a read.
     """
 
     __slots__ = ('_sock', '_done', '_lock')
@@ -449,9 +453,15 @@ def request(
         try:
             resp = _opener(ctx, watch).open(req, timeout=timeout)
         finally:
-            # Head read finished (returned or raised): stop guarding so the body
-            # read's own watchdog owns the socket, and a late timer fire can't
-            # tear down the healthy socket.
+            # Head read finished (returned or raised): release() disarms the
+            # watchdog so any LATER timer fire is a no-op and the body read's own
+            # watchdog owns the socket. One irreducible race remains — a timer
+            # that fires in the instant between open() returning and release()
+            # running here can still shut a healthy socket down (only when the
+            # head read completes right at the deadline). It is rare and
+            # recoverable: the body read then surfaces a typed OidcNetworkError,
+            # which the poll loop retries and a refresh retries later, costing at
+            # most one extra round-trip, never a wrong token.
             watch.release()
             head_timer.cancel()
         with resp:

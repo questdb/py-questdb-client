@@ -449,7 +449,28 @@ def discover_device_endpoint_from_idp(
     # document (from a captive portal, bad proxy, or hostile IdP) to empty so
     # resolve_config's doc.get(...) yields a clear "could not resolve" error
     # rather than an AttributeError. Mirrors settings_config.
-    return doc if isinstance(doc, dict) else {}
+    doc = doc if isinstance(doc, dict) else {}
+    # RFC 8414 §3.3 / OpenID Connect Discovery: the document's own `issuer` MUST
+    # be identical to the issuer it was fetched from. We fetched from the
+    # out-of-band-pinned issuer's own origin over TLS, so a network attacker can't
+    # substitute the document — but enforcing the match still turns a
+    # misconfigured or wrong-tenant IdP (a document served at the pinned origin
+    # that self-declares a DIFFERENT issuer, whose token / device endpoints this
+    # client would otherwise trust cross-origin) into a clear failure instead of
+    # silently routing the device-code / refresh-token POSTs per that document.
+    # Compared trailing-slash-insensitively; a non-string value coerces to absent
+    # (via _str_setting) and a document that omits the field is tolerated (a
+    # minimal provider) — so this is strictly a tightening of the old behaviour.
+    doc_issuer = _str_setting(doc.get('issuer'))
+    if doc_issuer is not None and doc_issuer.rstrip('/') != issuer.rstrip('/'):
+        raise OidcConfigError(
+            f'The IdP discovery document declares issuer {doc_issuer!r}, which '
+            f'does not match the pinned issuer {issuer!r}; refusing to use its '
+            'endpoints. A document that self-declares a different issuer '
+            'indicates a misconfigured or wrong-tenant identity provider. Pass '
+            'the endpoints explicitly (device_authorization_endpoint=..., '
+            'token_endpoint=...) to skip discovery.')
+    return doc
 
 
 def resolve_config(

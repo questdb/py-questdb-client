@@ -1168,20 +1168,27 @@ class OidcDeviceAuth:
 
     def _tokenset_from_persisted(
             self, persisted: PersistedToken) -> Optional[TokenSet]:
-        # The file is attacker-writable, so treat the served token (the one
-        # token() puts verbatim into an Authorization header or a PG-wire
-        # password) as untrusted: reject a control/non-ASCII char — and the whole
-        # entry — rather than route a tampered credential onto the wire. A null
-        # served token is unusable.
-        access_token = _str_or_none(persisted.access_token)
-        id_token = _str_or_none(persisted.id_token)
+        # The file is attacker-writable, so treat BOTH wire-bindable tokens
+        # (access_token / id_token) as untrusted and run them through the SAME
+        # gate the network path applies (_safe_token_or_none in
+        # _tokenset_from_response): a control/non-ASCII char (a header /
+        # _sso-password injection vector) or a blank/whitespace-only value drops
+        # that token to None rather than landing in the TokenSet and being
+        # re-persisted verbatim by _snapshot. Gating BOTH — not just the currently
+        # served kind — keeps the persisted and network ingestion paths symmetric,
+        # so a tampered non-served token can't survive into the TokenSet (and back
+        # to disk) to be picked up by a later mode change or a future adapter that
+        # reads it. The refresh_token is only ever re-sent url-encoded to the IdP
+        # (never onto a header), so it keeps the plain str-or-None coercion,
+        # matching _tokenset_from_response.
+        access_token = _safe_token_or_none(persisted.access_token)
+        id_token = _safe_token_or_none(persisted.id_token)
         refresh_token = _str_or_none(persisted.refresh_token)
         served = id_token if self.config.groups_in_token else access_token
-        # A null, blank (whitespace-only), or control/non-ASCII served token is
-        # unusable: reject the whole entry rather than serve a tampered or empty
-        # credential. The blank check mirrors _safe_token_or_none on the wire
-        # path so a run of spaces can't slip through the printable-ASCII gate.
-        if not served or not served.strip() or not _has_only_token_chars(served):
+        # A null served token (absent, or dropped by the gate above as blank /
+        # control / non-ASCII) is unusable: reject the whole entry rather than
+        # serve a tampered or empty credential.
+        if not served:
             return None
         # The file is attacker-writable (and may have been written under a skewed
         # clock), so bound how long the loaded token is trusted exactly as a
@@ -1715,7 +1722,12 @@ def _normalize_url(url: str) -> str:
     if ':' in host:
         host = f'[{host}]'
     default_port = {'https': 443, 'http': 80}.get(scheme)
-    if port and port != default_port:
+    # Compare against None, not truthiness, so an explicit :0 — falsy but a
+    # distinct (if unconnectable) port — is kept rather than collapsed onto the
+    # default, matching _store._canonical_endpoint (which keeps :0 too). The two
+    # must make the SAME port distinctions or a :0 endpoint would key one way in
+    # memory and another on disk.
+    if port is not None and port != default_port:
         netloc = f'{host}:{port}'
     else:
         netloc = host
