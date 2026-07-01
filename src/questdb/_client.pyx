@@ -3996,7 +3996,7 @@ cdef void_int _dataframe_columnar_sync(sf_column_sender* conn) except -1:
     _ensure_doesnt_have_gil(&gs)
     ok = sf_column_sender_wait(
         conn,
-        column_sender_ack_level.column_sender_ack_level_ok,
+        qwpws_ack_level.qwpws_ack_level_ok,
         0,  # timeout_millis: 0 = wait indefinitely (no-progress deadline)
         &err)
     _ensure_has_gil(&gs)
@@ -6962,7 +6962,7 @@ cdef class Sender:
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_wait(
             self._impl,
-            line_sender_qwpws_ack_level.line_sender_qwpws_ack_level_ok,
+            qwpws_ack_level.qwpws_ack_level_ok,
             c_timeout_millis,
             &err)
         _ensure_has_gil(&gs)

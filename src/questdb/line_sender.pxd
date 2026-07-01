@@ -625,9 +625,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    cdef enum line_sender_qwpws_ack_level:
-        line_sender_qwpws_ack_level_ok = 0
-        line_sender_qwpws_ack_level_durable = 1
+    cdef enum qwpws_ack_level:
+        qwpws_ack_level_ok = 0
+        qwpws_ack_level_durable = 1
 
     bint line_sender_qwpws_wait(
         line_sender* sender,
@@ -716,10 +716,6 @@ cdef extern from "questdb/ingress/column_sender.h":
     cdef struct column_sender_validity:
         const uint8_t* bits
         size_t bit_len
-
-    cdef enum column_sender_ack_level:
-        column_sender_ack_level_ok
-        column_sender_ack_level_durable
 
     questdb_db* questdb_db_connect(
         const char* conf,
@@ -1258,7 +1254,7 @@ cdef extern from "questdb/egress/reader.h":
         reader_error** err_out
         ) noexcept nogil
 
-    void reader_mark_must_close(
+    void reader_drop_on_return(
         reader* reader
         ) noexcept nogil
 

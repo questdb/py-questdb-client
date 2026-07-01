@@ -48,7 +48,7 @@ cdef class _ReaderHandle:
 
     The Python side carries only one extra bit of state —
     ``_must_close`` — which it forwards to the FFI via
-    ``reader_mark_must_close`` before calling close. We never
+    ``reader_drop_on_return`` before calling close. We never
     hold a raw ``questdb_db*`` pointer here: the reader struct
     holds an ``Arc<DbInner>`` internally, so the pool stays alive
     even if the user's ``Client.close()`` ran after ``query()``
@@ -77,7 +77,7 @@ cdef class _ReaderHandle:
         if self._reader == NULL:
             return
         if self._must_close:
-            reader_mark_must_close(self._reader)
+            reader_drop_on_return(self._reader)
         _ensure_doesnt_have_gil(&gs)
         reader_close(self._reader)
         _ensure_has_gil(&gs)
