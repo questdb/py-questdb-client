@@ -179,10 +179,19 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     try:
         parts = urllib.parse.urlparse(url)
         scheme = (parts.scheme or '').lower()
-        # `.username`/`.password`/`.hostname` parse the authority; `.port` (read
-        # indirectly via a malformed netloc) can raise ValueError — catch it.
+        # `.username`/`.password`/`.hostname`/`.port` parse the authority; a
+        # non-integer or out-of-range `.port` raises ValueError, caught below.
+        # Reading `.port` is essential, not incidental: without it a URL with a
+        # junk port (e.g. "https://host:70000/…") is returned verbatim for the
+        # href / webbrowser.open() / QR, while `_display_url` DROPS that port
+        # from the shown text — so the displayed link and the real target would
+        # diverge, the exact spoof this vetting (via `_safe_target`) exists to
+        # prevent. Rejecting it here keeps them identical: the URL is then shown
+        # as inert, port-stripped text and never made clickable/opened/scanned.
+        # A portless URL yields `.port is None` without raising.
         userinfo = parts.username is not None or parts.password is not None
         host = parts.hostname
+        _ = parts.port
     except (ValueError, TypeError):
         return None
     if scheme not in ('http', 'https'):

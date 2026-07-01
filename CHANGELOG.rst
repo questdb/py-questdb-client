@@ -42,8 +42,9 @@ Highlights:
   Google: ``accounts.google.com`` issuer, ``oauth2.googleapis.com`` endpoints),
   while still pinning endpoints advertised over an untrusted ``/settings``
   channel to the issuer.
-* In-process token cache with silent refresh; in-memory only by default (no
-  token ever written to disk).
+* In-process token cache with silent refresh; in-memory only by default
+  (nothing written to disk unless you opt into a
+  :class:`~questdb.auth.TokenStore` — see the next entry).
 * Opt-in **token persistence** (:class:`~questdb.auth.FileTokenStore`, passed as
   ``token_store=``) so a restarted process resumes from a saved refresh token
   instead of prompting again. The default file store keeps one owner-only
@@ -66,14 +67,15 @@ See the :ref:`OIDC authentication guide <oidc_auth>` for details.
 Breaking Changes
 ~~~~~~~~~~~~~~~~~
 
-* The minimum supported Python is now **3.10**, raised from 3.8 in ``setup.py``.
-  Python 3.8 (end-of-life 2024-10) and 3.9 (end-of-life 2025-10) are no longer
-  supported, and ``pip`` will refuse to install this release on them. This
-  affects the whole ``questdb`` package, not only the new :mod:`questdb.auth`
-  module. This is the first release to enforce the floor: although the 4.1.0
-  changelog described dropping older versions, its ``setup.py`` still declared
-  ``>=3.8``, so 3.8 / 3.9 installs were not actually rejected until now. Users
-  still on 3.8 / 3.9 should pin to an earlier ``questdb`` release.
+* The minimum supported Python is **3.10**. Python 3.8 (end-of-life 2024-10) and
+  3.9 (end-of-life 2025-10) are no longer supported, and ``pip`` will refuse to
+  install this release on them. This affects the whole ``questdb`` package, not
+  only the new :mod:`questdb.auth` module. The authoritative ``requires-python``
+  in ``pyproject.toml`` already declared ``>=3.10`` in 4.1.0 (so ``pip`` has
+  rejected 3.8 / 3.9 installs since then); this release also updates the stale
+  ``python_requires`` in ``setup.py``, which still read ``>=3.8``, to match —
+  removing the inconsistency for source builds that read ``setup.py`` directly.
+  Users still on 3.8 / 3.9 should pin to an earlier ``questdb`` release.
 
 4.1.0 (2025-11-28)
 ------------------

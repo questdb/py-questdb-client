@@ -4576,6 +4576,30 @@ class TestRendererSecurity(unittest.TestCase):
             _safe_target('https://idp.example.com\n/device'),
             'https://idp.example.com/device')
 
+    def test_safe_link_url_rejects_malformed_port_no_display_divergence(self):
+        # A non-integer / out-of-range port must make the URL non-clickable, so
+        # the displayed link cannot diverge from the href / webbrowser.open() /
+        # QR target. _display_url DROPS a junk port from the shown text (it can't
+        # render one), so if _safe_link_url returned the URL verbatim with the
+        # port intact, the user would read "https://idp.example.com/device" while
+        # the click / browser / QR went to a different port on that host — the
+        # exact shown-vs-opened spoof _safe_target exists to prevent.
+        from questdb.auth._render import (
+            _safe_link_url, _safe_target, _display_url, _render_link)
+        for url in ('https://idp.example.com:70000/device',   # out of range
+                    'https://idp.example.com:99999/device',   # out of range
+                    'https://idp.example.com:0x50/device',    # non-integer
+                    'https://idp.example.com:8080abc/device'):  # non-integer
+            self.assertIsNone(_safe_link_url(url), f'should reject {url!r}')
+            self.assertIsNone(_safe_target(url), f'should reject {url!r}')
+            # Shown as inert text (no clickable <a>), so nothing can diverge.
+            self.assertNotIn('<a ', _render_link(url), f'clickable: {url!r}')
+        # A valid explicit port is unaffected: still clickable AND the shown text
+        # keeps the port, so display and target agree.
+        ok = 'https://idp.example.com:8443/device'
+        self.assertEqual(_safe_link_url(ok), ok)
+        self.assertIn(':8443', _display_url(ok))
+
     def test_render_link_inert_for_dangerous_scheme(self):
         from questdb.auth._render import _render_link
         safe = _render_link('https://idp/x')
