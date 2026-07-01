@@ -38,8 +38,10 @@ VS Code-remote): authorize in any browser, the kernel only calls the IdP.
     token = auth.token()                      # device flow on first use
     headers = auth.headers()                  # {"Authorization": "Bearer .."}
 
-For PG-wire there are two convenience adapters that wire the auto-refreshed
-token in as the ``_sso`` password::
+For PG-wire there are two convenience adapters that wire the token in as the
+``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
+token on every new pooled connection, while ``psycopg_connect`` captures the
+current token once at connect time::
 
     from questdb.auth import sqlalchemy_engine, psycopg_connect
 

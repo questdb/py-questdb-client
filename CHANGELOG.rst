@@ -56,8 +56,10 @@ Highlights:
   refresh held under the file store's cross-process lock can't outlast its
   staleness window; a larger value raises ``OidcConfigError`` at construction.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
-  :func:`~questdb.auth.psycopg_connect`) that wire the auto-refreshed token into
-  PG-wire as the ``_sso`` password.
+  :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
+  ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
+  token on every new pooled connection, ``psycopg_connect`` captures it at
+  connect time.
 * ``token()`` / ``headers()`` require no dependencies beyond the standard
   library; ``sqlalchemy`` / ``psycopg`` / ``qrcode`` / ``IPython`` are imported
   lazily.

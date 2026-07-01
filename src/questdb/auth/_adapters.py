@@ -170,11 +170,14 @@ def sqlalchemy_engine(
         :meth:`OidcDeviceAuth.from_questdb`.
     :param url: The QuestDB base URL; the PG host is derived from it unless
         ``host=`` is given.
+    :param host: Override the PG-wire host (otherwise taken from ``url``).
     :param pg_port: PG-wire port (default ``8812``).
     :param database: Database name (default ``"qdb"``).
     :param drivername: SQLAlchemy driver; defaults to ``postgresql+psycopg``
         (v3) or ``postgresql+psycopg2`` depending on what is installed.
     :param engine_kwargs: Forwarded to ``create_engine``.
+    :raises OidcConfigError: if ``pg_port`` is not a valid TCP port, or the
+        resolved host is missing or carries connection-string metacharacters.
     """
     pg_port = _coerce_port(pg_port)
     try:
@@ -231,7 +234,12 @@ def psycopg_connect(
         :meth:`OidcDeviceAuth.from_questdb`.
     :param url: The QuestDB base URL; the PG host is derived from it unless
         ``host=`` is given.
+    :param host: Override the PG-wire host (otherwise taken from ``url``).
+    :param pg_port: PG-wire port (default ``8812``).
+    :param database: Database name (default ``"qdb"``).
     :param connect_kwargs: Forwarded to the driver's ``connect()``.
+    :raises OidcConfigError: if ``pg_port`` is not a valid TCP port, or the
+        resolved host is missing or carries connection-string metacharacters.
     """
     pg_port = _coerce_port(pg_port)
     mod = _pg_module()

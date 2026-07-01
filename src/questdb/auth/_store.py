@@ -31,10 +31,13 @@ persists the token state so the restarted process resumes from a saved refresh
 token — one silent token-endpoint round-trip — instead of re-prompting.
 
 :class:`FileTokenStore` is the default implementation: one plaintext JSON file
-per identity, protected at rest by file permissions (``0600`` file, ``0700``
-directory) rather than encryption — the same posture ``gcloud``, ``aws`` and
-``gh`` take. Supply your own :class:`TokenStore` (backed by an OS keychain, a
-KMS, or a vault) to encrypt the refresh token at rest.
+per identity, protected at rest by file permissions rather than encryption — the
+same posture ``gcloud``, ``aws`` and ``gh`` take. The token *content* is
+protected by the ``0600`` file mode (set atomically at creation by ``mkstemp``);
+the ``0700`` directory is defense-in-depth (listing/replacement resistance,
+re-asserted best-effort and dropped silently when the directory is owned by
+another principal). Supply your own :class:`TokenStore` (backed by an OS
+keychain, a KMS, or a vault) to encrypt the refresh token at rest.
 
 The on-disk format (directory, file name, JSON schema, atomic-write and
 lock-file protocols) is a deliberately **language-neutral contract** so the Java
@@ -513,9 +516,11 @@ class FileTokenStore(TokenStore):
 
     def load(self, key: TokenStoreKey) -> Optional[PersistedToken]:
         """Load and identity-verify the persisted token for ``key`` (see
-        :meth:`TokenStore.load`). Returns ``None`` — never raises — for a
-        missing, oversized, unreadable, non-regular, or wrong-identity file, so
-        an unusable entry falls back to a refresh / interactive sign-in."""
+        :meth:`TokenStore.load`). Returns ``None`` for a missing, oversized,
+        unreadable, non-regular, or wrong-identity file, so an unusable entry
+        falls back to a refresh / interactive sign-in; raises
+        :class:`~questdb.auth.OidcError` only on a genuine I/O or permission
+        error (e.g. ``EACCES``/``EIO``), which re-parsing cannot recover."""
         path = self._token_file(key)
         try:
             st = os.stat(path)
@@ -620,6 +625,29 @@ class FileTokenStore(TokenStore):
         except OSError as e:
             raise OidcError(
                 f'could not remove the OIDC token store file: {e}') from e
+        # Also sweep any orphaned sibling temp files holding a now-forgotten
+        # credential (see _sweep_orphan_temps); best-effort, never fails clear().
+        self._sweep_orphan_temps(key)
+
+    def _sweep_orphan_temps(self, key: TokenStoreKey) -> None:
+        # Remove any leftover `<hash>*.tmp` files for this identity. save() writes
+        # the plaintext token into such a temp before its atomic rename; a hard
+        # crash (SIGKILL / power loss) in that window leaves it behind — 0600 and
+        # never read back by load(), but it still holds a refresh token the user
+        # is now asking to forget. os.replace consumes the temp on a normal save,
+        # so this usually finds nothing. List by prefix (not glob) so a glob
+        # metacharacter in the directory path is a non-issue. Best-effort: a
+        # sweep failure must not fail clear().
+        prefix = key.hash()
+        try:
+            with os.scandir(self._directory) as entries:
+                names = [e.name for e in entries]
+        except OSError:
+            return
+        for name in names:
+            if name.startswith(prefix) and name.endswith('.tmp'):
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(self._directory, name))
 
     def in_lock(self, key: TokenStoreKey, action: Callable[[], Any]) -> Any:
         """Run ``action`` under a per-identity ``O_CREAT|O_EXCL`` lock file (see
@@ -638,15 +666,16 @@ class FileTokenStore(TokenStore):
             # Could not prepare the lock directory or file; run without the lock.
             # Atomic replacement still keeps every reader CONSISTENT (no torn
             # read), but a degraded lock-free refresh is no longer SERIALISED
-            # against a peer, so for this one refresh two cross-process races are
-            # unguarded: (1) a rotating-refresh-token race (two processes each
-            # refresh and one rotation is lost), and (2) a clear-vs-save race —
-            # because the clear()-generation re-check that normally guards a save
-            # is process-local (it lives in this process's in-memory cache), a
-            # save() here can re-create a file another process just clear()ed,
-            # resurrecting a cleared token until the next clear(). Both are
-            # best-effort by design; closing them across processes would need an
-            # on-disk epoch that save re-checks under the lock.
+            # against a peer, so for this one refresh a rotating-refresh-token
+            # race is unguarded (two processes each refresh and one rotation is
+            # lost). A second cross-process race — clear-vs-save, where a save()
+            # re-creates a file another process just clear()ed — is NOT specific
+            # to this degraded branch: the clear()-generation re-check that guards
+            # a save is process-local (it lives in this process's in-memory
+            # cache), so a concurrent cross-process clear() is undone even when
+            # the lock IS held. Both are best-effort by design; closing them
+            # across processes would need an on-disk epoch that save re-checks
+            # under the lock.
             held = False
         try:
             return action()
@@ -705,8 +734,9 @@ class FileTokenStore(TokenStore):
         self._restrict_to_owner()
 
     def _restrict_to_owner(self) -> None:
-        # Best-effort: the at-rest protection of the plaintext token files is
-        # exactly these owner-only directory permissions. On a non-POSIX
+        # Best-effort, defense-in-depth: the token CONTENT is protected by the
+        # 0600 file mode (mkstemp sets it atomically); these owner-only directory
+        # permissions add listing/replacement resistance on top. On a non-POSIX
         # filesystem (Windows) POSIX modes do not apply, so fall back to the
         # directory's inherited ACL and warn once.
         if os.name != 'posix':
@@ -715,7 +745,9 @@ class FileTokenStore(TokenStore):
         try:
             os.chmod(self._directory, 0o700)
         except OSError:
-            # The directory is not ours to chmod: keep the existing permissions.
+            # The directory is not ours to chmod (owned by another principal):
+            # keep the existing permissions. Each token file's own 0600 mode still
+            # protects its content regardless of the directory mode.
             pass
 
     def _fsync_directory(self) -> None:
@@ -887,7 +919,13 @@ class FileTokenStore(TokenStore):
 
     def _is_stale(self, lock: str) -> bool:
         try:
-            mtime = os.stat(lock).st_mtime
+            # lstat (not stat): judge a symlink by the LINK's own mtime, never
+            # its target's. A co-tenant who plants a symlink at the lock path
+            # (its O_EXCL create already refuses to follow one) and keeps the
+            # TARGET fresh cannot thereby keep the lock looking live — with lstat
+            # the link's own age is what counts, so it is stolen once it ages
+            # out. For a regular-file lock (what we create) lstat == stat.
+            mtime = os.lstat(lock).st_mtime
         except OSError:
             # Can't determine the age, so don't steal. (A pre-planted dangling
             # symlink at the lock path lands here forever, so that identity
@@ -905,7 +943,11 @@ class FileTokenStore(TokenStore):
         # then untrustworthy and the lock may well be live, so treat it as fresh
         # (do not steal) rather than break a live holder's lock; a genuinely
         # abandoned lock is re-judged stale on a later poll once the clock catches
-        # up to it.
+        # up to it. A co-tenant with write access to the store dir can abuse this
+        # by future-dating a lock they plant (os.utime) to pin the identity to
+        # lock-free coordination indefinitely — but that is integrity-safe (the
+        # atomic write still holds) and no worse than the peer simply holding or
+        # deleting files, which their write access already permits.
         if elapsed < 0:
             return False
         return elapsed > self._lock_stale

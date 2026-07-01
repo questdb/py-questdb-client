@@ -1775,6 +1775,22 @@ class TestRefresh(AuthTestBase):
         self.assertEqual(self.state.refresh_requests, 1)
         self.assertEqual(self.state.device_requests, 0)
 
+    def test_refresh_without_access_token_falls_back_to_device_flow(self):
+        # m8: the symmetric case of the groups_in_token=True test above.
+        # groups_in_token=False, but the IdP's refresh omits the access_token
+        # (the kind _select returns in this mode): the refresh is unusable, so
+        # fall back to the interactive device flow rather than caching it and
+        # looping.
+        auth = self.make_auth(groups_in_token=False)
+        self._seed_expired(auth)
+        self.state.refresh_response = (200, {
+            'id_token': ID_TOKEN, 'token_type': 'Bearer',
+            'expires_in': 3600})  # no access_token
+        token = auth.token()
+        self.assertEqual(token, ACCESS_TOKEN)            # from the device flow
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(self.state.device_requests, 1)  # fell back
+
     def test_cached_token_missing_required_kind_is_refreshed(self):
         # A cached, non-expired token that lacks the required kind (here:
         # access_token in non-groups mode) must not pass the cache gate and
@@ -3273,6 +3289,27 @@ class TestAdapters(unittest.TestCase):
             _pg_module()
         self.assertIsInstance(cm.exception.__cause__, ImportError)
 
+    def test_pg_module_selection_order(self):
+        # m8: _pg_module prefers psycopg v3, else psycopg2, else raises a chained
+        # ImportError. Force the module presence via sys.modules so the ordering
+        # is exercised regardless of which driver is actually installed (the
+        # missing-driver tests above skip when one is present). A None entry in
+        # sys.modules makes `import <name>` raise ImportError.
+        from questdb.auth._adapters import _pg_module
+        fake_v3 = types.ModuleType('psycopg')
+        fake_v2 = types.ModuleType('psycopg2')
+        with mock.patch.dict(sys.modules,
+                             {'psycopg': fake_v3, 'psycopg2': fake_v2}):
+            self.assertIs(_pg_module(), fake_v3)        # both present -> v3 wins
+        with mock.patch.dict(sys.modules,
+                             {'psycopg': None, 'psycopg2': fake_v2}):
+            self.assertIs(_pg_module(), fake_v2)        # only v2 -> fall back
+        with mock.patch.dict(sys.modules,
+                             {'psycopg': None, 'psycopg2': None}):
+            with self.assertRaises(ImportError) as cm:  # neither -> chained error
+                _pg_module()
+        self.assertIsInstance(cm.exception.__cause__, ImportError)
+
 
 class TestConfigHelpers(unittest.TestCase):
     def test_as_bool_variants(self):
@@ -4639,6 +4676,21 @@ class TestTransportSecurity(unittest.TestCase):
                     b + '/.well-known/openid-configuration', timeout=5)
         self.assertEqual(cm.exception.status, 200)  # status attached
 
+    def test_invalid_utf8_json_body_raises_oidc_error(self):
+        # m8: HttpResponse.json() decodes the body as utf-8 with NO
+        # errors='replace' (unlike text()), so an invalid-UTF-8 2xx body raises
+        # UnicodeDecodeError. Both call sites (post_form, get_json) must catch it
+        # and surface a typed error rather than let a raw UnicodeDecodeError
+        # escape the contract. (The existing 0x80..0x82 test targets the JWT
+        # base64 payload, not the HTTP body decode.)
+        from questdb.auth import _http
+        with _raw_response_server(200, 'application/json', b'\xff\xfe') as b:
+            with self.assertRaises(OidcError):
+                _http.post_form(b + '/token', {'a': 'b'}, timeout=5)
+        with _raw_response_server(200, 'application/json', b'\xff\xfe') as b:
+            with self.assertRaises(OidcConfigError):
+                _http.get_json(b + '/settings', timeout=5)
+
 
 class TestRendererSecurity(unittest.TestCase):
     """The Jupyter prompt must never turn an IdP-supplied URL into a
@@ -5662,6 +5714,15 @@ class TestFileTokenStore(unittest.TestCase):
         # not a usable entry. load() must return None (fall back to a fresh
         # sign-in), not raise IsADirectoryError out of its documented contract.
         os.mkdir(self._file())
+        self.assertIsNone(self.store.load(self.key))
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO support')
+    def test_fifo_at_token_path_ignored(self):
+        # m8: a non-regular file other than a directory — e.g. a FIFO — planted
+        # at the token path is likewise not a usable entry (the S_ISREG guard
+        # covers every non-regular type). load() must return None; because it
+        # stats before opening, it never blocks reading the FIFO.
+        os.mkfifo(self._file())
         self.assertIsNone(self.store.load(self.key))
 
     def test_deeply_nested_json_file_ignored(self):
