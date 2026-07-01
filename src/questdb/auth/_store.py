@@ -96,13 +96,16 @@ _DEFAULT_LOCK_STALE = 600.0
 _LOCK_POLL_SLICE = 0.05
 # Floor on a configured ``lock_stale``. A lock may legitimately be held for the
 # whole of one refresh under it: OidcDeviceAuth caps its HTTP timeout at 120s,
-# applied per network leg, so the worst-case live hold is ~2x that. Reject a
-# ``lock_stale`` at or below this floor — a shorter window would let ``_is_stale``
-# declare a LIVE holder's lock abandoned and a peer steal it mid-refresh, which
-# the atomic steal cannot rescue (it guards two acquirers racing to break one
-# *stale* lock, not a window so short a *live* lock reads as stale). The default
-# (_DEFAULT_LOCK_STALE) sits comfortably above this.
-_MIN_LOCK_STALE = 240.0
+# applied per network leg, so the worst-case live hold is ~2x that (~240s) PLUS
+# the save's two fsyncs (token file + directory) and scheduling slack. Set the
+# floor above that whole envelope — not at the bare 240s network figure, which a
+# ``lock_stale`` configured just past it (240.001) would slip under on a slow
+# host — and reject a value at or below it. A shorter window would let
+# ``_is_stale`` declare a LIVE holder's lock abandoned and a peer steal it
+# mid-refresh, which the atomic steal cannot rescue (it guards two acquirers
+# racing to break one *stale* lock, not a window so short a *live* lock reads as
+# stale). The default (_DEFAULT_LOCK_STALE) sits comfortably above this.
+_MIN_LOCK_STALE = 300.0
 
 # Set once if the platform cannot enforce owner-only POSIX permissions on the
 # token files (e.g. Windows), so the at-rest protection falls back to the
@@ -448,11 +451,12 @@ class FileTokenStore(TokenStore):
             than stalling a sign-in.
         :param lock_stale: a lock older than this (seconds) is treated as
             abandoned by a crashed holder and stolen. It MUST exceed the longest
-            a live holder can hold the lock (one refresh under the lock), so a
-            value at or below the worst-case hold (~240s, twice
-            ``OidcDeviceAuth``'s 120s HTTP-timeout cap) is rejected to keep a
-            peer from stealing a live holder's lock mid-refresh; the default
-            (600s) stays safely above that.
+            a live holder can hold the lock (one refresh under the lock: up to
+            ~240s of network — twice ``OidcDeviceAuth``'s 120s HTTP-timeout cap —
+            plus the save's two fsyncs and scheduling slack), so a value at or
+            below that envelope (the ``_MIN_LOCK_STALE`` floor) is rejected to
+            keep a peer from stealing a live holder's lock mid-refresh; the
+            default (600s) stays safely above it.
         """
         if not directory:
             raise OidcConfigError('the token store directory is required')
@@ -604,9 +608,17 @@ class FileTokenStore(TokenStore):
             held = self._acquire_lock(lock)
         except OSError:
             # Could not prepare the lock directory or file; run without the lock.
-            # Atomic replacement still keeps every reader consistent — only a
-            # rotating-refresh-token race across processes is left unguarded for
-            # this one refresh.
+            # Atomic replacement still keeps every reader CONSISTENT (no torn
+            # read), but a degraded lock-free refresh is no longer SERIALISED
+            # against a peer, so for this one refresh two cross-process races are
+            # unguarded: (1) a rotating-refresh-token race (two processes each
+            # refresh and one rotation is lost), and (2) a clear-vs-save race —
+            # because the clear()-generation re-check that normally guards a save
+            # is process-local (it lives in this process's in-memory cache), a
+            # save() here can re-create a file another process just clear()ed,
+            # resurrecting a cleared token until the next clear(). Both are
+            # best-effort by design; closing them across processes would need an
+            # on-disk epoch that save re-checks under the lock.
             held = False
         try:
             return action()
@@ -626,10 +638,39 @@ class FileTokenStore(TokenStore):
         return os.path.join(self._directory, key.hash() + '.lock')
 
     def _ensure_directory(self) -> None:
+        # Both os.path.isdir and os.chmod FOLLOW a symlink, so a symlink planted
+        # at the store path — by anyone with write access to its parent dir —
+        # would have us write the plaintext token files into, and chmod, the
+        # link's TARGET (outside any directory we own): re-asserting 0700 would
+        # then tighten the target, not close the exposure. lstat does not follow,
+        # so use it to detect a symlinked leaf and refuse it rather than operate
+        # through it. Only the final component is checked, so a symlinked PARENT
+        # (e.g. the whole store relocated to another volume via
+        # QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR) still works; a symlink AT the leaf
+        # does not. Refusal is best-effort like every other store failure: the
+        # sign-in still succeeds in memory, only persistence is skipped (with a
+        # warning) — see OidcDeviceAuth._warn_persistence. This narrows but cannot
+        # fully close the TOCTOU (a swap between lstat and the write needs precise
+        # timing plus parent write access); it defeats a persistently-planted
+        # symlink, the realistic case.
+        try:
+            leaf = os.lstat(self._directory)
+        except FileNotFoundError:
+            leaf = None
+        except OSError as e:
+            raise OidcError(
+                f'could not access the OIDC token store directory: {e}') from e
+        if leaf is not None and stat.S_ISLNK(leaf.st_mode):
+            raise OidcError(
+                'the OIDC token store path is a symbolic link; refusing to use '
+                'it because the plaintext token files could be redirected '
+                'outside the owner-only directory. Point the store at a real '
+                f'directory, or set {TOKEN_STORE_DIR_ENV} to one.')
         if os.path.isdir(self._directory):
-            # Re-assert owner-only permissions on a pre-existing directory: one
-            # left world/group-accessible by another tool, a permissive umask, or
-            # a hostile local pre-create would otherwise expose the token files.
+            # Re-assert owner-only permissions on a pre-existing (real) directory:
+            # one left world/group-accessible by another tool, a permissive
+            # umask, or a hostile local pre-create would otherwise expose the
+            # token files. The symlink variant is handled above.
             self._restrict_to_owner()
             return
         os.makedirs(self._directory, mode=0o700, exist_ok=True)
@@ -819,7 +860,20 @@ class FileTokenStore(TokenStore):
             # atomic write still holds, and an attacker who can plant it already
             # has write access to the token directory.)
             return False
-        return (time.time() - mtime) > self._lock_stale
+        elapsed = time.time() - mtime
+        # Staleness rides the wall clock (st_mtime vs time.time()), unavoidable
+        # for a lock that may be shared across hosts with no common monotonic
+        # source: an NTP step still skews the age, and nothing file-only can fix
+        # that. Guard the one anomaly we CAN detect locally — a future-dated mtime
+        # (elapsed < 0), i.e. our clock currently reads BEHIND the lock's, whether
+        # from a backward step here or a holder whose clock runs ahead. The age is
+        # then untrustworthy and the lock may well be live, so treat it as fresh
+        # (do not steal) rather than break a live holder's lock; a genuinely
+        # abandoned lock is re-judged stale on a later poll once the clock catches
+        # up to it.
+        if elapsed < 0:
+            return False
+        return elapsed > self._lock_stale
 
 
 def _audience_matches(key_audience: Optional[str], file_audience: Any) -> bool:

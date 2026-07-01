@@ -304,9 +304,15 @@ def _safe_token_or_none(value: Any) -> Optional[str]:
     (via :func:`_has_only_token_chars`). A dropped token reads as absent, so a
     missing required kind then raises the clear terminal error (see
     :meth:`_select`) rather than routing a tampered credential onto the wire.
+
+    A blank token (empty or whitespace-only) also reads as absent: a real OAuth
+    token is never blank, and a run of spaces would otherwise pass the printable-
+    ASCII gate, be cached, and go out as ``Bearer <spaces>`` — defeating the
+    "fail once with a clear error, don't cache an unusable token" guarantee.
     """
     token = value if isinstance(value, str) else None
-    if token is not None and not _has_only_token_chars(token):
+    if token is not None and (
+            not token.strip() or not _has_only_token_chars(token)):
         return None
     return token
 
@@ -384,6 +390,59 @@ class OidcDeviceAuth:
             timeout: float = 30,
             token_store: Optional[TokenStore] = None,
             _clock=None):  # injectable time source for testing
+        """
+        Construct with explicit IdP configuration (no server discovery). Prefer
+        :meth:`from_questdb`, which discovers most of these from a QuestDB server.
+
+        :param client_id: the OAuth client id registered with the identity
+            provider for the device-authorization grant.
+        :param device_authorization_endpoint: the IdP's RFC 8628
+            device-authorization URL, where the flow starts.
+        :param token_endpoint: the IdP's OAuth token URL, used to exchange the
+            device code and to refresh the token.
+        :param scope: space-separated OAuth scopes to request (default
+            ``'openid'``); ``'openid'`` is added automatically when
+            ``groups_in_token`` is set.
+        :param groups_in_token: ``True`` when the QuestDB server expects the
+            user's groups encoded in the token
+            (``acl.oidc.groups.encoded.in.token=true``); selects the ``id_token``
+            over the ``access_token`` and forces the ``openid`` scope.
+        :param audience: the OAuth ``audience`` to request, or ``None`` to omit
+            it (an empty string is treated as ``None``).
+        :param issuer: the expected token issuer to pin. On this explicit-config
+            path it feeds only cache / token-store identity (which sessions may
+            share a token), not credential routing; it is validated as a
+            well-formed authority.
+        :param insecure: allow plaintext ``http`` to the QuestDB server (local
+            dev only). The IdP is always held to ``https`` (or loopback
+            ``http``), so the device code and refresh token are never sent in
+            cleartext even when this is set.
+        :param ca_bundle: path to a PEM CA bundle used to verify TLS to the IdP
+            (e.g. a private/corporate CA); also forwarded to a caller wiring the
+            token into its own transport. ``None`` uses the system trust store.
+        :param open_browser: attempt to open the verification URL in a browser
+            (default ``True``); when ``False`` the URL is only printed for the
+            user to open manually.
+        :param interactive: force interactive (``True``) or non-interactive
+            (``False``) mode; ``None`` (default) auto-detects a usable terminal.
+            A non-interactive context raises rather than starting a device-flow
+            prompt no one can answer.
+        :param qr: also render the verification URL as a QR code, convenient for
+            scanning from a phone when signing in on a headless / remote kernel.
+        :param renderer: a custom :class:`~questdb.auth.Renderer` for the
+            device-code prompt (overrides ``qr``). Its callbacks run while the
+            acquisition lock is held, so they must not call back into this
+            instance's :meth:`token` / :meth:`clear`.
+        :param default_interval: fallback poll interval in seconds when the IdP's
+            device-authorization response does not specify one (default ``5``;
+            clamped to the RFC 8628 range).
+        :param timeout: per-request HTTP timeout in seconds for each IdP call
+            (device-code, each poll, refresh); must be positive and must not
+            exceed 120s (a larger value is rejected).
+        :param token_store: an optional :class:`~questdb.auth.TokenStore` to
+            persist the token across process restarts; ``None`` (default) keeps
+            tokens in memory only.
+        """
         # Validate types up front so a bad-typed arg raises the module's typed
         # error, not a bare AttributeError/TypeError surfacing later from
         # scope.split(), safe_urlparse(<non-str>), or the cache-key join.
@@ -571,6 +630,42 @@ class OidcDeviceAuth:
         <questdb.auth.FileTokenStore.at_default_location>`) to persist the token
         so a restarted process resumes from the saved refresh token instead of
         prompting again; the default is in-memory only.
+
+        :param url: the QuestDB base URL; ``{url}/settings`` is read to discover
+            the OIDC configuration.
+        :param client_id: override the discovered OAuth client id.
+        :param scope: override the discovered scopes (space-separated).
+        :param audience: override the discovered OAuth ``audience``.
+        :param groups_in_token: override the discovered groups-in-token mode
+            (``True`` selects the ``id_token`` and forces the ``openid`` scope).
+        :param issuer: pin the token issuer. **Required** when the server does
+            not advertise the device-authorization endpoint (so it is discovered
+            from the IdP), so a tampered ``/settings`` cannot redirect the
+            credential POSTs — see above.
+        :param token_endpoint: override the discovered token endpoint.
+        :param device_authorization_endpoint: override the discovered
+            device-authorization endpoint.
+        :param insecure: allow plaintext ``http`` to the QuestDB server for
+            discovery (local dev only); the IdP is always held to ``https`` (or
+            loopback ``http``).
+        :param ca_bundle: path to a PEM CA bundle used to verify TLS to QuestDB
+            and the IdP; ``None`` uses the system trust store.
+        :param open_browser: attempt to open the verification URL in a browser
+            (default ``True``); when ``False`` it is only printed.
+        :param interactive: force interactive (``True``) or non-interactive
+            (``False``) mode; ``None`` (default) auto-detects a usable terminal.
+        :param qr: also render the verification URL as a QR code.
+        :param renderer: a custom :class:`~questdb.auth.Renderer` for the
+            device-code prompt (overrides ``qr``); its callbacks must not
+            re-enter this instance's :meth:`token` / :meth:`clear`.
+        :param default_interval: fallback poll interval in seconds when the IdP
+            does not specify one (default ``5``).
+        :param timeout: per-request HTTP timeout in seconds for discovery and
+            every IdP call; must be positive and must not exceed 120s (a larger
+            value is rejected).
+        :param token_store: an optional :class:`~questdb.auth.TokenStore` to
+            persist the token across process restarts; ``None`` (default) keeps
+            tokens in memory only.
         """
         # Validate before resolve_config consumes `timeout` on its /settings and
         # discovery HTTP calls (which run before cls() would validate it), so a
@@ -1070,7 +1165,11 @@ class OidcDeviceAuth:
         id_token = _str_or_none(persisted.id_token)
         refresh_token = _str_or_none(persisted.refresh_token)
         served = id_token if self.config.groups_in_token else access_token
-        if not served or not _has_only_token_chars(served):
+        # A null, blank (whitespace-only), or control/non-ASCII served token is
+        # unusable: reject the whole entry rather than serve a tampered or empty
+        # credential. The blank check mirrors _safe_token_or_none on the wire
+        # path so a run of spaces can't slip through the printable-ASCII gate.
+        if not served or not served.strip() or not _has_only_token_chars(served):
             return None
         # The file is attacker-writable (and may have been written under a skewed
         # clock), so bound how long the loaded token is trusted exactly as a
@@ -1594,6 +1693,15 @@ def _normalize_url(url: str) -> str:
     parts, port = safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
     host = (parts.hostname or '').lower()
+    # Re-add the brackets urllib strips off an IPv6 literal, exactly as the
+    # on-disk _canonical_endpoint does. Without them "::1" + port 9000 renders as
+    # the ambiguous "::1:9000", which collides with the distinct host "::1:9000"
+    # (default port): two different IPv6 endpoints would then key to ONE in-memory
+    # cache entry while the bracketing disk store keeps them apart — the "keyed
+    # one way in memory, a different way on disk" divergence this normalization
+    # exists to prevent.
+    if ':' in host:
+        host = f'[{host}]'
     default_port = {'https': 443, 'http': 80}.get(scheme)
     if port and port != default_port:
         netloc = f'{host}:{port}'

@@ -549,11 +549,26 @@ def _parse_retry_after(headers: Optional[Mapping[str, str]]) -> Optional[int]:
         if key.lower() == 'retry-after':
             value = val
             break
-    try:
-        secs = int(str(value).strip())
-    except (TypeError, ValueError):
+    if value is None:
         return None
-    return secs if secs >= 0 else None
+    text = str(value).strip()
+    # Accept only a bare run of ASCII digits. int() is looser than the RFC's
+    # delta-seconds: it also parses a leading sign ('+0010'), PEP 515 underscore
+    # group separators ('1_0'), and non-ASCII Unicode decimal digits (e.g.
+    # Arabic-Indic '٠', which int() maps to 0). str.isdigit() still admits
+    # those Unicode digits, so gate on isascii() as well; the result is then a
+    # guaranteed non-negative int (no sign, no separators, no overflow-to-None).
+    # Bound the length before int(): on Python >= 3.10.7 int() raises ValueError
+    # on a string longer than sys.get_int_max_str_digits() (default 4300 digits),
+    # and this runs inside post_form BEFORE its try/except, so an unbounded int()
+    # would let a hostile IdP / on-path proxy leak that raw ValueError past the
+    # module's typed-error contract (it is neither OidcError nor caught by the
+    # poll / refresh loops). A genuine Retry-After is a few digits; a >9-digit
+    # value (>31 years) is meaningless, so read it — and anything longer — as
+    # absent and let the caller's fixed back-off apply.
+    if not (text.isascii() and text.isdigit()) or len(text) > 9:
+        return None
+    return int(text)
 
 
 class _PostResult(tuple):

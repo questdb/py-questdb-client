@@ -90,9 +90,17 @@ class _FakeAuth:
 
     _ctx = None
 
-    def __init__(self, token='TKN'):
+    def __init__(self, token='TKN', interactive_required=False):
         self._value = token
         self.calls = 0
+        # When True, mimic "no token acquired yet": a non-interactive fetch
+        # (allow_interactive=False — the pool-thread path) refuses with
+        # OidcInteractionRequired instead of returning a token, exactly as
+        # OidcDeviceAuth._token does when it would otherwise start a device flow.
+        self._interactive_required = interactive_required
+        # The allow_interactive value of the last _token() call, so a test can
+        # assert the adapter fetches the per-connection token non-interactively.
+        self.last_allow_interactive = None
 
     def token(self):
         self.calls += 1
@@ -104,6 +112,10 @@ class _FakeAuth:
         # thread, where an interactive prompt would block the pool). Mirror
         # OidcDeviceAuth and count it like token().
         self.calls += 1
+        self.last_allow_interactive = allow_interactive
+        if self._interactive_required and not allow_interactive:
+            raise OidcInteractionRequired(
+                'Sign in first: no token has been acquired.')
         return self._value
 
     def headers(self):
@@ -1014,6 +1026,38 @@ class TestDeviceFlow(AuthTestBase):
             'access_token': 'bad\x00access', 'id_token': ID_TOKEN,
             'refresh_token': 'REFRESH-1', 'token_type': 'Bearer',
             'expires_in': 3600})]
+        auth = self.make_auth(groups_in_token=False)
+        with self.assertRaises(OidcDeviceFlowError):
+            auth.token()
+        self.assertIsNone(auth._tokens)
+
+    def test_blank_network_token_treated_as_missing(self):
+        # A served token that is blank (empty or whitespace-only) must read as
+        # ABSENT — not be cached and sent as "Bearer <spaces>". A run of spaces
+        # passes the printable-ASCII injection gate, so without an explicit blank
+        # check it would slip through and defeat the "fail once with a clear
+        # error, don't cache an unusable token" guarantee: the client would serve
+        # the blank token until expiry instead of surfacing the actionable "IdP
+        # returned no id_token" error. Mirrors the control-char pair above for
+        # both served kinds.
+        from questdb.auth._device import _safe_token_or_none
+        self.assertIsNone(_safe_token_or_none('   '))     # all spaces
+        self.assertIsNone(_safe_token_or_none(''))         # empty
+        self.assertIsNone(_safe_token_or_none(' \t '))     # tab non-printable too
+        self.assertEqual(                                  # inner space is kept
+            _safe_token_or_none('tok en'), 'tok en')
+        # groups mode serves the id_token: a blank one fails terminally, no cache.
+        self.state.token_script = [(200, {
+            'access_token': ACCESS_TOKEN, 'id_token': '   ',
+            'token_type': 'Bearer', 'expires_in': 3600})]
+        auth = self.make_auth(groups_in_token=True)
+        with self.assertRaises(OidcDeviceFlowError):
+            auth.token()
+        self.assertIsNone(auth._tokens)
+        # access mode serves the access_token: a blank one likewise fails.
+        self.state.token_script = [(200, {
+            'access_token': '   ', 'id_token': ID_TOKEN,
+            'token_type': 'Bearer', 'expires_in': 3600})]
         auth = self.make_auth(groups_in_token=False)
         with self.assertRaises(OidcDeviceFlowError):
             auth.token()
@@ -2811,6 +2855,66 @@ class TestAdapters(unittest.TestCase):
             events['fn'](None, None, [], cparams)
             self.assertEqual(cparams['password'], 'TKN')
         self.assertEqual(auth.calls - before, 2)
+        # ...and it fetches NON-interactively (via _token(allow_interactive=
+        # False), not token()): a regression to the interactive accessor would
+        # leave last_allow_interactive at None / True and fail here. See also
+        # test_sqlalchemy_engine_per_connect_refuses_interactive_signin.
+        self.assertIs(auth.last_allow_interactive, False)
+
+    def test_sqlalchemy_engine_per_connect_refuses_interactive_signin(self):
+        # The per-connection token injection MUST be non-interactive: it runs on
+        # a pool thread, where launching a device-flow browser prompt would block
+        # the pool. The adapter fetches via auth._token(allow_interactive=False),
+        # so when no token has been acquired yet the pool sees OidcInteraction-
+        # Required rather than a hung prompt. Drive the real do_connect listener
+        # from a worker thread (the pool context) and assert the refusal
+        # propagates. A regression to auth.token() / allow_interactive=True would
+        # return 'TKN' here and NOT raise, failing this test.
+        auth = _FakeAuth('TKN', interactive_required=True)
+        events = {}
+
+        fake_sa = types.ModuleType('sqlalchemy')
+        fake_sa.__path__ = []
+        fake_sa.create_engine = lambda url, **kw: object()
+
+        class _Event:
+            @staticmethod
+            def listens_for(target, name):
+                def deco(fn):
+                    events.update(name=name, fn=fn)
+                    return fn
+                return deco
+
+        fake_sa.event = _Event
+        fake_eng = types.ModuleType('sqlalchemy.engine')
+
+        class _URL:
+            @staticmethod
+            def create(**kw):
+                return 'URL'
+
+        fake_eng.URL = _URL
+        with mock.patch.dict(sys.modules, {
+                'sqlalchemy': fake_sa,
+                'sqlalchemy.engine': fake_eng,
+                'psycopg': types.ModuleType('psycopg')}):
+            sqlalchemy_engine(auth, 'https://db.example.com:9000')
+
+        provide_token = events['fn']
+        box = {}
+
+        def run():
+            try:
+                provide_token(None, None, [], {})
+            except BaseException as e:  # noqa: BLE001 - re-raised via the box
+                box['exc'] = e
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        self.assertIsInstance(box.get('exc'), OidcInteractionRequired)
+        # The load-bearing half: it refused because the fetch was non-interactive.
+        self.assertIs(auth.last_allow_interactive, False)
 
     def test_sqlalchemy_engine_uses_bare_ipv6_host(self):
         # m6: SQLAlchemy's URL.create takes host and port separately and hands
@@ -3465,6 +3569,28 @@ class TestCacheKey(unittest.TestCase):
         with self.assertRaises(OidcConfigError):
             _normalize_url('https://[::1')
 
+    def test_normalize_url_rebrackets_ipv6_to_match_store_key(self):
+        # _normalize_url (the in-memory cache_key) must re-add the brackets
+        # urllib strips off an IPv6 literal, exactly as the on-disk
+        # _canonical_endpoint does. Without them "[::1]:9000" (host ::1, port
+        # 9000) and the DISTINCT host "[::1:9000]" (default port) both collapse to
+        # the ambiguous "::1:9000" and key two different IPv6 endpoints to ONE
+        # in-memory cache entry — while the bracketing disk store keeps them apart
+        # — i.e. a token keyed one way in memory and another on disk, the exact
+        # divergence this normalization exists to prevent.
+        from questdb.auth._device import _normalize_url
+        from questdb.auth._store import _canonical_endpoint
+        a = 'https://[::1]:9000/token'
+        b = 'https://[::1:9000]/token'
+        # Distinct in memory now (they previously collided) ...
+        self.assertNotEqual(_normalize_url(a), _normalize_url(b))
+        # ... making the SAME distinction the on-disk key already made.
+        self.assertNotEqual(_canonical_endpoint(a), _canonical_endpoint(b))
+        # Brackets preserved so the host:port boundary stays unambiguous.
+        self.assertEqual(_normalize_url(a), 'https://[::1]:9000/token')
+        self.assertEqual(
+            _normalize_url('http://[::1]/token'), 'http://[::1]/token')
+
     def test_realm_path_distinguishes_key(self):
         # Multi-tenant IdP: same host, different realm path -> distinct keys
         # (the old origin-only key collided, leaking one realm's token).
@@ -3648,6 +3774,42 @@ class TestTransportSecurity(unittest.TestCase):
                 post_form(raw + '/token', {'grant_type': 'x'})
         self.assertEqual(cm.exception.status, 429)
         self.assertEqual(cm.exception.retry_after, 30)
+
+    def test_parse_retry_after_rejects_lenient_int_forms(self):
+        # m7: int() is looser than the RFC 7231 delta-seconds it parses — it also
+        # accepts a leading sign ('+0010'), PEP 515 underscore separators ('1_0'),
+        # and non-ASCII Unicode decimal digits (e.g. Arabic-Indic '٠', mapped to
+        # 0). Only a bare run of ASCII digits is a valid Retry-After; anything else
+        # must read as absent (None) so the poll falls back to its fixed back-off
+        # rather than honor a malformed / attacker-crafted value.
+        from questdb.auth._http import _parse_retry_after
+        # Accepted: plain / zero-padded ASCII digits, surrounding whitespace,
+        # zero, and a case-insensitive (HTTP/2- or proxy-lowercased) header name.
+        self.assertEqual(_parse_retry_after({'Retry-After': '30'}), 30)
+        self.assertEqual(_parse_retry_after({'Retry-After': '0010'}), 10)
+        self.assertEqual(_parse_retry_after({'Retry-After': '  5  '}), 5)
+        self.assertEqual(_parse_retry_after({'Retry-After': '0'}), 0)
+        self.assertEqual(_parse_retry_after({'retry-after': '7'}), 7)
+        # Rejected (all -> None): sign, underscores, Unicode digits, superscript,
+        # decimal / exponent, words, and the empty / whitespace-only value.
+        for bad in ('+0010', '-5', '1_0', '٠١', '²',
+                    '10.0', '1e3', 'soon', '', '   '):
+            self.assertIsNone(_parse_retry_after({'Retry-After': bad}), bad)
+        # No matching header, an empty mapping, and None headers all read absent.
+        self.assertIsNone(_parse_retry_after({'X-Other': '9'}))
+        self.assertIsNone(_parse_retry_after({}))
+        self.assertIsNone(_parse_retry_after(None))
+        # Length is bounded before int(): on Python >= 3.10.7 int() RAISES
+        # ValueError on a string longer than sys.get_int_max_str_digits()
+        # (default 4300 digits). This runs inside post_form before its own
+        # try/except, so an unbounded int() would leak a raw ValueError past the
+        # module's typed-error contract when a hostile IdP / on-path proxy sends a
+        # giant Retry-After. A >9-digit value (>31 years, meaningless) reads as
+        # absent; a 9-digit one is still accepted. Must return None, never raise.
+        self.assertEqual(
+            _parse_retry_after({'Retry-After': '9' * 9}), 999999999)
+        self.assertIsNone(_parse_retry_after({'Retry-After': '9' * 10}))
+        self.assertIsNone(_parse_retry_after({'Retry-After': '9' * 5000}))
 
     def test_incomplete_error_body_maps_to_network_error(self):
         # A 4xx/5xx with a truncated CHUNKED body (the server announces a chunk,
@@ -5076,6 +5238,53 @@ class TestFileTokenStore(unittest.TestCase):
         self.store.save(self.key, self._pt())
         self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
 
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlink support')
+    def test_symlinked_store_dir_is_refused(self):
+        # m8: os.path.isdir and os.chmod both FOLLOW a symlink, so a symlink
+        # planted at the store path (needs write access to the PARENT dir) would
+        # route the plaintext token files to — and chmod — the link's target,
+        # outside any directory we own; re-asserting 0700 would then tighten the
+        # target, not the exposure. _ensure_directory detects the symlinked leaf
+        # with lstat and refuses it, so save()/in_lock() raise (best-effort: the
+        # device flow degrades to no persistence) rather than write a credential
+        # through the link.
+        target = os.path.join(self.dir, 'real_target')
+        os.mkdir(target)
+        link = os.path.join(self.dir, 'link_store')
+        os.symlink(target, link)
+        store = FileTokenStore.at(link)
+        with self.assertRaises(OidcError):
+            store.save(self.key, self._pt())
+        self.assertEqual(os.listdir(target), [])  # nothing written through it
+        # in_lock likewise refuses to run its action through the link.
+        with self.assertRaises(OidcError):
+            store.in_lock(self.key, lambda: 'unreachable')
+        self.assertEqual(os.listdir(target), [])
+        # Only the LEAF is checked: a symlinked PARENT (e.g. the whole store
+        # relocated to another volume) is fine when the leaf itself is a real dir.
+        inner = FileTokenStore.at(os.path.join(link, 'tokens'))
+        inner.save(self.key, self._pt())
+        self.assertIsNotNone(inner.load(self.key))
+        self.assertIn('tokens', os.listdir(target))  # created under the real dir
+
+    def test_is_stale_ignores_future_dated_lock(self):
+        # m2: staleness rides the wall clock (st_mtime vs time.time()), which is
+        # unavoidable for a cross-host lock. A FUTURE-dated mtime — our clock
+        # stepped back, or a holder's clock runs ahead — gives a negative age we
+        # cannot trust (the lock may be live), so _is_stale reads it as fresh and
+        # does NOT steal, rather than break a live holder's lock.
+        os.makedirs(self.dir, exist_ok=True)
+        lock = os.path.join(self.dir, self.key.hash() + '.lock')
+        open(lock, 'w').close()
+        future = time.time() + 100_000
+        os.utime(lock, (future, future))
+        self.assertFalse(self.store._is_stale(lock))
+        # Guard didn't over-broaden: a genuinely old lock past the window is still
+        # stale.
+        past = time.time() - 100_000
+        os.utime(lock, (past, past))
+        self.assertTrue(self.store._is_stale(lock))
+
     def test_atomic_write_leaves_no_tmp(self):
         self.store.save(self.key, self._pt())
         self.store.save(self.key, self._pt(refresh_token='RT2'))
@@ -5290,7 +5499,7 @@ class TestFileTokenStore(unittest.TestCase):
         # (os.utime, instant) rather than use a tiny window, so the lock reads as
         # abandoned without a real wait.
         store = FileTokenStore(
-            self.dir, lock_acquire_budget=1.0, lock_stale=300)
+            self.dir, lock_acquire_budget=1.0, lock_stale=_MIN_LOCK_STALE + 1)
         os.makedirs(self.dir, exist_ok=True)
         lock = os.path.join(self.dir, self.key.hash() + '.lock')
         open(lock, 'w').close()
@@ -5314,7 +5523,7 @@ class TestFileTokenStore(unittest.TestCase):
         # test_in_lock_serializes_concurrent_acquirers, and no-hang/no-leak under
         # heavier steal contention by the test below.)
         store = FileTokenStore(
-            self.dir, lock_acquire_budget=2.0, lock_stale=300)
+            self.dir, lock_acquire_budget=2.0, lock_stale=_MIN_LOCK_STALE + 1)
         os.makedirs(self.dir, exist_ok=True)
         lock = os.path.join(self.dir, self.key.hash() + '.lock')
         open(lock, 'w').close()
@@ -5352,7 +5561,7 @@ class TestFileTokenStore(unittest.TestCase):
         # (see the two-thread test above), so this asserts the guarantees that
         # always hold.
         store = FileTokenStore(
-            self.dir, lock_acquire_budget=10.0, lock_stale=300)
+            self.dir, lock_acquire_budget=10.0, lock_stale=_MIN_LOCK_STALE + 1)
         os.makedirs(self.dir, exist_ok=True)
         lock = os.path.join(self.dir, self.key.hash() + '.lock')
         open(lock, 'w').close()
@@ -5386,7 +5595,7 @@ class TestFileTokenStore(unittest.TestCase):
         # stubbed _is_stale: "stale" to the first (acquire-loop) check, "fresh" to
         # the post-rename re-check.
         store = FileTokenStore(
-            self.dir, lock_acquire_budget=0.2, lock_stale=300)
+            self.dir, lock_acquire_budget=0.2, lock_stale=_MIN_LOCK_STALE + 1)
         os.makedirs(self.dir, exist_ok=True)
         lock = os.path.join(self.dir, self.key.hash() + '.lock')
         with open(lock, 'w') as f:
@@ -5731,6 +5940,23 @@ class TestPersistence(AuthTestBase):
         store = _FakeStore()
         store.saved = PersistedToken(
             access_token=ACCESS_TOKEN, id_token='bad\x01id-token',
+            refresh_token='REFRESH-1',
+            expires_at=FakeClock().now() + 3600, token_ttl=3600.0)
+        self._restart()
+        self._reset_server_counters()
+        auth = self.make_auth(token_store=store, clock=FakeClock())  # groups mode
+        self.assertEqual(auth.token(), ID_TOKEN)
+        self.assertEqual(self.state.device_requests, 1)  # rejected -> device flow
+
+    def test_persisted_blank_token_is_rejected(self):
+        # M1: the persistence path shares the wire path's blank-token guard. A
+        # served token that is empty or whitespace-only reads as absent (a run of
+        # spaces would otherwise pass the printable-ASCII gate), so the entry is
+        # ignored and a fresh sign-in follows rather than serving "Bearer
+        # <spaces>". Mirrors the control-char rejection above.
+        store = _FakeStore()
+        store.saved = PersistedToken(
+            access_token=ACCESS_TOKEN, id_token='   ',
             refresh_token='REFRESH-1',
             expires_at=FakeClock().now() + 3600, token_ttl=3600.0)
         self._restart()

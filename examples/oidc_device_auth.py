@@ -10,6 +10,7 @@ the device grant enabled. It cannot run unattended (there is a human in the
 loop), so it is not part of the automated example suite.
 """
 
+import contextlib
 import sys
 
 from questdb.auth import (
@@ -49,8 +50,12 @@ def pg_wire(url: str = QUESTDB_URL):
         for row in conn.execute(text('SELECT * FROM trades LIMIT 10')):
             print(row)
 
-    # Or a raw psycopg / psycopg2 connection (token captured at connect time):
-    with psycopg_connect(auth, url) as conn:
+    # Or a raw psycopg / psycopg2 connection (token captured at connect time).
+    # contextlib.closing guarantees the connection is closed on BOTH drivers:
+    # psycopg (v3) closes when its `with` block exits, but psycopg2's connection
+    # context manager only commits / rolls back the transaction and leaves the
+    # connection itself open.
+    with contextlib.closing(psycopg_connect(auth, url)) as conn:
         with conn.cursor() as cur:
             cur.execute('SELECT count() FROM trades')
             print(cur.fetchone())
