@@ -836,7 +836,12 @@ class FileTokenStore(TokenStore):
         # interoperates unchanged.
         if key.issuer is not None:
             obj['issuer'] = key.issuer
-        obj['groups_in_token'] = key.groups_in_token
+        # bool() it: TokenStoreKey is public, so a direct caller could pass a
+        # truthy non-bool. hash() already buckets it truthily ('1'/'0'), so write
+        # the matching boolean into the payload (a boolean field should hold a
+        # boolean) rather than a raw 2 that reads oddly and diverges from the
+        # name. OidcDeviceAuth already normalizes it, so this is a no-op there.
+        obj['groups_in_token'] = bool(key.groups_in_token)
         if token.access_token is not None:
             obj['access_token'] = token.access_token
         if token.id_token is not None:
@@ -874,7 +879,8 @@ class FileTokenStore(TokenStore):
                 or obj.get('scope') != key.scope
                 or not _audience_matches(key.audience, obj.get('audience'))
                 or not _issuer_matches(key.issuer, obj.get('issuer'))
-                or bool(obj.get('groups_in_token')) != key.groups_in_token):
+                or bool(obj.get('groups_in_token'))
+                != bool(key.groups_in_token)):
             return None
         return PersistedToken(
             access_token=_nonempty_str(obj.get('access_token')),

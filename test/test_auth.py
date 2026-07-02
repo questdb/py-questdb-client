@@ -464,6 +464,36 @@ class TestDeviceFlow(AuthTestBase):
         # dropping back to the 5s floor.
         self.assertEqual(self._clock.sleeps, [5, 10, 15])
 
+    def test_json_429_slow_down_body_still_increases_interval(self):
+        # m1 (RFC 8628 §3.5): a NON-conformant `429 {"error":"slow_down"}` (the
+        # RFC returns slow_down with HTTP 400) is caught by the 429/5xx transient
+        # arm, which runs BEFORE the dedicated slow_down arm. It must still obey
+        # the slow_down rule — raise the interval by >=5 — not honor a low
+        # Retry-After and poll FASTER right after the IdP asked it to slow down.
+        # A plain 429 with no slow_down body still honors Retry-After verbatim
+        # (test_poll_honors_retry_after).
+        from questdb.auth._http import _PostResult
+        auth = self.make_auth()
+        real = auth._idp_post
+        n = {'tok': 0}
+
+        def fake(url, form):
+            if url.endswith('/token'):
+                n['tok'] += 1
+                if n['tok'] == 1:
+                    return _PostResult(400, {'error': 'slow_down'}, None)  # 5->10
+                if n['tok'] == 2:
+                    # 429 status AND a slow_down body, with a low Retry-After.
+                    return _PostResult(429, {'error': 'slow_down'}, 1)
+                return real(url, form)                                  # success
+            return real(url, form)
+
+        auth._idp_post = fake
+        self.assertEqual(auth.token(), ID_TOKEN)
+        # 5 -> (+5) 10 -> 429+slow_down Retry-After:1 stays >= 10+5 = 15, never
+        # dropping to the 5s floor.
+        self.assertEqual(self._clock.sleeps, [5, 10, 15])
+
     def test_non_json_429_retry_after_honored_in_poll(self):
         # m2: a non-JSON 429 from a proxy/WAF now carries its Retry-After
         # (post_form attaches it to the OidcError), so the poll loop's exception
@@ -1186,6 +1216,25 @@ class TestDeviceFlow(AuthTestBase):
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth.from_questdb(
                 'https://db.example.com:9000', default_interval=-1)
+
+    def test_groups_in_token_coerced_to_bool(self):
+        # m2: a truthy non-bool groups_in_token (e.g. 2, from an env read without
+        # a cast) is used truthily everywhere in memory, but the on-disk store
+        # keyed the file as groups=1 while _parse_and_verify compared the raw
+        # value (`bool(file) != 2`), so a persisted entry failed its OWN reload
+        # and re-prompted every restart. The constructor now coerces it to a real
+        # bool so the in-memory and on-disk identities agree.
+        base = dict(
+            client_id='c',
+            device_authorization_endpoint='https://idp.example.com/device',
+            token_endpoint='https://idp.example.com/token',
+            scope='openid', renderer=Renderer())
+        self.assertIs(
+            OidcDeviceAuth(**base, groups_in_token=2).config.groups_in_token,
+            True)
+        self.assertIs(
+            OidcDeviceAuth(**base, groups_in_token=0).config.groups_in_token,
+            False)
 
     def test_zero_expires_in_is_treated_as_unknown(self):
         # A non-positive expires_in must not mark the just-issued token expired.
@@ -5411,6 +5460,24 @@ class TestRendererSecurity(unittest.TestCase):
         self.assertEqual(_strip_control('e' + acute), 'e' + acute)
         self.assertEqual(_strip_control('café 北京'), 'café 北京')
 
+    def test_strip_control_removes_invisible_default_ignorable_marks(self):
+        # m3: invisible Default_Ignorable non-spacing marks (category Mn) that the
+        # "keep accents" rule would otherwise keep — the combining grapheme joiner
+        # (U+034F), the Mongolian free variation selectors (U+180B-U+180D, U+180F)
+        # and the Khmer inherent vowels (U+17B4, U+17B5) — can hide payload in a
+        # user_code / identity / URL exactly like the FE00-FE0F variation
+        # selectors. They must be stripped; a legitimate accent is still kept.
+        from questdb.auth._render import _strip_control
+        for cp in (0x034F, 0x180B, 0x180C, 0x180D, 0x180F, 0x17B4, 0x17B5):
+            self.assertEqual(_strip_control('A' + chr(cp) + 'B'), 'AB',
+                             f'U+{cp:04X} not stripped')
+        # A run of them can't smuggle a hidden gap into a user_code.
+        self.assertEqual(
+            _strip_control('WDJB' + chr(0x034f) + chr(0x180b) + 'MJHT'),
+            'WDJBMJHT')
+        # A legitimate accent (also category Mn) is still preserved.
+        self.assertEqual(_strip_control('e' + chr(0x0301)), 'e' + chr(0x0301))
+
     def test_strip_control_folds_exotic_whitespace_to_ascii_space(self):
         # An invisible-as-space separator (NBSP, ideographic space, ...) is a
         # phishing primitive: it can pad a user_code / identity / error to hide
@@ -5725,6 +5792,26 @@ class TestFileTokenStore(unittest.TestCase):
             ('AT', 'IT', 'RT'))
         self.assertEqual(got.expires_at, 1_003_600.0)
         self.assertEqual(got.token_ttl, 3600.0)
+
+    def test_non_bool_groups_in_token_round_trips(self):
+        # m2 (store-side defense-in-depth): TokenStoreKey is public, so a direct
+        # caller could pass a truthy non-bool groups_in_token. hash() buckets it
+        # truthily ('1'/'0'), so save/load must agree — _serialize writes the
+        # boolean and _parse_and_verify compares bool-to-bool — rather than the
+        # raw value failing its own reload (`True != 2`). (OidcDeviceAuth also
+        # coerces it; this guards the direct-key path.)
+        key2 = TokenStoreKey(
+            'questdb', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', None, 2)          # truthy non-bool
+        self.store.save(key2, self._pt())
+        self.assertIsNotNone(self.store.load(key2))
+        # It buckets to the same file as a real bool-True key, and that key —
+        # whose payload the fix wrote as a clean boolean — loads it too.
+        key_true = TokenStoreKey(
+            'questdb', 'https://idp:443/token', 'https://idp:443/device',
+            'openid', None, True)
+        self.assertEqual(key2.hash(), key_true.hash())
+        self.assertIsNotNone(self.store.load(key_true))
 
     def test_missing_file_returns_none(self):
         self.assertIsNone(self.store.load(self.key))

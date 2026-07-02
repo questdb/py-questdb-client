@@ -479,6 +479,16 @@ class OidcDeviceAuth:
             audience = None
         if issuer is not None and not isinstance(issuer, str):
             raise OidcConfigError('issuer must be a string or None')
+        # Coerce groups_in_token to a real bool. It is used truthily everywhere in
+        # memory (cache_key, TokenStoreKey.hash, _select), so a truthy non-bool
+        # (e.g. 2, from an env-var read without a cast) already behaves correctly
+        # there — but TokenStoreKey.hash buckets the file as groups=1 while
+        # _serialize writes the raw value and _parse_and_verify compares
+        # `bool(file) != key.groups_in_token`, so a raw 2 makes the entry fail its
+        # OWN reload (`True != 2`) and re-prompt on every restart. Normalizing
+        # here (mirroring from_questdb, which already bool()s it) keeps the config
+        # a real bool so the in-memory and on-disk identities agree.
+        groups_in_token = bool(groups_in_token)
         # default_interval feeds the poll-interval clamp and timeout every IdP
         # socket call; a non-numeric value would otherwise escape as a bare
         # TypeError rather than the typed error this block exists to raise.
@@ -1679,7 +1689,17 @@ class OidcDeviceAuth:
             # not a rate-limit, so its cadence is unchanged absent a Retry-After).
             if status >= 500 or status == 429:
                 if status == 429 or retry_after is not None:
-                    interval = _backoff_interval(interval, retry_after)
+                    # If this transient reply ALSO carries a slow_down body,
+                    # RFC 8628 §3.5 still applies — the interval MUST increase by
+                    # at least 5, never drop below current+5 just because the
+                    # 429's Retry-After happened to be lower. Without this a
+                    # non-conformant `429 {"error":"slow_down"}` (the RFC returns
+                    # slow_down with HTTP 400, handled by the dedicated arm below,
+                    # which never sees a 429/5xx) with a low Retry-After would
+                    # poll FASTER right after the IdP asked it to slow down.
+                    interval = _backoff_interval(
+                        interval, retry_after,
+                        at_least_increment=(body.get('error') == 'slow_down'))
                 continue
 
             # A 3xx with a JSON body is still a redirect these endpoints never

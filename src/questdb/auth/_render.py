@@ -351,8 +351,18 @@ _STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Me', 'Zl', 'Zp'})
 #    (U+E0100–U+E01EF) — category Mn (so the "keep accents" rule below would keep
 #    them), invisible, and able to carry hidden payload through a user_code / URL
 #    / identity or flip an adjacent glyph's text/emoji presentation.
+#  - the remaining invisible Default_Ignorable non-spacing marks (also category
+#    Mn, so likewise kept by the "keep accents" rule): the combining grapheme
+#    joiner (U+034F), the Mongolian free variation selectors (U+180B–U+180D and
+#    U+180F) and the Khmer inherent vowels (U+17B4, U+17B5) — same hazard class
+#    as the variation selectors above, invisible and able to hide payload in a
+#    user_code / URL / identity. (The Cf/Cn/Lo Default_Ignorables — soft hyphen,
+#    U+180E, the zero-width/bidi runs, the tag chars — are already dropped by the
+#    category rule.)
 _STRIP_EXTRA = frozenset(
     '\u115f\u1160\u3164\uffa0'
+    + ''.join(chr(c) for c in (
+        0x034F, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F))
     + ''.join(chr(c) for c in range(0xFE00, 0xFE10))
     + ''.join(chr(c) for c in range(0xE0100, 0xE01F0)))
 
