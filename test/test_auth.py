@@ -43,6 +43,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2483,6 +2484,41 @@ class TestInsecureSettingsGuard(unittest.TestCase):
                 self._resolve(evil, questdb_url='https://qdb.example.com:9000',
                               issuer=kc + '/prod')
             self.assertIn('issuer', str(cm.exception).lower())
+
+    def test_empty_string_endpoint_override_does_not_launder_settings(self):
+        # C1: an empty-string endpoint override is a common "unset" sentinel
+        # (e.g. token_endpoint=os.environ.get("QDB_TOKEN_ENDPOINT", "")). It must
+        # behave exactly like an OMITTED (None) override -- never be treated as
+        # caller-explicit (trusted) while its VALUE is silently taken from the
+        # untrusted /settings response. Were it treated as explicit, the
+        # provenance flags would stamp the /settings-advertised (attacker)
+        # endpoint as caller-supplied and skip BOTH the plaintext-channel guard
+        # and the issuer origin/path pins, routing the device code / refresh token
+        # to the attacker. resolve_config normalizes empty->None up front so this
+        # can't happen.
+        # Plaintext channel, no pin: the guard must still fire for any empty combo
+        # (both empty, or one empty + one omitted).
+        for tok, dev in (('', ''), ('', None), (None, '')):
+            with self.assertRaises(OidcConfigError) as cm:
+                self._resolve(self._TAMPERED,
+                              questdb_url='http://qdb.internal.example:9000',
+                              insecure=True,
+                              token_endpoint=tok,
+                              device_authorization_endpoint=dev)
+            self.assertIn(
+                'issuer', str(cm.exception),
+                f'empty override ({tok!r}, {dev!r}) bypassed the plaintext guard')
+        # https channel WITH an issuer pinned to a DIFFERENT origin: an empty
+        # override must not skip the issuer-origin pin the way a genuine explicit
+        # endpoint (intentionally) does -- the /settings attacker endpoints stay
+        # pinned and rejected.
+        with self.assertRaises(OidcConfigError) as cm:
+            self._resolve(self._TAMPERED,
+                          questdb_url='https://qdb.example.com:9000',
+                          issuer='https://idp.good.example',
+                          token_endpoint='',
+                          device_authorization_endpoint='')
+        self.assertIn('issuer', str(cm.exception).lower())
 
 
 class TestConcurrency(AuthTestBase):
@@ -5840,6 +5876,37 @@ class TestFileTokenStore(unittest.TestCase):
         os.mkfifo(self._file())
         self.assertIsNone(self.store.load(self.key))
 
+    @unittest.skipUnless(
+        hasattr(os, 'mkfifo') and os.name == 'posix', 'FIFO support')
+    def test_fifo_swapped_in_after_stat_does_not_hang(self):
+        # TOCTOU: the S_ISREG/size guards run on load()'s INITIAL os.stat, but a
+        # hostile co-tenant with write access to the store dir could swap the
+        # regular file for a FIFO between that stat and the open. A blocking
+        # open() of a FIFO hangs forever waiting for a writer, pinning the calling
+        # thread (which may hold the acquisition lock). Simulate the swap by
+        # making the initial stat report a plausible REGULAR file while the real
+        # path is a FIFO: load() must open O_NONBLOCK and reject it via the fstat
+        # re-check on the opened fd, returning None promptly rather than hanging.
+        os.mkfifo(self._file())
+        fake_reg = os.stat_result((
+            stat.S_IFREG | 0o600, 0, 0, 1, os.getuid(), os.getgid(),
+            64, 0, 0, 0))
+        result = {}
+
+        def run():
+            # Patch only os.stat (not os.fstat), so the initial guard sees a
+            # regular file while the fd-based re-check sees the real FIFO.
+            with mock.patch('questdb.auth._store.os.stat',
+                            return_value=fake_reg):
+                result['r'] = self.store.load(self.key)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        self.assertFalse(
+            t.is_alive(), 'load() hung on a FIFO swapped in after the stat')
+        self.assertIsNone(result['r'])
+
     def test_deeply_nested_json_file_ignored(self):
         # The token file is attacker-writable. A deeply-nested JSON document
         # (well under the size cap) makes json.loads raise RecursionError, which
@@ -6307,6 +6374,22 @@ class _CountingFileStore(FileTokenStore):
         return super().in_lock(key, action)
 
 
+class _RaiseAfterActionStore(_FakeStore):
+    """A custom store whose in_lock RAISES after action() has already run.
+
+    Models a real-world custom TokenStore whose lock-RELEASE fails after the
+    coordinated refresh already succeeded (e.g. a Redis/Consul lock whose
+    release call throws). The action's refresh has, on a rotating IdP, already
+    consumed the old refresh token by then, so the caller must NOT re-refresh
+    with it. Exercises the post-action fall-through in _try_refresh_coordinated.
+    """
+
+    def in_lock(self, key, action):
+        self.in_locks += 1
+        action()  # the coordinated refresh runs (and rotates the token) here
+        raise OidcError('simulated lock-release failure after refresh')
+
+
 class TestPersistence(AuthTestBase):
     """OidcDeviceAuth wired to a TokenStore (opt-in persistence)."""
 
@@ -6420,6 +6503,34 @@ class TestPersistence(AuthTestBase):
             auth.token()
         self.assertEqual(self.state.device_requests, 1)  # only the sign-in
         self.assertGreaterEqual(store.in_locks, 1)
+
+    def test_custom_store_lock_failure_after_refresh_does_not_replay_token(self):
+        # M2: a custom TokenStore whose in_lock RAISES after action() already ran
+        # the coordinated refresh (a lock-release failure on a rotating IdP). The
+        # refresh has already consumed REFRESH-1 and minted REFRESH-2, so the
+        # fall-through must NOT re-refresh with the now-stale REFRESH-1 — replaying
+        # a spent refresh token trips the IdP's reuse detection and revokes the
+        # fresh one. It must instead return the already-refreshed token, so
+        # REFRESH-1 is sent to the token endpoint exactly ONCE.
+        store = _RaiseAfterActionStore()
+        clock = FakeClock()
+        auth = self.make_auth(token_store=store, clock=clock)
+        auth.token()                       # sign in; persists REFRESH-1
+        self._reset_server_counters()
+        # Rotate on refresh, so a replay would be observable as a 2nd REFRESH-1.
+        self.state.refresh_response = (200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'refresh_token': 'REFRESH-2', 'token_type': 'Bearer',
+            'expires_in': 3600})
+        clock.wall += 10_000               # expire the access/id token
+        # Succeeds via the in-lock refresh despite the post-action lock failure.
+        self.assertEqual(auth.token(), ID_TOKEN)
+        # The spent REFRESH-1 was sent exactly once — never replayed. (Without the
+        # fall-through's re-consult it would be sent a second time here.)
+        self.assertEqual(self.state.refresh_requests, 1)
+        self.assertEqual(
+            [f['refresh_token'] for f in self.state.refresh_forms], ['REFRESH-1'])
+        self.assertEqual(self.state.device_requests, 0)  # no needless re-prompt
 
     def test_clear_removes_persisted_entry_and_reprompts(self):
         store = _FakeStore()

@@ -405,6 +405,20 @@ class TokenStore(abc.ABC):
         ``action`` re-enters this same store (it calls :meth:`load` and
         :meth:`save` on it). An implementation that cannot acquire the lock should
         run ``action`` anyway (degrade) rather than fail a sign-in.
+
+        **Contract ``OidcDeviceAuth`` relies on.** ``action`` MUST be invoked
+        exactly once, **synchronously, on the calling thread**, with the lock
+        held for the whole call, and ``in_lock`` MUST NOT raise *after* ``action``
+        has run — swallow a release failure rather than propagate it.
+        ``OidcDeviceAuth`` reads an instance flag while ``action`` runs to know
+        the disk lock is held (so the save it performs writes inline rather than
+        recursively re-locking); a store that runs ``action`` on another thread
+        could make that flag observed true while the lock is not held, racing a
+        concurrent :meth:`clear`. And on a rotating IdP, a refresh inside
+        ``action`` may have already consumed the refresh token by the time a late
+        release fails, so raising then would (absent the caller's post-failure
+        re-consult) replay a spent token and get the freshly minted one revoked.
+        The bundled :class:`FileTokenStore` satisfies this contract.
         """
         return action()
 
@@ -547,18 +561,52 @@ class FileTokenStore(TokenStore):
         # rather than read it into memory.
         if st.st_size <= 0 or st.st_size > _MAX_FILE_BYTES:
             return None
+        # Open O_NONBLOCK and re-validate the OPENED fd, not the earlier stat: a
+        # hostile co-tenant with write access to the store dir could swap the
+        # regular file for a FIFO between the stat above and this open, and a
+        # blocking open() of a FIFO hangs forever waiting for a writer — pinning
+        # the calling thread, which may hold the acquisition lock (load() runs
+        # under it, including inside the store's cross-process in_lock). That is
+        # the very "peer pins the lock-holding thread" failure mode the HTTP
+        # layer builds watchdogs against, so guard it here too. O_NONBLOCK makes
+        # the FIFO open return at once; fstat on the fd — the object actually
+        # opened, closing the stat->open TOCTOU — then rejects a non-regular or
+        # resized file. O_NONBLOCK is a no-op on a regular file; Windows lacks it
+        # (and has no FIFO-at-path exposure), so it degrades to a plain open.
         try:
-            with open(path, 'rb') as f:
-                data = f.read(_MAX_FILE_BYTES + 1)
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
         except FileNotFoundError:
             return None
         except IsADirectoryError:
-            # The regular file became a directory between the stat above and
-            # this open (a TOCTOU); treat it as no usable entry, as above.
+            # Became a directory between the stat above and this open (a TOCTOU).
             return None
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                return None
+            raise OidcError(
+                f'could not read the OIDC token store file: {e}') from e
+        # os.fdopen takes ownership of fd and closes it on the `with` exit; track
+        # whether ownership transferred (mirrors save()) so an early reject or an
+        # fdopen failure closes fd exactly once in the finally.
+        fd_owned = False
+        try:
+            fst = os.fstat(fd)
+            # Re-check on the fd: a non-regular file (a FIFO / device / directory
+            # swapped in after the stat) or one that grew past the cap since the
+            # stat is not a usable entry — return None rather than read it.
+            if not stat.S_ISREG(fst.st_mode) or not (
+                    0 < fst.st_size <= _MAX_FILE_BYTES):
+                return None
+            with os.fdopen(fd, 'rb') as f:
+                fd_owned = True
+                data = f.read(_MAX_FILE_BYTES + 1)
         except OSError as e:
             raise OidcError(
                 f'could not read the OIDC token store file: {e}') from e
+        finally:
+            if not fd_owned:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         if len(data) > _MAX_FILE_BYTES:
             return None
         return self._parse_and_verify(key, data)

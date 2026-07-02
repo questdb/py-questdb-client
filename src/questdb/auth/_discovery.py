@@ -494,6 +494,24 @@ def resolve_config(
     from QuestDB ``/settings`` (if ``questdb_url`` is given) and, as a last
     resort for the device endpoint, the IdP discovery document.
     """
+    # Normalize an empty-string override to absent BEFORE any provenance is
+    # derived below. Provenance is tracked by identity (`... is not None`) while
+    # the value is chosen by truthiness (`... or _resolve_endpoint(...)`), so an
+    # empty string — the natural sentinel a caller layer produces for an unset
+    # override, e.g. `token_endpoint=os.environ.get("TOK", "")` — would otherwise
+    # be stamped caller-explicit (trusted) while its VALUE is taken from the
+    # untrusted /settings response. That false provenance disables every
+    # /settings guard at once (the plaintext-channel pin, the issuer-origin pin
+    # and the issuer-path pin all skip a "caller-explicit" endpoint), silently
+    # routing the device-code and refresh-token POSTs to whatever endpoint a
+    # tampered /settings advertises. Collapsing empty to None here makes
+    # `... is not None` a faithful "explicit and usable" signal, so an empty
+    # override behaves exactly like an omitted one. (The direct OidcDeviceAuth
+    # constructor already rejects an empty endpoint; this closes the from_questdb
+    # path, which consumes these before any non-empty check.)
+    token_endpoint = token_endpoint or None
+    device_authorization_endpoint = device_authorization_endpoint or None
+    issuer = issuer or None
     cfg: Dict[str, Any] = {}
     if questdb_url:
         cfg = fetch_settings(

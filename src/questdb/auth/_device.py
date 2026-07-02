@@ -1101,10 +1101,24 @@ class OidcDeviceAuth:
             self._warn_persistence('lock', e)
         finally:
             self._store_lock_held = False
-        # Reached only when in_lock raised a non-network store failure above: the
-        # flag is now cleared, so this lock-free refresh's own persist takes its
-        # normal lock-acquiring path.
-        return self._try_refresh_locally(tokens, generation)
+        # Reached only when in_lock raised a NON-network store failure above (a
+        # custom store's lock backend; the bundled FileTokenStore degrades
+        # internally and never reaches here). The in-lock action may ALREADY have
+        # refreshed — and, on a rotating IdP, CONSUMED our refresh token — before
+        # in_lock raised (e.g. a custom store whose lock RELEASE failed after
+        # action() succeeded). So re-consult our own freshest view rather than
+        # replay the now-stale `tokens` argument: if that refresh landed a valid
+        # token, return it as-is (it is already committed to self._tokens and,
+        # generation permitting, the shared cache); otherwise refresh with the
+        # freshest tokens we hold — never the stale argument, whose refresh_token
+        # may be spent (replaying it trips the IdP's refresh-token reuse detection
+        # and revokes the just-minted token). The flag is now cleared, so this
+        # fall-through's own persist takes its normal lock-acquiring path.
+        current = self._tokens if self._tokens is not None else tokens
+        if (current is not None and current.is_valid(self._now())
+                and self._has_required_token(current)):
+            return current
+        return self._try_refresh_locally(current, generation)
 
     def _try_refresh_locally(
             self, tokens: TokenSet, generation: int) -> Optional[TokenSet]:
