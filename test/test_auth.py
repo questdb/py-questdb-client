@@ -2228,6 +2228,62 @@ class TestDiscovery(AuthTestBase):
         self.assertEqual(auth.config.device_authorization_endpoint,
                          'https://oauth2.idp.example/device')
 
+    def test_settings_endpoint_confirmed_despite_trailing_slash(self):
+        # M2 regression: a split-origin IdP whose /settings token endpoint sits
+        # off the issuer ORIGIN is confirmed by the IdP's own (TLS-fetched)
+        # discovery document — but the two sources SPELL the one endpoint slightly
+        # differently (an explicit :443 and a trailing slash here). The
+        # confirmation is compared on the canonical endpoint form, not by raw
+        # string equality, so the trivial spelling difference still counts as
+        # confirmed and the endpoint is ACCEPTED. An exact-string test wrongly
+        # rejected this (a real Google / Auth0 / Azure deployment whose /settings
+        # spelling differs from the IdP document's).
+        from questdb.auth import _discovery
+        issuer = 'https://accounts.idp.example'
+        settings = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint': 'https://oauth2.idp.example/token'}
+        well_known = {  # SAME endpoint, spelled with explicit :443 + trailing '/'
+            'issuer': issuer,
+            'token_endpoint': 'https://oauth2.idp.example:443/token/',
+            'device_authorization_endpoint':
+                'https://oauth2.idp.example/device'}
+        with mock.patch.object(_discovery, 'fetch_settings',
+                               return_value=settings), \
+             mock.patch.object(_discovery, 'discover_device_endpoint_from_idp',
+                               return_value=well_known):
+            cfg = _discovery.resolve_config(
+                questdb_url='https://qdb.example.com:9000', issuer=issuer)
+        # The /settings spelling is kept as the resolved value; it was accepted
+        # because the IdP document confirmed the same canonical endpoint.
+        self.assertEqual(cfg.token_endpoint, 'https://oauth2.idp.example/token')
+
+    def test_settings_endpoint_confirmation_keeps_query_distinct(self):
+        # M2: the canonical confirmation still treats a DIFFERING QUERY STRING as
+        # a different credential-routing target — a /settings token endpoint whose
+        # query differs from the IdP document's is NOT confirmed, so the
+        # off-issuer-origin pin rejects it. Guards the widened confirmation
+        # against becoming too loose.
+        from questdb.auth import _discovery
+        issuer = 'https://accounts.idp.example'
+        settings = {
+            'acl.oidc.enabled': True, 'acl.oidc.client.id': 'questdb',
+            'acl.oidc.token.endpoint':
+                'https://oauth2.idp.example/token?tenant=EVIL'}
+        well_known = {
+            'issuer': issuer,
+            'token_endpoint': 'https://oauth2.idp.example/token?tenant=good',
+            'device_authorization_endpoint':
+                'https://oauth2.idp.example/device'}
+        with mock.patch.object(_discovery, 'fetch_settings',
+                               return_value=settings), \
+             mock.patch.object(_discovery, 'discover_device_endpoint_from_idp',
+                               return_value=well_known):
+            with self.assertRaises(OidcConfigError) as cm:
+                _discovery.resolve_config(
+                    questdb_url='https://qdb.example.com:9000', issuer=issuer)
+        self.assertIn('issuer', str(cm.exception).lower())
+
     def test_settings_off_origin_token_not_confirmed_by_discovery_rejected(self):
         # The flip side of the confirmed case: /settings advertises an
         # off-issuer-origin token endpoint that the IdP discovery document does
@@ -3782,6 +3838,26 @@ class TestEndpointValidation(unittest.TestCase):
                     token_endpoint='https://idp.good/token',
                     device_authorization_endpoint='https://idp.good/device',
                     scope='openid', issuer=bad)
+
+    def test_non_string_issuer_maps_to_config_error(self):
+        # M1: resolve_config (the from_questdb path) PARSES the issuer — to vet
+        # its authority and, when needed, build the IdP discovery URL — BEFORE
+        # OidcDeviceAuth.__init__ can type-check it. urlparse raises a raw
+        # AttributeError / TypeError on a non-str/bytes value, so without an early
+        # guard a non-string issuer escaped the module's typed-error contract.
+        # It must now map to OidcConfigError here too, matching the direct
+        # constructor (test_issuer_validated_in_direct_constructor). This is the
+        # only caller kwarg resolve_config parses before __init__ validates it —
+        # a non-string client_id / endpoint is caught by __init__'s isinstance
+        # guards, and a /settings-sourced value is always a string.
+        from questdb.auth._discovery import resolve_config
+        for bad in (123, b'https://idp', ['https://idp'], 12.5):
+            with self.assertRaises(OidcConfigError):
+                resolve_config(
+                    client_id='questdb',
+                    token_endpoint='https://idp.good/token',
+                    device_authorization_endpoint='https://idp.good/device',
+                    issuer=bad)
 
     def test_endpoint_path_under_issuer(self):
         # M1: segment-aware path containment used to isolate path-based realms.

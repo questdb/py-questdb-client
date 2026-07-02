@@ -117,12 +117,17 @@ def safe_urlparse(url: str) -> tuple:
     Both ``urlparse`` (malformed IPv6 literal) and ``ParseResult.port``
     (non-integer port) raise a bare ``ValueError``; re-raise as
     :class:`OidcConfigError` to keep a malformed URL within the error contract.
-    Returns ``(parts, port)``.
+    A non-``str``/``bytes`` ``url`` instead makes ``urlparse`` raise a bare
+    ``TypeError``/``AttributeError`` (it tries to ``.decode`` / slice the value);
+    map those too, so a non-string endpoint / issuer / QuestDB URL that reaches
+    here — e.g. via ``resolve_config``, which parses ``issuer`` before
+    ``OidcDeviceAuth.__init__`` can type-check it — stays within the typed-error
+    contract rather than escaping raw. Returns ``(parts, port)``.
     """
     try:
         parts = urllib.parse.urlparse(url)
         return parts, parts.port
-    except ValueError as e:
+    except (ValueError, TypeError, AttributeError) as e:
         raise OidcConfigError(
             f'Malformed endpoint URL {url!r}: {e}.') from e
 

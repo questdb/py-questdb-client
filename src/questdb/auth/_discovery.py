@@ -43,6 +43,7 @@ from typing import Any, Dict, Optional
 
 from ._errors import OidcConfigError
 from ._http import get_json, safe_urlparse, _is_loopback
+from ._store import _canonical_endpoint
 
 # QuestDB /settings keys (see EntPropServerConfiguration.exportConfiguration()).
 _K_ENABLED = 'acl.oidc.enabled'
@@ -186,6 +187,29 @@ def _normalized_origin(url: str) -> tuple:
 def _origin_str(url: str) -> str:
     scheme, host, port = _normalized_origin(url)
     return f'{scheme}://{host}:{port}' if port else f'{scheme}://{host}'
+
+
+def _same_endpoint(url_a: str, url_b: Optional[str]) -> bool:
+    """True if two endpoint URLs are the SAME credential-routing target.
+
+    Compared on the canonical endpoint form (:func:`_store._canonical_endpoint`
+    — scheme/host/port/path/query, trailing-slash-insensitive), NOT raw string
+    equality, so a ``/settings`` endpoint and the IdP discovery document's
+    spelling of that same endpoint still match despite a trailing slash, an
+    explicit-vs-default port, or a scheme/host case difference (e.g. ``/token``
+    vs ``/token/``). Reuses the token store's endpoint canonicalisation so this
+    "same endpoint" test makes the same distinctions as the in-memory cache key
+    and the on-disk store key. A differing query is a different routing target,
+    so it is kept (not the same). A value that will not parse counts as NOT the
+    same — the caller then falls through to the issuer-origin/path pins, the
+    fail-closed direction — rather than raising.
+    """
+    if url_b is None:
+        return False
+    try:
+        return _canonical_endpoint(url_a) == _canonical_endpoint(url_b)
+    except OidcConfigError:
+        return False
 
 
 def _settings_channel_is_plaintext(questdb_url: str) -> bool:
@@ -512,6 +536,17 @@ def resolve_config(
     token_endpoint = token_endpoint or None
     device_authorization_endpoint = device_authorization_endpoint or None
     issuer = issuer or None
+    # Type-check issuer HERE, not only in OidcDeviceAuth.__init__: resolve_config
+    # PARSES it below (_reject_confusable_authority -> safe_urlparse, and the
+    # discovery-URL build) before __init__ ever runs, and a non-string would make
+    # urlparse raise a raw AttributeError/TypeError. safe_urlparse now maps those
+    # too, but check here as well so from_questdb fails with the SAME clear,
+    # early message as the direct constructor rather than a generic "malformed
+    # URL". The other caller endpoints are only parsed here when they come from
+    # /settings (always strings); a caller-explicit non-string endpoint is caught
+    # by __init__'s isinstance guards, so issuer is the one that needs it here.
+    if issuer is not None and not isinstance(issuer, str):
+        raise OidcConfigError('issuer must be a string or None')
     cfg: Dict[str, Any] = {}
     if questdb_url:
         cfg = fetch_settings(
@@ -652,7 +687,12 @@ def resolve_config(
     # steering credentials to a different realm on the same host.
     #
     # Both checks are waived for an endpoint the IdP's OWN (authoritative,
-    # TLS-fetched) discovery document advertised verbatim (url == confirmed_by_idp):
+    # TLS-fetched) discovery document advertised (_same_endpoint(url,
+    # confirmed_by_idp), compared on the canonical endpoint form so a trailing
+    # slash / default port / case difference between the /settings spelling and
+    # the IdP document's spelling still counts as confirmed — an exact-string
+    # test wrongly rejected a legitimate split-origin IdP whose two sources
+    # spelled the one endpoint slightly differently):
     # that confirms it independently of /settings, exactly as trustworthy as the
     # pinned IdP. So this runs AFTER discovery — a /settings endpoint the IdP
     # confirms is accepted consistently under BOTH pins (the issuer-PATH check
@@ -676,7 +716,7 @@ def resolve_config(
                 ('device-authorization endpoint',
                  device_authorization_endpoint, device_from_settings,
                  doc_device_endpoint)):
-            if not from_settings or url == confirmed_by_idp:
+            if not from_settings or _same_endpoint(url, confirmed_by_idp):
                 # Caller-explicit / IdP-discovered / discovery-confirmed: trusted.
                 continue
             if _normalized_origin(url) != issuer_origin:
