@@ -704,7 +704,7 @@ cdef extern from "questdb/ingress/column_sender.h":
     cdef struct questdb_db:
         pass
 
-    cdef struct sf_column_sender:
+    cdef struct column_sender:
         pass
 
     cdef struct column_sender_chunk:
@@ -727,12 +727,12 @@ cdef extern from "questdb/ingress/column_sender.h":
         questdb_db* db
         ) noexcept nogil
 
-    sf_column_sender* questdb_db_borrow_sf_column_sender(
+    column_sender* questdb_db_borrow_column_sender(
         questdb_db* db,
         line_sender_error** err_out
         ) noexcept nogil
 
-    sf_column_sender* questdb_db_borrow_sf_column_sender_with_retry(
+    column_sender* questdb_db_borrow_column_sender_with_retry(
         questdb_db* db,
         uint64_t budget_ms,
         line_sender_error** err_out
@@ -742,14 +742,14 @@ cdef extern from "questdb/ingress/column_sender.h":
         const questdb_db* db
         ) noexcept nogil
 
-    void questdb_db_return_sf_column_sender(
+    void questdb_db_return_column_sender(
         questdb_db* db,
-        sf_column_sender* conn
+        column_sender* conn
         ) noexcept nogil
 
-    void questdb_db_drop_sf_column_sender(
+    void questdb_db_drop_column_sender(
         questdb_db* db,
-        sf_column_sender* conn
+        column_sender* conn
         ) noexcept nogil
 
     size_t questdb_db_reap_idle(
@@ -939,14 +939,14 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint sf_column_sender_flush(
-        sf_column_sender* conn,
+    bint column_sender_flush(
+        column_sender* conn,
         column_sender_chunk* chunk,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint sf_column_sender_wait(
-        sf_column_sender* conn,
+    bint column_sender_wait(
+        column_sender* conn,
         uint32_t ack_level,
         uint64_t timeout_millis,
         line_sender_error** err_out
@@ -965,8 +965,8 @@ cdef extern from "questdb/ingress/column_sender.h":
         uint32_t kind
         uint32_t arg
 
-    bint sf_column_sender_flush_arrow_batch_at_now(
-        sf_column_sender* conn,
+    bint column_sender_flush_arrow_batch_at_now(
+        column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,
@@ -975,8 +975,8 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint sf_column_sender_flush_arrow_batch_at_column(
-        sf_column_sender* conn,
+    bint column_sender_flush_arrow_batch_at_column(
+        column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,

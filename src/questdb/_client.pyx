@@ -3984,7 +3984,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
         chunk, at_col, at_prebuilt, row_offset, row_count)
 
 
-cdef void_int _dataframe_columnar_sync(sf_column_sender* conn) except -1:
+cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
@@ -3994,7 +3994,7 @@ cdef void_int _dataframe_columnar_sync(sf_column_sender* conn) except -1:
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = sf_column_sender_wait(
+    ok = column_sender_wait(
         conn,
         qwpws_ack_level.qwpws_ack_level_ok,
         0,  # timeout_millis: 0 = wait indefinitely (no-progress deadline)
@@ -4008,7 +4008,7 @@ cdef void_int _dataframe_columnar_sync(sf_column_sender* conn) except -1:
 
 
 cdef bint _dataframe_columnar_force_drop_after_error(
-        sf_column_sender* conn,
+        column_sender* conn,
         bint flushed,
         bint sync_attempted) noexcept:
     # A flush leaves deferred frames the next borrower would commit unless a
@@ -4043,7 +4043,7 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
 
 
 cdef void_int _dataframe_columnar_flush(
-        sf_column_sender* conn,
+        column_sender* conn,
         column_sender_chunk* chunk,
         bint retry_after_sync,
         bint* committed_prefix) except -1:
@@ -4059,7 +4059,7 @@ cdef void_int _dataframe_columnar_flush(
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = sf_column_sender_flush(conn, chunk, &err)
+    ok = column_sender_flush(conn, chunk, &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
@@ -4079,7 +4079,7 @@ cdef void_int _dataframe_columnar_flush(
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
-        ok = sf_column_sender_flush(conn, chunk, &err)
+        ok = column_sender_flush(conn, chunk, &err)
         _ensure_has_gil(&gs)
         if _dataframe_columnar_count_io_stats:
             _dataframe_columnar_flush_calls += 1
@@ -4091,7 +4091,7 @@ cdef void_int _dataframe_columnar_flush(
 
 
 cdef void_int _dataframe_arrow_flush_batch(
-        sf_column_sender* conn,
+        column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         ArrowSchema* schema,
@@ -4109,11 +4109,11 @@ cdef void_int _dataframe_arrow_flush_batch(
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
     if ts_column != NULL:
-        ok = sf_column_sender_flush_arrow_batch_at_column(
+        ok = column_sender_flush_arrow_batch_at_column(
             conn, table, array, schema, ts_column[0],
             overrides, overrides_len, &err)
     else:
-        ok = sf_column_sender_flush_arrow_batch_at_now(
+        ok = column_sender_flush_arrow_batch_at_now(
             conn, table, array, schema,
             overrides, overrides_len, &err)
     _ensure_has_gil(&gs)
@@ -4197,7 +4197,7 @@ def _bench_dataframe_flush_arrow_batch(
         object conf=None,
         size_t iterations=1):
     """
-    Internal benchmark hook for `sf_column_sender_flush_arrow_batch_at_now`
+    Internal benchmark hook for `column_sender_flush_arrow_batch_at_now`
     FFI.
 
     `arrow_source` must expose the Arrow PyCapsule Interface
@@ -4213,7 +4213,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef size_t col_count = 0
     cdef size_t completed = 0
     cdef questdb_db* db = NULL
-    cdef sf_column_sender* conn = NULL
+    cdef column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef qdb_pystr_buf* b = NULL
     cdef PyThreadState* gs = NULL
@@ -4274,7 +4274,7 @@ def _bench_dataframe_flush_arrow_batch(
             c_ts_column_ptr = &c_ts_column
 
         _ensure_doesnt_have_gil(&gs)
-        conn = questdb_db_borrow_sf_column_sender(db, &err)
+        conn = questdb_db_borrow_column_sender(db, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -4287,7 +4287,7 @@ def _bench_dataframe_flush_arrow_batch(
             _dataframe_columnar_sync(conn)
             completed = iterations
         finally:
-            questdb_db_return_sf_column_sender(db, conn)
+            questdb_db_return_column_sender(db, conn)
     finally:
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
@@ -4444,7 +4444,7 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
 
 
 cdef void_int _capsule_consume_stream(
-        sf_column_sender* conn,
+        column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -5003,7 +5003,7 @@ cdef bint _dataframe_client_try_capsule_path(
         object schema_overrides,
         bint* committed_prefix) except -1:
     cdef qdb_pystr_buf* b = NULL
-    cdef sf_column_sender* conn = NULL
+    cdef column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
     cdef object sliceable = None
@@ -5115,9 +5115,9 @@ cdef bint _dataframe_client_try_capsule_path(
 
         _ensure_doesnt_have_gil(&gs)
         if budget_ms == 0:
-            conn = questdb_db_borrow_sf_column_sender(db, &err)
+            conn = questdb_db_borrow_column_sender(db, &err)
         else:
-            conn = questdb_db_borrow_sf_column_sender_with_retry(db, budget_ms, &err)
+            conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -5155,9 +5155,9 @@ cdef bint _dataframe_client_try_capsule_path(
         _ensure_has_gil(&gs)
         if conn != NULL:
             if force_drop_conn:
-                questdb_db_drop_sf_column_sender(db, conn)
+                questdb_db_drop_column_sender(db, conn)
             else:
-                questdb_db_return_sf_column_sender(db, conn)
+                questdb_db_return_column_sender(db, conn)
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
         if c_overrides != NULL:
@@ -5167,7 +5167,7 @@ cdef bint _dataframe_client_try_capsule_path(
 
 
 cdef void_int _capsule_consume_stream_with_hint(
-        sf_column_sender* conn,
+        column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -5484,7 +5484,7 @@ cdef class Client:
             size_t max_rows_per_batch,
             bint* committed_prefix):
         cdef column_sender_chunk* chunk = NULL
-        cdef sf_column_sender* conn = NULL
+        cdef column_sender* conn = NULL
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
         cdef bint flushed = False
@@ -5516,9 +5516,9 @@ cdef class Client:
 
             _ensure_doesnt_have_gil(&gs)
             if budget_ms == 0:
-                conn = questdb_db_borrow_sf_column_sender(db, &err)
+                conn = questdb_db_borrow_column_sender(db, &err)
             else:
-                conn = questdb_db_borrow_sf_column_sender_with_retry(db, budget_ms, &err)
+                conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
             _ensure_has_gil(&gs)
             if conn == NULL:
                 raise c_err_to_py(err)
@@ -5562,9 +5562,9 @@ cdef class Client:
             _ensure_has_gil(&gs)
             if conn != NULL:
                 if force_drop_conn:
-                    questdb_db_drop_sf_column_sender(db, conn)
+                    questdb_db_drop_column_sender(db, conn)
                 else:
-                    questdb_db_return_sf_column_sender(db, conn)
+                    questdb_db_return_column_sender(db, conn)
             if chunk != NULL:
                 column_sender_chunk_free(chunk)
             # The plan is rebuilt on each failover attempt; release this
