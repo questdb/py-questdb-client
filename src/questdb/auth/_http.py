@@ -383,6 +383,26 @@ def _read_body(resp: Any, *, max_bytes: int, deadline: float) -> bytes:
                     raise OidcNetworkError(
                         'Timed out reading the response body; the server is too '
                         'slow or is dribbling data.')
+                # read1() (which we read through above) does NOT enforce
+                # Content-Length: on a body that DECLARES N bytes but delivers
+                # fewer then closes, it returns the short data and then this clean
+                # b'' EOF, with no exception — so a truncated response would
+                # otherwise be returned as a complete 200 (the plain read() would
+                # raise IncompleteRead on the same input). http.client leaves the
+                # still-owed byte count on `resp.length` — None for a chunked body
+                # (no declared length; the deadline watchdog bounds that path), 0
+                # once a Content-Length body is fully delivered, and > 0 when it
+                # ended short. A truthy length at EOF therefore means the declared
+                # body was NOT fully received, so surface it as the network error
+                # it is rather than hand back a silently-truncated (and possibly
+                # still parseable) token / config JSON. A stream without a
+                # `length` attribute (getattr -> None) is treated as complete, so
+                # a non-http.client body reader degrades to the prior behaviour.
+                if getattr(resp, 'length', None):
+                    raise OidcNetworkError(
+                        'The response body ended before its declared '
+                        'Content-Length was received (truncated response); '
+                        'refusing to treat a partial body as complete.')
                 return b''.join(chunks)
             total += len(chunk)
             if total > max_bytes:

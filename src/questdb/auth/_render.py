@@ -132,7 +132,7 @@ def _verification_uri_complete(resp: Dict[str, Any]) -> Optional[str]:
 # confusable (e.g. a Cyrillic look-alike, or the fullwidth solidus ``U+FF0F``),
 # a stray control char, or a ``%`` (percent-encoding, or an IPv6 zone-id —
 # neither of which a remote verification host legitimately needs, matching the
-# hygiene in ``_adapters._ILLEGAL_HOST_CHARS``) — can misrepresent the real
+# hygiene in ``_adapters._LEGAL_HOST_RE``) — can misrepresent the real
 # destination host, so such a URL is never made clickable/auto-opened.
 _SAFE_HOST_RE = re.compile(r'\A[a-z0-9._:-]+\Z')
 

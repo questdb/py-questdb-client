@@ -3229,6 +3229,35 @@ class TestAdapters(unittest.TestCase):
             _require_host('https://db.example.com:9000', 'questdb.example.com'),
             'questdb.example.com')
 
+    def test_require_host_rejects_multihost_comma_and_unix_socket(self):
+        # Regression: the host guard is a positive allow-list, so characters that
+        # are NOT conninfo delimiters (which the old deny-list caught) but ARE
+        # libpq-meaningful must still be rejected — otherwise a tampered URL could
+        # redirect the PG connection (and the '_sso' token sent as the password):
+        #   * ',' is the libpq MULTI-HOST separator ('host=a,b' tries both), and
+        #     urlparse keeps it in .hostname;
+        #   * a leading '/' makes libpq read the value as a Unix-socket directory;
+        #   * '@' (userinfo) never belongs in a bare host.
+        for bad in ('https://good.questdb.com,evil.attacker.com:9000',
+                    'https://good.questdb.com,evil.attacker.com'):
+            with self.subTest(url=bad):
+                with self.assertRaises(OidcConfigError):
+                    _require_host(bad)
+        for bad_host in ('good.questdb.com,evil.attacker.com',  # multi-host
+                         '[good,evil]',            # comma smuggled in brackets
+                         '/var/run/postgresql',    # Unix-socket dir
+                         '/tmp',
+                         'good@evil'):              # userinfo
+            with self.subTest(host=bad_host):
+                with self.assertRaises(OidcConfigError):
+                    _require_host('https://db.example.com:9000', bad_host)
+        # A hostname carrying an underscore (accepted in practice, and by the
+        # render / discovery host checks) is still allowed — the allow-list must
+        # not over-reject a legitimate host.
+        self.assertEqual(
+            _require_host('https://db:9000', 'my_host.internal'),
+            'my_host.internal')
+
     def test_require_host_unbrackets_explicit_ipv6(self):
         # m2: psycopg / SQLAlchemy take a BARE address. The URL-derived path is
         # already unbracketed by urlparse, but an explicit host="[::1]" override
@@ -3672,7 +3701,7 @@ class TestEndpointValidation(unittest.TestCase):
         # artifact, never a way to reach a remote IdP) or percent-encoding (which
         # urlparse keeps in .hostname but a resolver/transport may decode,
         # diverging the validated host from the connected one). This mirrors the
-        # host hygiene in _adapters._ILLEGAL_HOST_CHARS and _render._SAFE_HOST_RE,
+        # host hygiene in _adapters._LEGAL_HOST_RE and _render._SAFE_HOST_RE,
         # which both reject '%' too.
         from questdb.auth._discovery import _reject_confusable_authority
         for url in ('https://[fe80::1%25eth0]/token',   # IPv6 zone-id (%25 == %)
@@ -4251,6 +4280,92 @@ class TestTransportSecurity(unittest.TestCase):
         resp = _ChunkStream(b'x' * 60, b'y' * 60)   # 120 bytes > 100-byte cap
         with self.assertRaises(OidcNetworkError):
             _read_body(resp, max_bytes=100, deadline=1e18)
+
+    def test_read_body_rejects_truncated_content_length(self):
+        # Regression: read1() (which _read_body reads through, for the chunked-
+        # dribble watchdog) does NOT enforce Content-Length — on a body that
+        # DECLARES N bytes but delivers fewer then EOFs, it returns the short data
+        # then a clean b'', with no exception. Without the guard, that truncated
+        # (yet still JSON-parseable) body was handed back as a complete 200. Since
+        # http.client leaves the still-owed count on resp.length, _read_body must
+        # treat a truthy length at EOF as a truncation and raise.
+        from questdb.auth._http import _read_body
+
+        class _LenResp:
+            # Faithfully mimics http.client.HTTPResponse on a Content-Length body:
+            # read1(n) yields up to n buffered bytes and DECREMENTS the owed
+            # count, so .length hits 0 exactly when the declared body is fully
+            # delivered and stays > 0 if the peer closed early.
+            def __init__(self, body, declared):
+                self._body = body
+                self.length = declared
+
+            def read1(self, n):
+                if not self._body:
+                    return b''
+                chunk, self._body = self._body[:n], self._body[n:]
+                self.length -= len(chunk)
+                return chunk
+
+        truncated = _LenResp(b'{"access_token":"REAL"}', declared=5000)
+        with self.assertRaises(OidcNetworkError):
+            _read_body(truncated, max_bytes=10 ** 6, deadline=1e18)
+
+        # A body that delivers exactly its declared length drains .length to 0 and
+        # must still be accepted — the guard must not over-reject.
+        body = b'{"access_token":"REAL"}'
+        complete = _LenResp(body, declared=len(body))
+        self.assertEqual(
+            _read_body(complete, max_bytes=10 ** 6, deadline=1e18), body)
+
+        # A chunked body has no declared length (no `length` attribute, so
+        # getattr -> None), so the guard must NOT fire — the deadline watchdog
+        # bounds that path instead.
+        chunked = _ChunkStream(b'{"a":', b'1}')
+        self.assertEqual(
+            _read_body(chunked, max_bytes=10 ** 6, deadline=1e18), b'{"a":1}')
+
+    def test_request_rejects_truncated_content_length_body(self):
+        # Regression against the REAL socket stack (the _LenResp unit test above
+        # cannot catch a mismatch with real http.client behaviour). A server that
+        # DECLARES a large Content-Length but sends a short, valid-JSON body then
+        # closes must NOT be handed back as a complete 200 — request() must raise
+        # OidcNetworkError rather than let a hostile/flaky peer pass off a
+        # truncated token / config response as whole.
+        import socket
+        from questdb.auth import _http
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def serve():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(65536)  # consume the request line/headers
+                # Declare 5000 bytes, send a ~40-byte valid-JSON body, then close
+                # — a clean early EOF (not a dribble), well inside the deadline.
+                conn.sendall(
+                    b'HTTP/1.1 200 OK\r\n'
+                    b'Content-Type: application/json\r\n'
+                    b'Content-Length: 5000\r\n\r\n'
+                    b'{"access_token":"REAL","refresh_token":"R"}')
+            finally:
+                conn.close()
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+        try:
+            with self.assertRaises(OidcNetworkError):
+                _http.request('GET', f'http://127.0.0.1:{port}/x', timeout=5.0)
+        finally:
+            srv.close()
+            server_thread.join(2.0)
 
     def test_read_body_aborts_on_slow_dribble(self):
         # A steady dribble that never trips the per-read socket timeout must

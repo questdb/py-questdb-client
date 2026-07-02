@@ -43,16 +43,25 @@ from ._http import safe_urlparse
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
 
-# Reject connection-string delimiters (';', '='), whitespace/control chars, and
-# '%' in the host: a real hostname / IPv4 / IPv6-literal never has them, so their
-# presence means a tampered URL trying to inject PG connection parameters
-# (psycopg turns its kwargs into a libpq conninfo string). ':' is allowed — IPv6
-# literals contain it, and the PG drivers take host and port separately. '%'
-# would only appear as an IPv6 zone-id (e.g. 'fe80::1%eth0'), meaningful only for
-# a link-local address on the local machine and never for reaching a remote
-# QuestDB; rejecting it keeps the guard a strict plain-host allowlist
-# (defense-in-depth — '%' is not itself a conninfo delimiter).
-_ILLEGAL_HOST_CHARS = re.compile(r'[\x00-\x20\x7f;=%]')
+# Constrain the PG-wire host to exactly the characters a real hostname / IPv4 /
+# IPv6-literal can contain — ASCII letters, digits, '.', '-', '_', and ':' (which
+# an IPv6 literal carries once urlparse has stripped its brackets; the PG drivers
+# take host and port separately) — and reject everything else. A positive
+# allow-list (rather than a deny-list of known-bad chars) closes the WHOLE class
+# of libpq conninfo-injection / connection-redirection vectors at once, because
+# psycopg turns its kwargs into a libpq conninfo string:
+#   * ',' is the libpq MULTI-HOST separator ('host=a,b' tries both a and b), so a
+#     tampered URL could steer the connection — and the '_sso' token sent as the
+#     password — to an attacker host that merely reads next to the real one;
+#   * a '/' makes libpq treat the value as a Unix-socket DIRECTORY, redirecting
+#     to a local socket;
+#   * ';', '=', whitespace and control chars are conninfo delimiters;
+#   * '%' is only ever an IPv6 zone-id ('fe80::1%eth0'), meaningful for an on-host
+#     link-local address, never for reaching a remote QuestDB.
+# None of these appears in a genuine host, so this is the choke point that keeps a
+# malformed/tampered URL from redirecting the PG connection. Mirrors the host
+# hygiene in _render._SAFE_HOST_RE and _discovery's authority checks.
+_LEGAL_HOST_RE = re.compile(r'\A[A-Za-z0-9._:-]+\Z')
 
 
 def _pg_module():
@@ -96,12 +105,15 @@ def _require_host(url: str, host: Optional[str] = None) -> str:
     # driver (and any junk inside the brackets is still caught).
     if resolved.startswith('[') and resolved.endswith(']') and len(resolved) > 2:
         resolved = resolved[1:-1]
-    if _ILLEGAL_HOST_CHARS.search(resolved):
+    if not _LEGAL_HOST_RE.match(resolved):
         raise OidcConfigError(
-            f'The QuestDB host {resolved!r} contains an illegal character '
-            "(';', '=', '%', whitespace or a control character). A hostname or "
-            'IP address never does; this indicates a malformed or tampered URL. '
-            '(Such a host could otherwise inject PG connection parameters.)')
+            f'The QuestDB host {resolved!r} contains an illegal character. A '
+            'hostname or IP address contains only letters, digits, ".", "-", '
+            '"_" and ":" (IPv6); anything else — "," (a libpq multi-host '
+            'separator), "/" (a Unix-socket path), ";", "=", "%", whitespace or '
+            'a control character — indicates a malformed or tampered URL and '
+            'could otherwise redirect the PG connection or inject connection '
+            'parameters.')
     return resolved
 
 

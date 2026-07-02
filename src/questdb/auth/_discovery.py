@@ -313,8 +313,9 @@ def _endpoint_path_under_issuer(endpoint: str, issuer: str) -> bool:
 # ``%`` (percent-encoding, or an IPv6 zone-id such as ``fe80::1%eth0`` — an
 # on-host link-local artifact, never a way to reach a remote IdP), so reject them
 # — fail closed — mirroring the host hygiene already enforced in
-# ``_adapters._ILLEGAL_HOST_CHARS`` and ``_render._SAFE_HOST_RE`` (both of which
-# also reject ``%``). (Non-ASCII is checked with ``str.isascii`` in the function,
+# ``_adapters._LEGAL_HOST_RE`` and ``_render._SAFE_HOST_RE`` (both positive
+# allow-lists, so both also reject ``%``). (Non-ASCII is checked with
+# ``str.isascii`` in the function,
 # not this regex.)
 _UNSAFE_AUTHORITY_RE = re.compile(r'[\\\s\x00-\x1f\x7f%]')
 
