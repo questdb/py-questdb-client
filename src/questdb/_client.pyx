@@ -221,8 +221,8 @@ class QuestDBError(Exception):
     @property
     def qwp_ws_error(self):
         """
-        Return the structured QWP/WebSocket HALT diagnostic, if this error
-        carries one from a terminal QWP/WebSocket sender failure.
+        Return the structured QWP/WebSocket diagnostic, if this error carries
+        one from a QWP/WebSocket sender failure.
         """
         if self._qwp_ws_error is not None:
             self._qwp_ws_error = _qwp_ws_error_from_raw(self._qwp_ws_error)
@@ -2016,6 +2016,7 @@ class QwpWsErrorCategory(TaggedEnum):
     InternalError = ('internal_error', LINE_SENDER_QWPWS_ERROR_INTERNAL_ERROR)
     SecurityError = ('security_error', LINE_SENDER_QWPWS_ERROR_SECURITY_ERROR)
     WriteError = ('write_error', LINE_SENDER_QWPWS_ERROR_WRITE_ERROR)
+    NotWritable = ('not_writable', LINE_SENDER_QWPWS_ERROR_NOT_WRITABLE)
     ProtocolViolation = (
         'protocol_violation',
         LINE_SENDER_QWPWS_ERROR_PROTOCOL_VIOLATION)
@@ -2026,10 +2027,11 @@ class QwpWsErrorPolicy(TaggedEnum):
     """
     Applied policy for a structured QWP/WebSocket diagnostic.
     """
-    DropAndContinue = (
-        'drop_and_continue',
-        LINE_SENDER_QWPWS_ERROR_DROP_AND_CONTINUE)
-    Halt = ('halt', LINE_SENDER_QWPWS_ERROR_HALT)
+    Retriable = ('retriable', LINE_SENDER_QWPWS_ERROR_RETRIABLE)
+    RetriableOther = (
+        'retriable_other',
+        LINE_SENDER_QWPWS_ERROR_RETRIABLE_OTHER)
+    Terminal = ('terminal', LINE_SENDER_QWPWS_ERROR_TERMINAL)
 
 
 @dataclass(frozen=True)
@@ -2064,7 +2066,7 @@ def _qwp_ws_error_from_raw(raw):
             py_category = entry
             break
 
-    py_policy = QwpWsErrorPolicy.Halt
+    py_policy = QwpWsErrorPolicy.Terminal
     for entry in QwpWsErrorPolicy:
         if entry.c_value == applied_policy:
             py_policy = entry
@@ -2083,7 +2085,7 @@ def _qwp_ws_error_from_raw(raw):
 def _default_qwp_ws_error_handler(error):
     level = (
         logging.ERROR
-        if error.applied_policy is QwpWsErrorPolicy.Halt
+        if error.applied_policy is QwpWsErrorPolicy.Terminal
         else logging.WARNING)
     logging.getLogger("questdb").log(
         level,

@@ -124,7 +124,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             'sender halted',
             (
                 qi.QwpWsErrorCategory.ParseError.c_value,
-                qi.QwpWsErrorPolicy.Halt.c_value,
+                qi.QwpWsErrorPolicy.Terminal.c_value,
                 2,
                 'bad line',
                 44,
@@ -135,7 +135,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         diagnostic = err.qwp_ws_error
 
         self.assertEqual(diagnostic.category, qi.QwpWsErrorCategory.ParseError)
-        self.assertEqual(diagnostic.applied_policy, qi.QwpWsErrorPolicy.Halt)
+        self.assertEqual(diagnostic.applied_policy, qi.QwpWsErrorPolicy.Terminal)
         self.assertEqual(diagnostic.status, 2)
         self.assertEqual(diagnostic.message, 'bad line')
         self.assertEqual(diagnostic.message_sequence, 44)
@@ -149,7 +149,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             'sender halted',
             (
                 qi.QwpWsErrorCategory.ParseError.c_value,
-                qi.QwpWsErrorPolicy.Halt.c_value,
+                qi.QwpWsErrorPolicy.Terminal.c_value,
                 2,
                 'bad line',
                 44,

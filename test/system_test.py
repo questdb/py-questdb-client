@@ -466,7 +466,7 @@ class TestWithDatabase(unittest.TestCase):
             ['r2', 2, 'two'],
             ['r3', None, 'three']])
 
-    def test_qwp_websocket_write_rejection_drops_and_sender_continues(self):
+    def test_qwp_websocket_schema_rejection_reports_terminal_and_retains_sf(self):
         self._require_qwp_ws()
         table_name = uuid.uuid4().hex
         sender_id = 'py-reject-' + uuid.uuid4().hex[:8]
@@ -504,31 +504,31 @@ class TestWithDatabase(unittest.TestCase):
                 self.assertEqual(
                     (first_fsn, rejected_fsn, final_fsn),
                     (0, 1, 2))
-                self.assertTrue(sender.await_acked_fsn(final_fsn, 30000))
-                diagnostic = self._retry_poll_qwp_ws_error(sender)
+                with self.assertRaises(
+                        qi.QuestDBServerRejectionError) as raised:
+                    sender.await_acked_fsn(final_fsn, 30000)
+                diagnostic = raised.exception.qwp_ws_error
+                self.assertIsNotNone(diagnostic)
                 self.assertEqual(
                     diagnostic.category,
                     qi.QwpWsErrorCategory.SchemaMismatch)
                 self.assertEqual(
                     diagnostic.applied_policy,
-                    qi.QwpWsErrorPolicy.DropAndContinue)
+                    qi.QwpWsErrorPolicy.Terminal)
                 self.assertEqual(diagnostic.status, 0x03)
                 self.assertEqual(diagnostic.from_fsn, rejected_fsn)
                 self.assertEqual(diagnostic.to_fsn, rejected_fsn)
-                self.assertIsNone(sender.poll_qwp_ws_error())
-                self.assertEqual(sender.qwp_ws_errors_dropped(), 0)
-                sender.close_drain()
             finally:
                 sender.close(False)
 
-            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+            self.assertGreater(self._sfa_file_count(sf_dir, sender_id), 0)
 
         self.qdb_plain.retry_check_table(table_name, min_rows=2)
         resp = self.qdb_plain.http_sql_query(
             f"select id, px from '{table_name}' order by id")
         self.assertEqual(resp['dataset'], [[0, 10.5], [2, 20.5]])
 
-    def test_qwp_websocket_error_handler_callback_fires(self):
+    def test_qwp_websocket_error_handler_does_not_hide_terminal_error(self):
         self._require_qwp_ws()
         table_name = uuid.uuid4().hex
         sender_id = 'py-reject-cb-' + uuid.uuid4().hex[:8]
@@ -563,18 +563,37 @@ class TestWithDatabase(unittest.TestCase):
                     columns={'id': 2, 'px': 20.5},
                     at=qi.TimestampMicros(1_700_000_000_002_000))
                 final_fsn = sender.flush_and_get_fsn()
-                self.assertTrue(sender.await_acked_fsn(final_fsn, 30000))
-                sender.close_drain()
-                self.assertTrue(
-                    captured, 'qwp_ws_error_handler was never invoked')
-                diagnostic = captured[0]
+                with self.assertRaises(
+                        qi.QuestDBServerRejectionError) as raised:
+                    sender.await_acked_fsn(final_fsn, 30000)
+                diagnostic = raised.exception.qwp_ws_error
+                self.assertIsNotNone(diagnostic)
                 self.assertEqual(
                     diagnostic.category,
                     qi.QwpWsErrorCategory.SchemaMismatch)
+                self.assertEqual(
+                    diagnostic.applied_policy,
+                    qi.QwpWsErrorPolicy.Terminal)
+                self.assertEqual(diagnostic.status, 0x03)
                 self.assertEqual(diagnostic.from_fsn, rejected_fsn)
                 self.assertEqual(diagnostic.to_fsn, rejected_fsn)
+                if captured:
+                    callback_diagnostic = captured[0]
+                    self.assertEqual(
+                        callback_diagnostic.category, diagnostic.category)
+                    self.assertEqual(
+                        callback_diagnostic.applied_policy,
+                        diagnostic.applied_policy)
+                    self.assertEqual(
+                        callback_diagnostic.status, diagnostic.status)
+                    self.assertEqual(
+                        callback_diagnostic.from_fsn, diagnostic.from_fsn)
+                    self.assertEqual(
+                        callback_diagnostic.to_fsn, diagnostic.to_fsn)
             finally:
                 sender.close(False)
+
+            self.assertGreater(self._sfa_file_count(sf_dir, sender_id), 0)
 
         self.qdb_plain.retry_check_table(table_name, min_rows=2)
         resp = self.qdb_plain.http_sql_query(
@@ -4490,7 +4509,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             resp['dataset'],
             [[10, 'xray'], [11, 'yankee'], [12, 'xray']])
 
-    def test_sfa_dataframe_rejection_reports_once_and_continues(self):
+    def test_sfa_dataframe_rejection_reports_terminal_and_retains_sf(self):
         table = self._table('t_sfa_df_reject_')
         sender_id = 'py-df-reject-' + uuid.uuid4().hex[:8]
         self.qdb_plain.http_sql_query(
@@ -4525,14 +4544,15 @@ class TestColumnIngressFailover(unittest.TestCase):
                     qi.QwpWsErrorCategory.SchemaMismatch)
                 self.assertEqual(
                     diagnostic.applied_policy,
-                    qi.QwpWsErrorPolicy.DropAndContinue)
+                    qi.QwpWsErrorPolicy.Terminal)
                 self.assertEqual(diagnostic.status, 0x03)
                 self.assertEqual(diagnostic.from_fsn, 1)
                 self.assertEqual(diagnostic.to_fsn, 1)
 
-                client.dataframe(valid2, table_name=table, at='ts')
+                with self.assertRaises(qi.QuestDBServerRejectionError):
+                    client.dataframe(valid2, table_name=table, at='ts')
 
-            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+            self.assertGreater(self._sfa_file_count(sf_dir, sender_id), 0)
 
         self.qdb_plain.retry_check_table(table, min_rows=2)
         resp = self.qdb_plain.http_sql_query(
