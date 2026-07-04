@@ -3309,7 +3309,7 @@ cdef void_int _dataframe_columnar_append_pyobj_str(
     offsets = prebuilt.str_offsets + row_offset
     bytes_len = prebuilt.str_bytes_len
     with nogil:
-        ok = column_sender_chunk_column_varchar(
+        ok = column_sender_chunk_column_str(
             chunk,
             col.name.buf,
             col.name.len,
@@ -3763,7 +3763,7 @@ cdef void_int _dataframe_columnar_append_at(
                 'Designated timestamp column cannot contain nulls.')
         data = <const int64_t*>prebuilt.data
         with nogil:
-            ok = column_sender_chunk_designated_timestamp_micros(
+            ok = column_sender_chunk_at_micros(
                 chunk,
                 data + row_offset,
                 row_count,
@@ -3778,7 +3778,7 @@ cdef void_int _dataframe_columnar_append_at(
             col_source_t.col_source_dt64ns_numpy,
             col_source_t.col_source_dt64ns_tz_arrow):
         with nogil:
-            ok = column_sender_chunk_designated_timestamp_nanos(
+            ok = column_sender_chunk_at_nanos(
                 chunk,
                 data + row_offset,
                 row_count,
@@ -3787,21 +3787,21 @@ cdef void_int _dataframe_columnar_append_at(
             col_source_t.col_source_dt64us_numpy,
             col_source_t.col_source_dt64us_tz_arrow):
         with nogil:
-            ok = column_sender_chunk_designated_timestamp_micros(
+            ok = column_sender_chunk_at_micros(
                 chunk,
                 data + row_offset,
                 row_count,
                 &err)
     elif col.setup.source == col_source_t.col_source_dt64ms_tz_arrow:
         with nogil:
-            ok = column_sender_chunk_designated_timestamp_millis(
+            ok = column_sender_chunk_at_millis(
                 chunk,
                 data + row_offset,
                 row_count,
                 &err)
     elif col.setup.source == col_source_t.col_source_dt64s_tz_arrow:
         with nogil:
-            ok = column_sender_chunk_designated_timestamp_seconds(
+            ok = column_sender_chunk_at_seconds(
                 chunk,
                 data + row_offset,
                 row_count,

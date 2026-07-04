@@ -788,7 +788,7 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_column_varchar(
+    bint column_sender_chunk_column_str(
         column_sender_chunk* chunk,
         const char* name,
         size_t name_len,
@@ -812,28 +812,28 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_designated_timestamp_micros(
+    bint column_sender_chunk_at_micros(
         column_sender_chunk* chunk,
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_designated_timestamp_nanos(
+    bint column_sender_chunk_at_nanos(
         column_sender_chunk* chunk,
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_designated_timestamp_millis(
+    bint column_sender_chunk_at_millis(
         column_sender_chunk* chunk,
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_designated_timestamp_seconds(
+    bint column_sender_chunk_at_seconds(
         column_sender_chunk* chunk,
         const int64_t* data,
         size_t row_count,
