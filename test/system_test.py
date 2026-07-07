@@ -41,6 +41,7 @@ QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
 FIRST_QWP_WS_RELEASE = (9, 4, 3)
+FIRST_QWP_GAP_HALT_RELEASE = (9, 4, 4)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -523,10 +524,14 @@ class TestWithDatabase(unittest.TestCase):
 
             self.assertGreater(self._sfa_file_count(sf_dir, sender_id), 0)
 
-        self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        if self.qdb_plain.version < FIRST_QWP_GAP_HALT_RELEASE:
+            expected = [[0, 10.5], [2, 20.5]]
+        else:
+            expected = [[0, 10.5]]
+        self.qdb_plain.retry_check_table(table_name, min_rows=len(expected))
         resp = self.qdb_plain.http_sql_query(
             f"select id, px from '{table_name}' order by id")
-        self.assertEqual(resp['dataset'], [[0, 10.5], [2, 20.5]])
+        self.assertEqual(resp['dataset'], expected)
 
     def test_qwp_websocket_error_handler_does_not_hide_terminal_error(self):
         self._require_qwp_ws()
@@ -595,10 +600,14 @@ class TestWithDatabase(unittest.TestCase):
 
             self.assertGreater(self._sfa_file_count(sf_dir, sender_id), 0)
 
-        self.qdb_plain.retry_check_table(table_name, min_rows=2)
+        if self.qdb_plain.version < FIRST_QWP_GAP_HALT_RELEASE:
+            expected = [[0, 10.5], [2, 20.5]]
+        else:
+            expected = [[0, 10.5]]
+        self.qdb_plain.retry_check_table(table_name, min_rows=len(expected))
         resp = self.qdb_plain.http_sql_query(
             f"select id, px from '{table_name}' order by id")
-        self.assertEqual(resp['dataset'], [[0, 10.5], [2, 20.5]])
+        self.assertEqual(resp['dataset'], expected)
 
     def test_qwp_websocket_schema_fuzz(self):
         self._require_qwp_fuzz()
@@ -4554,10 +4563,14 @@ class TestColumnIngressFailover(unittest.TestCase):
 
             self.assertGreater(self._sfa_file_count(sf_dir, sender_id), 0)
 
-        self.qdb_plain.retry_check_table(table, min_rows=2)
+        if self.qdb_plain.version < FIRST_QWP_GAP_HALT_RELEASE:
+            expected = [[0], [2]]
+        else:
+            expected = [[0]]
+        self.qdb_plain.retry_check_table(table, min_rows=len(expected))
         resp = self.qdb_plain.http_sql_query(
             f'SELECT v FROM {table} ORDER BY v')
-        self.assertEqual(resp['dataset'], [[0], [2]])
+        self.assertEqual(resp['dataset'], expected)
 
     def test_dead_then_live_endpoint_numpy_route(self):
         """A dead first endpoint + the live primary: the pool borrow
