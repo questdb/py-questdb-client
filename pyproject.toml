@@ -82,3 +82,14 @@ skip = [
 
 [tool.cibuildwheel.environment]
 SETUP_DO_GIT_SUBMODULE_INIT = "1"
+
+# Shared out-of-tree cargo target dir: the Rust deps compile once per job and
+# are reused across the job's Python versions. Platform tables replace (not
+# merge) the block above, so SETUP_DO_GIT_SUBMODULE_INIT is repeated here.
+[tool.cibuildwheel.linux.environment]
+SETUP_DO_GIT_SUBMODULE_INIT = "1"
+CARGO_TARGET_DIR = "/tmp/qdb-cargo-target"
+
+[tool.cibuildwheel.macos.environment]
+SETUP_DO_GIT_SUBMODULE_INIT = "1"
+CARGO_TARGET_DIR = "/tmp/qdb-cargo-target"

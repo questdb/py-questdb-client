@@ -31,6 +31,16 @@ if os.environ.get('TEST_QUESTDB_FUZZING') == '1':
     os.environ['CXX'] = "clang++"
 
 
+def cargo_target_release_dir(crate_dir):
+    """Locate a crate's cargo `release/` output dir, honouring
+    `CARGO_TARGET_DIR` when set so every crate can share one target dir."""
+    env_target = os.environ.get('CARGO_TARGET_DIR')
+    base = pathlib.Path(env_target) if env_target else (crate_dir / 'target')
+    if PLATFORM == 'win32' and MODE == '32bit':
+        return base / WIN_32BIT_CARGO_TARGET / 'release'
+    return base / 'release'
+
+
 def client_extension():
     lib_prefix = ''
     lib_suffix = ''
@@ -42,16 +52,9 @@ def client_extension():
 
     questdb_rs_ffi_dir = PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'
     rpyutils_dir = PROJ_ROOT / 'rpyutils'
-    questdb_client_lib_dir = None
-    rpyutils_lib_dir = None
-    if PLATFORM == 'win32' and MODE == '32bit':
-        questdb_client_lib_dir = \
-            questdb_rs_ffi_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
-        rpyutils_lib_dir = \
-            rpyutils_dir / 'target' / WIN_32BIT_CARGO_TARGET / 'release'
-    else:
-        questdb_client_lib_dir = questdb_rs_ffi_dir / 'target' / 'release'
-        rpyutils_lib_dir = rpyutils_dir / 'target' / 'release'
+    questdb_client_lib_dir = cargo_target_release_dir(questdb_rs_ffi_dir)
+    rpyutils_lib_dir = cargo_target_release_dir(rpyutils_dir)
+    if not (PLATFORM == 'win32' and MODE == '32bit'):
         if INSTRUMENT_FUZZING:
             extra_compile_args.append('-fsanitize=fuzzer-no-link')
             extra_link_args.append('-fsanitize=fuzzer-no-link')
@@ -104,8 +107,10 @@ def client_extension():
 def cargo_build():
     if not (PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi').exists():
         if os.environ.get('SETUP_DO_GIT_SUBMODULE_INIT') == '1':
+            # Non-recursive: the wheel needs only `c-questdb-client`, not its
+            # nested `questdb` Java-server submodule (a large, useless clone).
             subprocess.check_call([
-                'git', 'submodule', 'update', '--init', '--recursive'])
+                'git', 'submodule', 'update', '--init', 'c-questdb-client'])
         else:
             sys.stderr.write('Could not find `c-questdb-client` submodule.\n')
             sys.stderr.write('You might need to run:\n')
