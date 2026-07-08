@@ -3,6 +3,7 @@ import socket
 import select
 import re
 import http.server as hs
+import socketserver
 import threading
 import time
 import struct
@@ -121,6 +122,11 @@ SETTINGS_WITH_PROTOCOL_VERSION_V4 = '{"config":{"release.type":"OSS","release.ve
 SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1,2,3],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITHOUT_PROTOCOL_VERSION = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
 
+class _NoReverseDnsHTTPServer(hs.HTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 class HttpServer:
     def __init__(self, settings=SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3, delay_seconds=0):
         self.delay_seconds = delay_seconds
@@ -195,7 +201,7 @@ class HttpServer:
     def __enter__(self):
         self._stop_event = threading.Event()
         handler_class = self.create_handler()
-        self._http_server = hs.HTTPServer(('', 0), handler_class, bind_and_activate=True)
+        self._http_server = _NoReverseDnsHTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server.timeout = 30
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()

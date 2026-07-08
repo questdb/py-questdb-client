@@ -93,7 +93,7 @@ def test(all=False, patch_path='1', *args):
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
     if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
-    _run('python3', 'test/test.py', '-v', *args,
+    _run('python3', '-u', 'test/test.py', '-v', *args,
          env=env)
 
 
