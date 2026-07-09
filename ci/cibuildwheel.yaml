@@ -148,7 +148,7 @@ stages:
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
-      - job: macos_x64
+      - job: macos_cp310_cp311
         pool: {vmImage: 'macOS-14'}
         timeoutInMinutes: 120
         steps:
@@ -160,6 +160,59 @@ stages:
             displayName: Install dependencies
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
+            env:
+              CIBW_BUILD: "cp310-* cp311-*"
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: wheelhouse}
+
+      - job: macos_cp312_cp313
+        pool: {vmImage: 'macOS-14'}
+        timeoutInMinutes: 120
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              python3 -m pip install cibuildwheel
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: "cp312-* cp313-*"
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: wheelhouse}
+
+      - job: macos_cp314
+        pool: {vmImage: 'macOS-14'}
+        timeoutInMinutes: 120
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              python3 -m pip install cibuildwheel
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: "cp314-*"
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: wheelhouse}
+
+      - job: macos_cp314t
+        pool: {vmImage: 'macOS-14'}
+        timeoutInMinutes: 120
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              python3 -m pip install cibuildwheel
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: "cp314t-*"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: wheelhouse}
 
