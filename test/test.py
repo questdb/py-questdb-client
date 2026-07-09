@@ -67,7 +67,10 @@ from test_client_capsule_path import (
     TestWriterMixingInOneChunk,
     TestPandasPlannerRouting,
 )
-from test_client_dataframe_failures import TestClientDataframeDirectFailures
+from test_client_dataframe_failures import (
+    TestClientDataframeDirectFailures,
+    TestClientDataframeFaultFuzz,
+)
 from test_client_dataframe_fuzz import (
     TestClientDataframeFuzz,
     TestClientDataframeRoundTrip,
@@ -389,7 +392,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     @unittest.skipIf(pd is None or pyarrow is None,
                      'pandas + pyarrow not installed')
-    def test_client_dataframe_syncs_before_returning_after_late_flush_error(self):
+    def test_client_dataframe_late_flush_error_is_terminal(self):
         labels = ['a'] * 64000
         labels.append('x' * 1_200_000)
         df = pd.DataFrame({
@@ -421,14 +424,14 @@ class TestQwpWebSocketApi(unittest.TestCase):
         # The 1.2 MB single row is irreducible: the column sender splits the
         # oversized final chunk down to one row and still cannot fit it under
         # the 1 MB cap, so it surfaces batch_too_large (asserted by code, not
-        # message text, to stay robust to wording changes).
+        # message text, to stay robust to wording changes). The failed call
+        # drops its connection, discarding the already-pipelined uncommitted
+        # chunks instead of committing them — how many frames reached the
+        # socket before the drop is a race, so no frame-count assertion here;
+        # the landed-rows contract is pinned by system_test's
+        # test_failed_dataframe_call_leaves_only_the_eager_first_batch.
         self.assertEqual(ctx.exception.code, qi.QuestDBErrorCode.BatchTooLarge)
-        # The server saw no errors, and the earlier small-row chunks were
-        # synced before the late failure: at least the three full chunks
-        # reached the wire (splitting the final chunk may add more sub-frames,
-        # so this is a lower bound rather than an exact count).
         self.assertEqual(stats['errors'], [])
-        self.assertGreaterEqual(stats['qwp1_frames'], 3)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

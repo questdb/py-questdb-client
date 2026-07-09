@@ -21,6 +21,20 @@ import patch_path
 import questdb._client as qi
 
 from qwp_ws_ack_server import QwpAckServer
+from test_client_dataframe_fuzz import (
+    Rng,
+    _derive_master_seed,
+    _format_seed,
+    _parse_int_env,
+    ITER_SEED_ENV,
+    ITERS_ENV,
+)
+
+try:
+    import numpy as np
+    import pandas as pd
+except ImportError:
+    pd = None
 
 try:
     import pyarrow as pa
@@ -136,6 +150,145 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
              qi.QuestDBErrorCode.SocketError))
         self.assertGreaterEqual(stats['accepted_connections'], 2)
         self.assertLess(elapsed, 30.0)
+
+
+def _fault_frame(n_rows, str_len, arrow_route):
+    ts = [1_700_000_000_000_000 + i * 1_000 for i in range(n_rows)]
+    vs = list(range(n_rows))
+    if arrow_route:
+        cols = {
+            'ts': pa.array(ts, type=pa.timestamp('us', tz='UTC')),
+            'v': pa.array(vs, type=pa.int64()),
+        }
+        if str_len:
+            cols['s'] = pa.array(['x' * str_len] * n_rows, type=pa.string())
+        return pa.table(cols)
+    frame = pd.DataFrame({
+        'ts': pd.to_datetime(ts, unit='us'),
+        'v': np.array(vs, dtype=np.int64),
+    })
+    if str_len:
+        frame['s'] = ['x' * str_len] * n_rows
+    return frame
+
+
+@unittest.skipIf(
+    pa is None or pd is None, 'pandas/pyarrow not installed')
+class TestClientDataframeFaultFuzz(unittest.TestCase):
+    """Random fault timing x frame shape over the direct dataframe path.
+
+    The deterministic tests above pin the boundaries we could derive by
+    hand; this sweep drives random disconnect points, server batch caps
+    (forcing frame splits under defer-aware acks), and their combination,
+    asserting invariants only: the call terminates promptly, ends in
+    success or a known error code, never corrupts the wire, and a
+    post-checkpoint failure never re-sends.
+    """
+
+    DEFAULT_ITERS = 100
+
+    ALLOWED_CODES = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ALLOWED_CODES = (
+            qi.QuestDBErrorCode.FailoverRetry,
+            qi.QuestDBErrorCode.SocketError,
+            qi.QuestDBErrorCode.InvalidApiCall,
+            qi.QuestDBErrorCode.BatchTooLarge,
+        )
+        cls.iter_seed_override = _parse_int_env(ITER_SEED_ENV)
+        if cls.iter_seed_override is not None:
+            cls.master_seed = None
+            cls.iters = 1
+            sys.stderr.write(
+                f'>>>> dataframe fault fuzz: '
+                f'iter_seed_override={_format_seed(cls.iter_seed_override)}, '
+                f'iters=1\n')
+            return
+        cls.master_seed = _derive_master_seed()
+        cls.iters = _parse_int_env(ITERS_ENV) or cls.DEFAULT_ITERS
+        sys.stderr.write(
+            f'>>>> dataframe fault fuzz: master_seed='
+            f'{_format_seed(cls.master_seed)}, iters={cls.iters}\n')
+
+    def _iter_seeds(self):
+        if self.iter_seed_override is not None:
+            return [self.iter_seed_override]
+        master = Rng(self.master_seed)
+        return [master.next_long() for _ in range(self.iters)]
+
+    def _master_label(self):
+        if self.master_seed is None:
+            return f'iter_seed_override={_format_seed(self.iter_seed_override)}'
+        return f'master_seed={_format_seed(self.master_seed)}'
+
+    def _run_one(self, rng):
+        max_rows_per_batch = rng.choice([1, 2, 4, 16])
+        batches = rng.choice([1, 3, 30, 130])
+        n_rows = max(1, max_rows_per_batch * batches - rng.next_int(
+            max_rows_per_batch))
+        str_len = rng.choice([0, 8, 64])
+        arrow_route = rng.next_bool()
+        mode = rng.choice(['disconnect', 'cap', 'combo'])
+        cap = rng.choice([512, 1024, 2048]) if mode != 'disconnect' else 0
+        close_plan = None
+        if mode != 'cap':
+            close_plan = [rng.next_int(batches * 4 + 4)]
+        frame = _fault_frame(n_rows, str_len, arrow_route)
+
+        started = time.monotonic()
+        with QwpAckServer(
+                close_plan=close_plan,
+                max_batch_size=cap,
+                defer_aware_acks=(mode != 'disconnect')) as server:
+            with qi.Client.from_conf(
+                    _conf(server.port,
+                          reconnect_max_duration_millis=3000)) as client:
+                err = None
+                try:
+                    client.dataframe(
+                        frame, table_name='t_fault', at='ts',
+                        max_rows_per_batch=max_rows_per_batch)
+                except qi.QuestDBError as exc:
+                    err = exc
+            stats = server.snapshot()
+        elapsed = time.monotonic() - started
+
+        label = (
+            f'mode={mode} cap={cap} close={close_plan} rows={n_rows} '
+            f'mrpb={max_rows_per_batch} str={str_len} arrow={arrow_route}')
+        assert elapsed < 30.0, f'{label}: took {elapsed:.1f}s'
+        assert stats['errors'] == [], f'{label}: server saw {stats["errors"]}'
+        if err is not None:
+            assert err.code in self.ALLOWED_CODES, (
+                f'{label}: unexpected {err.code}: {err}')
+        else:
+            # The numpy chunk path rounds the batch size up to the 8-row
+            # bitmap alignment, so the frame-count floor uses that stride.
+            min_frames = -(-n_rows // max(max_rows_per_batch, 8))
+            assert stats['binary_frames'] >= min_frames, (
+                f'{label}: only {stats["binary_frames"]} frames for '
+                f'{min_frames} batches')
+
+    def test_fuzz_fault_injection(self):
+        failures = []
+        seeds = self._iter_seeds()
+        for iter_seed in seeds:
+            rng = Rng(iter_seed)
+            try:
+                self._run_one(rng)
+            except AssertionError as exc:
+                failures.append((iter_seed, type(exc).__name__, str(exc)))
+            except Exception as exc:  # noqa: BLE001 — fuzz triage
+                failures.append((iter_seed, type(exc).__name__, repr(exc)))
+        if failures:
+            preview = '\n'.join(
+                f'  iter={_format_seed(s)} [{cls}]: {m}'
+                for s, cls, m in failures[:5])
+            self.fail(
+                f'{len(failures)}/{len(seeds)} iterations failed.\n'
+                f'{self._master_label()}\n{preview}')
 
 
 if __name__ == '__main__':
