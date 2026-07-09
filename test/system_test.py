@@ -4435,9 +4435,11 @@ class TestColumnIngressFailover(unittest.TestCase):
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         return got.column('v').to_pylist()
 
-    def test_sfa_dataframe_numpy_round_trip(self):
-        """SFA through the parent Python ``Client.dataframe`` NumPy path."""
-        table = self._table('t_sfa_df_np_')
+    def test_sf_conf_dataframe_stays_direct_numpy(self):
+        """``Client.dataframe`` ignores ``sf_dir``: the NumPy path stays on
+        the direct column sender and never touches the store-and-forward
+        spool."""
+        table = self._table('t_sf_conf_df_np_')
         sender_id = 'py-df-np-' + uuid.uuid4().hex[:8]
         self.qdb_plain.http_sql_query(
             f'CREATE TABLE {table} '
@@ -4454,12 +4456,15 @@ class TestColumnIngressFailover(unittest.TestCase):
             'sym': pd.Categorical(['alpha', 'bravo', 'alpha']),
         })
 
-        with tempfile.TemporaryDirectory(prefix='py-df-sfa-np-') as sf_dir:
+        with tempfile.TemporaryDirectory(prefix='py-df-sf-conf-np-') as sf_dir:
             with qi.Client.from_conf(
                     self._sfa_conf(sender_id, sf_dir)) as client:
                 client.dataframe(
                     df, table_name=table, at='ts', symbols=['sym'])
-            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+            self.assertFalse(
+                (pathlib.Path(sf_dir) / sender_id).exists(),
+                'dataframe ingestion must not open the store-and-forward '
+                'slot')
 
         self.qdb_plain.retry_check_table(table, min_rows=3)
         resp = self.qdb_plain.http_sql_query(
@@ -4468,12 +4473,14 @@ class TestColumnIngressFailover(unittest.TestCase):
             resp['dataset'],
             [[0, 'alpha'], [1, 'bravo'], [2, 'alpha']])
 
-    def test_sfa_dataframe_arrow_round_trip(self):
-        """SFA through the parent Python ``Client.dataframe`` Arrow path."""
+    def test_sf_conf_dataframe_stays_direct_arrow(self):
+        """``Client.dataframe`` ignores ``sf_dir``: the Arrow capsule path
+        stays on the direct column sender and never touches the
+        store-and-forward spool."""
         if pyarrow is None:
             self.skipTest('pyarrow not installed')
 
-        table = self._table('t_sfa_df_arrow_')
+        table = self._table('t_sf_conf_df_arrow_')
         sender_id = 'py-df-arrow-' + uuid.uuid4().hex[:8]
         self.qdb_plain.http_sql_query(
             f'CREATE TABLE {table} '
@@ -4499,7 +4506,8 @@ class TestColumnIngressFailover(unittest.TestCase):
                 dtype=pd.ArrowDtype(pyarrow.string())),
         })
 
-        with tempfile.TemporaryDirectory(prefix='py-df-sfa-arrow-') as sf_dir:
+        with tempfile.TemporaryDirectory(
+                prefix='py-df-sf-conf-arrow-') as sf_dir:
             with qi.Client.from_conf(
                     self._sfa_conf(sender_id, sf_dir)) as client:
                 client.dataframe(
@@ -4507,7 +4515,10 @@ class TestColumnIngressFailover(unittest.TestCase):
                     table_name=table,
                     at='ts',
                     schema_overrides={'sym': 'symbol'})
-            self.assertEqual(self._sfa_file_count(sf_dir, sender_id), 0)
+            self.assertFalse(
+                (pathlib.Path(sf_dir) / sender_id).exists(),
+                'dataframe ingestion must not open the store-and-forward '
+                'slot')
 
         self.qdb_plain.retry_check_table(table, min_rows=3)
         resp = self.qdb_plain.http_sql_query(
@@ -4516,9 +4527,11 @@ class TestColumnIngressFailover(unittest.TestCase):
             resp['dataset'],
             [[10, 'xray'], [11, 'yankee'], [12, 'xray']])
 
-    def test_sfa_dataframe_rejection_reports_terminal_and_retains_sf(self):
-        table = self._table('t_sfa_df_reject_')
-        sender_id = 'py-df-reject-' + uuid.uuid4().hex[:8]
+    def test_dataframe_rejection_is_terminal_and_next_call_recovers(self):
+        """A server rejection surfaces as a terminal error (not retried by
+        the failover loop) and the rejected connection is dropped, so the
+        next ``dataframe`` call succeeds on a fresh borrow."""
+        table = self._table('t_df_reject_')
         self.qdb_plain.http_sql_query(
             f'CREATE TABLE {table} '
             '(ts TIMESTAMP, v LONG, bad LONG) '
@@ -4537,37 +4550,19 @@ class TestColumnIngressFailover(unittest.TestCase):
             'v': np.array([2], dtype=np.int64),
         })
 
-        with tempfile.TemporaryDirectory(prefix='py-df-sfa-reject-') as sf_dir:
-            with qi.Client.from_conf(
-                    self._sfa_conf(sender_id, sf_dir)) as client:
-                client.dataframe(valid1, table_name=table, at='ts')
-                with self.assertRaises(
-                        qi.QuestDBServerRejectionError) as raised:
-                    client.dataframe(rejected, table_name=table, at='ts')
-                diagnostic = raised.exception.qwp_ws_error
-                self.assertIsNotNone(diagnostic)
-                self.assertEqual(
-                    diagnostic.category,
-                    qi.QwpWsErrorCategory.SchemaMismatch)
-                self.assertEqual(
-                    diagnostic.applied_policy,
-                    qi.QwpWsErrorPolicy.Terminal)
-                self.assertEqual(diagnostic.status, 0x03)
-                self.assertEqual(diagnostic.from_fsn, 1)
-                self.assertEqual(diagnostic.to_fsn, 1)
+        with qi.Client.from_conf(self._conf()) as client:
+            client.dataframe(valid1, table_name=table, at='ts')
+            with self.assertRaises(qi.QuestDBError) as raised:
+                client.dataframe(rejected, table_name=table, at='ts')
+            self.assertEqual(
+                raised.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn('schema mismatch', str(raised.exception))
+            client.dataframe(valid2, table_name=table, at='ts')
 
-                with self.assertRaises(qi.QuestDBServerRejectionError):
-                    client.dataframe(valid2, table_name=table, at='ts')
-
-            self.assertGreater(self._sfa_file_count(sf_dir, sender_id), 0)
-
-        self.qdb_plain.retry_check_table(table, min_rows=1)
+        self.qdb_plain.retry_check_table(table, min_rows=2)
         resp = self.qdb_plain.http_sql_query(
             f'SELECT v FROM {table} ORDER BY v')
-        if self.qdb_plain.version < FIRST_QWP_GAP_HALT_RELEASE:
-            self.assertIn([0], resp['dataset'])
-        else:
-            self.assertEqual(resp['dataset'], [[0]])
+        self.assertEqual(resp['dataset'], [[0], [2]])
 
     def test_dead_then_live_endpoint_numpy_route(self):
         """A dead first endpoint + the live primary: the pool borrow

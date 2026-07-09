@@ -3986,7 +3986,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
         chunk, at_col, at_prebuilt, row_offset, row_count)
 
 
-cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
+cdef void_int _dataframe_columnar_sync(direct_column_sender* conn) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
@@ -3996,10 +3996,9 @@ cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = column_sender_wait(
+    ok = direct_column_sender_commit(
         conn,
         qwpws_ack_level.qwpws_ack_level_ok,
-        0,  # timeout_millis: 0 = wait indefinitely (no-progress deadline)
         &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
@@ -4010,26 +4009,18 @@ cdef void_int _dataframe_columnar_sync(column_sender* conn) except -1:
 
 
 cdef bint _dataframe_columnar_force_drop_after_error(
-        column_sender* conn,
-        bint flushed,
-        bint sync_attempted) noexcept:
-    # A flush leaves deferred frames the next borrower would commit unless a
-    # clean sync confirmed them, so the connection is only reusable when no
-    # flush succeeded or when a sync then succeeds. When no flush succeeded we
-    # left nothing deferred and can return normally: the FFI return path itself
-    # closes (rather than recycles) a conn that latched a terminal transport or
-    # protocol error, so we don't need to force-drop those here.
+        direct_column_sender* conn,
+        bint flushed) noexcept:
+    # A failed call must not let its data reach the table. The direct pool's
+    # return path best-effort-commits pipelined frames, so a connection that
+    # saw any flush is dropped (discarding the uncommitted frames) instead of
+    # returned. When no flush succeeded there is nothing pipelined and the
+    # connection can be returned normally: the FFI return path itself closes
+    # (rather than recycles) a conn that latched a terminal transport or
+    # protocol error.
     if conn == NULL:
         return False
-    if not flushed:
-        return False
-    if not sync_attempted:
-        try:
-            _dataframe_columnar_sync(conn)
-            return False
-        except Exception:
-            return True
-    return True
+    return flushed
 
 
 cdef bint _dataframe_columnar_is_deferred_capacity_error(
@@ -4045,7 +4036,7 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
 
 
 cdef void_int _dataframe_columnar_flush(
-        column_sender* conn,
+        direct_column_sender* conn,
         column_sender_chunk* chunk,
         bint retry_after_sync,
         bint* committed_prefix) except -1:
@@ -4061,7 +4052,7 @@ cdef void_int _dataframe_columnar_flush(
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = column_sender_flush(conn, chunk, &err)
+    ok = direct_column_sender_flush(conn, chunk, &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
@@ -4081,7 +4072,7 @@ cdef void_int _dataframe_columnar_flush(
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
-        ok = column_sender_flush(conn, chunk, &err)
+        ok = direct_column_sender_flush(conn, chunk, &err)
         _ensure_has_gil(&gs)
         if _dataframe_columnar_count_io_stats:
             _dataframe_columnar_flush_calls += 1
@@ -4092,15 +4083,15 @@ cdef void_int _dataframe_columnar_flush(
     raise c_err_to_py(err)
 
 
-cdef void_int _dataframe_arrow_flush_batch(
-        column_sender* conn,
+cdef int _arrow_flush_once(
+        direct_column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         ArrowSchema* schema,
         line_sender_column_name* ts_column,
         const column_sender_arrow_override* overrides,
-        size_t overrides_len) except -1:
-    cdef line_sender_error* err = NULL
+        size_t overrides_len,
+        line_sender_error** err) except -1:
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
     cdef uint64_t start_ns = 0
@@ -4111,20 +4102,62 @@ cdef void_int _dataframe_arrow_flush_batch(
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
     if ts_column != NULL:
-        ok = column_sender_flush_arrow_batch_at_column(
+        ok = direct_column_sender_flush_arrow_batch_at_column(
             conn, table, array, schema, ts_column[0],
-            overrides, overrides_len, &err)
+            overrides, overrides_len, err)
     else:
-        ok = column_sender_flush_arrow_batch_at_now(
+        ok = direct_column_sender_flush_arrow_batch_at_now(
             conn, table, array, schema,
-            overrides, overrides_len, &err)
+            overrides, overrides_len, err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
         _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
-    if not ok:
-        raise c_err_to_py(err)
-    return 0
+    return 1 if ok else 0
+
+
+cdef void_int _dataframe_arrow_flush_batch(
+        direct_column_sender* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        ArrowSchema* schema,
+        line_sender_column_name* ts_column,
+        const column_sender_arrow_override* overrides,
+        size_t overrides_len,
+        bint retry_after_sync,
+        bint* committed_prefix,
+        size_t* deferred_since_sync) except -1:
+    cdef line_sender_error* err = NULL
+    global _dataframe_columnar_flush_retry_syncs
+
+    if _arrow_flush_once(
+            conn, table, array, schema, ts_column,
+            overrides, overrides_len, &err):
+        return 0
+
+    # A batch larger than the server per-batch cap is split into several
+    # deferred frames, so the caller's batch counter can undercount the
+    # 127-slot in-flight window; commit to drain it and retry once. The
+    # capacity failure is pre-publication, so `array` was re-exported and
+    # `release` must still be set for the retry to be safe.
+    if (retry_after_sync
+            and line_sender_error_get_code(err) ==
+                line_sender_error_invalid_api_call
+            and _dataframe_columnar_is_deferred_capacity_error(err)
+            and array.release != NULL):
+        if _dataframe_columnar_count_io_stats:
+            _dataframe_columnar_flush_retry_syncs += 1
+        line_sender_error_free(err)
+        err = NULL
+        _dataframe_columnar_sync(conn)
+        committed_prefix[0] = True
+        deferred_since_sync[0] = 0
+        if _arrow_flush_once(
+                conn, table, array, schema, ts_column,
+                overrides, overrides_len, &err):
+            return 0
+
+    raise c_err_to_py(err)
 
 
 def _debug_dataframe_columnar_io_stats(
@@ -4199,7 +4232,7 @@ def _bench_dataframe_flush_arrow_batch(
         object conf=None,
         size_t iterations=1):
     """
-    Internal benchmark hook for `column_sender_flush_arrow_batch_at_now`
+    Internal benchmark hook for `direct_column_sender_flush_arrow_batch_at_now`
     FFI.
 
     `arrow_source` must expose the Arrow PyCapsule Interface
@@ -4215,13 +4248,12 @@ def _bench_dataframe_flush_arrow_batch(
     cdef size_t col_count = 0
     cdef size_t completed = 0
     cdef questdb_db* db = NULL
-    cdef column_sender* conn = NULL
+    cdef direct_column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef qdb_pystr_buf* b = NULL
     cdef PyThreadState* gs = NULL
     cdef bytes conf_bytes
     cdef bint any_flushed = False
-    cdef bint flush_attempted = False
     cdef bint committed_prefix = False
     cdef size_t deferred_since_sync = 0
     cdef line_sender_table_name c_table_name
@@ -4276,7 +4308,7 @@ def _bench_dataframe_flush_arrow_batch(
             c_ts_column_ptr = &c_ts_column
 
         _ensure_doesnt_have_gil(&gs)
-        conn = questdb_db_borrow_column_sender(db, &err)
+        conn = questdb_db_borrow_direct_column_sender(db, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -4284,12 +4316,18 @@ def _bench_dataframe_flush_arrow_batch(
             for iteration in range(iterations):
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
-                    &c_schema, NULL, 0, &any_flushed, &flush_attempted,
+                    &c_schema, NULL, 0, &any_flushed,
                     &deferred_since_sync, &committed_prefix)
-            _dataframe_columnar_sync(conn)
+            if any_flushed:
+                _dataframe_columnar_sync(conn)
             completed = iterations
+        except:
+            questdb_db_drop_direct_column_sender(db, conn)
+            conn = NULL
+            raise
         finally:
-            questdb_db_return_column_sender(db, conn)
+            if conn != NULL:
+                questdb_db_return_direct_column_sender(db, conn)
     finally:
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
@@ -4446,7 +4484,7 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
 
 
 cdef void_int _capsule_consume_stream(
-        column_sender* conn,
+        direct_column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -4454,7 +4492,6 @@ cdef void_int _capsule_consume_stream(
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
         bint* any_flushed,
-        bint* flush_attempted,
         size_t* deferred_since_sync,
         bint* committed_prefix) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
@@ -4499,14 +4536,15 @@ cdef void_int _capsule_consume_stream(
         if batch.release == NULL:
             break
         try:
-            flush_attempted[0] = True
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)
                 committed_prefix[0] = True
                 deferred_since_sync[0] = 0
             _dataframe_arrow_flush_batch(
                 conn, c_table_name, &batch, c_schema, c_ts_column_ptr,
-                c_overrides, c_overrides_len)
+                c_overrides, c_overrides_len,
+                deferred_since_sync[0] > 0, committed_prefix,
+                deferred_since_sync)
             any_flushed[0] = True
             deferred_since_sync[0] += 1
         finally:
@@ -5005,14 +5043,12 @@ cdef bint _dataframe_client_try_capsule_path(
         object schema_overrides,
         bint* committed_prefix) except -1:
     cdef qdb_pystr_buf* b = NULL
-    cdef column_sender* conn = NULL
+    cdef direct_column_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
     cdef object sliceable = None
     cdef bint any_flushed = False
-    cdef bint flush_attempted = False
     cdef size_t deferred_since_sync = 0
-    cdef bint sync_attempted = False
     cdef bint force_drop_conn = False
     cdef object row_slice = None
     cdef Py_ssize_t total_rows = 0
@@ -5117,9 +5153,10 @@ cdef bint _dataframe_client_try_capsule_path(
 
         _ensure_doesnt_have_gil(&gs)
         if budget_ms == 0:
-            conn = questdb_db_borrow_column_sender(db, &err)
+            conn = questdb_db_borrow_direct_column_sender(db, &err)
         else:
-            conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
+            conn = questdb_db_borrow_direct_column_sender_with_retry(
+                db, budget_ms, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -5129,7 +5166,7 @@ cdef bint _dataframe_client_try_capsule_path(
                 _capsule_consume_stream_with_hint(
                     conn, sliceable, c_table_name, c_ts_column_ptr,
                     &c_schema, c_overrides, c_overrides_len,
-                    &any_flushed, &flush_attempted, &deferred_since_sync,
+                    &any_flushed, &deferred_since_sync,
                     committed_prefix, max_rows_per_batch, False)
             else:
                 offset = 0
@@ -5142,14 +5179,14 @@ cdef bint _dataframe_client_try_capsule_path(
                     _capsule_consume_stream_with_hint(
                         conn, row_slice, c_table_name, c_ts_column_ptr,
                         &c_schema, c_overrides, c_overrides_len,
-                        &any_flushed, &flush_attempted, &deferred_since_sync,
+                        &any_flushed, &deferred_since_sync,
                         committed_prefix, max_rows_per_batch, True)
                     offset += chunk_rows
-            sync_attempted = True
-            _dataframe_columnar_sync(conn)
+            if any_flushed:
+                _dataframe_columnar_sync(conn)
         except:
             force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                conn, any_flushed, sync_attempted)
+                conn, any_flushed)
             raise
 
         return True
@@ -5157,9 +5194,9 @@ cdef bint _dataframe_client_try_capsule_path(
         _ensure_has_gil(&gs)
         if conn != NULL:
             if force_drop_conn:
-                questdb_db_drop_column_sender(db, conn)
+                questdb_db_drop_direct_column_sender(db, conn)
             else:
-                questdb_db_return_column_sender(db, conn)
+                questdb_db_return_direct_column_sender(db, conn)
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
         if c_overrides != NULL:
@@ -5169,7 +5206,7 @@ cdef bint _dataframe_client_try_capsule_path(
 
 
 cdef void_int _capsule_consume_stream_with_hint(
-        column_sender* conn,
+        direct_column_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
@@ -5177,7 +5214,6 @@ cdef void_int _capsule_consume_stream_with_hint(
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
         bint* any_flushed,
-        bint* flush_attempted,
         size_t* deferred_since_sync,
         bint* committed_prefix,
         size_t max_rows_per_batch,
@@ -5186,7 +5222,7 @@ cdef void_int _capsule_consume_stream_with_hint(
     try:
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr, c_schema,
-            c_overrides, c_overrides_len, any_flushed, flush_attempted,
+            c_overrides, c_overrides_len, any_flushed,
             deferred_since_sync, committed_prefix)
     except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
@@ -5277,10 +5313,13 @@ cdef class Client:
         """
         Construct a pooled client from a QWP/WebSocket configuration string.
 
-        The underlying connection pool is opened eagerly by `questdb_db_connect`.
-        Include ``sf_dir=...`` to opt the columnar dataframe path into
-        store-and-forward mode; without ``sf_dir`` dataframe ingestion uses the
-        direct QWP/WebSocket column sender.
+        The underlying connection pool is opened by `questdb_db_connect`.
+        Dataframe ingestion always uses the direct (non-store-and-forward)
+        QWP/WebSocket column sender, independent of ``sf_dir``; on a transient
+        connection failure the frame is re-sent from the caller's DataFrame.
+        ``request_timeout`` bounds each commit's no-progress ack wait;
+        ``request_timeout=0`` disables that deadline, so a stalled but
+        connected server can block :meth:`dataframe` indefinitely.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
@@ -5337,11 +5376,20 @@ cdef class Client:
         """
         Ingest a dataframe through the pooled columnar QWP path.
 
-        When this client was opened with ``sf_dir=...``,
-        :meth:`Client.dataframe` uses the store-and-forward column sender. Each
-        batch is accepted into the local SFA queue first, and this method still
-        waits for ``AckLevel::Ok`` before returning; low-level columnar
-        ``flush`` calls have the weaker local-acceptance contract.
+        Ingestion always uses the direct (non-store-and-forward) column
+        sender, independent of ``sf_dir``, and returns once the whole frame
+        is committed (``AckLevel::Ok``). On a transient connection failure
+        the frame is re-sent from the caller's DataFrame within the pool's
+        reconnect budget — unless an intermediate commit checkpoint (emitted
+        every ~100 batches on large frames) has already landed, in which case
+        the error is raised immediately and the committed prefix stays in the
+        table, since a blind re-send would duplicate it. Delivery is
+        at-least-once: a re-sent frame can duplicate already-committed rows
+        (including the first chunk, which commits eagerly on a fresh
+        connection) unless the table has ``DEDUP UPSERT KEYS``. Server-side
+        rejections (e.g. a schema mismatch) surface as a plain
+        :class:`QuestDBError`; the structured ``qwp_ws_error`` diagnostic is
+        attached only by the store-and-forward senders.
 
         ``df`` accepts any of:
 
@@ -5486,11 +5534,10 @@ cdef class Client:
             size_t max_rows_per_batch,
             bint* committed_prefix):
         cdef column_sender_chunk* chunk = NULL
-        cdef column_sender* conn = NULL
+        cdef direct_column_sender* conn = NULL
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
         cdef bint flushed = False
-        cdef bint sync_attempted = False
         cdef bint force_drop_conn = False
         cdef size_t rows_per_chunk
         cdef size_t row_offset
@@ -5518,9 +5565,10 @@ cdef class Client:
 
             _ensure_doesnt_have_gil(&gs)
             if budget_ms == 0:
-                conn = questdb_db_borrow_column_sender(db, &err)
+                conn = questdb_db_borrow_direct_column_sender(db, &err)
             else:
-                conn = questdb_db_borrow_column_sender_with_retry(db, budget_ms, &err)
+                conn = questdb_db_borrow_direct_column_sender_with_retry(
+                    db, budget_ms, &err)
             _ensure_has_gil(&gs)
             if conn == NULL:
                 raise c_err_to_py(err)
@@ -5552,11 +5600,10 @@ cdef class Client:
                     flushed = True
                     row_offset += chunk_rows
 
-                sync_attempted = True
                 _dataframe_columnar_sync(conn)
             except:
                 force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                    conn, flushed, sync_attempted)
+                    conn, flushed)
                 raise
 
             return self
@@ -5564,9 +5611,9 @@ cdef class Client:
             _ensure_has_gil(&gs)
             if conn != NULL:
                 if force_drop_conn:
-                    questdb_db_drop_column_sender(db, conn)
+                    questdb_db_drop_direct_column_sender(db, conn)
                 else:
-                    questdb_db_return_column_sender(db, conn)
+                    questdb_db_return_direct_column_sender(db, conn)
             if chunk != NULL:
                 column_sender_chunk_free(chunk)
             # The plan is rebuilt on each failover attempt; release this

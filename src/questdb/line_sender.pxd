@@ -709,6 +709,9 @@ cdef extern from "questdb/ingress/column_sender.h":
     cdef struct column_sender:
         pass
 
+    cdef struct direct_column_sender:
+        pass
+
     cdef struct column_sender_chunk:
         pass
 
@@ -740,6 +743,17 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    direct_column_sender* questdb_db_borrow_direct_column_sender(
+        questdb_db* db,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    direct_column_sender* questdb_db_borrow_direct_column_sender_with_retry(
+        questdb_db* db,
+        uint64_t budget_ms,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     uint64_t questdb_db_reconnect_max_duration_ms(
         const questdb_db* db
         ) noexcept nogil
@@ -752,6 +766,16 @@ cdef extern from "questdb/ingress/column_sender.h":
     void questdb_db_drop_column_sender(
         questdb_db* db,
         column_sender* conn
+        ) noexcept nogil
+
+    void questdb_db_return_direct_column_sender(
+        questdb_db* db,
+        direct_column_sender* conn
+        ) noexcept nogil
+
+    void questdb_db_drop_direct_column_sender(
+        questdb_db* db,
+        direct_column_sender* conn
         ) noexcept nogil
 
     size_t questdb_db_reap_idle(
@@ -954,6 +978,18 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint direct_column_sender_flush(
+        direct_column_sender* conn,
+        column_sender_chunk* chunk,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint direct_column_sender_commit(
+        direct_column_sender* conn,
+        uint32_t ack_level,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     cdef enum column_sender_arrow_override_kind:
         column_sender_arrow_override_symbol = 0
         column_sender_arrow_override_ipv4 = 1
@@ -979,6 +1015,27 @@ cdef extern from "questdb/ingress/column_sender.h":
 
     bint column_sender_flush_arrow_batch_at_column(
         column_sender* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        const ArrowSchema* schema,
+        line_sender_column_name ts_column,
+        const column_sender_arrow_override* overrides,
+        size_t overrides_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint direct_column_sender_flush_arrow_batch_at_now(
+        direct_column_sender* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        const ArrowSchema* schema,
+        const column_sender_arrow_override* overrides,
+        size_t overrides_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint direct_column_sender_flush_arrow_batch_at_column(
+        direct_column_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,

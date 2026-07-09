@@ -959,11 +959,14 @@ frame, the dedicated methods avoid the re-reconciliation that
 ``SYMBOL``-heavy results.
 
 The same :class:`Client` can ingest dataframes through the pooled columnar QWP
-path with :func:`Client.dataframe`. Adding ``sf_dir=...`` to
-:func:`Client.from_conf` opts dataframe ingestion into the Rust
-store-and-forward column-sender backend. The dataframe method still waits for
-``AckLevel::Ok`` before returning; only lower-level columnar flush APIs return
-after local queue acceptance.
+path with :func:`Client.dataframe`. Dataframe ingestion always uses the direct
+(non-store-and-forward) column sender, independent of ``sf_dir``, and returns
+once the whole frame is committed (``AckLevel::Ok``). On a transient connection
+failure the frame is re-sent from the caller's DataFrame — unless an
+intermediate commit checkpoint on a large frame has already landed, in which
+case the error surfaces immediately and the committed prefix stays in the
+table. Delivery is at-least-once: a re-sent frame can duplicate
+already-committed rows unless the table has ``DEDUP UPSERT KEYS``.
 
 ILP/HTTP is available from:
 
