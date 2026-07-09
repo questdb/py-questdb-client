@@ -4138,8 +4138,10 @@ cdef void_int _dataframe_arrow_flush_batch(
     # A batch larger than the server per-batch cap is split into several
     # deferred frames, so the caller's batch counter can undercount the
     # 127-slot in-flight window; commit to drain it and retry once. The
-    # capacity failure is pre-publication, so `array` was re-exported and
-    # `release` must still be set for the retry to be safe.
+    # failed frame itself never hit the wire (`array` was re-exported;
+    # `release` must still be set for the retry to be safe), but earlier
+    # frames of a split batch may have: the commit lands them and the
+    # retry re-sends them — at-least-once, like any failover replay.
     if (retry_after_sync
             and line_sender_error_get_code(err) ==
                 line_sender_error_invalid_api_call

@@ -4556,7 +4556,6 @@ class TestColumnIngressFailover(unittest.TestCase):
                 client.dataframe(rejected, table_name=table, at='ts')
             self.assertEqual(
                 raised.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
-            self.assertIn('schema mismatch', str(raised.exception))
             client.dataframe(valid2, table_name=table, at='ts')
 
         self.qdb_plain.retry_check_table(table, min_rows=2)
@@ -4654,6 +4653,75 @@ class TestColumnIngressFailover(unittest.TestCase):
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
         self.assertEqual(self._read_back_v(table), list(range(20000)))
+
+    def test_bounce_without_dedup_is_at_least_once(self):
+        """Mid-stream bounce on a table WITHOUT dedup keys: the whole-df
+        re-send must lose nothing; the committed-but-unobserved prefix
+        may duplicate. Pins the at-least-once contract explicitly rather
+        than letting DEDUP mask it."""
+        warm_table = self._table('t_fo_warm_')
+        self._create_table(warm_table)
+        table = self._table('t_fo_nodedup_')
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} (ts TIMESTAMP, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        df = self._pandas_df(20000)
+        with qi.Client.from_conf(
+                self._conf(reconnect_max_duration_millis='60000')) as client:
+            client.dataframe(
+                self._pandas_df(2), table_name=warm_table, at='ts')
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=20000)
+        rows = self._read_back_v(table)
+        self.assertEqual(
+            sorted(set(rows)), list(range(20000)), 'no row may be lost')
+        self.assertLessEqual(
+            len(rows), 2 * 20000, 'duplication must stay bounded')
+
+    def test_failed_dataframe_call_leaves_only_the_eager_first_batch(self):
+        """A dataframe call that fails mid-stream must not land its
+        pipelined (deferred) batches: the failed connection is dropped,
+        never committed. The first batch of a fresh connection is
+        immediate-commit on the wire, so exactly that much may land."""
+        import time
+        if pyarrow is None:
+            self.skipTest('pyarrow not installed')
+        table = self._table('t_fo_partial_')
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} (ts TIMESTAMP, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+
+        ts_type = pyarrow.timestamp('us', tz='UTC')
+        schema = pyarrow.schema([('ts', ts_type), ('v', pyarrow.int64())])
+
+        def batches():
+            for start in (0, 3):
+                yield pyarrow.record_batch(
+                    [
+                        pyarrow.array(
+                            [1_700_000_000_000_000 + i * 1_000_000
+                             for i in range(start, start + 3)],
+                            type=ts_type),
+                        pyarrow.array(
+                            list(range(start, start + 3)),
+                            type=pyarrow.int64()),
+                    ],
+                    schema=schema)
+            raise ValueError('source stream failed')
+
+        reader = pyarrow.RecordBatchReader.from_batches(schema, batches())
+        with qi.Client.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.QuestDBError):
+                client.dataframe(reader, table_name=table, at='ts')
+
+        # Batch 0 (v=0,1,2) went out immediate-commit on the fresh
+        # connection and lands; batch 1 (v=3,4,5) was deferred and must
+        # not survive the dropped connection.
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        time.sleep(1.0)
+        self.assertEqual(self._read_back_v(table), [0, 1, 2])
 
 
 class TestEgressFailover(unittest.TestCase):

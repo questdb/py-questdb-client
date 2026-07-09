@@ -67,6 +67,7 @@ from test_client_capsule_path import (
     TestWriterMixingInOneChunk,
     TestPandasPlannerRouting,
 )
+from test_client_dataframe_failures import TestClientDataframeDirectFailures
 from test_client_dataframe_fuzz import (
     TestClientDataframeFuzz,
     TestClientDataframeRoundTrip,
