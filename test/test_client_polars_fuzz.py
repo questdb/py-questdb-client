@@ -403,7 +403,10 @@ class TestClientPolarsDataframeFuzz(unittest.TestCase):
                 f'{self._seed_msg(iter_seed)}: {exc}')
             # Under a small max_rows_per_batch a mid-stream reject can have
             # already flushed earlier batches, so we don't assert the count.
-            return self.server.snapshot()['binary_frames']
+            # Such a reject drops a pipelined connection whose in-flight
+            # frames the server is still counting; settle before recording
+            # the baseline so the next iteration doesn't see the tail land.
+            return self.server.wait_binary_frames_settled()
         self.assertTrue(
             expected_supported,
             f'client accepted an expected-rejected frame; '

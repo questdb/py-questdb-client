@@ -96,7 +96,7 @@ stages:
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
-      - job: linux_x64_cpython_manylinux_x86_64
+      - job: linux_x64_cpython_manylinux_x86_64_a
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
@@ -109,11 +109,11 @@ stages:
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
-              CIBW_BUILD: cp*-manylinux_x86_64
+              CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
-      - job: linux_x64_cpython_musllinux
+      - job: linux_x64_cpython_manylinux_x86_64_b
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
@@ -126,7 +126,41 @@ stages:
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
-              CIBW_BUILD: cp*-musllinux*
+              CIBW_BUILD: "cp313*-manylinux_x86_64 cp314*-manylinux_x86_64"
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: 'wheelhouse'}
+
+      - job: linux_x64_cpython_musllinux_a
+        pool: {vmImage: 'ubuntu-latest'}
+        timeoutInMinutes: 120
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              python3 -m pip install cibuildwheel
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: "cp310-musllinux* cp311-musllinux* cp312-musllinux*"
+          - task: PublishBuildArtifacts@1
+            inputs: {pathtoPublish: 'wheelhouse'}
+
+      - job: linux_x64_cpython_musllinux_b
+        pool: {vmImage: 'ubuntu-latest'}
+        timeoutInMinutes: 120
+        steps:
+          - task: UsePythonVersion@0
+          - bash: |
+              set -o errexit
+              python3 -m pip install --upgrade pip
+              python3 -m pip install cibuildwheel
+            displayName: Install dependencies
+          - bash: cibuildwheel --output-dir wheelhouse .
+            displayName: Build wheels
+            env:
+              CIBW_BUILD: "cp313*-musllinux* cp314*-musllinux*"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 

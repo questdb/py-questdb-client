@@ -41,6 +41,7 @@ class QwpAckServer:
         self._handlers = []
         self._lock = threading.Lock()
         self.accept_count = 0
+        self.finished_count = 0
         self.binary_frame_count = 0
         self.qwp1_frame_count = 0
         self.binary_bytes = 0
@@ -87,6 +88,7 @@ class QwpAckServer:
         with self._lock:
             return {
                 "accepted_connections": self.accept_count,
+                "finished_connections": self.finished_count,
                 "binary_frames": self.binary_frame_count,
                 "qwp1_frames": self.qwp1_frame_count,
                 "binary_bytes": self.binary_bytes,
@@ -94,6 +96,45 @@ class QwpAckServer:
                 "control_frames": self.control_frame_count,
                 "errors": list(self.errors),
             }
+
+    def wait_binary_frames_settled(self, quiet_s=0.02, timeout_s=5.0):
+        """Return the ``binary_frames`` count once no more are in flight.
+
+        The count is incremented by each connection's handler thread as it
+        reads frames off the wire, asynchronously to the client. On the
+        happy path the client's commit waits for our ack (sent only after
+        the frame is counted), so a snapshot is already settled. But a
+        client that drops a *pipelined* connection — e.g. a mid-stream
+        rejected dataframe that flushed a few deferred batches before
+        raising — closes the socket without waiting; its handler keeps
+        counting the already-sent frames after the client call returns.
+
+        A dropped connection's socket is closed before the client call
+        returns, so its handler reaches EOF and exits imminently. Once
+        every accepted connection's handler has finished, no unread frame
+        remains and the count is final — return it. If a connection is
+        still open (an upfront reject leaves the pooled connection live,
+        but then nothing was sent so the count cannot lag), fall back to
+        returning once the count has held steady for ``quiet_s``.
+        """
+        deadline = time.monotonic() + timeout_s
+        last = None
+        stable_since = time.monotonic()
+        while True:
+            with self._lock:
+                frames = self.binary_frame_count
+                all_finished = self.finished_count == self.accept_count
+            now = time.monotonic()
+            if all_finished:
+                return frames
+            if frames != last:
+                last = frames
+                stable_since = now
+            elif now - stable_since >= quiet_s:
+                return frames
+            if now >= deadline:
+                return frames
+            time.sleep(0.001)
 
     def _accept_loop(self):
         while not self._stop.is_set():
@@ -191,6 +232,8 @@ class QwpAckServer:
                 conn.close()
             except OSError:
                 pass
+            with self._lock:
+                self.finished_count += 1
 
 
 def _read_exact(conn, length):
