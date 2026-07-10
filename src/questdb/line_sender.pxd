@@ -34,6 +34,8 @@ cdef extern from "questdb/ingress/line_sender.h":
     cdef struct line_sender_error:
         pass
 
+    ctypedef line_sender_error questdb_error
+
     cdef enum line_sender_error_code:
         line_sender_error_could_not_resolve_addr,
         line_sender_error_invalid_api_call,
@@ -71,7 +73,10 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_schema_drift,
         line_sender_error_no_schema,
         line_sender_error_arrow_export,
-        line_sender_error_batch_too_large
+        line_sender_error_batch_too_large,
+        line_sender_error_store_resend_required
+
+    ctypedef line_sender_error_code questdb_error_code
 
     cdef enum line_sender_protocol:
         line_sender_protocol_tcp,
@@ -136,6 +141,23 @@ cdef extern from "questdb/ingress/line_sender.h":
         void* user_data,
         const line_sender_qwpws_error_view* event
         ) noexcept with gil
+
+    questdb_error_code questdb_error_get_code(
+        const questdb_error* error
+        ) noexcept nogil
+
+    const char* questdb_error_msg(
+        const questdb_error* error,
+        size_t* len_out
+        ) noexcept nogil
+
+    bint questdb_error_in_doubt(
+        const questdb_error* error
+        ) noexcept nogil
+
+    void questdb_error_free(
+        questdb_error* error
+        ) noexcept nogil
 
     line_sender_error_code line_sender_error_get_code(
         const line_sender_error* error
@@ -1056,30 +1078,10 @@ cdef extern from "questdb/egress/reader.h":
     cdef struct reader_cursor:
         pass
 
-    # The reader shares the client's single unified error object and code
-    # enum: `reader_error` / `reader_error_code` are back-compat aliases of
-    # `line_sender_error` / `line_sender_error_code` (see reader.h). Decode
-    # reader errors through the shared `c_err_code_to_py`.
-    ctypedef line_sender_error reader_error
-    ctypedef line_sender_error_code reader_error_code
-
     cdef enum reader_arrow_batch_result:
         reader_arrow_batch_ok = 0
         reader_arrow_batch_end = 1
         reader_arrow_batch_error = 2
-
-    reader_error_code reader_error_get_code(
-        const reader_error* error
-        ) noexcept nogil
-
-    const char* reader_error_msg(
-        const reader_error* error,
-        size_t* len_out
-        ) noexcept nogil
-
-    void reader_error_free(
-        reader_error* error
-        ) noexcept nogil
 
     void reader_close(
         reader* reader
@@ -1088,7 +1090,7 @@ cdef extern from "questdb/egress/reader.h":
     reader_query* reader_prepare(
         reader* reader,
         line_sender_utf8 sql,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     void reader_query_free(
@@ -1097,7 +1099,7 @@ cdef extern from "questdb/egress/reader.h":
 
     reader_cursor* reader_query_execute(
         reader_query** query_inout,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     void reader_query_set_reset_symbol_dict(
@@ -1108,61 +1110,61 @@ cdef extern from "questdb/egress/reader.h":
     reader_cursor* reader_execute(
         reader* reader,
         line_sender_utf8 sql,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
-    cdef struct reader_failover_event:
+    cdef struct reader_failover_reset_event:
         pass
 
-    ctypedef void (*reader_failover_callback)(
-        const reader_failover_event* event,
+    ctypedef void (*reader_failover_reset_callback)(
+        const reader_failover_reset_event* event,
         void* user_data) noexcept nogil
 
-    void reader_failover_event_failed_host(
-        const reader_failover_event* event,
+    void reader_failover_reset_event_failed_host(
+        const reader_failover_reset_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    uint16_t reader_failover_event_failed_port(
-        const reader_failover_event* event
+    uint16_t reader_failover_reset_event_failed_port(
+        const reader_failover_reset_event* event
         ) noexcept nogil
 
-    void reader_failover_event_new_host(
-        const reader_failover_event* event,
+    void reader_failover_reset_event_new_host(
+        const reader_failover_reset_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    uint16_t reader_failover_event_new_port(
-        const reader_failover_event* event
+    uint16_t reader_failover_reset_event_new_port(
+        const reader_failover_reset_event* event
         ) noexcept nogil
 
-    int64_t reader_failover_event_new_request_id(
-        const reader_failover_event* event
+    int64_t reader_failover_reset_event_new_request_id(
+        const reader_failover_reset_event* event
         ) noexcept nogil
 
-    uint32_t reader_failover_event_attempts(
-        const reader_failover_event* event
+    uint32_t reader_failover_reset_event_attempts(
+        const reader_failover_reset_event* event
         ) noexcept nogil
 
-    uint64_t reader_failover_event_elapsed_ns(
-        const reader_failover_event* event
+    uint64_t reader_failover_reset_event_elapsed_ns(
+        const reader_failover_reset_event* event
         ) noexcept nogil
 
-    reader_error_code reader_failover_event_trigger_code(
-        const reader_failover_event* event
+    questdb_error_code reader_failover_reset_event_trigger_code(
+        const reader_failover_reset_event* event
         ) noexcept nogil
 
-    void reader_failover_event_trigger_msg(
-        const reader_failover_event* event,
+    void reader_failover_reset_event_trigger_msg(
+        const reader_failover_reset_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
     void reader_query_on_failover_reset(
         reader_query* query,
-        reader_failover_callback callback,
+        reader_failover_reset_callback callback,
         void* user_data
         ) noexcept nogil
 
@@ -1172,21 +1174,21 @@ cdef extern from "questdb/egress/reader.h":
 
     bint reader_cursor_cancel(
         reader_cursor* cursor,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     reader_arrow_batch_result reader_cursor_next_arrow_batch(
         reader_cursor* cursor,
         ArrowArray* out_array,
         ArrowSchema* out_schema,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     reader_arrow_batch_result reader_cursor_next_arrow_batch_compact(
         reader_cursor* cursor,
         ArrowArray* out_array,
         ArrowSchema* out_schema,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     cdef enum reader_column_kind:
@@ -1254,7 +1256,7 @@ cdef extern from "questdb/egress/reader.h":
 
     const reader_batch* reader_cursor_next_batch(
         reader_cursor* cursor,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     size_t reader_batch_row_count(
@@ -1269,7 +1271,7 @@ cdef extern from "questdb/egress/reader.h":
         const reader_batch* batch,
         size_t col_idx,
         reader_column_kind* out_kind,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     bint reader_batch_column_name(
@@ -1277,27 +1279,27 @@ cdef extern from "questdb/egress/reader.h":
         size_t col_idx,
         const char** out_buf,
         size_t* out_len,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     bint reader_batch_column_data(
         const reader_batch* batch,
         size_t col_idx,
         reader_column_data* out,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     bint reader_batch_array_column_data(
         const reader_batch* batch,
         size_t col_idx,
         reader_array_data* out,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     bint reader_batch_symbol_dict(
         const reader_batch* batch,
         reader_symbol_dict* out,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     bint reader_batch_symbol(
@@ -1306,7 +1308,7 @@ cdef extern from "questdb/egress/reader.h":
         uint32_t code,
         const char** out_buf,
         size_t* out_len,
-        reader_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     void reader_drop_on_return(
@@ -1320,12 +1322,7 @@ cdef extern from "questdb/egress/reader.h":
     # above.
     reader* questdb_db_borrow_reader(
         questdb_db* db,
-        reader_error** err_out
-        ) noexcept nogil
-
-    void questdb_db_return_reader(
-        questdb_db* db,
-        reader* reader
+        questdb_error** err_out
         ) noexcept nogil
 
     size_t questdb_db_dbg_reader_free_count(

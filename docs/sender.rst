@@ -962,11 +962,12 @@ The same :class:`Client` can ingest dataframes through the pooled columnar QWP
 path with :func:`Client.dataframe`. Dataframe ingestion always uses the direct
 (non-store-and-forward) column sender, independent of ``sf_dir``, and returns
 once the whole frame is committed (``AckLevel::Ok``). On a transient connection
-failure the frame is re-sent from the caller's DataFrame — unless an
-intermediate commit checkpoint on a large frame has already landed, in which
-case the error surfaces immediately and the committed prefix stays in the
-table. Delivery is at-least-once: a re-sent frame can duplicate
-already-committed rows unless the table has ``DEDUP UPSERT KEYS``.
+failure the frame is re-sent from the caller's DataFrame only when the failed
+operation is provably not delivered. If the native client reports delivery as
+in doubt, or an intermediate commit checkpoint on a large frame has already
+landed, the error surfaces immediately and a committed prefix may remain in the
+table. Retrying an in-doubt operation can duplicate rows unless the table has
+appropriate ``DEDUP UPSERT KEYS``.
 
 ILP/HTTP is available from:
 

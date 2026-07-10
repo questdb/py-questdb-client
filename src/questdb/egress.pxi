@@ -9,8 +9,8 @@
 cimport numpy as cnp
 
 
-cdef inline object _reader_err_code_to_py(reader_error_code code):
-    # The error model is unified: `reader_error_code` is an alias of
+cdef inline object _reader_err_code_to_py(questdb_error_code code):
+    # The error model is unified: `questdb_error_code` is an alias of
     # `line_sender_error_code`, so reader errors decode through the single
     # shared map. Every reader category now has its own `QuestDBErrorCode`
     # member (handshake, protocol, invalid bind, schema drift, the
@@ -19,19 +19,9 @@ cdef inline object _reader_err_code_to_py(reader_error_code code):
     return c_err_code_to_py(code)
 
 
-cdef inline object _reader_err_to_py(reader_error* err):
-    """Construct an ``QuestDBError`` from a ``reader_error*`` and free it."""
-    cdef reader_error_code code = reader_error_get_code(err)
-    cdef size_t c_len = 0
-    cdef const char* c_msg = reader_error_msg(err, &c_len)
-    cdef object py_code
-    cdef object py_msg
-    try:
-        py_code = _reader_err_code_to_py(code)
-        py_msg = PyUnicode_FromStringAndSize(c_msg, <Py_ssize_t>c_len)
-        return QuestDBError(py_code, py_msg)
-    finally:
-        reader_error_free(err)
+cdef inline object _reader_err_to_py(questdb_error* err):
+    """Construct a ``QuestDBError`` from a ``questdb_error*`` and free it."""
+    return c_err_to_py(err)
 
 
 cdef class _ReaderHandle:
@@ -139,7 +129,7 @@ cdef object _fetch_one_batch(
     """
     cdef ArrowArray array
     cdef ArrowSchema schema
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef reader_arrow_batch_result result
     cdef reader_cursor* cursor
 
@@ -297,7 +287,7 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
     :class:`_ReaderHandle` that knows it came from this pool, so
     its dealloc returns/drops via the matching FFI.
     """
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef reader* reader = NULL
     with nogil:
         reader = questdb_db_borrow_reader(db, &err)
@@ -318,7 +308,7 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
 
 
 cdef void _failover_reset_trampoline(
-        const reader_failover_event* event,
+        const reader_failover_reset_event* event,
         void* user_data) noexcept nogil:
     # Fires synchronously inside reader_cursor_next_batch while the
     # reader re-executes on a new endpoint, before the replayed batch-0
@@ -348,7 +338,7 @@ cdef _CursorHandle _execute_query(
     cdef bytes sql_bytes = sql.encode('utf-8')
     cdef line_sender_error* utf8_err = NULL
     cdef line_sender_utf8 sql_utf8
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef reader_query* query
     cdef reader_cursor* cursor
 
@@ -561,11 +551,11 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
     cdef reader_cursor* cursor
     cdef ArrowArray local_array
     cdef ArrowSchema local_schema
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef reader_arrow_batch_result result
     cdef const char* err_msg = NULL
     cdef size_t err_len = 0
-    cdef reader_error_code code
+    cdef questdb_error_code code
     cdef object py_msg
     cdef bytes full
     if prod.exhausted:
@@ -634,8 +624,8 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
             prod.cursor_handle._reader_ref._must_close = False
         return 0
     if err != NULL:
-        code = reader_error_get_code(err)
-        err_msg = reader_error_msg(err, &err_len)
+        code = questdb_error_get_code(err)
+        err_msg = questdb_error_msg(err, &err_len)
         try:
             if err_msg != NULL:
                 py_msg = PyUnicode_FromStringAndSize(err_msg, <Py_ssize_t>err_len)
@@ -650,7 +640,7 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
                 _qs_set_error(prod, err_msg, err_len)
             else:
                 _qs_set_error(prod, b'arrow batch fetch failed', 24)
-        reader_error_free(err)
+        questdb_error_free(err)
     else:
         _qs_set_error(
             prod,
@@ -900,7 +890,7 @@ cdef object _decimal_type():
     return _DECIMAL_TYPE
 
 
-cdef int _reader_check(bint ok, reader_error* err, str what) except -1:
+cdef int _reader_check(bint ok, questdb_error* err, str what) except -1:
     if ok:
         return 0
     if err != NULL:
@@ -945,7 +935,7 @@ cdef object _numpy_fixed_chunk(
         size_t row_count,
         object np):
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef object dtype = _numpy_dtype_for_kind(kind, np)
     cdef size_t itemsize
     cdef Py_ssize_t nbytes
@@ -992,7 +982,7 @@ cdef object _numpy_varlen_chunk(
         size_t row_count,
         object np):
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef const uint32_t* offsets
     cdef const uint8_t* data
     cdef const uint8_t* validity
@@ -1043,7 +1033,7 @@ cdef object _numpy_symbol_codes_chunk(
         size_t row_count,
         object np):
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef const uint32_t* codes
     cdef const uint8_t* validity
     cdef size_t r
@@ -1090,7 +1080,7 @@ cdef object _numpy_geohash_chunk(
         size_t row_count,
         object np):
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef object dtype
     cdef size_t stride
     cdef size_t target
@@ -1141,7 +1131,7 @@ cdef object _numpy_uuid_chunk(
         object np):
     cdef object _uuid = _uuid_module()
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
@@ -1175,7 +1165,7 @@ cdef object _numpy_long256_chunk(
         size_t row_count,
         object np):
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
@@ -1208,7 +1198,7 @@ cdef object _numpy_decimal_chunk(
         object np):
     cdef object Decimal = _decimal_type()
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
@@ -1247,7 +1237,7 @@ cdef object _numpy_array_chunk(
         size_t row_count,
         object np):
     cdef reader_array_data ad
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* data
     cdef const uint32_t* data_offsets
@@ -1353,7 +1343,7 @@ cdef object _numpy_validity_mask(
         size_t row_count,
         object np):
     cdef reader_column_data cd
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef Py_ssize_t vbytes
     cdef unsigned char* vsrc
     _reader_check(
@@ -1405,7 +1395,7 @@ cdef tuple _numpy_extract_meta(const reader_batch* batch):
     cdef reader_column_kind kind = reader_column_kind_unknown
     cdef const char* name_buf = NULL
     cdef size_t name_len = 0
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef reader_column_data cd_meta
     cdef bint has_symbol = False
     col_names = []
@@ -1437,7 +1427,7 @@ cdef tuple _numpy_extract_meta(const reader_batch* batch):
                 else:
                     col_scales[col_idx] = cd_meta.decimal_scale
             elif err != NULL:
-                reader_error_free(err)
+                questdb_error_free(err)
                 err = NULL
     return (col_names, col_kinds, col_scales, col_precision, has_symbol)
 
@@ -1531,7 +1521,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     import numpy as np
     import pandas as pd
     cdef reader_cursor* cursor
-    cdef reader_error* err = NULL
+    cdef questdb_error* err = NULL
     cdef const reader_batch* batch
     cdef reader_symbol_dict sd
     cdef size_t n_cols = 0
@@ -1839,7 +1829,7 @@ cdef class _NumpyBatchIter:
 
     def __next__(self):
         cdef reader_cursor* cursor
-        cdef reader_error* err = NULL
+        cdef questdb_error* err = NULL
         cdef const reader_batch* batch
         cdef reader_symbol_dict sd
         cdef size_t row_count
@@ -2196,7 +2186,7 @@ class QueryResult:
         ``QuestDBErrorCode.Cancelled``.
         """
         cdef _CursorHandle handle = self._cancel_handle
-        cdef reader_error* err = NULL
+        cdef questdb_error* err = NULL
         cdef bint ok
         cdef reader_cursor* cursor
         if handle is None:

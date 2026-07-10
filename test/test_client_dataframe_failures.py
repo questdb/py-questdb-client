@@ -129,6 +129,39 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             'drained mid-frame')
         self.assertEqual(stats['errors'], [])
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_in_doubt_split_failure_raises_without_resend(self):
+        # One 1280-row batch splits into 160 data frames under this cap. The
+        # native sender drains its deferred window with a commit near frame 128;
+        # closing at frame 140 therefore leaves a committed prefix. Both the
+        # NumPy and Arrow routes must surface the in-doubt failure instead of
+        # reconnecting and resending the complete 162-frame operation.
+        for arrow_route in (False, True):
+            with self.subTest(arrow_route=arrow_route):
+                with QwpAckServer(
+                        close_plan=[140],
+                        max_batch_size=1024,
+                        defer_aware_acks=True) as server:
+                    with qi.Client.from_conf(
+                            _conf(
+                                server.port,
+                                reconnect_max_duration_millis=3000)) as client:
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            client.dataframe(
+                                _fault_frame(1280, 64, arrow_route),
+                                table_name='t_in_doubt',
+                                at='ts',
+                                max_rows_per_batch=1280)
+                    stats = server.snapshot()
+
+                self.assertEqual(
+                    raised.exception.code,
+                    qi.QuestDBErrorCode.FailoverRetry)
+                self.assertTrue(raised.exception.in_doubt)
+                self.assertEqual(stats['accepted_connections'], 1)
+                self.assertEqual(stats['binary_frames'], 140)
+                self.assertEqual(stats['errors'], [])
+
     def test_reconnect_budget_exhaustion_raises(self):
         # Every connection dies after its first frame and no checkpoint
         # ever lands, so the loop keeps re-sending until the reconnect

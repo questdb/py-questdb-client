@@ -123,10 +123,13 @@ Adds :class:`UnsupportedDataFrameShapeError` (raised when a DataFrame
 cannot be expressed on the QWP columnar path) and the
 :class:`QuestDBErrorCode` members ``ServerRejection``, ``RoleMismatch``,
 ``ArrowUnsupportedColumnKind``, ``ArrowIngest``, ``FailoverRetry``,
-``ConnectTimeout``, ``FailoverWouldDuplicate`` and ``Cancelled``.
+``ConnectTimeout``, ``FailoverWouldDuplicate``, ``Cancelled``,
+``BatchTooLarge`` and ``StoreResendRequired``.
 :class:`QuestDBError` gains a ``qwp_ws_error`` property exposing the
 structured :class:`QwpWsError` view on a server-side QWP/WebSocket
-rejection.
+rejection, plus an ``in_doubt`` property indicating that failed ingress input
+may already have been delivered and must not be blindly replayed without an
+appropriate table-level deduplication guarantee.
 
 Build & dependencies
 ~~~~~~~~~~~~~~~~~~~~~~

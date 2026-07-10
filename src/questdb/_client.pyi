@@ -92,15 +92,26 @@ class QuestDBErrorCode(Enum):
     SchemaDrift = ...
     NoSchema = ...
     ArrowExport = ...
+    BatchTooLarge = ...
+    StoreResendRequired = ...
     BadDataFrame = ...
 
 
 class QuestDBError(Exception):
-    """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
+    """An error whilst using the QuestDB client."""
 
     @property
     def code(self) -> QuestDBErrorCode:
         """Return the error code."""
+
+    @property
+    def in_doubt(self) -> bool:
+        """
+        Whether the failed operation may already have delivered its input.
+
+        Retrying the same input when this is true can duplicate rows unless the
+        destination table has an appropriate deduplication guarantee.
+        """
 
     @property
     def qwp_ws_error(self) -> Optional["QwpWsError"]:

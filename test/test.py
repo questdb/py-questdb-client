@@ -144,6 +144,15 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(diagnostic.from_fsn, 5)
         self.assertEqual(diagnostic.to_fsn, 6)
         self.assertIs(err.qwp_ws_error, diagnostic)
+        self.assertFalse(err.in_doubt)
+
+    def test_ingress_error_can_report_delivery_unknown(self):
+        err = qi.QuestDBError(
+            qi.QuestDBErrorCode.FailoverRetry,
+            'delivery status unknown',
+            in_doubt=True)
+
+        self.assertTrue(err.in_doubt)
 
     def test_server_rejection_error_is_specific_subclass(self):
         err = qi.QuestDBServerRejectionError(
@@ -189,6 +198,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertLess(
             qi.QuestDBErrorCode.FailoverWouldDuplicate.value,
             qi.QuestDBErrorCode.BadDataFrame.value)
+        self.assertEqual(
+            qi.QuestDBErrorCode.StoreResendRequired.value,
+            36)
 
     def test_default_max_chunk_rows_matches_core_literal(self):
         # Pinned to the Rust core's DEFAULT_MAX_CHUNK_ROWS. Both sides hardcode

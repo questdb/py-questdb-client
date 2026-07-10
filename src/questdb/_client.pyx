@@ -195,6 +195,7 @@ class QuestDBErrorCode(Enum):
     NoSchema = line_sender_error_no_schema
     ArrowExport = line_sender_error_arrow_export
     BatchTooLarge = line_sender_error_batch_too_large
+    StoreResendRequired = line_sender_error_store_resend_required
     # Python-only sentinel with no backing FFI code: raised by the Cython
     # DataFrame-shape validation path. Sits in a reserved high band, disjoint
     # from the contiguous FFI code space, so an appended FFI variant can never
@@ -207,16 +208,27 @@ class QuestDBErrorCode(Enum):
 
 
 class QuestDBError(Exception):
-    """An error whilst using the ``Sender`` or constructing its ``Buffer``."""
-    def __init__(self, code, msg, qwp_ws_error=None):
+    """An error whilst using the QuestDB client."""
+    def __init__(self, code, msg, qwp_ws_error=None, *, in_doubt=False):
         super().__init__(msg)
         self._code = code
         self._qwp_ws_error = qwp_ws_error
+        self._in_doubt = bool(in_doubt)
 
     @property
     def code(self) -> QuestDBErrorCode:
         """Return the error code."""
         return self._code
+
+    @property
+    def in_doubt(self) -> bool:
+        """
+        Whether the failed operation may already have delivered its input.
+
+        Retrying the same input when this is true can duplicate rows unless the
+        destination table has an appropriate deduplication guarantee.
+        """
+        return self._in_doubt
 
     @property
     def qwp_ws_error(self):
@@ -324,6 +336,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.ArrowExport
     elif code == line_sender_error_batch_too_large:
         return QuestDBErrorCode.BatchTooLarge
+    elif code == line_sender_error_store_resend_required:
+        return QuestDBErrorCode.StoreResendRequired
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -346,18 +360,20 @@ cdef inline object c_qwp_ws_error_view_to_raw(
         view.to_fsn)
 
 
-cdef inline object c_err_to_fields(line_sender_error* err):
+cdef inline object c_err_to_fields(questdb_error* err):
     """Construct a ``SenderError`` from a C error, which will be freed."""
     if err == NULL:
         return (
             QuestDBErrorCode.SocketError,
             'Unknown error: the client library reported failure without '
             'a diagnostic.',
-            None)
-    cdef line_sender_error_code code = line_sender_error_get_code(err)
+            None,
+            False)
+    cdef questdb_error_code code = questdb_error_get_code(err)
     cdef size_t c_len = 0
-    cdef const char* c_msg = line_sender_error_msg(err, &c_len)
+    cdef const char* c_msg = questdb_error_msg(err, &c_len)
     cdef line_sender_qwpws_error_view qwp_ws_view
+    cdef bint in_doubt = questdb_error_in_doubt(err)
     cdef object py_msg
     cdef object py_code
     cdef object py_qwp_ws_error = None
@@ -366,25 +382,28 @@ cdef inline object c_err_to_fields(line_sender_error* err):
         py_msg = PyUnicode_FromStringAndSize(c_msg, <Py_ssize_t>c_len)
         if line_sender_error_qwpws_get_view(err, &qwp_ws_view):
             py_qwp_ws_error = c_qwp_ws_error_view_to_raw(qwp_ws_view)
-        return (py_code, py_msg, py_qwp_ws_error)
+        return (py_code, py_msg, py_qwp_ws_error, in_doubt)
     finally:
-        line_sender_error_free(err)
+        questdb_error_free(err)
 
 
 cdef inline object c_err_to_py(line_sender_error* err):
     """Construct an ``QuestDBError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
-        return QuestDBServerRejectionError(tup[0], tup[1], tup[2])
-    return QuestDBError(tup[0], tup[1], tup[2])
+        return QuestDBServerRejectionError(
+            tup[0], tup[1], tup[2], in_doubt=tup[3])
+    return QuestDBError(tup[0], tup[1], tup[2], in_doubt=tup[3])
 
 
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Construct an ``QuestDBError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
-        return QuestDBServerRejectionError(tup[0], fmt.format(tup[1]), tup[2])
-    return QuestDBError(tup[0], fmt.format(tup[1]), tup[2])
+        return QuestDBServerRejectionError(
+            tup[0], fmt.format(tup[1]), tup[2], in_doubt=tup[3])
+    return QuestDBError(
+        tup[0], fmt.format(tup[1]), tup[2], in_doubt=tup[3])
 
 
 cdef inline void_int reserve_buffer(
@@ -3594,8 +3613,8 @@ cdef void_int _dataframe_columnar_append_field(
                     NULL,
                     &err)
         elif col.setup.source == col_source_t.col_source_f32_numpy:
-            # numpy f32 widens to a DOUBLE column on the wire; the 4-byte
-            # source stride is what the FFI reads per row.
+            # numpy f32 maps directly to a FLOAT column on the wire; the
+            # source stride is 4 bytes per row.
             numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_f32
             element_size = 4
             with nogil:
@@ -5317,8 +5336,11 @@ cdef class Client:
 
         The underlying connection pool is opened by `questdb_db_connect`.
         Dataframe ingestion always uses the direct (non-store-and-forward)
-        QWP/WebSocket column sender, independent of ``sf_dir``; on a transient
-        connection failure the frame is re-sent from the caller's DataFrame.
+        QWP/WebSocket column sender, independent of ``sf_dir``. On a transient
+        connection failure the frame is re-sent from the caller's DataFrame
+        only when the failed operation is provably not delivered. A
+        delivery-unknown failure surfaces as :class:`QuestDBError` with
+        ``in_doubt`` set, because blindly re-sending could duplicate rows.
         ``request_timeout`` bounds each commit's no-progress ack wait;
         ``request_timeout=0`` disables that deadline, so a stalled but
         connected server can block :meth:`dataframe` indefinitely.
@@ -5382,10 +5404,11 @@ cdef class Client:
         sender, independent of ``sf_dir``, and returns once the whole frame
         is committed (``AckLevel::Ok``). On a transient connection failure
         the frame is re-sent from the caller's DataFrame within the pool's
-        reconnect budget — unless an intermediate commit checkpoint (emitted
-        every ~100 batches on large frames) has already landed, in which case
-        the error is raised immediately and the committed prefix stays in the
-        table, since a blind re-send would duplicate it. Delivery is
+        reconnect budget — unless the native client reports delivery as in
+        doubt, or an intermediate commit checkpoint (emitted every ~100 batches
+        on large frames) has already landed. In either case the error is raised
+        immediately and a committed prefix may remain in the table, since a
+        blind re-send would duplicate it. Delivery is
         at-least-once: a re-sent frame can duplicate already-committed rows
         (including the first chunk, which commits eagerly on a fresh
         connection) unless the table has ``DEDUP UPSERT KEYS``. Server-side
@@ -5506,9 +5529,10 @@ cdef class Client:
                             QuestDBErrorCode.FailoverRetry,
                             QuestDBErrorCode.SocketError):
                         raise
-                    # An intermediate sync already durably committed a prefix of
-                    # this frame; restarting from row 0 would duplicate it.
-                    if committed_prefix:
+                    # The native operation may have committed a split prefix, or
+                    # an explicit intermediate sync already committed one.
+                    # Restarting from row 0 would duplicate it.
+                    if exc.in_doubt or committed_prefix:
                         raise
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
