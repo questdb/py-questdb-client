@@ -134,7 +134,7 @@ def pandas_to_questdb_throughput(*args):
     Runs the s1-narrow columnar-populate floor + the cold/warm e2e split
     (in-process mock server) + the populate_plus_encode sum. Pass extra args
     through to the harness, e.g. ``--rows 10000000 --pretty`` or
-    ``--real-conf qwpws::addr=... --real-http http://...`` to add the
+    ``--real-conf ws::addr=... --real-http http://...`` to add the
     live-server real-client number. Ack level is Ok; Durable is Enterprise and
     deferred.
     """

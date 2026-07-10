@@ -39,7 +39,7 @@ def example(host: str = 'localhost', port: int = 9000):
         # Note: Table name is looked up from the dataframe's index name.
         sender.dataframe(df, at='ts')
 
-    with Client.from_conf(f"qwpws::addr={host}:{port};") as client:
+    with Client.from_conf(f"ws::addr={host}:{port};") as client:
         # Egress: query QuestDB and materialise the result as Pandas.
         with client.query(
                 "SELECT x AS charger_id, "

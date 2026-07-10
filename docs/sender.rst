@@ -845,7 +845,7 @@ Which protocol?
 ===============
 
 The sender supports ``tcp``, ``tcps``, ``http``, ``https``, ``qwpudp``,
-``qwpws``, and ``qwpwss`` protocols.
+``ws``, and ``wss`` protocols.
 
 **You should prefer to use ILP/HTTP in most cases as it provides better
 feedback on errors and transaction control.**
@@ -893,7 +893,7 @@ Key differences from ILP:
 QWP/WebSocket
 -------------
 
-QWP/WebSocket (``qwpws``, or ``qwpwss`` for TLS) is an acknowledged streaming
+QWP/WebSocket (``ws``, or ``wss`` for TLS) is an acknowledged streaming
 transport. Each flush publishes a frame identified by a monotonically
 increasing **frame sequence number (FSN)**; the server acknowledges frames as
 it durably applies them, so the client can confirm delivery.
@@ -935,7 +935,7 @@ Querying data
 :func:`Client.query` returns a single-use :class:`QueryResult` that streams rows
 as Arrow record batches::
 
-    with qi.Client.from_conf('qwpws::addr=localhost:9000;') as client:
+    with qi.Client.from_conf('ws::addr=localhost:9000;') as client:
         with client.query('SELECT * FROM trades WHERE ts > $1') as result:
             df = result.to_pandas()
 

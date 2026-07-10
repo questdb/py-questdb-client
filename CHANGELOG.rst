@@ -44,7 +44,7 @@ ILP transports.
 - **QWP/UDP** (``qwpudp::``): fire-and-forget datagram ingestion,
   defaulting to port 9007. New configuration keys ``max_datagram_size``
   and ``multicast_ttl``; ``protocol_version`` does not apply.
-- **QWP/WebSocket** (``qwpws::`` / ``qwpwss::``): acknowledged streaming
+- **QWP/WebSocket** (``ws::`` / ``wss::``): acknowledged streaming
   ingestion with frame-sequence-number (FSN) tracking. New ``Sender``
   methods ``flush_and_get_fsn``, ``flush_and_keep_and_get_fsn``,
   ``published_fsn``, ``acked_fsn``, ``await_acked_fsn``, ``drive_once``,

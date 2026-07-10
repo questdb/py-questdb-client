@@ -606,7 +606,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
         self.server = QwpAckServer()
         self.server.start()
         self.conf = (
-            f'qwpws::addr=127.0.0.1:{self.server.port};'
+            f'ws::addr=127.0.0.1:{self.server.port};'
             'pool_size=1;pool_max=1;pool_reap=manual;')
 
     def tearDown(self):
@@ -973,7 +973,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
 
     def test_from_conf_requires_addr(self):
         with self.assertRaises(qi.QuestDBError) as cm:
-            qi.Client.from_conf('qwpws::pool_size=1;')
+            qi.Client.from_conf('ws::pool_size=1;')
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.ConfigError)
 
 
@@ -1065,7 +1065,7 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
 
     @property
     def conf(self):
-        return (f'qwpws::addr={self.qdb.host}:'
+        return (f'ws::addr={self.qdb.host}:'
                 f'{self.qdb.http_server_port};')
 
     def _wait_for_rows(self, table_name, expected, timeout_s=30):

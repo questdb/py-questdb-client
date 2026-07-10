@@ -20,7 +20,7 @@ def example(host: str = 'localhost', port: int = 9000):
                 symbols=['symbol', 'side'],  # Columns to be inserted as SYMBOL types.
                 at='timestamp')  # Column containing the designated timestamps.
 
-        with Client.from_conf(f"qwpws::addr={host}:{port};") as client:
+        with Client.from_conf(f"ws::addr={host}:{port};") as client:
             # Egress: query QuestDB and materialise the result as Pandas.
             with client.query(
                     "SELECT x AS trade_id, "

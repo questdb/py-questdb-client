@@ -135,7 +135,7 @@ class TestWithDatabase(unittest.TestCase):
             f'{endpoint_host}:{endpoint_port}'
             for endpoint_host, endpoint_port in endpoints)
         conf = (
-            f'qwpws::addr={addr};'
+            f'ws::addr={addr};'
             f'sender_id={sender_id};'
             f'sf_dir={sf_dir};')
         for key, value in kwargs.items():
@@ -2034,7 +2034,7 @@ class TestEgressWithDatabase(unittest.TestCase):
         self._require_qwp_ws()
 
     def _conf(self):
-        return (f'qwpws::addr={self.qdb_plain.host}:'
+        return (f'ws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};')
 
     def _exec(self, sql):
@@ -2904,7 +2904,7 @@ class TestEgressPool(unittest.TestCase):
         self._require_qwp_ws()
 
     def _conf(self, **extra):
-        conf = (f'qwpws::addr={self.qdb_plain.host}:'
+        conf = (f'ws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};')
         for k, v in extra.items():
             conf += f'{k}={v};'
@@ -3080,8 +3080,8 @@ class TestEgressPool(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_pool_conf_keys_accepted_by_reader(self):
-        """The reader's conf parser was extended to accept ``qwpws::``
-        / ``qwpwss::`` schemes and ignore ``pool_*`` keys. Verify
+        """The reader's conf parser accepts ``ws::`` / ``wss::`` schemes and
+        ignores ``pool_*`` keys. Verify
         that a pool-configured Client produces a working egress
         reader (a regression in the accept list would surface as a
         ConfigError on the first ``query()``).
@@ -3247,7 +3247,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
 
     def _conf(self):
-        return (f'qwpws::addr={self.qdb_plain.host}:'
+        return (f'ws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};')
 
     def _table(self, prefix='t_narrow_'):
@@ -4045,7 +4045,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
             'seq': pd.array(seq, dtype=pd.ArrowDtype(seq.type)),
         })
-        conf = (f'qwpws::addr={self.qdb_plain.host}:'
+        conf = (f'ws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};max_buf_size=4096;')
         with qi.Client.from_conf(conf) as client:
             # One logical batch (max_rows_per_batch == rows) forces the core to
@@ -4079,7 +4079,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
             'v': pd.array(v, dtype=pd.ArrowDtype(v.type)),
         })
-        conf = (f'qwpws::addr={self.qdb_plain.host}:'
+        conf = (f'ws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};max_buf_size=4096;')
         with qi.Client.from_conf(conf) as client:
             with self.assertRaises(qi.QuestDBError) as ctx:
@@ -4367,7 +4367,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             endpoints = [
                 (self.qdb_plain.host, self.qdb_plain.http_server_port)]
         addr = ','.join(f'{h}:{p}' for h, p in endpoints)
-        conf = f'qwpws::addr={addr};'
+        conf = f'ws::addr={addr};'
         for k, v in extra.items():
             conf += f'{k}={v};'
         return conf
@@ -4756,7 +4756,7 @@ class TestEgressFailover(unittest.TestCase):
             endpoints = [
                 (self.qdb_plain.host, self.qdb_plain.http_server_port)]
         addr = ','.join(f'{host}:{port}' for host, port in endpoints)
-        conf = f'qwpws::addr={addr};'
+        conf = f'ws::addr={addr};'
         for k, v in extra.items():
             conf += f'{k}={v};'
         return conf
@@ -5009,7 +5009,7 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
     @staticmethod
     def _conf(servers, **extra):
         addr = ','.join(f'127.0.0.1:{s.port}' for s in servers)
-        conf = f'qwpws::addr={addr};'
+        conf = f'ws::addr={addr};'
         for key, value in extra.items():
             conf += f'{key}={value};'
         return conf

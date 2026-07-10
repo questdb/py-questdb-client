@@ -49,7 +49,7 @@ def run_layer3(args):
     try:
         http_base = f"http://{qdb.host}:{qdb.http_server_port}"
         conf = (
-            f"qwpws::addr={qdb.host}:{qdb.http_server_port};"
+            f"ws::addr={qdb.host}:{qdb.http_server_port};"
             "pool_size=1;"
             "pool_max=1;"
             "pool_reap=manual;")

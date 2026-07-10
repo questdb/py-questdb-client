@@ -572,7 +572,7 @@ def run_row_path(df, rows, iterations, warmups):
 
 def _make_ack_conf(server):
     return (
-        f"qwpws::addr=127.0.0.1:{server.port};"
+        f"ws::addr=127.0.0.1:{server.port};"
         "pool_size=1;"
         "pool_max=1;"
         "pool_reap=manual;")
@@ -1122,7 +1122,7 @@ def pandas_to_questdb_throughput(
     * when ``real_conf`` is given, ``real-client`` adds the true end-to-end
       number against a live QuestDB and the DEDUP ``count() == rows`` gate.
 
-    Ack level is ``Ok`` (the mock server and the default qwpws conf). ``Durable``
+    Ack level is ``Ok`` (the mock server and the default ws conf). ``Durable``
     is Enterprise (``request_durable_ack=on``) and is deferred (plan s13).
     """
     df = build_schema_df(

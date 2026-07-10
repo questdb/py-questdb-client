@@ -31,7 +31,7 @@ except ImportError:
 
 def _client_conf(port):
     return (
-        f'qwpws::addr=127.0.0.1:{port};'
+        f'ws::addr=127.0.0.1:{port};'
         'pool_size=1;'
         'pool_max=1;'
         'pool_reap=manual;')

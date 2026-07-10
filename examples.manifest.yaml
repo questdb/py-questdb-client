@@ -90,7 +90,7 @@
     ```
     python3 -m pip install -U 'questdb[dataframe]' polars
     ```
-  conf: qwpws::addr=localhost:9000;
+  conf: ws::addr=localhost:9000;
 - name: qwpws-pyarrow
   lang: python
   path: examples/pyarrow_basic.py
@@ -104,4 +104,4 @@
     ```
     python3 -m pip install -U 'questdb[dataframe]'
     ```
-  conf: qwpws::addr=localhost:9000;
+  conf: ws::addr=localhost:9000;

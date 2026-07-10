@@ -31,7 +31,7 @@ def example(host: str = 'localhost', port: int = 9000):
     }, schema=schema)
 
     try:
-        conf = f'qwpws::addr={host}:{port};'
+        conf = f'ws::addr={host}:{port};'
         with Client.from_conf(conf) as client:
             # Ingress: publish a PyArrow Table into QuestDB.
             client.dataframe(table, table_name='trades', at='ts')
@@ -71,7 +71,7 @@ def schema_metadata_example(host: str = 'localhost', port: int = 9000):
     }, schema=schema)
 
     try:
-        conf = f'qwpws::addr={host}:{port};'
+        conf = f'ws::addr={host}:{port};'
         with Client.from_conf(conf) as client:
             client.dataframe(table, table_name='locations', at='ts')
     except QuestDBError as e:

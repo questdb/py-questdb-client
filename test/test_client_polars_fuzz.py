@@ -375,7 +375,7 @@ class TestClientPolarsDataframeFuzz(unittest.TestCase):
         self.server = QwpAckServer()
         self.server.start()
         self.conf = (
-            f'qwpws::addr=127.0.0.1:{self.server.port};'
+            f'ws::addr=127.0.0.1:{self.server.port};'
             'pool_size=1;pool_max=1;pool_reap=manual;')
 
     def tearDown(self):
@@ -576,7 +576,7 @@ class TestClientPolarsDataframeRoundTrip(unittest.TestCase):
 
     @property
     def conf(self):
-        return f'qwpws::addr={self.qdb.host}:{self.qdb.http_server_port};'
+        return f'ws::addr={self.qdb.host}:{self.qdb.http_server_port};'
 
     def _wait_for_rows(self, table_name, expected, timeout_s=30):
         deadline = time.monotonic() + timeout_s

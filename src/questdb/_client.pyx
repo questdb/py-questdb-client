@@ -787,8 +787,8 @@ cdef bint _is_qwp_udp_protocol(line_sender_protocol protocol):
 
 cdef bint _is_qwp_ws_protocol(line_sender_protocol protocol):
     return (
-        (protocol == line_sender_protocol_qwpws) or
-        (protocol == line_sender_protocol_qwpwss))
+        (protocol == line_sender_protocol_ws) or
+        (protocol == line_sender_protocol_wss))
 
 
 cdef class SenderTransaction:
@@ -2008,12 +2008,12 @@ class Protocol(TaggedEnum):
     Http = ('http', 2)
     Https = ('https', 3)
     QwpUdp = ('qwpudp', 4)
-    QwpWs = ('qwpws', 5)
-    QwpWss = ('qwpwss', 6)
+    Ws = ('ws', 5)
+    Wss = ('wss', 6)
 
     @property
     def tls_enabled(self):
-        return self in (Protocol.Tcps, Protocol.Https, Protocol.QwpWss)
+        return self in (Protocol.Tcps, Protocol.Https, Protocol.Wss)
 
 
 class QwpWsProgress(TaggedEnum):
@@ -5354,11 +5354,11 @@ cdef class Client:
         cdef PyThreadState* gs = NULL
         try:
             protocol, params = parse_conf_str(b, conf_str)
-            if protocol not in (Protocol.QwpWs, Protocol.QwpWss):
+            if protocol not in (Protocol.Ws, Protocol.Wss):
                 raise QuestDBError(
                     QuestDBErrorCode.ConfigError,
                     'Client.from_conf() requires a QWP/WebSocket '
-                    'configuration string: qwpws:: or qwpwss::.')
+                    'configuration string: ws:: or wss::.')
             if params.get('addr') is None:
                 raise QuestDBError(
                     QuestDBErrorCode.ConfigError,
@@ -6321,7 +6321,7 @@ cdef class Sender:
                 'max_name_len',
             }
             synthetic_params = {'addr': addr}
-            if protocol in (Protocol.QwpWs, Protocol.QwpWss):
+            if protocol in (Protocol.Ws, Protocol.Wss):
                 for key, value in params.items():
                     if key not in python_handled_keys:
                         synthetic_params[key] = value

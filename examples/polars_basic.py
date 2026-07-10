@@ -27,7 +27,7 @@ def example(host: str = 'localhost', port: int = 9000):
     })
 
     try:
-        conf = f'qwpws::addr={host}:{port};'
+        conf = f'ws::addr={host}:{port};'
         with Client.from_conf(conf) as client:
             # Ingress: publish a Polars DataFrame into QuestDB.
             client.dataframe(df, table_name='trades', at='ts')
@@ -70,7 +70,7 @@ def schema_overrides_example(host: str = 'localhost', port: int = 9000):
     }, schema={'addr': pl.UInt32, 'price': pl.Int64, 'ts': pl.Datetime('us')})
 
     try:
-        conf = f'qwpws::addr={host}:{port};'
+        conf = f'ws::addr={host}:{port};'
         with Client.from_conf(conf) as client:
             client.dataframe(
                 df,

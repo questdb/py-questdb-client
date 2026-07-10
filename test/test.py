@@ -107,10 +107,14 @@ class TestManifest(unittest.TestCase):
 
 class TestQwpWebSocketApi(unittest.TestCase):
     def test_protocol_enum(self):
-        self.assertEqual(qi.Protocol.parse('qwpws'), qi.Protocol.QwpWs)
-        self.assertEqual(qi.Protocol.parse('qwpwss'), qi.Protocol.QwpWss)
-        self.assertFalse(qi.Protocol.QwpWs.tls_enabled)
-        self.assertTrue(qi.Protocol.QwpWss.tls_enabled)
+        self.assertEqual(qi.Protocol.parse('ws'), qi.Protocol.Ws)
+        self.assertEqual(qi.Protocol.parse('wss'), qi.Protocol.Wss)
+        self.assertFalse(qi.Protocol.Ws.tls_enabled)
+        self.assertTrue(qi.Protocol.Wss.tls_enabled)
+        for old_scheme in ('qwpws', 'qwpwss'):
+            with self.subTest(old_scheme=old_scheme):
+                with self.assertRaises(ValueError):
+                    qi.Protocol.parse(old_scheme)
 
     def test_progress_enum(self):
         self.assertEqual(
@@ -229,7 +233,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'Missing "addr" parameter'):
-            qi.Client.from_conf('qwpws::pool_size=1;')
+            qi.Client.from_conf('ws::pool_size=1;')
 
     def test_client_close_is_idempotent(self):
         client = qi.Client.__new__(qi.Client)
@@ -266,7 +270,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};'
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
@@ -296,7 +300,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};'
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
@@ -331,7 +335,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};'
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
@@ -367,7 +371,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(ack_delay_s=0.2) as server:
             conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};'
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
@@ -419,7 +423,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};'
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;'
@@ -457,7 +461,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};'
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
@@ -485,7 +489,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'qwpws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};'
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
@@ -531,7 +535,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_from_conf_preserves_qwpws_progress(self):
         sender = qi.Sender.from_conf(
-            'qwpws::addr=localhost:9000;qwp_ws_progress=manual;')
+            'ws::addr=localhost:9000;qwp_ws_progress=manual;')
         try:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
@@ -541,7 +545,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             sender.close(False)
 
     def test_published_fsn_rejects_when_not_connected(self):
-        sender = qi.Sender.from_conf('qwpws::addr=localhost:9000;')
+        sender = qi.Sender.from_conf('ws::addr=localhost:9000;')
         try:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
@@ -554,12 +558,12 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'invalid sf_max_bytes'):
-            qi.Sender.from_conf('qwpws::addr=localhost:9000;sf_max_bytes=64mi;')
+            qi.Sender.from_conf('ws::addr=localhost:9000;sf_max_bytes=64mi;')
 
-    def test_from_conf_accepts_qwpwss_tls_roots_password(self):
+    def test_from_conf_accepts_wss_tls_roots_password(self):
         with tempfile.NamedTemporaryFile() as roots:
             sender = qi.Sender.from_conf(
-                'qwpwss::addr=localhost:9000;'
+                'wss::addr=localhost:9000;'
                 f'tls_roots={roots.name};'
                 'tls_roots_password=secret;')
             try:
@@ -615,7 +619,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):
         sender = qi.Sender.from_conf(
-            'qwpws::addr=localhost:9000;sf_dir=/tmp/qdb;;sf;')
+            'ws::addr=localhost:9000;sf_dir=/tmp/qdb;;sf;')
         try:
             self.assertIsInstance(sender, qi.Sender)
         finally:
@@ -635,7 +639,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError, '"qwp_ws_progress" has invalid value'):
             qi.Sender(
-                qi.Protocol.QwpWs, '127.0.0.1', 9000,
+                qi.Protocol.Ws, '127.0.0.1', 9000,
                 qwp_ws_progress='bogus')
 
     def test_max_datagram_size_bounds(self):
@@ -663,7 +667,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_qwpws_error_handler_can_be_registered(self):
         sender = qi.Sender(
-            qi.Protocol.QwpWs,
+            qi.Protocol.Ws,
             '127.0.0.1',
             9000,
             qwp_ws_error_handler=lambda error: None)
@@ -703,7 +707,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_qwpws_progress_conf_override_conflict(self):
         with self.assertRaisesRegex(ValueError, '"qwp_ws_progress" is already present'):
             qi.Sender.from_conf(
-                'qwpws::addr=localhost:9000;qwp_ws_progress=manual;',
+                'ws::addr=localhost:9000;qwp_ws_progress=manual;',
                 qwp_ws_progress=qi.QwpWsProgress.Background)
 
 

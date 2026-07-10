@@ -26,7 +26,7 @@ def example(host: str = 'localhost', port: int = 9000):
                 symbols='auto',  # Category columns as SYMBOL. (Default)
                 at=-1)  # Last column contains the designated timestamps.
 
-        with Client.from_conf(f"qwpws::addr={host}:{port};") as client:
+        with Client.from_conf(f"ws::addr={host}:{port};") as client:
             # Egress: query QuestDB and materialise the result as Pandas.
             with client.query(
                     "SELECT x AS sample_id, "

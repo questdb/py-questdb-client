@@ -30,8 +30,8 @@ The valid protocols are:
 * ``http``: ILP/HTTP
 * ``https``: ILP/HTTP with TLS
 * ``qwpudp``: QWP/UDP (QuestWire Protocol over UDP)
-* ``qwpws``: QWP/WebSocket
-* ``qwpwss``: QWP/WebSocket with TLS
+* ``ws``: QWP/WebSocket
+* ``wss``: QWP/WebSocket with TLS
 
 If you're unsure which protocol to use, see :ref:`sender_which_protocol`.
 
@@ -124,7 +124,7 @@ See the :ref:`auth_and_tls_example` example for more details.
 TLS
 ===
 
-TLS is enabled by selecting the ``tcps``, ``https``, or ``qwpwss`` protocol.
+TLS is enabled by selecting the ``tcps``, ``https``, or ``wss`` protocol.
 
 See the `QuestDB enterprise TLS documentation <https://questdb.com/docs/operations/tls/>`_
 on how to enable this feature in the server.
@@ -153,11 +153,11 @@ still use TLS by setting up a proxy in front of QuestDB, such as
 * ``tls_roots`` - ``str``: Path to a PEM-encoded certificate authority file.
   When used it defaults the ``tls_ca`` to ``'pem_file'``.
 
-  For ``qwpwss``, this can also point at a JKS or PKCS#12 keystore when
+  For ``wss``, this can also point at a JKS or PKCS#12 keystore when
   paired with ``tls_roots_password``.
 
 * ``tls_roots_password`` - ``str``: Password for the JKS or PKCS#12 keystore
-  configured by ``tls_roots``. This is supported only for ``qwpwss``.
+  configured by ``tls_roots``. This is supported only for ``wss``.
 
 * ``tls_verify`` - ``'on'`` | ``'unsafe_off'``: Whether to verify the server's
   certificate. This should only be used for testing as a last resort and never
