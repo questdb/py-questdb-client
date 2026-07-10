@@ -13,7 +13,7 @@ import sys
 
 sys.dont_write_bytecode = True
 
-import itertools
+import socket
 import time
 import unittest
 
@@ -77,18 +77,19 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 0)
         self.assertEqual(stats['errors'], [])
 
-    def test_transient_failure_before_checkpoint_resends_whole_frame(self):
-        # Connection 1 acks 3 data frames then closes; no commit checkpoint
-        # has landed, so the loop re-borrows and re-sends the whole frame:
-        # 10 data frames + 1 trailing commit on connection 2.
-        with QwpAckServer(close_plan=[3]) as server:
+    def test_transient_failure_before_publication_resends_whole_frame(self):
+        # Connection 1 closes immediately after the WebSocket upgrade, before
+        # reading a data frame. The operation is therefore provably not
+        # delivered, so the loop re-borrows and sends the whole frame on
+        # connection 2: 10 data frames plus 1 trailing commit.
+        with QwpAckServer(close_plan=[0]) as server:
             with qi.Client.from_conf(_conf(server.port)) as client:
                 client.dataframe(
                     _table(10), table_name='t_resend', at='ts',
                     max_rows_per_batch=1)
             stats = server.snapshot()
         self.assertEqual(stats['accepted_connections'], 2)
-        self.assertEqual(stats['binary_frames'], 3 + 10 + 1)
+        self.assertEqual(stats['binary_frames'], 10 + 1)
 
     def test_committed_prefix_failure_raises_without_resend(self):
         # 110 one-row batches: frames 1-100 are data, frame 101 is the
@@ -163,26 +164,25 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                 self.assertEqual(stats['errors'], [])
 
     def test_reconnect_budget_exhaustion_raises(self):
-        # Every connection dies after its first frame and no checkpoint
-        # ever lands, so the loop keeps re-sending until the reconnect
-        # budget expires and the transient error surfaces.
-        started = time.monotonic()
-        with QwpAckServer(close_plan=itertools.repeat(1)) as server:
+        # A bound-but-non-listening local port deterministically refuses every
+        # connection before publication. The native reconnect loop exhausts
+        # the configured budget without making delivery uncertain.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+            blocker.bind(('127.0.0.1', 0))
+            port = blocker.getsockname()[1]
+            started = time.monotonic()
             with qi.Client.from_conf(
-                    _conf(server.port,
-                          reconnect_max_duration_millis=1200)) as client:
+                    _conf(port, reconnect_max_duration_millis=300)) as client:
                 with self.assertRaises(qi.QuestDBError) as raised:
                     client.dataframe(
                         _table(5), table_name='t_budget', at='ts',
                         max_rows_per_batch=1)
-            stats = server.snapshot()
-        elapsed = time.monotonic() - started
-        self.assertIn(
-            raised.exception.code,
-            (qi.QuestDBErrorCode.FailoverRetry,
-             qi.QuestDBErrorCode.SocketError))
-        self.assertGreaterEqual(stats['accepted_connections'], 2)
-        self.assertLess(elapsed, 30.0)
+            elapsed = time.monotonic() - started
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.SocketError)
+        self.assertFalse(raised.exception.in_doubt)
+        self.assertIn('all endpoints unreachable', str(raised.exception))
+        self.assertLess(elapsed, 5.0)
 
 
 def _fault_frame(n_rows, str_len, arrow_route):
