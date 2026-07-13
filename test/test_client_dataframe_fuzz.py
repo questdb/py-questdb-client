@@ -725,7 +725,9 @@ class TestClientDataframeFuzz(unittest.TestCase):
 
     # ------- Focused property tests below. Reliable, non-fuzz. -------
 
-    def test_rejects_non_column_at_arguments(self):
+    def test_accepts_scalar_at_arguments(self):
+        # A fixed TimestampNanos / datetime is encoded as a repeated
+        # constant designated timestamp: every row shares the value.
         df = pd.DataFrame({
             'ts': pd.Series(_datetime_array(2)),
             'seq': pd.Series([1, 2], dtype='int64'),
@@ -733,16 +735,118 @@ class TestClientDataframeFuzz(unittest.TestCase):
         client = qi.Client.from_conf(self.conf)
         try:
             for at_val in (
-                    qi.ServerTimestamp,
                     qi.TimestampNanos(1_700_000_000_000_000_000),
                     datetime.datetime(2024, 1, 1)):
-                with self.assertRaises(
-                        qi.UnsupportedDataFrameShapeError,
-                        msg=f'at={at_val!r} should be rejected'):
-                    client.dataframe(df, table_name='t', at=at_val)
+                client.dataframe(df, table_name='t', at=at_val)
+        finally:
+            client.close()
+        stats = self.server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 2)
+
+    def test_rejects_pre_epoch_scalar_at(self):
+        df = pd.DataFrame({'seq': pd.Series([1, 2], dtype='int64')})
+        client = qi.Client.from_conf(self.conf)
+        try:
+            with self.assertRaisesRegex(ValueError, 'before the Unix epoch'):
+                client.dataframe(
+                    df, table_name='t',
+                    at=datetime.datetime(
+                        1969, 1, 1, tzinfo=datetime.timezone.utc))
         finally:
             client.close()
         self.assertEqual(self.server.snapshot()['binary_frames'], 0)
+
+    def test_ingest_emits_no_future_warnings(self):
+        # pandas >= 2.2 warn-CoW mode fires chained-assignment
+        # FutureWarnings from library-internal frame normalization if it
+        # mutates shallow copies via name setitem (the refcount heuristic
+        # misfires for Cython-held frames). Guard the ingest path stays
+        # warning-clean so `-W error` users and pandas 3.0 are unaffected.
+        import warnings
+        ts = pd.Series(_datetime_array(2))
+        frames = [
+            pd.DataFrame({'ts': ts.copy(),
+                          'v': pd.Series([1, None], dtype='Int64')}),
+            pd.DataFrame({'ts': ts.copy(),
+                          'v': pd.Series(['a', None], dtype='string')}),
+            pd.DataFrame({
+                'ts': pd.Series(
+                    [1_686_832_496_789, 1_686_832_496_790],
+                    dtype='int64').astype('datetime64[ms, UTC]'),
+                'v': pd.Series([1, 2], dtype='int64')}),
+        ]
+        client = qi.Client.from_conf(self.conf)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', FutureWarning)
+                for df in frames:
+                    client.dataframe(df, table_name='t', at='ts')
+        finally:
+            client.close()
+        self.assertEqual(self.server.snapshot()['errors'], [])
+
+    def test_pandas3_str_dtype_frame(self):
+        # pandas 3.0 makes the Arrow-backed `str` dtype the default for
+        # string data (PDEP-14); `future.infer_string` previews it.
+        if not hasattr(pd.options, 'future') or not hasattr(
+                pd.options.future, 'infer_string'):
+            self.skipTest('pandas has no future.infer_string option')
+        prior = pd.options.future.infer_string
+        pd.options.future.infer_string = True
+        try:
+            df = pd.DataFrame({
+                'sym': ['a', 'b'],
+                'v': [1, 2],
+                'ts': pd.Series(_datetime_array(2)),
+            })
+            self.assertEqual(str(df.dtypes['sym']), 'str')
+            client = qi.Client.from_conf(self.conf)
+            try:
+                client.dataframe(df, table_name='t', at='ts')
+            finally:
+                client.close()
+        finally:
+            pd.options.future.infer_string = prior
+        stats = self.server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+
+    def test_coarse_datetime_at_units(self):
+        # pandas 3.0 infers datetime64[us] (and coarser) instead of [ns];
+        # every unit must be accepted as the designated timestamp.
+        client = qi.Client.from_conf(self.conf)
+        try:
+            for unit in ('us', 'ms', 's'):
+                df = pd.DataFrame({
+                    'ts': pd.Series(_datetime_array(2)).astype(
+                        f'datetime64[{unit}]'),
+                    'v': pd.Series([1, 2], dtype='int64'),
+                })
+                client.dataframe(df, table_name='t', at='ts')
+        finally:
+            client.close()
+        stats = self.server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 3)
+
+    def test_accepts_server_timestamp_at(self):
+        # `at=ServerTimestamp` is an explicit opt-in: the frame carries no
+        # designated timestamp column and the server stamps each row on
+        # arrival. NumPy-backed pandas reaches this through the chunk
+        # planner's server-now path.
+        df = pd.DataFrame({
+            'ts': pd.Series(_datetime_array(2)),
+            'seq': pd.Series([1, 2], dtype='int64'),
+        })
+        client = qi.Client.from_conf(self.conf)
+        try:
+            client.dataframe(df, table_name='t', at=qi.ServerTimestamp)
+        finally:
+            client.close()
+        stats = self.server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 1)
 
     def test_rejects_table_name_col(self):
         df = pd.DataFrame({

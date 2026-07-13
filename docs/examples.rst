@@ -18,7 +18,7 @@ default listener port is ``9007``.
 .. literalinclude:: ../examples/qwp_udp.py
    :language: python
 
-.. _qwpws_polars_example:
+.. _ws_polars_example:
 
 QWP/WebSocket from Polars
 -------------------------
@@ -30,7 +30,7 @@ The following example ingests a Polars ``DataFrame`` over QWP/WebSocket via
 .. literalinclude:: ../examples/polars_basic.py
    :language: python
 
-.. _qwpws_pyarrow_example:
+.. _ws_pyarrow_example:
 
 QWP/WebSocket from PyArrow
 --------------------------

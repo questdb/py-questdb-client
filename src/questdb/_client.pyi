@@ -25,6 +25,8 @@
 __all__ = [
     "Buffer",
     "Client",
+    "ConnectionEvent",
+    "ConnectionEventKind",
     "QuestDBError",
     "QuestDBErrorCode",
     "QuestDBServerRejectionError",
@@ -36,6 +38,8 @@ __all__ = [
     "QwpWsErrorPolicy",
     "QwpWsProgress",
     "SenderTransaction",
+    "ServerInfo",
+    "ServerRole",
     "ServerTimestamp",
     "ServerTimestampType",
     "TimestampMicros",
@@ -136,6 +140,73 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     """
 
     column_failures: tuple
+
+
+class ConnectionEventKind(Enum):
+    """Connection-state transitions observed by the ingress pool."""
+
+    Connected = ...
+    Disconnected = ...
+    Reconnected = ...
+    FailedOver = ...
+    EndpointAttemptFailed = ...
+    AllEndpointsUnreachable = ...
+    AuthFailed = ...
+
+    @property
+    def tag(self) -> str: ...
+    @property
+    def c_value(self) -> int: ...
+    @classmethod
+    def parse(
+        cls, tag: Union[str, "ConnectionEventKind", None]
+    ) -> Optional["ConnectionEventKind"]: ...
+
+
+@dataclass(frozen=True)
+class ConnectionEvent:
+    """One connection-state transition delivered to a connection listener."""
+
+    kind: ConnectionEventKind
+    host: Optional[str]
+    port: Optional[str]
+    previous_host: Optional[str]
+    previous_port: Optional[str]
+    attempt_number: Optional[int]
+    cause_code: Optional[QuestDBErrorCode]
+    cause_msg: Optional[str]
+    timestamp_millis: int
+
+
+class ServerRole(Enum):
+    """Cluster role advertised by the server's ``SERVER_INFO`` handshake."""
+
+    Standalone = ...
+    Primary = ...
+    Replica = ...
+    PrimaryCatchup = ...
+    Other = ...
+
+    @property
+    def tag(self) -> str: ...
+    @property
+    def c_value(self) -> int: ...
+    @classmethod
+    def parse(cls, tag: Union[str, "ServerRole", None]) -> Optional["ServerRole"]: ...
+
+
+@dataclass(frozen=True)
+class ServerInfo:
+    """Snapshot of the server's ``SERVER_INFO`` handshake."""
+
+    role: ServerRole
+    role_byte: int
+    epoch: int
+    capabilities: int
+    server_wall_ns: int
+    cluster_id: str
+    node_id: str
+    zone_id: Optional[str]
 
 
 class ServerTimestampType:
@@ -924,9 +995,17 @@ class Client:
     """
 
     @staticmethod
-    def from_conf(conf_str: str) -> Client:
+    def from_conf(
+        conf_str: str,
+        *,
+        connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
+        connection_event_inbox_capacity: int = 0,
+    ) -> Client:
         """
         Construct a pooled client from a QWP/WebSocket configuration string.
+
+        ``connection_listener`` receives one :class:`ConnectionEvent` per
+        connection-state transition, on a dedicated dispatcher thread.
         """
 
     def __enter__(self) -> Client: ...
@@ -938,7 +1017,7 @@ class Client:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestampType, int, str],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
         max_rows_per_batch: int = 16384,
         schema_overrides: Optional[Dict[str, object]] = None,
     ) -> Client:
@@ -946,9 +1025,9 @@ class Client:
         Ingest a dataframe through the pooled columnar QWP path.
 
         ``at`` names the designated timestamp column (by name or index),
-        or pass the explicit ``ServerTimestamp`` sentinel to let the
-        server assign each row's timestamp on arrival (Arrow-backed
-        input only).
+        or a fixed ``TimestampNanos`` / ``datetime`` shared by every row,
+        or the explicit ``ServerTimestamp`` sentinel to let the server
+        assign each row's timestamp on arrival.
 
         ``df`` accepts any of:
 
@@ -979,6 +1058,20 @@ class Client:
         repeated identical queries. No-op against servers that predate the
         capability.
         """
+
+    def server_info(self) -> ServerInfo:
+        """
+        Snapshot the pooled connection's ``SERVER_INFO`` handshake: role,
+        failover epoch, capabilities, handshake wall-clock, cluster/node ids.
+        """
+
+    @property
+    def connection_events_dropped(self) -> int:
+        """Events discarded by the listener inbox's drop-oldest policy."""
+
+    @property
+    def connection_events_delivered(self) -> int:
+        """Events delivered to the connection listener."""
 
     def reap_idle(self) -> int:
         """
@@ -1097,6 +1190,8 @@ class Sender:
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
         qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
+        connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
+        connection_event_inbox_capacity: int = 0,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -1129,6 +1224,8 @@ class Sender:
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
         qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
+        connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
+        connection_event_inbox_capacity: int = 0,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,
@@ -1171,6 +1268,8 @@ class Sender:
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
         qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
+        connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
+        connection_event_inbox_capacity: int = 0,
         protocol_version=None,
         init_buf_size: int = 65536,
         max_name_len: int = 127,

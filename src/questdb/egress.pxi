@@ -307,6 +307,55 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
     return handle
 
 
+cdef object _snapshot_server_info(_ReaderHandle handle):
+    """Copy the reader's last-seen ``SERVER_INFO`` into a :class:`ServerInfo`.
+
+    The FFI pointer is borrowed and invalidated by any reader operation
+    that may reconnect, so every field is copied out before returning.
+    """
+    cdef const reader_server_info* si = \
+        reader_current_server_info(handle._reader)
+    cdef const char* buf = NULL
+    cdef size_t buf_len = 0
+    if si == NULL:
+        raise QuestDBError(
+            QuestDBErrorCode.SocketError,
+            'SERVER_INFO unavailable: the connection is mid-reconnect.')
+    cdef int role_int = <int>reader_server_info_role(si)
+    role = ServerRole.Other
+    for entry in ServerRole:
+        if entry.c_value == role_int:
+            role = entry
+            break
+    cdef uint8_t role_byte = reader_server_info_role_byte(si)
+    cdef uint64_t epoch = reader_server_info_epoch(si)
+    cdef uint32_t capabilities = reader_server_info_capabilities(si)
+    cdef int64_t server_wall_ns = reader_server_info_server_wall_ns(si)
+    reader_server_info_cluster_id(si, &buf, &buf_len)
+    cluster_id = PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len) \
+        if buf != NULL else ''
+    buf = NULL
+    buf_len = 0
+    reader_server_info_node_id(si, &buf, &buf_len)
+    node_id = PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len) \
+        if buf != NULL else ''
+    buf = NULL
+    buf_len = 0
+    zone_id = None
+    if reader_server_info_zone_id(si, &buf, &buf_len):
+        zone_id = PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len) \
+            if buf != NULL else ''
+    return ServerInfo(
+        role=role,
+        role_byte=role_byte,
+        epoch=epoch,
+        capabilities=capabilities,
+        server_wall_ns=server_wall_ns,
+        cluster_id=cluster_id,
+        node_id=node_id,
+        zone_id=zone_id)
+
+
 cdef void _failover_reset_trampoline(
         const reader_failover_reset_event* event,
         void* user_data) noexcept nogil:

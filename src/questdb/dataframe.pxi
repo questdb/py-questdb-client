@@ -1483,7 +1483,10 @@ cdef void_int _dataframe_series_sniff_pyobj(
                     arr_type_name = '??unknown??'
                     arr_descr = cnp.PyArray_DescrFromType(arr_type)
                     if arr_descr is not None:
-                        arr_type_name = arr_descr.name.decode('ascii')
+                        # numpy 2.x returns str; 1.x returned bytes.
+                        arr_type_name = arr_descr.name
+                        if isinstance(arr_type_name, bytes):
+                            arr_type_name = arr_type_name.decode('ascii')
                     raise QuestDBError(
                         QuestDBErrorCode.BadDataFrame,
                         f'Bad column {pandas_col.name!r}: ' +

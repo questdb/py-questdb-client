@@ -164,15 +164,26 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                 self.assertEqual(stats['errors'], [])
 
     def test_reconnect_budget_exhaustion_raises(self):
-        # A bound-but-non-listening local port deterministically refuses every
-        # connection before publication. The native reconnect loop exhausts
-        # the configured budget without making delivery uncertain.
+        # A bound-but-non-listening local port never completes the TCP
+        # handshake before publication, so the native reconnect loop
+        # exhausts the configured budget without making delivery uncertain.
+        #
+        # `connect_timeout` is essential here and must be small: a
+        # foreground connect defaults to no connect timeout (mirroring
+        # Java's effectiveConnectTimeoutMs), so each dial inherits the OS
+        # default. On Linux a bound-not-listening port refuses instantly
+        # (ECONNREFUSED) and the loop spins fast, but on macOS the SYN goes
+        # unanswered and a single connect() blocks ~7.8s (ETIMEDOUT) —
+        # overshooting the reconnect budget, which can only bound the loop
+        # *between* attempts, not one in-flight connect. Bounding the dial
+        # makes the reconnect budget the governing deadline on every OS.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
             blocker.bind(('127.0.0.1', 0))
             port = blocker.getsockname()[1]
             started = time.monotonic()
             with qi.Client.from_conf(
-                    _conf(port, reconnect_max_duration_millis=300)) as client:
+                    _conf(port, reconnect_max_duration_millis=300,
+                          connect_timeout=100)) as client:
                 with self.assertRaises(qi.QuestDBError) as raised:
                     client.dataframe(
                         _table(5), table_name='t_budget', at='ts',

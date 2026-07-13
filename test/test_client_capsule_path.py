@@ -282,23 +282,39 @@ class TestServerTimestampAt(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 0)
 
-    def test_numpy_pandas_server_timestamp_rejected_with_hint(self):
+    def test_numpy_pandas_server_timestamp(self):
+        # NumPy-backed pandas routes through the chunk planner, whose
+        # encoder supports server stamping via the chunk at_now opt-in.
         import pandas as pd
         df = pd.DataFrame({'sym': ['a', 'b'], 'x': [1, 2]})
         with QwpAckServer() as server:
             client = qi.Client.from_conf(_client_conf(server.port))
             try:
-                with self.assertRaisesRegex(
-                        qi.UnsupportedDataFrameShapeError,
-                        r'NumPy-backed pandas frames.*'
-                        r'designated timestamp column'):
-                    client.dataframe(
-                        df, table_name='t', at=qi.ServerTimestamp)
+                client.dataframe(
+                    df, table_name='t', at=qi.ServerTimestamp)
             finally:
                 client.close()
             stats = server.snapshot()
-        # Rejected before anything reaches the wire.
-        self.assertEqual(stats['binary_frames'], 0)
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_numpy_pandas_server_timestamp_multi_chunk(self):
+        # Server stamping must survive the max_rows_per_batch split: every
+        # chunk carries the at_now opt-in, none carries a ts column.
+        import pandas as pd
+        n = 64
+        df = pd.DataFrame({'sym': ['s'] * n, 'x': list(range(n))})
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='t', at=qi.ServerTimestamp,
+                    max_rows_per_batch=16)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 4)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_arrow_backed_pandas_server_timestamp(self):
@@ -317,18 +333,421 @@ class TestServerTimestampAt(unittest.TestCase):
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
     @unittest.skipIf(pl is None, 'polars not installed')
-    def test_scalar_at_still_rejected_and_mentions_sentinel(self):
+    def test_none_at_rejected_and_mentions_sentinel(self):
         df = pl.DataFrame({'v': [1]}, schema={'v': pl.Int64})
         with QwpAckServer() as server:
             client = qi.Client.from_conf(_client_conf(server.port))
             try:
-                for bad_at in (qi.TimestampNanos(1), None):
-                    with self.assertRaisesRegex(
-                            qi.UnsupportedDataFrameShapeError,
-                            r'`ServerTimestamp` sentinel'):
-                        client.dataframe(df, table_name='t', at=bad_at)
+                with self.assertRaisesRegex(
+                        qi.UnsupportedDataFrameShapeError,
+                        r'`ServerTimestamp` sentinel'):
+                    client.dataframe(df, table_name='t', at=None)
             finally:
                 client.close()
+
+
+class TestScalarAt(unittest.TestCase):
+    """`at=TimestampNanos(...)` / `at=datetime(...)`: one fixed designated
+    timestamp shared by every row, encoded as a repeated constant on both
+    the Arrow batch route and the numpy chunk route."""
+
+    AT_NANOS = 1_700_000_000_123_456_789
+
+    def _ingest(self, df, at, **kw):
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(df, table_name='t', at=at, **kw)
+            finally:
+                client.close()
+            return server.snapshot()
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_scalar_at(self):
+        for at in (qi.TimestampNanos(self.AT_NANOS),
+                   datetime.datetime(2024, 1, 1,
+                                     tzinfo=datetime.timezone.utc)):
+            stats = self._ingest(
+                pl.DataFrame({'v': [1, 2]}, schema={'v': pl.Int64}), at)
+            self.assertEqual(stats['errors'], [])
+            self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_pyarrow_scalar_at(self):
+        stats = self._ingest(
+            pa.table({'v': [1, 2]}), qi.TimestampNanos(self.AT_NANOS))
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_numpy_pandas_scalar_at(self):
+        import pandas as pd
+        for at in (qi.TimestampNanos(self.AT_NANOS),
+                   datetime.datetime(2024, 1, 1,
+                                     tzinfo=datetime.timezone.utc)):
+            stats = self._ingest(pd.DataFrame({'v': [1, 2]}), at)
+            self.assertEqual(stats['errors'], [])
+            self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_numpy_pandas_scalar_at_multi_chunk(self):
+        import pandas as pd
+        stats = self._ingest(
+            pd.DataFrame({'v': list(range(64))}),
+            qi.TimestampNanos(self.AT_NANOS), max_rows_per_batch=16)
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 4)
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_pre_epoch_datetime_rejected(self):
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        ValueError, 'before the Unix epoch'):
+                    client.dataframe(
+                        pl.DataFrame({'v': [1]}, schema={'v': pl.Int64}),
+                        table_name='t',
+                        at=datetime.datetime(
+                            1969, 1, 1, tzinfo=datetime.timezone.utc))
+            finally:
+                client.close()
+            self.assertEqual(server.snapshot()['binary_frames'], 0)
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_empty_frame_scalar_at_is_noop(self):
+        stats = self._ingest(
+            pl.DataFrame({'v': pl.Series([], dtype=pl.Int64)}),
+            qi.TimestampNanos(self.AT_NANOS))
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+
+
+class TestNdarrayArrayColumns(unittest.TestCase):
+    """Object-dtype columns of float64 numpy-array cells land as QuestDB
+    ARRAY(DOUBLE) through the columnar manual-planner route (promoted to
+    Arrow list<double> and shipped via the Rust Arrow importer)."""
+
+    def _ingest(self, df, **kw):
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(df, table_name='t', at='ts', **kw)
+            finally:
+                client.close()
+            return server.snapshot()
+
+    @staticmethod
+    def _df(cells):
+        import numpy as np
+        import pandas as pd
+        return pd.DataFrame({
+            'ts': pd.date_range('2024-01-01', periods=len(cells), freq='s'),
+            'vec': pd.Series(cells, dtype=object),
+        })
+
+    def test_1d_uniform_ragged_empty_noncontiguous(self):
+        import numpy as np
+        cells = [
+            np.array([1.5, 2.5, 3.5]),
+            np.array([4.5]),
+            np.array([], dtype=np.float64),
+            np.arange(10.0)[::2],
+        ]
+        stats = self._ingest(self._df(cells))
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_2d_cells(self):
+        import numpy as np
+        stats = self._ingest(
+            self._df([np.ones((2, 3)), np.zeros((3, 2))]))
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_none_cell_is_null_row(self):
+        import numpy as np
+        stats = self._ingest(self._df([np.array([1.0]), None]))
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_multi_chunk_split(self):
+        import numpy as np
+        cells = [np.array([float(i)]) for i in range(64)]
+        stats = self._ingest(self._df(cells), max_rows_per_batch=16)
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 4)
+
+    def test_mixed_cell_types_rejected(self):
+        import numpy as np
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, 'mixed object cells'):
+                    client.dataframe(
+                        self._df([np.array([1.0]), 'oops']),
+                        table_name='t', at='ts')
+            finally:
+                client.close()
+            self.assertEqual(server.snapshot()['binary_frames'], 0)
+
+
+@unittest.skipUnless(
+    os.environ.get('QDB_HTTP_ADDR'),
+    'set QDB_HTTP_ADDR=host:port for a running QuestDB')
+class TestServerInfoLive(unittest.TestCase):
+
+    def test_server_info_snapshot(self):
+        import time
+        addr = os.environ['QDB_HTTP_ADDR']
+        with qi.Client.from_conf(f'ws::addr={addr};') as client:
+            info = client.server_info()
+            self.assertIsInstance(info, qi.ServerInfo)
+            self.assertIsInstance(info.role, qi.ServerRole)
+            self.assertEqual(info.role_byte, info.role.c_value if
+                             info.role is not qi.ServerRole.Other
+                             else info.role_byte)
+            self.assertGreaterEqual(info.epoch, 0)
+            self.assertIsInstance(info.cluster_id, str)
+            self.assertIsInstance(info.node_id, str)
+            # Handshake wall-clock within 5 minutes of local clock.
+            self.assertLess(
+                abs(time.time_ns() - info.server_wall_ns), 300 * 10**9)
+            # zone_id is None unless the server advertises CAP_ZONE.
+            self.assertTrue(info.zone_id is None
+                            or isinstance(info.zone_id, str))
+            # Second snapshot reuses the pooled connection.
+            info2 = client.server_info()
+            self.assertEqual(info2.cluster_id, info.cluster_id)
+
+
+class TestConnectionEvents(unittest.TestCase):
+    """Connection lifecycle narration: `connection_listener` receives
+    ConnectionEvents on a dedicated dispatcher thread."""
+
+    @staticmethod
+    def _collect():
+        import threading
+        events = []
+        lock = threading.Lock()
+
+        def listener(event):
+            with lock:
+                events.append(event)
+        return events, listener
+
+    @staticmethod
+    def _wait_for(events, kinds, timeout=5.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            seen = {e.kind for e in events}
+            if all(k in seen for k in kinds):
+                return True
+            time.sleep(0.01)
+        return False
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_connected_fires_with_endpoint_and_counters(self):
+        events, listener = self._collect()
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(
+                _client_conf(server.port), connection_listener=listener)
+            try:
+                client.dataframe(
+                    pl.DataFrame({'v': [1]}, schema={'v': pl.Int64}),
+                    table_name='t', at=qi.ServerTimestamp)
+                self.assertTrue(
+                    self._wait_for(
+                        events, [qi.ConnectionEventKind.Connected]),
+                    [e.kind for e in events])
+                connected = [
+                    e for e in events
+                    if e.kind is qi.ConnectionEventKind.Connected][0]
+                self.assertEqual(connected.host, '127.0.0.1')
+                self.assertEqual(connected.port, str(server.port))
+                self.assertIsNone(connected.cause_code)
+                self.assertGreater(connected.timestamp_millis, 0)
+                self.assertGreaterEqual(
+                    client.connection_events_delivered, 1)
+                self.assertEqual(client.connection_events_dropped, 0)
+            finally:
+                client.close()
+
+    def test_unreachable_fires_attempt_failed_and_unreachable(self):
+        import socket
+        events, listener = self._collect()
+        blk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blk.bind(('127.0.0.1', 0))
+        port = blk.getsockname()[1]
+        blk.close()
+        client = qi.Client.from_conf(
+            f'ws::addr=127.0.0.1:{port};connect_timeout=100;'
+            f'reconnect_max_duration_millis=200;pool_size=1;pool_max=1;',
+            connection_listener=listener)
+        try:
+            import pandas as pd
+            with self.assertRaises(qi.QuestDBError):
+                # Reader-pool paths (e.g. server_info/query) are not yet
+                # instrumented; ingest exercises the instrumented ingress
+                # pool walk.
+                client.dataframe(
+                    pd.DataFrame({'v': [1]}), table_name='t',
+                    at=qi.ServerTimestamp)
+            self.assertTrue(
+                self._wait_for(events, [
+                    qi.ConnectionEventKind.EndpointAttemptFailed,
+                    qi.ConnectionEventKind.AllEndpointsUnreachable]),
+                [e.kind for e in events])
+            attempt = [
+                e for e in events
+                if e.kind is qi.ConnectionEventKind.EndpointAttemptFailed][0]
+            self.assertEqual(attempt.host, '127.0.0.1')
+            self.assertIsNotNone(attempt.attempt_number)
+            self.assertIsNotNone(attempt.cause_code)
+        finally:
+            client.close()
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_failover_fires_failed_over_with_previous_endpoint(self):
+        import time
+        events, listener = self._collect()
+        server_a = QwpAckServer()
+        server_a.start()
+        server_b = QwpAckServer()
+        server_b.start()
+        try:
+            client = qi.Client.from_conf(
+                f'ws::addr=127.0.0.1:{server_a.port},'
+                f'127.0.0.1:{server_b.port};'
+                f'connect_timeout=200;pool_size=1;pool_max=1;'
+                f'pool_reap=manual;',
+                connection_listener=listener)
+            try:
+                df = pl.DataFrame({'v': [1]}, schema={'v': pl.Int64})
+                client.dataframe(
+                    df, table_name='t', at=qi.ServerTimestamp)
+                self.assertTrue(self._wait_for(
+                    events, [qi.ConnectionEventKind.Connected]))
+                first_port = [
+                    e for e in events
+                    if e.kind is qi.ConnectionEventKind.Connected][0].port
+                if first_port == str(server_a.port):
+                    server_a.stop()
+                else:
+                    server_b.stop()
+                deadline = time.time() + 5
+                while time.time() < deadline and not any(
+                        e.kind is qi.ConnectionEventKind.FailedOver
+                        for e in events):
+                    try:
+                        client.dataframe(
+                            df, table_name='t', at=qi.ServerTimestamp)
+                    except qi.QuestDBError:
+                        pass
+                    time.sleep(0.05)
+                failed_over = [
+                    e for e in events
+                    if e.kind is qi.ConnectionEventKind.FailedOver]
+                self.assertTrue(
+                    failed_over, [e.kind for e in events])
+                self.assertEqual(
+                    failed_over[0].previous_port, first_port)
+            finally:
+                client.close()
+        finally:
+            server_a.stop()
+            server_b.stop()
+
+    def test_listener_must_be_callable(self):
+        with self.assertRaisesRegex(TypeError, 'must be callable'):
+            qi.Client.from_conf(
+                'ws::addr=127.0.0.1:9000;',
+                connection_listener='not-callable')
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_listener_exception_is_swallowed(self):
+        def bad_listener(event):
+            raise RuntimeError('listener bug')
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(
+                _client_conf(server.port), connection_listener=bad_listener)
+            try:
+                client.dataframe(
+                    pl.DataFrame({'v': [1]}, schema={'v': pl.Int64}),
+                    table_name='t', at=qi.ServerTimestamp)
+                import time
+                deadline = time.time() + 5
+                while (time.time() < deadline
+                        and client.connection_events_delivered < 1):
+                    time.sleep(0.01)
+                self.assertGreaterEqual(
+                    client.connection_events_delivered, 1)
+            finally:
+                client.close()
+
+
+class TestSenderConnectionEvents(unittest.TestCase):
+    """Sender-level connection narration: `connection_listener` on
+    Sender.from_conf, mirroring Java's builder.connectionListener."""
+
+    def test_establish_fires_connected_and_counters(self):
+        import time
+        events = []
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};',
+                    connection_listener=events.append) as sender:
+                deadline = time.time() + 5
+                while time.time() < deadline and not events:
+                    time.sleep(0.01)
+                self.assertTrue(events)
+                self.assertIs(events[0].kind,
+                              qi.ConnectionEventKind.Connected)
+                self.assertEqual(events[0].host, '127.0.0.1')
+                self.assertEqual(events[0].port, str(server.port))
+                self.assertGreaterEqual(
+                    sender.connection_events_delivered, 1)
+                self.assertEqual(sender.connection_events_dropped, 0)
+
+    def test_unreachable_establish_fires_failure_events(self):
+        import socket
+        import time
+        blk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blk.bind(('127.0.0.1', 0))
+        port = blk.getsockname()[1]
+        blk.close()
+        events = []
+        sender = qi.Sender.from_conf(
+            f'ws::addr=127.0.0.1:{port};connect_timeout=100;'
+            f'reconnect_max_duration_millis=200;',
+            connection_listener=events.append)
+        with self.assertRaises(qi.QuestDBError):
+            sender.establish()
+        deadline = time.time() + 5
+        while time.time() < deadline and not any(
+                e.kind is qi.ConnectionEventKind.AllEndpointsUnreachable
+                for e in events):
+            time.sleep(0.01)
+        kinds = {e.kind for e in events}
+        self.assertIn(qi.ConnectionEventKind.EndpointAttemptFailed, kinds)
+        self.assertIn(qi.ConnectionEventKind.AllEndpointsUnreachable, kinds)
+        attempt = [e for e in events if e.kind is
+                   qi.ConnectionEventKind.EndpointAttemptFailed][0]
+        self.assertIsNotNone(attempt.attempt_number)
+        self.assertIsNotNone(attempt.cause_code)
+
+    def test_non_ws_sender_listener_rejected(self):
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'only supported for QWP/WebSocket'):
+            qi.Sender.from_conf(
+                'http::addr=127.0.0.1:9000;',
+                connection_listener=lambda event: None)
+
+    def test_non_callable_listener_rejected(self):
+        with self.assertRaisesRegex(TypeError, 'must be callable'):
+            qi.Sender.from_conf(
+                'ws::addr=127.0.0.1:9000;',
+                connection_listener='nope')
 
 
 class TestSchemaOverrides(unittest.TestCase):

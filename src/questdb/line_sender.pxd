@@ -804,6 +804,61 @@ cdef extern from "questdb/ingress/column_sender.h":
         questdb_db* db
         ) noexcept nogil
 
+    cdef struct questdb_connection_event:
+        uint32_t kind
+        const char* host
+        size_t host_len
+        const char* port
+        size_t port_len
+        const char* previous_host
+        size_t previous_host_len
+        const char* previous_port
+        size_t previous_port_len
+        bint has_attempt
+        uint64_t attempt_number
+        bint has_cause
+        line_sender_error_code cause_code
+        const char* cause_msg
+        size_t cause_msg_len
+        int64_t timestamp_millis
+
+    ctypedef void (*questdb_connection_event_cb)(
+        void* user_data,
+        const questdb_connection_event* event
+        ) noexcept with gil
+
+    bint questdb_db_set_connection_event_handler(
+        questdb_db* db,
+        questdb_connection_event_cb callback,
+        void* user_data,
+        size_t inbox_capacity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    uint64_t questdb_db_connection_events_dropped(
+        const questdb_db* db
+        ) noexcept nogil
+
+    uint64_t questdb_db_connection_events_delivered(
+        const questdb_db* db
+        ) noexcept nogil
+
+    bint line_sender_opts_connection_event_handler(
+        line_sender_opts* opts,
+        questdb_connection_event_cb cb,
+        void* user_data,
+        size_t inbox_capacity,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    uint64_t line_sender_connection_events_dropped(
+        const line_sender* sender
+        ) noexcept nogil
+
+    uint64_t line_sender_connection_events_delivered(
+        const line_sender* sender
+        ) noexcept nogil
+
     column_sender_chunk* column_sender_chunk_new(
         const char* table_name,
         size_t table_name_len,
@@ -883,6 +938,17 @@ cdef extern from "questdb/ingress/column_sender.h":
         column_sender_chunk* chunk,
         const int64_t* data,
         size_t row_count,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_at_now(
+        column_sender_chunk* chunk,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint column_sender_chunk_at_scalar_nanos(
+        column_sender_chunk* chunk,
+        int64_t nanos,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -1056,6 +1122,17 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint direct_column_sender_flush_arrow_batch_at_scalar_nanos(
+        direct_column_sender* conn,
+        line_sender_table_name table,
+        ArrowArray* array,
+        const ArrowSchema* schema,
+        int64_t at_nanos,
+        const column_sender_arrow_override* overrides,
+        size_t overrides_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint direct_column_sender_flush_arrow_batch_at_column(
         direct_column_sender* conn,
         line_sender_table_name table,
@@ -1078,6 +1155,16 @@ cdef extern from "questdb/egress/reader.h":
     cdef struct reader_cursor:
         pass
 
+    cdef struct reader_server_info:
+        pass
+
+    cdef enum reader_server_role:
+        reader_server_role_standalone = 0
+        reader_server_role_primary = 1
+        reader_server_role_replica = 2
+        reader_server_role_primary_catchup = 3
+        reader_server_role_other = 0xFF
+
     cdef enum reader_arrow_batch_result:
         reader_arrow_batch_ok = 0
         reader_arrow_batch_end = 1
@@ -1085,6 +1172,48 @@ cdef extern from "questdb/egress/reader.h":
 
     void reader_close(
         reader* reader
+        ) noexcept nogil
+
+    const reader_server_info* reader_current_server_info(
+        const reader* reader
+        ) noexcept nogil
+
+    reader_server_role reader_server_info_role(
+        const reader_server_info* si
+        ) noexcept nogil
+
+    uint8_t reader_server_info_role_byte(
+        const reader_server_info* si
+        ) noexcept nogil
+
+    uint64_t reader_server_info_epoch(
+        const reader_server_info* si
+        ) noexcept nogil
+
+    uint32_t reader_server_info_capabilities(
+        const reader_server_info* si
+        ) noexcept nogil
+
+    int64_t reader_server_info_server_wall_ns(
+        const reader_server_info* si
+        ) noexcept nogil
+
+    void reader_server_info_cluster_id(
+        const reader_server_info* si,
+        const char** out_buf,
+        size_t* out_len
+        ) noexcept nogil
+
+    void reader_server_info_node_id(
+        const reader_server_info* si,
+        const char** out_buf,
+        size_t* out_len
+        ) noexcept nogil
+
+    bint reader_server_info_zone_id(
+        const reader_server_info* si,
+        const char** out_buf,
+        size_t* out_len
         ) noexcept nogil
 
     reader_query* reader_prepare(

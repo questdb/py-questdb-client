@@ -124,6 +124,37 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QwpWsProgress.parse('manual'),
             qi.QwpWsProgress.Manual)
 
+    def test_connection_event_enum_and_shape(self):
+        self.assertEqual(qi.ConnectionEventKind.parse('connected'),
+                         qi.ConnectionEventKind.Connected)
+        self.assertEqual(qi.ConnectionEventKind.Connected.c_value, 0)
+        self.assertEqual(qi.ConnectionEventKind.AuthFailed.c_value, 6)
+        event = qi.ConnectionEvent(
+            kind=qi.ConnectionEventKind.FailedOver,
+            host='b', port='2', previous_host='a', previous_port='1',
+            attempt_number=3, cause_code=None, cause_msg=None,
+            timestamp_millis=1_700_000_000_000)
+        self.assertEqual(event.previous_host, 'a')
+        with self.assertRaises(Exception):
+            event.host = 'c'  # frozen
+
+    def test_server_role_enum_and_server_info_shape(self):
+        self.assertEqual(qi.ServerRole.parse('standalone'),
+                         qi.ServerRole.Standalone)
+        self.assertEqual(qi.ServerRole.Primary.c_value, 1)
+        self.assertEqual(qi.ServerRole.Replica.c_value, 2)
+        self.assertEqual(qi.ServerRole.PrimaryCatchup.c_value, 3)
+        self.assertEqual(qi.ServerRole.Other.c_value, 0xFF)
+        info = qi.ServerInfo(
+            role=qi.ServerRole.Primary, role_byte=1, epoch=7,
+            capabilities=2, server_wall_ns=1_700_000_000_000_000_000,
+            cluster_id='c1', node_id='n1', zone_id=None)
+        self.assertIsNone(info.zone_id)
+        self.assertEqual(info.role, qi.ServerRole.Primary)
+        self.assertEqual(info.epoch, 7)
+        with self.assertRaises(Exception):
+            info.epoch = 8  # frozen
+
     def test_ingress_error_can_carry_qwpws_diagnostic(self):
         err = qi.QuestDBError(
             qi.QuestDBErrorCode.SocketError,
@@ -215,13 +246,44 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_unsupported_dataframe_shape_error_carries_failures(self):
         err = qi.UnsupportedDataFrameShapeError(
             'unsupported frame',
-            [{'column': 'active', 'reason': 'bool_requires_packing'}])
+            [{'column': 'active', 'reason': 'bool_requires_packing'},
+             {'column': None, 'reason': 'needs a data column'}])
 
         self.assertIsInstance(err, qi.QuestDBError)
         self.assertEqual(err.code, qi.QuestDBErrorCode.BadDataFrame)
         self.assertEqual(
             err.column_failures,
-            ({'column': 'active', 'reason': 'bool_requires_packing'},))
+            ({'column': 'active', 'reason': 'bool_requires_packing'},
+             {'column': None, 'reason': 'needs a data column'}))
+
+        # The per-column reasons must be folded into str(exc), not stranded
+        # on the attribute. A non-timestamp failure gets no `at` remedy and
+        # must not steer the user off Client to the row path.
+        text = str(err)
+        self.assertIn('unsupported frame', text)
+        self.assertIn("column 'active': bool_requires_packing", text)
+        self.assertIn('needs a data column', text)
+        self.assertNotIn('Sender', text)
+        self.assertNotIn('at=ServerTimestamp', text)
+
+    def test_unsupported_dataframe_shape_error_timestamp_hint(self):
+        # A designated-timestamp failure adds the Client-side remedy
+        # (valid column, or ServerTimestamp) — and still no Sender pointer.
+        err = qi.UnsupportedDataFrameShapeError(
+            'unsupported frame',
+            [{'column': 'ts', 'target': 'designated timestamp',
+              'reason': 'cannot contain timestamps before the Unix epoch.'}])
+        text = str(err)
+        self.assertIn("column 'ts':", text)
+        self.assertIn("at='<column>'", text)
+        self.assertIn('at=ServerTimestamp', text)
+        self.assertNotIn('Sender', text)
+
+    def test_unsupported_dataframe_shape_error_without_failures_is_verbatim(self):
+        # A message-only rejection (e.g. a scalar `at`) must stay verbatim.
+        err = qi.UnsupportedDataFrameShapeError('scalar at not supported')
+        self.assertEqual(str(err), 'scalar at not supported')
+        self.assertEqual(err.column_failures, ())
 
     def test_client_from_conf_rejects_non_qwp_websocket(self):
         with self.assertRaisesRegex(

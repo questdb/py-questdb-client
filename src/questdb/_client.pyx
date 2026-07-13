@@ -33,6 +33,8 @@ API for fast data ingestion into QuestDB.
 __all__ = [
     'Buffer',
     'Client',
+    'ConnectionEvent',
+    'ConnectionEventKind',
     'QuestDBError',
     'QuestDBErrorCode',
     'QuestDBServerRejectionError',
@@ -44,6 +46,8 @@ __all__ = [
     'QwpWsErrorPolicy',
     'QwpWsProgress',
     'SenderTransaction',
+    'ServerInfo',
+    'ServerRole',
     'ServerTimestamp',
     'ServerTimestampType',
     'TimestampMicros',
@@ -254,13 +258,53 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     """
     A DataFrame shape is not supported by the optimized columnar client path.
 
-    The existing ``Sender.dataframe(...)`` row path may still support the
-    frame. ``column_failures`` carries structured per-column rejection details
-    where available.
+    ``column_failures`` carries structured per-column rejection details where
+    available; each is a ``dict`` with ``column`` (name or ``None`` for a
+    whole-frame issue), ``target``, ``source_code``, and ``reason``. The same
+    per-column reasons are also folded into ``str(exc)`` so a bare
+    ``print(exc)`` explains *why* the frame was rejected, and — when the
+    designated timestamp is at fault — how to fix it on
+    :meth:`Client.dataframe` (name a valid timestamp column, or pass
+    ``ServerTimestamp``).
     """
     def __init__(self, msg, column_failures=None):
-        super().__init__(QuestDBErrorCode.BadDataFrame, msg)
         self.column_failures = tuple(column_failures or ())
+        super().__init__(
+            QuestDBErrorCode.BadDataFrame,
+            _format_unsupported_dataframe_msg(msg, self.column_failures))
+
+
+cdef str _format_unsupported_dataframe_msg(str msg, tuple column_failures):
+    # Surface the per-column reasons (otherwise stranded on the
+    # `.column_failures` attribute) so a plain `str(exc)` says what to fix
+    # instead of a bare "columnar v1". When the designated timestamp is the
+    # problem, point at the two Client-side remedies (name a valid column,
+    # or let the server stamp) — keeping the user on Client.dataframe()
+    # rather than steering them off to the row path.
+    if not column_failures:
+        return msg
+    cdef list lines = [msg]
+    cdef object failure, column, reason
+    cdef bint ts_related = False
+    for failure in column_failures:
+        if isinstance(failure, dict):
+            column = failure.get('column')
+            reason = failure.get('reason', failure)
+            if (failure.get('target') == 'designated timestamp'
+                    or 'ServerTimestamp' in str(reason)):
+                ts_related = True
+        else:
+            column, reason = None, failure
+        if column is not None:
+            lines.append(f'  - column {column!r}: {reason}')
+        else:
+            lines.append(f'  - {reason}')
+    if ts_related:
+        lines.append(
+            "  For the designated timestamp, name a valid timestamp column "
+            "with at='<column>', or pass at=ServerTimestamp to have the "
+            "server assign each row's timestamp on arrival.")
+    return '\n'.join(lines)
 
 
 cdef inline object c_err_code_to_py(line_sender_error_code code):
@@ -2065,6 +2109,127 @@ class QwpWsError:
     to_fsn: int
 
 
+class ConnectionEventKind(TaggedEnum):
+    """
+    Connection-state transitions observed by the ingress connection pool.
+    """
+    #: First successful connect of the pool's lifetime.
+    Connected = ('connected', 0)
+    #: An active wire connection died.
+    Disconnected = ('disconnected', 1)
+    #: Reconnect succeeded against the same endpoint after a failure.
+    Reconnected = ('reconnected', 2)
+    #: Reconnect succeeded against a different endpoint.
+    FailedOver = ('failed_over', 3)
+    #: One endpoint connect/upgrade attempt failed; the walk moves on.
+    EndpointAttemptFailed = ('endpoint_attempt_failed', 4)
+    #: Every configured endpoint was attempted and none accepted.
+    AllEndpointsUnreachable = ('all_endpoints_unreachable', 5)
+    #: Terminal: the server rejected credentials.
+    AuthFailed = ('auth_failed', 6)
+
+
+@dataclass(frozen=True)
+class ConnectionEvent:
+    """
+    One connection-state transition, delivered to the
+    ``connection_listener`` registered via :meth:`Client.from_conf`.
+
+    Listeners run on a dedicated dispatcher thread — never on an I/O or
+    caller thread — fed by a bounded inbox with a drop-oldest overflow
+    policy, so a slow listener cannot stall ingest or reconnects.
+    Exceptions raised by the listener are logged and swallowed.
+    """
+    kind: ConnectionEventKind
+    host: Optional[str]
+    port: Optional[str]
+    #: For :attr:`ConnectionEventKind.FailedOver`, the previously-active
+    #: endpoint.
+    previous_host: Optional[str]
+    previous_port: Optional[str]
+    #: Monotonic connect-attempt counter at the time the event fired.
+    attempt_number: Optional[int]
+    cause_code: Optional[QuestDBErrorCode]
+    cause_msg: Optional[str]
+    #: Wall-clock time of the event, milliseconds since the Unix epoch.
+    timestamp_millis: int
+
+
+cdef inline object _conn_event_str(const char* buf, size_t buf_len):
+    if buf == NULL:
+        return None
+    return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len)
+
+
+cdef void _connection_event_trampoline(
+        void* user_data,
+        const questdb_connection_event* event) noexcept with gil:
+    cdef object listener = <object>user_data
+    kind = ConnectionEventKind.Connected
+    for entry in ConnectionEventKind:
+        if entry.c_value == <int>event.kind:
+            kind = entry
+            break
+    try:
+        listener(ConnectionEvent(
+            kind=kind,
+            host=_conn_event_str(event.host, event.host_len),
+            port=_conn_event_str(event.port, event.port_len),
+            previous_host=_conn_event_str(
+                event.previous_host, event.previous_host_len),
+            previous_port=_conn_event_str(
+                event.previous_port, event.previous_port_len),
+            attempt_number=event.attempt_number if event.has_attempt else None,
+            cause_code=c_err_code_to_py(event.cause_code)
+                if event.has_cause else None,
+            cause_msg=_conn_event_str(event.cause_msg, event.cause_msg_len)
+                if event.has_cause else None,
+            timestamp_millis=event.timestamp_millis))
+    except BaseException:
+        logging.getLogger("questdb").exception(
+            "connection event listener failed")
+
+
+class ServerRole(TaggedEnum):
+    """
+    Cluster role advertised by the server's ``SERVER_INFO`` handshake.
+    """
+    Standalone = ('standalone', 0)
+    Primary = ('primary', 1)
+    Replica = ('replica', 2)
+    PrimaryCatchup = ('primary_catchup', 3)
+    #: Forward-compat: a role byte this client doesn't recognise. The raw
+    #: byte is available via :attr:`ServerInfo.role_byte`.
+    Other = ('other', 0xFF)
+
+
+@dataclass(frozen=True)
+class ServerInfo:
+    """
+    Snapshot of the server's ``SERVER_INFO`` handshake, as advertised on
+    the connection :meth:`Client.server_info` sampled. Fields mirror the
+    Rust reader's ``ServerInfo``.
+    """
+    #: Cluster role; :attr:`ServerRole.Other` for unrecognised role bytes.
+    role: ServerRole
+    #: Raw wire role byte; disambiguates ``role == ServerRole.Other``.
+    role_byte: int
+    #: Monotonic generation counter; increases on failover/role
+    #: transitions, useful for fencing replayed batches.
+    epoch: int
+    #: Bitset of QWP capability flags negotiated with the server.
+    capabilities: int
+    #: Server wall-clock at handshake, nanoseconds since the Unix epoch
+    #: (UTC). Useful for clock-skew detection.
+    server_wall_ns: int
+    cluster_id: str
+    node_id: str
+    #: Zone identifier, present iff the server advertised ``CAP_ZONE`` in
+    #: ``capabilities``; ``None`` otherwise. Compared case-insensitively
+    #: against the client's ``zone=`` connect-string knob during failover.
+    zone_id: Optional[str]
+
+
 def _qwp_ws_error_from_raw(raw):
     if raw is None or isinstance(raw, QwpWsError):
         return raw
@@ -2458,9 +2623,13 @@ cdef object _dataframe_columnar_plan_failures(
         failures.append(_dataframe_columnar_global_failure(
             'v1 requires a fixed table_name; table_name_col is not supported.'))
 
-    if plan.at_value != _AT_IS_SET_BY_COLUMN:
+    if (plan.at_value != _AT_IS_SET_BY_COLUMN
+            and plan.at_value != _AT_IS_SERVER_NOW
+            and plan.at_value < 0):
         failures.append(_dataframe_columnar_global_failure(
-            'v1 requires at to be a non-null DataFrame timestamp column.'))
+            'v1 requires at to be a non-null DataFrame timestamp column, '
+            'a fixed timestamp shared by every row, or the explicit '
+            'ServerTimestamp sentinel.'))
 
     for col_index in range(plan.col_count):
         col = &plan.cols.d[col_index]
@@ -2692,6 +2861,69 @@ cdef void_int _dataframe_columnar_validate_plan(
         raise UnsupportedDataFrameShapeError(
             'DataFrame is not supported by Client.dataframe() columnar v1.',
             failures)
+
+
+cdef object _dataframe_columnar_ndarray_col_to_arrow(object df, col_t* col):
+    cdef object series = df.iloc[:, col.setup.orig_index]
+    cdef object cell
+    cdef PyArrayObject* arr
+    cdef bint nested = False
+    cdef object col_name = df.columns[col.setup.orig_index]
+    for cell in series:
+        if _dataframe_is_null_pyobj(<PyObject*>cell):
+            continue
+        if not PyArray_CheckExact(<PyObject*>cell):
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {col_name!r}: mixed object cells; expected '
+                f'every non-null cell to be a numpy array, got '
+                f'{_fqn(type(cell))}.')
+        arr = <PyArrayObject*>cell
+        if PyArray_TYPE(arr) != NPY_DOUBLE:
+            raise QuestDBError(
+                QuestDBErrorCode.ArrayWriteToBufferError,
+                f'Bad column {col_name!r}: Only float64 numpy arrays are '
+                f'supported, got dtype: {cell.dtype}')
+        if PyArray_NDIM(arr) > 1:
+            nested = True
+    if not nested:
+        return _PYARROW.Array.from_pandas(series)
+    # pyarrow cannot convert multi-dimensional ndarray cells directly
+    # ("Can only convert 1-dimensional array values"); nested python
+    # lists infer to the equivalent nested list<...<double>>.
+    return _PYARROW.array([
+        None if _dataframe_is_null_pyobj(<PyObject*>cell) else cell.tolist()
+        for cell in series])
+
+
+cdef void_int _dataframe_columnar_promote_ndarray_cols(
+        object df,
+        dataframe_plan_t* plan) except -1:
+    # Columns of object-dtype numpy-array cells reach this planner as the
+    # row-oriented `arr_f64_numpyobj` source, which the columnar wire
+    # cannot emit directly. Re-export each as an Arrow list<double> array
+    # and let the Rust Arrow importer classify it as ARRAY(DOUBLE) — the
+    # same route capsule-path list columns take.
+    cdef size_t col_index
+    cdef col_t* col
+    cdef ArrowArray* chunk
+    cdef object arrow_array
+    for col_index in range(plan.col_count):
+        col = &plan.cols.d[col_index]
+        if col.setup.source != col_source_t.col_source_arr_f64_numpyobj:
+            continue
+        _dataframe_require_pyarrow()
+        arrow_array = _dataframe_columnar_ndarray_col_to_arrow(df, col)
+        chunk = &col.setup.chunks.chunks[0]
+        if chunk.release != NULL:
+            chunk.release(chunk)
+        memset(chunk, 0, sizeof(ArrowArray))
+        if col.setup.arrow_schema.release != NULL:
+            col.setup.arrow_schema.release(&col.setup.arrow_schema)
+        arrow_array._export_to_c(
+            <uintptr_t>chunk, <uintptr_t>&col.setup.arrow_schema)
+        col.setup.source = col_source_t.col_source_arrow_passthrough
+        col.setup.target = col_target_t.col_target_column_arrow
 
 
 cdef bint _is_pyobj_source(col_source_t source) noexcept nogil:
@@ -3854,22 +4086,36 @@ cdef object _dataframe_normalize_nullable(object df):
     _dataframe_may_import_deps()
     cdef object masked_base = _pandas_masked_dtype()
     convert = []
-    for name, dtype in zip(df.columns, df.dtypes):
+    for pos, dtype in enumerate(df.dtypes):
         # pyarrow-backed strings keep their Arrow buffers (resolved as
         # str_utf8_arrow), so an all-null column survives as a null VARCHAR
         # instead of collapsing to a skipped all-null object column.
         if isinstance(dtype, masked_base):
-            convert.append(name)
+            convert.append(pos)
         elif (isinstance(dtype, _PANDAS.StringDtype)
                 and getattr(dtype, 'storage', None) != 'pyarrow'):
-            convert.append(name)
+            convert.append(pos)
     if not convert:
         return df
     out = df.copy(deep=False)
-    for name in convert:
-        out[name] = df[name].astype(object)
+    for pos in convert:
+        _dataframe_set_column(out, df, pos, df.iloc[:, pos].astype(object))
     out.attrs = dict(df.attrs)
     return out
+
+
+cdef void_int _dataframe_set_column(
+        object out, object df, object pos, object value) except -1:
+    # `out[name] = value` trips pandas' chained-assignment refcount
+    # heuristic when called from Cython (the shallow copy looks like a
+    # temporary), spamming FutureWarnings under pandas >= 2.2 warn-CoW
+    # and erroring under `-W error`. Positional `isetitem` performs the
+    # same block replacement without the heuristic; pandas < 1.5 lacks
+    # it but also lacks the warning, so plain setitem stays correct.
+    if hasattr(out, 'isetitem'):
+        out.isetitem(pos, value)
+    else:
+        out[df.columns[pos]] = value
 
 
 cdef object _dataframe_normalize_at_timestamp(object df, object at):
@@ -3901,8 +4147,13 @@ cdef object _dataframe_normalize_at_timestamp(object df, object at):
     if not isinstance(dtype, _PANDAS.DatetimeTZDtype) or dtype.unit not in ('s', 'ms'):
         return df
     new_dtype = _PANDAS.DatetimeTZDtype('us', dtype.tz)
+    pos = df.columns.get_loc(at_name)
+    if getattr(pos, '__index__', None) is None:
+        # Duplicate at-column names: leave the frame for the planner
+        # to reject.
+        return df
     out = df.copy(deep=False)
-    out[at_name] = df[at_name].astype(new_dtype)
+    _dataframe_set_column(out, df, pos, df.iloc[:, pos].astype(new_dtype))
     out.attrs = dict(df.attrs)
     return out
 
@@ -3964,6 +4215,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
     cdef size_t field_count = 0
     cdef pyobj_built_t* prebuilt = NULL
     cdef pyobj_built_t* at_prebuilt = NULL
+    cdef line_sender_error* err = NULL
 
     for col_index in range(plan.col_count):
         col = &plan.cols.d[col_index]
@@ -3997,6 +4249,18 @@ cdef void_int _dataframe_columnar_populate_chunk(
     if field_count == 0:
         raise RuntimeError(
             'Validated columnar plan has no non-timestamp data columns.')
+    if plan.at_value == _AT_IS_SERVER_NOW:
+        # Explicit `at=ServerTimestamp` opt-in: the frame carries no
+        # designated timestamp column; the server stamps rows on arrival.
+        if not column_sender_chunk_at_now(chunk, &err):
+            raise c_err_to_py(err)
+        return 0
+    if plan.at_value >= 0:
+        # Fixed scalar designated timestamp shared by every row.
+        if not column_sender_chunk_at_scalar_nanos(
+                chunk, plan.at_value, &err):
+            raise c_err_to_py(err)
+        return 0
     if at_col == NULL:
         raise RuntimeError('Validated columnar plan has no timestamp column.')
     if plan.pyobj_built != NULL:
@@ -4108,6 +4372,8 @@ cdef int _arrow_flush_once(
         ArrowArray* array,
         ArrowSchema* schema,
         line_sender_column_name* ts_column,
+        bint at_scalar_set,
+        int64_t at_scalar_nanos,
         const column_sender_arrow_override* overrides,
         size_t overrides_len,
         line_sender_error** err) except -1:
@@ -4141,6 +4407,8 @@ cdef void_int _dataframe_arrow_flush_batch(
         ArrowArray* array,
         ArrowSchema* schema,
         line_sender_column_name* ts_column,
+        bint at_scalar_set,
+        int64_t at_scalar_nanos,
         const column_sender_arrow_override* overrides,
         size_t overrides_len,
         bint retry_after_sync,
@@ -4151,6 +4419,7 @@ cdef void_int _dataframe_arrow_flush_batch(
 
     if _arrow_flush_once(
             conn, table, array, schema, ts_column,
+            at_scalar_set, at_scalar_nanos,
             overrides, overrides_len, &err):
         return 0
 
@@ -4175,6 +4444,7 @@ cdef void_int _dataframe_arrow_flush_batch(
         deferred_since_sync[0] = 0
         if _arrow_flush_once(
                 conn, table, array, schema, ts_column,
+                at_scalar_set, at_scalar_nanos,
                 overrides, overrides_len, &err):
             return 0
 
@@ -4337,7 +4607,7 @@ def _bench_dataframe_flush_arrow_batch(
             for iteration in range(iterations):
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
-                    &c_schema, NULL, 0, &any_flushed,
+                    False, 0, &c_schema, NULL, 0, &any_flushed,
                     &deferred_since_sync, &committed_prefix)
             if any_flushed:
                 _dataframe_columnar_sync(conn)
@@ -4509,6 +4779,8 @@ cdef void_int _capsule_consume_stream(
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
+        bint at_scalar_set,
+        int64_t at_scalar_nanos,
         ArrowSchema* c_schema,
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
@@ -4563,6 +4835,7 @@ cdef void_int _capsule_consume_stream(
                 deferred_since_sync[0] = 0
             _dataframe_arrow_flush_batch(
                 conn, c_table_name, &batch, c_schema, c_ts_column_ptr,
+                at_scalar_set, at_scalar_nanos,
                 c_overrides, c_overrides_len,
                 deferred_since_sync[0] > 0, committed_prefix,
                 deferred_since_sync)
@@ -5086,6 +5359,8 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef column_sender_arrow_override* c_overrides = NULL
     cdef size_t c_overrides_len = 0
     cdef bint at_is_column = False
+    cdef bint at_scalar_set = False
+    cdef int64_t at_scalar_nanos = 0
     cdef size_t i
     cdef object name_bytes
     cdef int kind_int
@@ -5126,6 +5401,12 @@ cdef bint _dataframe_client_try_capsule_path(
             'table_name must be str for Arrow-native DataFrame input.')
     if at is None or isinstance(at, ServerTimestampType):
         at_is_column = False
+    elif isinstance(at, TimestampNanos):
+        at_scalar_set = True
+        at_scalar_nanos = (<TimestampNanos>at)._value
+    elif isinstance(at, datetime.datetime):
+        at_scalar_set = True
+        at_scalar_nanos = datetime_to_nanos(at)
     elif isinstance(at, str):
         at_is_column = True
     elif isinstance(at, int) and not isinstance(at, bool):
@@ -5133,8 +5414,9 @@ cdef bint _dataframe_client_try_capsule_path(
         at_is_column = True
     else:
         raise TypeError(
-            'at must be a column name str, int index, ServerTimestamp, or '
-            'None for Arrow-native DataFrame input.')
+            'at must be a column name str, int index, TimestampNanos, '
+            'datetime, ServerTimestamp, or None for Arrow-native DataFrame '
+            'input.')
 
     # An empty frame is a no-op: emit nothing and skip symbol-shape
     # validation, which is moot with zero rows.
@@ -5186,6 +5468,7 @@ cdef bint _dataframe_client_try_capsule_path(
             if not can_slice:
                 _capsule_consume_stream_with_hint(
                     conn, sliceable, c_table_name, c_ts_column_ptr,
+                    at_scalar_set, at_scalar_nanos,
                     &c_schema, c_overrides, c_overrides_len,
                     &any_flushed, &deferred_since_sync,
                     committed_prefix, max_rows_per_batch, False)
@@ -5199,6 +5482,7 @@ cdef bint _dataframe_client_try_capsule_path(
                         sliceable, offset, chunk_rows)
                     _capsule_consume_stream_with_hint(
                         conn, row_slice, c_table_name, c_ts_column_ptr,
+                        at_scalar_set, at_scalar_nanos,
                         &c_schema, c_overrides, c_overrides_len,
                         &any_flushed, &deferred_since_sync,
                         committed_prefix, max_rows_per_batch, True)
@@ -5231,6 +5515,8 @@ cdef void_int _capsule_consume_stream_with_hint(
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
+        bint at_scalar_set,
+        int64_t at_scalar_nanos,
         ArrowSchema* c_schema,
         const column_sender_arrow_override* c_overrides,
         size_t c_overrides_len,
@@ -5242,7 +5528,8 @@ cdef void_int _capsule_consume_stream_with_hint(
     cdef str hint
     try:
         _capsule_consume_stream(
-            conn, stream_owner, c_table_name, c_ts_column_ptr, c_schema,
+            conn, stream_owner, c_table_name, c_ts_column_ptr,
+            at_scalar_set, at_scalar_nanos, c_schema,
             c_overrides, c_overrides_len, any_flushed,
             deferred_since_sync, committed_prefix)
     except QuestDBError as exc:
@@ -5297,12 +5584,14 @@ cdef class Client:
     cdef object _conf_str
     cdef object _state_cond
     cdef size_t _active_uses
+    cdef object _connection_listener
 
     def __cinit__(self):
         self._db = NULL
         self._conf_str = None
         self._state_cond = threading.Condition(threading.RLock())
         self._active_uses = 0
+        self._connection_listener = None
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
@@ -5330,7 +5619,11 @@ cdef class Client:
             self._state_cond.release()
 
     @staticmethod
-    def from_conf(str conf_str):
+    def from_conf(
+            str conf_str,
+            *,
+            connection_listener=None,
+            connection_event_inbox_capacity: int = 0):
         """
         Construct a pooled client from a QWP/WebSocket configuration string.
 
@@ -5344,6 +5637,18 @@ cdef class Client:
         ``request_timeout`` bounds each commit's no-progress ack wait;
         ``request_timeout=0`` disables that deadline, so a stalled but
         connected server can block :meth:`dataframe` indefinitely.
+
+        ``connection_listener``, when set, is a callable receiving one
+        :class:`ConnectionEvent` per connection-state transition of the
+        pool's ingress connections (initial connect, per-endpoint attempt
+        failures, failover, terminal auth rejection). It runs on a
+        dedicated dispatcher thread fed by a bounded inbox
+        (``connection_event_inbox_capacity``; ``0`` selects the default
+        of 64) with a drop-oldest overflow policy, so a slow listener
+        cannot stall ingest or reconnects. Exceptions it raises are
+        logged and swallowed. Dropped/delivered totals are available via
+        :attr:`connection_events_dropped` /
+        :attr:`connection_events_delivered`.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
@@ -5364,12 +5669,30 @@ cdef class Client:
                     QuestDBErrorCode.ConfigError,
                     'Missing "addr" parameter in config string')
 
+            if connection_listener is not None and not callable(
+                    connection_listener):
+                raise TypeError(
+                    '"connection_listener" must be callable or None, '
+                    f'not {_fqn(type(connection_listener))}')
             str_to_utf8(b, <PyObject*>conf_str, &c_conf)
             _ensure_doesnt_have_gil(&gs)
             client._db = questdb_db_connect(c_conf.buf, c_conf.len, &err)
             _ensure_has_gil(&gs)
             if client._db == NULL:
                 raise c_err_to_py(err)
+            if connection_listener is not None:
+                # The Client owns the only strong reference the trampoline
+                # relies on; it lives until close() frees the pool, which
+                # stops the dispatcher before the reference is cleared.
+                client._connection_listener = connection_listener
+                if not questdb_db_set_connection_event_handler(
+                        client._db,
+                        _connection_event_trampoline,
+                        <void*>client._connection_listener,
+                        <size_t>connection_event_inbox_capacity,
+                        &err):
+                    client._connection_listener = None
+                    raise c_err_to_py(err)
             client._conf_str = conf_str
             return client
         finally:
@@ -5394,7 +5717,7 @@ cdef class Client:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str],
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
             schema_overrides: Optional[Dict[str, object]] = None):
         """
@@ -5433,17 +5756,13 @@ cdef class Client:
           exporters, wrapped into a one-batch ``pa.Table``).
 
         ``at`` names the designated timestamp column (by name or index).
-        Alternatively, pass the explicit :data:`ServerTimestamp` sentinel
-        to let the server assign each row's timestamp on arrival — an
-        opt-in mirroring the row API, since server-assigned timestamps
-        defeat ``DEDUP UPSERT KEYS`` on resubmission. ``ServerTimestamp``
-        is currently supported for Arrow-backed input only (polars /
-        pyarrow / ``pd.ArrowDtype`` frames); NumPy-backed pandas frames
-        route through the chunk planner, whose wire encoding requires a
-        designated timestamp column. Scalar timestamps (``TimestampNanos``
-        / ``datetime``) are not supported on the columnar path: the
-        timestamp is a column of the frame, so broadcast a constant
-        column instead.
+        Alternatively pass a fixed ``TimestampNanos`` / ``datetime``
+        shared by every row (encoded as a repeated constant; resubmission
+        stays idempotent under ``DEDUP UPSERT KEYS``), or the explicit
+        :data:`ServerTimestamp` sentinel to let the server assign each
+        row's timestamp on arrival — an opt-in mirroring the row API,
+        since server-assigned timestamps defeat ``DEDUP UPSERT KEYS`` on
+        resubmission.
 
         Supports a column-QWP v1 subset: fixed ``table_name``, non-null
         designated timestamp column, and the following per-column dtypes:
@@ -5472,6 +5791,12 @@ cdef class Client:
           (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18). Plain
           object-dtype columns of ``decimal.Decimal`` are not accepted on the
           columnar path; back them with an Arrow decimal type instead.
+        - **Array**: Arrow ``pa.list_`` / ``pa.large_list`` /
+          ``pa.fixed_size_list`` columns with a ``float64`` leaf (nested for
+          multi-dimensional), and object-dtype columns of ``float64``
+          ``numpy.ndarray`` cells (any rank; requires pyarrow). Both land as
+          QuestDB ``ARRAY(DOUBLE)``. Null rows are allowed; null *elements*
+          inside an array are not.
         - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
           extension type. Bytes are forwarded verbatim as **QuestDB's
           UUID wire layout** ("bytes 0..8 lo half LE, bytes 8..16 hi
@@ -5505,14 +5830,21 @@ cdef class Client:
         try:
             if max_rows_per_batch <= 0:
                 raise ValueError('max_rows_per_batch must be >= 1.')
-            if not isinstance(at, (str, ServerTimestampType)) and not (
+            if isinstance(at, datetime.datetime) and at.timestamp() < 0:
+                raise ValueError(
+                    'Bad argument `at`: Cannot use a datetime before the '
+                    'Unix epoch (1970-01-01 00:00:00).')
+            if not isinstance(
+                    at,
+                    (str, ServerTimestampType, TimestampNanos,
+                     datetime.datetime)) and not (
                     isinstance(at, int) and not isinstance(at, bool)):
                 raise UnsupportedDataFrameShapeError(
-                    'Client.dataframe requires `at` to name the designated '
-                    'timestamp column (by name or index), or the explicit '
-                    '`ServerTimestamp` sentinel to let the server assign '
-                    'each row\'s timestamp on arrival; scalar timestamps '
-                    'are not supported on the columnar path.')
+                    'Client.dataframe requires `at` to be the designated '
+                    'timestamp column (by name or index), a fixed timestamp '
+                    'shared by every row (TimestampNanos / datetime), or '
+                    'the explicit `ServerTimestamp` sentinel to let the '
+                    'server assign each row\'s timestamp on arrival.')
             # Overall failover deadline, matching the row sender's
             # `reconnect_max_duration` budget.
             deadline = time.monotonic() + \
@@ -5584,18 +5916,6 @@ cdef class Client:
         cdef size_t row_offset
         cdef size_t chunk_rows
         try:
-            if isinstance(at, ServerTimestampType):
-                # The chunk wire encoder requires a designated timestamp
-                # column; only the Arrow batch route has a server-stamped
-                # (`at_now`) entry point.
-                raise UnsupportedDataFrameShapeError(
-                    '`at=ServerTimestamp` is not supported for NumPy-backed '
-                    'pandas frames on the columnar path: the chunk wire '
-                    'encoding requires a designated timestamp column. '
-                    'Either convert the frame to Arrow-backed input (e.g. '
-                    'pyarrow.Table.from_pandas(df) or '
-                    "df.convert_dtypes(dtype_backend='pyarrow')), or use "
-                    'the row-oriented Sender.dataframe instead.')
             df = _dataframe_normalize_nullable(df)
             df = _dataframe_normalize_at_timestamp(df, at)
             _dataframe_plan_build(
@@ -5611,6 +5931,7 @@ cdef class Client:
                 return self
 
             _dataframe_apply_roundtrip_overrides(df, plan)
+            _dataframe_columnar_promote_ndarray_cols(df, plan)
             _dataframe_columnar_validate_plan(df, plan)
             _dataframe_columnar_prebuild_pyobj(df, plan)
             rows_per_chunk = _dataframe_columnar_rows_per_chunk(
@@ -5724,6 +6045,57 @@ cdef class Client:
             self._end_db_use()
         return QueryResult(cursor_handle)
 
+    def server_info(self) -> ServerInfo:
+        """
+        Return a :class:`ServerInfo` snapshot of the server's
+        ``SERVER_INFO`` handshake: cluster role, failover epoch,
+        negotiated capabilities, handshake wall-clock, and cluster/node
+        identifiers.
+
+        A reader is borrowed from the connection pool (opening one on
+        first use, exactly like :meth:`query`), sampled, and returned to
+        the pool. The snapshot describes that connection at its last
+        handshake; a later failover is reflected only in snapshots taken
+        after it.
+        """
+        cdef _ReaderHandle reader_handle
+        cdef questdb_db* db
+        db = self._begin_db_use('server_info')
+        try:
+            reader_handle = _borrow_reader_from_pool(db)
+            info = _snapshot_server_info(reader_handle)
+            # No cursor was opened, so the reader is pristine: return it
+            # to the pool instead of the default drop-on-dealloc.
+            reader_handle._must_close = False
+            reader_handle._close()
+        finally:
+            self._end_db_use()
+        return info
+
+    @property
+    def connection_events_dropped(self) -> int:
+        """
+        Total connection events discarded by the listener inbox's
+        drop-oldest policy. ``0`` when no listener is registered.
+        """
+        cdef questdb_db* db = self._begin_db_use('connection_events_dropped')
+        try:
+            return questdb_db_connection_events_dropped(db)
+        finally:
+            self._end_db_use()
+
+    @property
+    def connection_events_delivered(self) -> int:
+        """
+        Total connection events delivered to the listener. ``0`` when no
+        listener is registered.
+        """
+        cdef questdb_db* db = self._begin_db_use('connection_events_delivered')
+        try:
+            return questdb_db_connection_events_delivered(db)
+        finally:
+            self._end_db_use()
+
     def reap_idle(self):
         """
         Manually reap idle above-pool-size connections.
@@ -5799,6 +6171,7 @@ cdef class Sender:
     cdef line_sender* _impl
     cdef Buffer _buffer
     cdef object _qwp_ws_error_handler
+    cdef object _connection_listener
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
@@ -5834,6 +6207,8 @@ cdef class Sender:
             object protocol_version,
             object qwp_ws_progress,
             object qwp_ws_error_handler,
+            object connection_listener,
+            object connection_event_inbox_capacity,
             object init_buf_size,
             object max_name_len) except -1:
         """
@@ -5945,6 +6320,31 @@ cdef class Sender:
                     <void*>self._qwp_ws_error_handler,
                     &err):
                 self._qwp_ws_error_handler = None
+                raise c_err_to_py(err)
+
+        if connection_listener is not None and not callable(
+                connection_listener):
+            raise TypeError(
+                '"connection_listener" must be callable or None, '
+                f'not {_fqn(type(connection_listener))}')
+        if connection_listener is not None and not _is_qwp_ws_protocol(
+                self._c_protocol):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'connection_listener is only supported for QWP/WebSocket '
+                'senders.')
+        if connection_listener is not None:
+            # The Sender owns the only strong reference the trampoline
+            # relies on; the dispatcher joins its thread when the sender
+            # closes, so no delivery outlives this reference.
+            self._connection_listener = connection_listener
+            if not line_sender_opts_connection_event_handler(
+                    self._opts,
+                    _connection_event_trampoline,
+                    <void*>self._connection_listener,
+                    <size_t>(connection_event_inbox_capacity or 0),
+                    &err):
+                self._connection_listener = None
                 raise c_err_to_py(err)
 
         if username is not None:
@@ -6165,6 +6565,8 @@ cdef class Sender:
             object multicast_ttl=None,  # Default 1 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
             object qwp_ws_error_handler=None,
+            object connection_listener=None,
+            object connection_event_inbox_capacity=0,
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -6216,6 +6618,8 @@ cdef class Sender:
                 protocol_version,
                 qwp_ws_progress,
                 qwp_ws_error_handler,
+                connection_listener,
+                connection_event_inbox_capacity,
                 init_buf_size,
                 max_name_len)
         finally:
@@ -6249,6 +6653,8 @@ cdef class Sender:
             object multicast_ttl=None,  # Default 1 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
             object qwp_ws_error_handler=None,
+            object connection_listener=None,
+            object connection_event_inbox_capacity=0,
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -6389,6 +6795,8 @@ cdef class Sender:
                 params.get('protocol_version'),
                 params.get('qwp_ws_progress'),
                 qwp_ws_error_handler,
+                connection_listener,
+                connection_event_inbox_capacity,
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
             
@@ -6423,6 +6831,8 @@ cdef class Sender:
             object multicast_ttl=None,  # Default 1 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
             object qwp_ws_error_handler=None,
+            object connection_listener=None,
+            object connection_event_inbox_capacity=0,
             object protocol_version=None,  # Default auto
             object init_buf_size=None,  # 64KiB
             object max_name_len=None):  # 127
@@ -6469,6 +6879,8 @@ cdef class Sender:
             multicast_ttl=multicast_ttl,
             qwp_ws_progress=qwp_ws_progress,
             qwp_ws_error_handler=qwp_ws_error_handler,
+            connection_listener=connection_listener,
+            connection_event_inbox_capacity=connection_event_inbox_capacity,
             protocol_version=protocol_version,
             init_buf_size=init_buf_size,
             max_name_len=max_name_len)
@@ -7129,6 +7541,26 @@ cdef class Sender:
         if not line_sender_qwpws_errors_dropped(self._impl, &dropped, &err):
             raise c_err_to_py(err)
         return dropped
+
+    @property
+    def connection_events_dropped(self) -> int:
+        """
+        Total connection events discarded by the listener inbox's
+        drop-oldest policy. ``0`` when no listener is registered.
+        """
+        if self._impl == NULL:
+            return 0
+        return line_sender_connection_events_dropped(self._impl)
+
+    @property
+    def connection_events_delivered(self) -> int:
+        """
+        Total connection events delivered to the listener. ``0`` when no
+        listener is registered.
+        """
+        if self._impl == NULL:
+            return 0
+        return line_sender_connection_events_delivered(self._impl)
 
     def close_drain(self):
         """
