@@ -5394,7 +5394,7 @@ cdef class Client:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[int, str],
+            at: Union[ServerTimestampType, int, str],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
             schema_overrides: Optional[Dict[str, object]] = None):
         """
@@ -5431,6 +5431,19 @@ cdef class Client:
           ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
+
+        ``at`` names the designated timestamp column (by name or index).
+        Alternatively, pass the explicit :data:`ServerTimestamp` sentinel
+        to let the server assign each row's timestamp on arrival — an
+        opt-in mirroring the row API, since server-assigned timestamps
+        defeat ``DEDUP UPSERT KEYS`` on resubmission. ``ServerTimestamp``
+        is currently supported for Arrow-backed input only (polars /
+        pyarrow / ``pd.ArrowDtype`` frames); NumPy-backed pandas frames
+        route through the chunk planner, whose wire encoding requires a
+        designated timestamp column. Scalar timestamps (``TimestampNanos``
+        / ``datetime``) are not supported on the columnar path: the
+        timestamp is a column of the frame, so broadcast a constant
+        column instead.
 
         Supports a column-QWP v1 subset: fixed ``table_name``, non-null
         designated timestamp column, and the following per-column dtypes:
@@ -5492,11 +5505,13 @@ cdef class Client:
         try:
             if max_rows_per_batch <= 0:
                 raise ValueError('max_rows_per_batch must be >= 1.')
-            if not isinstance(at, str) and not (
+            if not isinstance(at, (str, ServerTimestampType)) and not (
                     isinstance(at, int) and not isinstance(at, bool)):
                 raise UnsupportedDataFrameShapeError(
                     'Client.dataframe requires `at` to name the designated '
-                    'timestamp column (by name or index); scalar timestamps '
+                    'timestamp column (by name or index), or the explicit '
+                    '`ServerTimestamp` sentinel to let the server assign '
+                    'each row\'s timestamp on arrival; scalar timestamps '
                     'are not supported on the columnar path.')
             # Overall failover deadline, matching the row sender's
             # `reconnect_max_duration` budget.
@@ -5569,6 +5584,18 @@ cdef class Client:
         cdef size_t row_offset
         cdef size_t chunk_rows
         try:
+            if isinstance(at, ServerTimestampType):
+                # The chunk wire encoder requires a designated timestamp
+                # column; only the Arrow batch route has a server-stamped
+                # (`at_now`) entry point.
+                raise UnsupportedDataFrameShapeError(
+                    '`at=ServerTimestamp` is not supported for NumPy-backed '
+                    'pandas frames on the columnar path: the chunk wire '
+                    'encoding requires a designated timestamp column. '
+                    'Either convert the frame to Arrow-backed input (e.g. '
+                    'pyarrow.Table.from_pandas(df) or '
+                    "df.convert_dtypes(dtype_backend='pyarrow')), or use "
+                    'the row-oriented Sender.dataframe instead.')
             df = _dataframe_normalize_nullable(df)
             df = _dataframe_normalize_at_timestamp(df, at)
             _dataframe_plan_build(

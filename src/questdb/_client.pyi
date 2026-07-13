@@ -938,12 +938,17 @@ class Client:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[int, str],
+        at: Union[ServerTimestampType, int, str],
         max_rows_per_batch: int = 16384,
         schema_overrides: Optional[Dict[str, object]] = None,
     ) -> Client:
         """
         Ingest a dataframe through the pooled columnar QWP path.
+
+        ``at`` names the designated timestamp column (by name or index),
+        or pass the explicit ``ServerTimestamp`` sentinel to let the
+        server assign each row's timestamp on arrival (Arrow-backed
+        input only).
 
         ``df`` accepts any of:
 

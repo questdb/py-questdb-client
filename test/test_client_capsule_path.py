@@ -203,6 +203,134 @@ class TestCapsulePathPolars(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
 
+class TestServerTimestampAt(unittest.TestCase):
+    """`at=ServerTimestamp` on the Arrow batch route: the frame carries no
+    designated timestamp column and the server stamps each row on arrival
+    (`flush_arrow_batch_at_now`). An explicit opt-in mirroring the row API."""
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_server_timestamp(self):
+        df = pl.DataFrame({
+            'symbol': ['ETH-USD', 'BTC-USD'],
+            'price':  [2615.54, 67234.12],
+        }, schema={'symbol': pl.Utf8, 'price': pl.Float64})
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='trades', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_pyarrow_server_timestamp(self):
+        table = pa.table({
+            'symbol': ['ETH-USD', 'BTC-USD'],
+            'price':  [2615.54, 67234.12],
+        })
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    table, table_name='trades', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_ts_column_stays_field_with_server_timestamp(self):
+        # A timestamp column in the frame is an ordinary field when the
+        # caller opts into server stamping; it must not be promoted to
+        # the designated timestamp.
+        df = pl.DataFrame({
+            'v': [1, 2],
+            'ts': [
+                datetime.datetime(2025, 1, 1),
+                datetime.datetime(2025, 1, 2),
+            ],
+        }, schema={'v': pl.Int64, 'ts': pl.Datetime('us')})
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_empty_frame_server_timestamp_is_noop(self):
+        df = pl.DataFrame({
+            'symbol': pl.Series([], dtype=pl.Utf8),
+            'price': pl.Series([], dtype=pl.Float64),
+        })
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+
+    def test_numpy_pandas_server_timestamp_rejected_with_hint(self):
+        import pandas as pd
+        df = pd.DataFrame({'sym': ['a', 'b'], 'x': [1, 2]})
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.UnsupportedDataFrameShapeError,
+                        r'NumPy-backed pandas frames.*'
+                        r'designated timestamp column'):
+                    client.dataframe(
+                        df, table_name='t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        # Rejected before anything reaches the wire.
+        self.assertEqual(stats['binary_frames'], 0)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_arrow_backed_pandas_server_timestamp(self):
+        import pandas as pd
+        df = pd.DataFrame({'sym': ['a', 'b'], 'x': [1, 2]}).convert_dtypes(
+            dtype_backend='pyarrow')
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_scalar_at_still_rejected_and_mentions_sentinel(self):
+        df = pl.DataFrame({'v': [1]}, schema={'v': pl.Int64})
+        with QwpAckServer() as server:
+            client = qi.Client.from_conf(_client_conf(server.port))
+            try:
+                for bad_at in (qi.TimestampNanos(1), None):
+                    with self.assertRaisesRegex(
+                            qi.UnsupportedDataFrameShapeError,
+                            r'`ServerTimestamp` sentinel'):
+                        client.dataframe(df, table_name='t', at=bad_at)
+            finally:
+                client.close()
+
+
 class TestSchemaOverrides(unittest.TestCase):
 
     @unittest.skipIf(pl is None, 'polars not installed')
