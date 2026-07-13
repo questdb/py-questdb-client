@@ -132,17 +132,17 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_in_doubt_split_failure_raises_without_resend(self):
-        # One 1280-row batch splits into 160 data frames under this cap.
-        # `max_in_flight=32` makes the sender exhaust its deferred window and
-        # commit near frame 33 — far before the server's close at frame 140 —
-        # so `committed_prefix` is deterministically set by the time the
-        # connection dies. (With the default 128-frame window the first commit
-        # raced the close: when the close landed while that sync exchange was
-        # still in flight, the prefix was never marked committed and the
-        # client legally resent the whole frame on a fresh connection,
-        # succeeding instead of raising.) Both the NumPy and Arrow routes
-        # must surface the in-doubt failure instead of reconnecting and
-        # resending the complete operation.
+        # One 1280-row batch splits into 160 data frames under this cap; the
+        # native split drains its 128-frame deferred window with an internal
+        # commit near frame 129, so by the server's close at frame 140 a
+        # prefix is already committed server-side. The whole flush usually
+        # survives (the remaining frames land in the socket buffer) and the
+        # failure surfaces in the trailing sync. Whether the peer reset is
+        # seen by that sync's non-blocking entry drain or by its blocking
+        # ack wait is a race — both must classify as delivery-unknown
+        # (`in_doubt`), or the client would blindly resend the operation and
+        # duplicate the committed prefix. Both the NumPy and Arrow routes
+        # must raise instead of reconnecting and resending.
         for arrow_route in (False, True):
             with self.subTest(arrow_route=arrow_route):
                 with QwpAckServer(
@@ -152,8 +152,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                     with qi.Client.from_conf(
                             _conf(
                                 server.port,
-                                reconnect_max_duration_millis=3000,
-                                max_in_flight=32)) as client:
+                                reconnect_max_duration_millis=3000)) as client:
                         with self.assertRaises(qi.QuestDBError) as raised:
                             client.dataframe(
                                 _fault_frame(1280, 64, arrow_route),
