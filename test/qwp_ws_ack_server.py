@@ -178,6 +178,7 @@ class QwpAckServer:
             response += "\r\n"
             conn.sendall(response.encode("ascii"))
             if close_after is not None and close_after == 0:
+                _fin_close(conn)
                 return
 
             while not self._stop.is_set():
@@ -218,6 +219,7 @@ class QwpAckServer:
                     _write_qwp_ok(conn, seq)
                 frames_handled += 1
                 if close_after is not None and frames_handled >= close_after:
+                    _fin_close(conn)
                     break
         except (BrokenPipeError, ConnectionResetError):
             # The peer dropping its connection (e.g. a failed dataframe
@@ -234,6 +236,25 @@ class QwpAckServer:
                 pass
             with self._lock:
                 self.finished_count += 1
+
+
+def _fin_close(conn):
+    # A bare close() with unread client frames in the receive buffer takes
+    # the RST path, and macOS loopback occasionally loses that RST: the
+    # client's socket stays silently ESTABLISHED until its request timeout
+    # (30s). A FIN is sequenced and retransmitted, so shutdown(SHUT_WR)
+    # notifies the peer reliably; the short drain afterwards keeps the
+    # receive queue empty so the final close() doesn't reset first.
+    try:
+        conn.shutdown(socket.SHUT_WR)
+    except OSError:
+        return
+    conn.settimeout(0.2)
+    try:
+        while conn.recv(65536):
+            pass
+    except OSError:
+        pass
 
 
 def _read_exact(conn, length):
