@@ -5335,7 +5335,8 @@ cdef bint _dataframe_client_try_capsule_path(
         object at,
         size_t max_rows_per_batch,
         object schema_overrides,
-        bint* committed_prefix) except -1:
+        bint* committed_prefix,
+        bint* nonreplayable_consumed) except -1:
     cdef qdb_pystr_buf* b = NULL
     cdef direct_column_sender* conn = NULL
     cdef line_sender_error* err = NULL
@@ -5466,6 +5467,10 @@ cdef bint _dataframe_client_try_capsule_path(
 
         try:
             if not can_slice:
+                # A one-shot stream (e.g. RecordBatchReader) cannot be
+                # re-exported for a whole-frame replay: a failed attempt
+                # must surface instead of retrying with the drained rest.
+                nonreplayable_consumed[0] = True
                 _capsule_consume_stream_with_hint(
                     conn, sliceable, c_table_name, c_ts_column_ptr,
                     at_scalar_set, at_scalar_nanos,
@@ -5825,6 +5830,7 @@ cdef class Client:
         cdef double deadline = 0.0
         cdef double remaining = 0.0
         cdef bint committed_prefix = False
+        cdef bint nonreplayable_consumed = False
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
@@ -5863,7 +5869,8 @@ cdef class Client:
                             at,
                             max_rows_per_batch,
                             schema_overrides,
-                            &committed_prefix):
+                            &committed_prefix,
+                            &nonreplayable_consumed):
                         return self
                     return self._dataframe_numpy_publish(
                         db, budget_ms, b, &plan, df, table_name,
@@ -5881,6 +5888,15 @@ cdef class Client:
                     # Restarting from row 0 would duplicate it.
                     if exc.in_doubt or committed_prefix:
                         raise
+                    # A drained one-shot stream has no rows left to replay:
+                    # retrying would report success while writing nothing.
+                    if nonreplayable_consumed:
+                        raise QuestDBError(
+                            exc.code,
+                            f'{exc} The input stream was already partially '
+                            f'consumed and cannot be replayed; retry with a '
+                            f'fresh reader.',
+                            in_doubt=exc.in_doubt) from exc
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         raise

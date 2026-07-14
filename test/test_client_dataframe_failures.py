@@ -77,6 +77,38 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 0)
         self.assertEqual(stats['errors'], [])
 
+    def test_consumed_stream_failure_raises_instead_of_empty_replay(self):
+        # A one-shot RecordBatchReader cannot be re-exported for the
+        # whole-frame replay: after the server drops the connection with
+        # the stream already drained, a retry would send nothing and
+        # report success. The call must raise instead — on the original
+        # connection only, with a message pointing at the fresh-reader fix.
+        schema = pa.schema([
+            ('ts', pa.timestamp('us', tz='UTC')),
+            ('v', pa.int64()),
+        ])
+
+        def batches():
+            for i in range(10):
+                yield pa.record_batch(
+                    [pa.array([1_700_000_000_000_000 + i],
+                              type=schema[0].type),
+                     pa.array([i], type=pa.int64())], schema=schema)
+            # Let the server's close land before the trailing sync so the
+            # failure is the retry gate's decision, not a flush error.
+            time.sleep(0.15)
+
+        with QwpAckServer(close_plan=[10], defer_aware_acks=True) as server:
+            with qi.Client.from_conf(_conf(server.port)) as client:
+                reader = pa.RecordBatchReader.from_batches(schema, batches())
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(reader, table_name='t_stream', at='ts')
+            stats = server.snapshot()
+        self.assertIn('cannot be replayed', str(raised.exception))
+        self.assertFalse(raised.exception.in_doubt)
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertEqual(stats['binary_frames'], 10)
+
     def test_transient_failure_before_publication_resends_whole_frame(self):
         # Connection 1 closes immediately after the WebSocket upgrade, before
         # reading a data frame. The operation is therefore provably not
