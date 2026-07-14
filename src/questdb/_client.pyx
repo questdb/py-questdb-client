@@ -826,7 +826,7 @@ cdef bint _is_http_protocol(line_sender_protocol protocol):
 
 
 cdef bint _is_qwp_udp_protocol(line_sender_protocol protocol):
-    return protocol == line_sender_protocol_qwpudp
+    return protocol == line_sender_protocol_udp
 
 
 cdef bint _is_qwp_ws_protocol(line_sender_protocol protocol):
@@ -2051,7 +2051,7 @@ class Protocol(TaggedEnum):
     Tcps = ('tcps', 1)
     Http = ('http', 2)
     Https = ('https', 3)
-    QwpUdp = ('qwpudp', 4)
+    Udp = ('udp', 4)
     Ws = ('ws', 5)
     Wss = ('wss', 6)
 
@@ -2401,6 +2401,10 @@ cdef object parse_conf_str(
             raise QuestDBError(
                 QuestDBErrorCode.ConfigError,
                 f'Invalid value for config key {key!r}: {value!r}') from e
+    if service == 'udps':
+        raise QuestDBError(
+            QuestDBErrorCode.ConfigError,
+            'TLS is not supported for UDP.')
     return (Protocol.parse(service), typed_params)
 
 

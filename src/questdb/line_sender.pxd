@@ -83,7 +83,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_protocol_tcps,
         line_sender_protocol_http,
         line_sender_protocol_https,
-        line_sender_protocol_qwpudp,
+        line_sender_protocol_udp,
         line_sender_protocol_ws,
         line_sender_protocol_wss,
         line_sender_protocol_unknown,

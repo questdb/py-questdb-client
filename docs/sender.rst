@@ -844,7 +844,7 @@ See the :ref:`sender_conf_protocol_version` section for more details.
 Which protocol?
 ===============
 
-The sender supports ``tcp``, ``tcps``, ``http``, ``https``, ``qwpudp``,
+The sender supports ``tcp``, ``tcps``, ``http``, ``https``, ``udp``,
 ``ws``, and ``wss`` protocols.
 
 **You should prefer to use ILP/HTTP in most cases as it provides better
@@ -855,7 +855,7 @@ feedback on errors and transaction control.**
 QWP/UDP
 -------
 
-QWP/UDP (``qwpudp``) uses fire-and-forget UDP datagrams for lowest-latency
+QWP/UDP (``udp``) uses fire-and-forget UDP datagrams for lowest-latency
 ingestion. It does not support authentication, TLS, or transactions. The
 default port is 9007. See the :ref:`qwp_udp_example` example.
 

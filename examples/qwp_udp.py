@@ -8,7 +8,7 @@ def example(
         table_name: str = 'trades'):
     try:
         with Sender(
-                Protocol.QwpUdp,
+                Protocol.Udp,
                 host,
                 port,
                 max_datagram_size=1400) as sender:

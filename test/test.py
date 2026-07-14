@@ -692,7 +692,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 qi.QuestDBError,
                 'only supported for QWP/WebSocket'):
             qi.Sender(
-                qi.Protocol.QwpUdp,
+                qi.Protocol.Udp,
                 '127.0.0.1',
                 9009,
                 qwp_ws_progress=qi.QwpWsProgress.Manual)
@@ -709,22 +709,22 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with self.assertRaisesRegex(
                     ValueError,
                     '"max_datagram_size" must be an int between 1 and 65507'):
-                qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+                qi.Sender(qi.Protocol.Udp, '127.0.0.1', 9009,
                           max_datagram_size=bad)
         with self.assertRaisesRegex(
                 TypeError, '"max_datagram_size" must be a positive int'):
-            qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+            qi.Sender(qi.Protocol.Udp, '127.0.0.1', 9009,
                       max_datagram_size=True)
 
     def test_multicast_ttl_bounds(self):
         for bad in (-1, 256):
             with self.assertRaisesRegex(
                     ValueError, '"multicast_ttl" must be an int'):
-                qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+                qi.Sender(qi.Protocol.Udp, '127.0.0.1', 9009,
                           multicast_ttl=bad)
         with self.assertRaisesRegex(
                 TypeError, '"multicast_ttl" must be an int'):
-            qi.Sender(qi.Protocol.QwpUdp, '127.0.0.1', 9009,
+            qi.Sender(qi.Protocol.Udp, '127.0.0.1', 9009,
                       multicast_ttl=True)
 
     def test_qwpws_error_handler_can_be_registered(self):
@@ -743,14 +743,14 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 qi.QuestDBError,
                 'only supported for QWP/WebSocket'):
             qi.Sender(
-                qi.Protocol.QwpUdp,
+                qi.Protocol.Udp,
                 '127.0.0.1',
                 9009,
                 qwp_ws_error_handler=lambda error: None)
 
     def test_qwpws_fsn_helpers_reject_non_websocket_sender_even_when_empty(self):
         sender = qi.Sender(
-            qi.Protocol.QwpUdp,
+            qi.Protocol.Udp,
             '127.0.0.1',
             9009)
         try:

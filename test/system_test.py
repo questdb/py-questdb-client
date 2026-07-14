@@ -103,17 +103,17 @@ class TestWithDatabase(unittest.TestCase):
             self.skipTest(
                 'QWP/UDP integration tests require repo-backed QWP receiver support')
 
-    def _mk_qwpudp_sender(self, **kwargs):
+    def _mk_udp_sender(self, **kwargs):
         self._require_qwp_udp()
         return qi.Sender(
-            qi.Protocol.QwpUdp,
+            qi.Protocol.Udp,
             self.qdb_plain.host,
             self.qdb_plain.qwp_udp_port,
             **kwargs)
 
-    def _mk_qwpudp_conf(self, **kwargs):
+    def _mk_udp_conf(self, **kwargs):
         self._require_qwp_udp()
-        conf = f'qwpudp::addr={self.qdb_plain.host}:{self.qdb_plain.qwp_udp_port};'
+        conf = f'udp::addr={self.qdb_plain.host}:{self.qdb_plain.qwp_udp_port};'
         for key, value in kwargs.items():
             conf += f'{key}={value};'
         return conf
@@ -746,13 +746,13 @@ class TestWithDatabase(unittest.TestCase):
             self.assertEqual(resp['dataset'], expected_rows)
 
     def test_qwp_udp_protocol_enum(self):
-        self.assertEqual(qi.Protocol.parse('qwpudp'), qi.Protocol.QwpUdp)
-        self.assertFalse(qi.Protocol.QwpUdp.tls_enabled)
+        self.assertEqual(qi.Protocol.parse('udp'), qi.Protocol.Udp)
+        self.assertFalse(qi.Protocol.Udp.tls_enabled)
 
     def test_qwp_udp_basic(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 symbols={'name_a': 'val_a'},
@@ -777,7 +777,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_from_conf_with_opts(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        conf = self._mk_qwpudp_conf(max_datagram_size=1200, multicast_ttl=2)
+        conf = self._mk_udp_conf(max_datagram_size=1200, multicast_ttl=2)
         with qi.Sender.from_conf(conf) as sender:
             self.assertEqual(sender.auto_flush_bytes, 1200)
             sender.row(
@@ -792,7 +792,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_from_conf_override(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        conf = self._mk_qwpudp_conf()
+        conf = self._mk_udp_conf()
         with qi.Sender.from_conf(
                 conf,
                 max_datagram_size=1200,
@@ -811,7 +811,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         old_conf = os.environ.get('QDB_CLIENT_CONF')
-        os.environ['QDB_CLIENT_CONF'] = self._mk_qwpudp_conf()
+        os.environ['QDB_CLIENT_CONF'] = self._mk_udp_conf()
         try:
             with qi.Sender.from_env(
                     max_datagram_size=1200,
@@ -833,7 +833,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_from_conf_override_conflict(self):
         self._require_qwp_udp()
-        conf = self._mk_qwpudp_conf(max_datagram_size=1200)
+        conf = self._mk_udp_conf(max_datagram_size=1200)
         with self.assertRaisesRegex(
                 ValueError,
                 r'"max_datagram_size" is already present in the conf_str'):
@@ -841,14 +841,14 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_auto_flush_bytes_default(self):
         self._require_qwp_udp()
-        sender = self._mk_qwpudp_sender()
+        sender = self._mk_udp_sender()
         try:
             self.assertTrue(sender.auto_flush)
             self.assertEqual(sender.auto_flush_bytes, 1400)
         finally:
             sender.close(flush=False)
 
-        sender = self._mk_qwpudp_sender(max_datagram_size=1200)
+        sender = self._mk_udp_sender(max_datagram_size=1200)
         try:
             self.assertEqual(sender.auto_flush_bytes, 1200)
         finally:
@@ -857,7 +857,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_new_buffer(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender(init_buf_size=1024, max_name_len=64) as sender:
+        with self._mk_udp_sender(init_buf_size=1024, max_name_len=64) as sender:
             buffer = sender.new_buffer()
             self.assertEqual(buffer.init_buf_size, 1024)
             self.assertEqual(buffer.max_name_len, 64)
@@ -876,7 +876,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_new_buffer_requires_establish(self):
         self._require_qwp_udp()
-        sender = self._mk_qwpudp_sender()
+        sender = self._mk_udp_sender()
         try:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
@@ -887,7 +887,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_new_buffer_rejects_closed_sender(self):
         self._require_qwp_udp()
-        sender = self._mk_qwpudp_sender()
+        sender = self._mk_udp_sender()
         sender.close(flush=False)
         with self.assertRaisesRegex(
                 qi.QuestDBError,
@@ -896,7 +896,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_transaction_rejected(self):
         self._require_qwp_udp()
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
                     'Transactions are only supported for ILP/HTTP'):
@@ -904,7 +904,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_protocol_version_rejected(self):
         self._require_qwp_udp()
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
                     'protocol_version is not applicable for QWP/UDP senders'):
@@ -941,7 +941,7 @@ class TestWithDatabase(unittest.TestCase):
             'name_c': [1, 2],
             'name_d': [1.5, 2.5],
         })
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
 
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
@@ -961,7 +961,7 @@ class TestWithDatabase(unittest.TestCase):
         ts_micros = qi.TimestampMicros(1_700_000_000_000_000)
         ts_nanos = qi.TimestampNanos(1_700_000_000_123_456_789)
         dt = datetime.datetime(2024, 6, 15, 12, 0, 0, tzinfo=datetime.timezone.utc)
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 columns={
@@ -998,7 +998,7 @@ class TestWithDatabase(unittest.TestCase):
             f'(host SYMBOL, event_ts TIMESTAMP, timestamp TIMESTAMP) '
             f'TIMESTAMP(timestamp) PARTITION BY DAY;')
 
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 micros_table,
                 symbols={'host': 'micro'},
@@ -1031,7 +1031,7 @@ class TestWithDatabase(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'designated timestamp changes type within a batched table'):
-            with self._mk_qwpudp_sender() as sender:
+            with self._mk_udp_sender() as sender:
                 sender.row(
                     'mixed_ts_designated',
                     columns={'qty': 1},
@@ -1045,7 +1045,7 @@ class TestWithDatabase(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'column "event_ts" changes type within a batched table'):
-            with self._mk_qwpudp_sender() as sender:
+            with self._mk_udp_sender() as sender:
                 sender.row(
                     'mixed_ts_column',
                     columns={'event_ts': qi.TimestampMicros(123_456)},
@@ -1063,7 +1063,7 @@ class TestWithDatabase(unittest.TestCase):
         table_name = uuid.uuid4().hex
         array1 = np.array([[1.1, 2.2], [3.3, 4.4]], dtype=np.float64)
         array2 = array1.T  # non-contiguous
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 columns={
@@ -1089,7 +1089,7 @@ class TestWithDatabase(unittest.TestCase):
             f'CREATE TABLE {table_name} '
             f'(price DECIMAL(18,3), timestamp TIMESTAMP) '
             f'TIMESTAMP(timestamp) PARTITION BY DAY;')
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 columns={'price': decimal.Decimal('12345.678')},
@@ -1107,7 +1107,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_string_column(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 columns={'label': 'hello world', 'value': 42},
@@ -1126,7 +1126,7 @@ class TestWithDatabase(unittest.TestCase):
         table_name = uuid.uuid4().hex
         # Close with flush=False so only auto-flushed rows reach the server;
         # a broken byte trigger leaves rows buffered and the check fails.
-        sender = self._mk_qwpudp_sender(
+        sender = self._mk_udp_sender(
             max_datagram_size=200,
             auto_flush_rows=False,
             auto_flush_interval=False)
@@ -1149,7 +1149,7 @@ class TestWithDatabase(unittest.TestCase):
         table_name = uuid.uuid4().hex
         # Close with flush=False so only auto-flushed rows reach the server;
         # a broken row trigger leaves rows buffered and the check fails.
-        sender = self._mk_qwpudp_sender(
+        sender = self._mk_udp_sender(
             auto_flush_rows=5,
             auto_flush_bytes=False,
             auto_flush_interval=False)
@@ -1168,7 +1168,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_auto_flush_disabled(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        sender = self._mk_qwpudp_sender(auto_flush=False)
+        sender = self._mk_udp_sender(auto_flush=False)
         sender.establish()
         try:
             for i in range(5):
@@ -1187,7 +1187,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         t1 = uuid.uuid4().hex
         t2 = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(t1, columns={'x': 1}, at=qi.TimestampNanos.now())
             sender.row(t2, columns={'y': 2}, at=qi.TimestampNanos.now())
             sender.row(t1, columns={'x': 3}, at=qi.TimestampNanos.now())
@@ -1201,7 +1201,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         t1 = uuid.uuid4().hex
         t2 = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             buf = sender.new_buffer()
             buf.row(t1, columns={'batch': 1}, at=qi.TimestampNanos.now())
             sender.flush(buf)
@@ -1217,7 +1217,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         t1 = uuid.uuid4().hex
         t2 = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             buf_a = sender.new_buffer()
             buf_b = sender.new_buffer()
             buf_a.row(t1, columns={'src': 'a'}, at=qi.TimestampNanos.now())
@@ -1235,7 +1235,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         row_ts = qi.TimestampMicros(1_700_000_000_200_000)
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             buf = sender.new_buffer()
             buf.row(table_name, columns={'val': 99}, at=row_ts)
             sender.flush(buf, clear=False)
@@ -1250,7 +1250,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_unicode(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 symbols={'city': 'Zürich'},
@@ -1266,7 +1266,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_none_columns_skipped(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 symbols={'tag': 'a', 'skip_sym': None},
@@ -1282,7 +1282,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_schema_expansion_backfills_rows(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name, symbols={'host': 'r1'}, at=qi.ServerTimestamp)
             sender.row(
                 table_name,
@@ -1307,7 +1307,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_sparse_boolean_columns_fill_false(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name, symbols={'host': 'r1'}, at=qi.ServerTimestamp)
             sender.row(
                 table_name,
@@ -1333,7 +1333,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         event_ts = qi.TimestampMicros(123_456)
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name, symbols={'host': 'r1'}, at=qi.ServerTimestamp)
             sender.row(
                 table_name,
@@ -1357,7 +1357,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_empty_flush(self):
         self._require_qwp_udp()
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             self.assertEqual(len(sender), 0)
             sender.flush()
             sender.flush()
@@ -1366,7 +1366,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_double_close(self):
         self._require_qwp_udp()
-        sender = self._mk_qwpudp_sender()
+        sender = self._mk_udp_sender()
         sender.establish()
         sender.close(flush=False)
         sender.close(flush=False)
@@ -1374,7 +1374,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_context_manager_flush_on_exit(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender(auto_flush=False) as sender:
+        with self._mk_udp_sender(auto_flush=False) as sender:
             sender.row(
                 table_name, columns={'val': 7},
                 at=qi.TimestampNanos.now())
@@ -1386,7 +1386,7 @@ class TestWithDatabase(unittest.TestCase):
         t1 = uuid.uuid4().hex
         t2 = uuid.uuid4().hex
         explicit_ts = qi.TimestampNanos(1_700_000_000_000_000_000)
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(t1, columns={'x': 1}, at=qi.ServerTimestamp)
             sender.row(t2, columns={'x': 2}, at=explicit_ts)
             sender.flush()
@@ -1397,7 +1397,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_many_rows(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             for i in range(500):
                 sender.row(
                     table_name,
@@ -1409,7 +1409,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_max_name_len(self):
         self._require_qwp_udp()
-        with self._mk_qwpudp_sender(max_name_len=20) as sender:
+        with self._mk_udp_sender(max_name_len=20) as sender:
             buf = sender.new_buffer()
             buf.row('t', columns={'a' * 20: 1}, at=qi.ServerTimestamp)
             self.assertGreater(len(buf), 0)
@@ -1424,7 +1424,7 @@ class TestWithDatabase(unittest.TestCase):
         t2 = uuid.uuid4().hex
         buf = qi.Buffer.qwp()
         buf.row(t1, columns={'round': 1}, at=qi.TimestampNanos.now())
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.flush(buf)
             self.assertEqual(len(buf), 0)
             buf.row(t2, columns={'round': 2}, at=qi.TimestampNanos.now())
@@ -1440,7 +1440,7 @@ class TestWithDatabase(unittest.TestCase):
         import time as _time
         # Close with flush=False so arrival reflects only the interval
         # trigger firing on the second row, not the context-manager close.
-        sender = self._mk_qwpudp_sender(
+        sender = self._mk_udp_sender(
             auto_flush_rows=False,
             auto_flush_bytes=False,
             auto_flush_interval=500)
@@ -1462,7 +1462,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_datagram_splitting(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender(
+        with self._mk_udp_sender(
                 max_datagram_size=200,
                 auto_flush=False) as sender:
             for i in range(30):
@@ -1482,7 +1482,7 @@ class TestWithDatabase(unittest.TestCase):
         with qi.Sender(
                 qi.Protocol.Http, self.qdb_plain.host,
                 self.qdb_plain.http_server_port) as http_sender, \
-             self._mk_qwpudp_sender() as qwp_sender:
+             self._mk_udp_sender() as qwp_sender:
             http_sender.row(
                 t_http, columns={'src': 'http', 'val': 1},
                 at=qi.TimestampNanos.now())
@@ -1499,7 +1499,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         old = os.environ.get('QDB_CLIENT_CONF')
-        os.environ['QDB_CLIENT_CONF'] = self._mk_qwpudp_conf()
+        os.environ['QDB_CLIENT_CONF'] = self._mk_udp_conf()
         try:
             with qi.Sender.from_env() as sender:
                 sender.row(
@@ -1519,11 +1519,11 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         t1 = uuid.uuid4().hex
         t2 = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(t1, columns={'session': 1},
                        at=qi.TimestampNanos.now())
             sender.flush()
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(t2, columns={'session': 2},
                        at=qi.TimestampNanos.now())
             sender.flush()
@@ -1536,7 +1536,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         big_str = 'x' * 1000
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name, columns={'payload': big_str},
                 at=qi.TimestampNanos.now())
@@ -1547,7 +1547,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_symbols_only(self):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(
                 table_name,
                 symbols={'exchange': 'NYSE', 'ticker': 'AAPL'},
@@ -1564,7 +1564,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         table_name = uuid.uuid4().hex
         explicit = qi.TimestampNanos(1_700_000_000_000_000_000)
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name, columns={'seq': 1},
                        at=qi.ServerTimestamp)
             sender.row(table_name, columns={'seq': 2}, at=explicit)
@@ -1587,7 +1587,7 @@ class TestWithDatabase(unittest.TestCase):
                 ['2024-01-01 12:00:00', '2024-01-01 12:01:00'],
                 utc=True),
         })
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.dataframe(df, table_name=table_name, at='ts')
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
         self.assertEqual(resp['count'], 2)
@@ -1598,7 +1598,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_new_buffer_inherits_settings(self):
         self._require_qwp_udp()
-        with self._mk_qwpudp_sender(
+        with self._mk_udp_sender(
                 init_buf_size=2048, max_name_len=32) as sender:
             buf = sender.new_buffer()
             self.assertEqual(buf.init_buf_size, 2048)
@@ -1612,7 +1612,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         buf = qi.Buffer.ilp(protocol_version=2)
         buf.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             with self.assertRaisesRegex(
                     qi.QuestDBError, 'QWP sender requires a QWP buffer'):
                 sender.flush(buf)
@@ -1633,7 +1633,7 @@ class TestWithDatabase(unittest.TestCase):
         """UDP flush to wrong port succeeds silently (fire-and-forget)."""
         self._require_qwp_udp()
         with qi.Sender(
-                qi.Protocol.QwpUdp,
+                qi.Protocol.Udp,
                 self.qdb_plain.host, 19007) as sender:
             sender.row('t', columns={'x': 1}, at=qi.TimestampNanos.now())
             sender.flush()  # no error — data goes nowhere
@@ -1643,7 +1643,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         with self.assertRaisesRegex(qi.QuestDBError, 'Could not resolve'):
             with qi.Sender(
-                    qi.Protocol.QwpUdp,
+                    qi.Protocol.Udp,
                     'this.host.does.not.exist.invalid', 9007) as sender:
                 pass
 
@@ -1653,7 +1653,7 @@ class TestWithDatabase(unittest.TestCase):
         table_name = uuid.uuid4().hex
         cols = {f'col_{i:02d}': float(i) for i in range(50)}
         syms = {f'sym_{i}': f'val_{i}' for i in range(5)}
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name, symbols=syms, columns=cols,
                        at=qi.TimestampNanos.now())
             sender.flush()
@@ -1667,7 +1667,7 @@ class TestWithDatabase(unittest.TestCase):
         table_name = uuid.uuid4().hex
         n = 100
         base_ts = 1_700_000_000_000_000_000
-        with self._mk_qwpudp_sender(
+        with self._mk_udp_sender(
                 max_datagram_size=200, auto_flush=False) as sender:
             for i in range(n):
                 sender.row(
@@ -1681,7 +1681,7 @@ class TestWithDatabase(unittest.TestCase):
     def test_qwp_udp_tiny_datagram_rejected(self):
         """max_datagram_size=1: row exceeds datagram, flush errors."""
         self._require_qwp_udp()
-        with self._mk_qwpudp_sender(
+        with self._mk_udp_sender(
                 max_datagram_size=1, auto_flush=False) as sender:
             sender.row('t', columns={'x': 1}, at=qi.TimestampNanos.now())
             with self.assertRaisesRegex(
@@ -1697,7 +1697,7 @@ class TestWithDatabase(unittest.TestCase):
         # Close with flush=False so arrival reflects continuous auto-flush,
         # not a single context-manager close flushing the whole buffer. The
         # unflushed residual is one datagram (<< 10% of n).
-        sender = self._mk_qwpudp_sender()
+        sender = self._mk_udp_sender()
         sender.establish()
         try:
             for i in range(n):
@@ -1714,7 +1714,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_protocol_version_in_conf_rejected(self):
         self._require_qwp_udp()
-        conf = self._mk_qwpudp_conf(protocol_version=2)
+        conf = self._mk_udp_conf(protocol_version=2)
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'protocol_version.*not supported.*QWP'):
@@ -1729,7 +1729,7 @@ class TestWithDatabase(unittest.TestCase):
         errors = []
         def writer(table, n=50):
             try:
-                with self._mk_qwpudp_sender() as sender:
+                with self._mk_udp_sender() as sender:
                     for i in range(n):
                         sender.row(
                             table, columns={'seq': i},
@@ -1751,7 +1751,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_double_establish_rejected(self):
         self._require_qwp_udp()
-        sender = self._mk_qwpudp_sender()
+        sender = self._mk_udp_sender()
         sender.establish()
         try:
             with self.assertRaisesRegex(
@@ -1762,7 +1762,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_establish_after_close_rejected(self):
         self._require_qwp_udp()
-        sender = self._mk_qwpudp_sender()
+        sender = self._mk_udp_sender()
         sender.establish()
         sender.close(flush=False)
         with self.assertRaisesRegex(
@@ -1778,7 +1778,7 @@ class TestWithDatabase(unittest.TestCase):
             f'CREATE TABLE {table_name} '
             f'(val DECIMAL(18,3), timestamp TIMESTAMP) '
             f'TIMESTAMP(timestamp) PARTITION BY DAY;')
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name,
                        columns={'val': decimal.Decimal('0.000')},
                        at=qi.TimestampNanos.now())
@@ -1804,7 +1804,7 @@ class TestWithDatabase(unittest.TestCase):
             f'CREATE TABLE {table_name} '
             f'(val DECIMAL(18,3), timestamp TIMESTAMP) '
             f'TIMESTAMP(timestamp) PARTITION BY DAY;')
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name,
                        columns={'val': decimal.Decimal('999999999999999.999')},
                        at=qi.TimestampNanos.now())
@@ -1826,7 +1826,7 @@ class TestWithDatabase(unittest.TestCase):
             f'CREATE TABLE {table_name} '
             f'(val DECIMAL(18,3), timestamp TIMESTAMP) '
             f'TIMESTAMP(timestamp) PARTITION BY DAY;')
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             with self.assertRaises(qi.QuestDBError):
                 sender.row(table_name,
                            columns={'val': decimal.Decimal('NaN')},
@@ -1845,7 +1845,7 @@ class TestWithDatabase(unittest.TestCase):
             f'CREATE TABLE {table_name} '
             f'(price DECIMAL(18,2), fee DECIMAL(18,6), timestamp TIMESTAMP) '
             f'TIMESTAMP(timestamp) PARTITION BY DAY;')
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.row(table_name,
                        columns={
                            'price': decimal.Decimal('199.99'),
@@ -1874,7 +1874,7 @@ class TestWithDatabase(unittest.TestCase):
                 dtype=pd.ArrowDtype(pyarrow.decimal128(18, 3))),
             'seq': [1, 2, 3],
         })
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=3)
         vals = [row[0] for row in resp['dataset']]
@@ -1902,7 +1902,7 @@ class TestWithDatabase(unittest.TestCase):
                 dtype=pd.ArrowDtype(pyarrow.decimal128(18, 2))
             )
         })
-        with self._mk_qwpudp_sender() as sender:
+        with self._mk_udp_sender() as sender:
             sender.dataframe(df, table_name=table_name, at=qi.ServerTimestamp)
         resp = self.qdb_plain.retry_check_table(table_name, min_rows=2)
         exp_columns = [

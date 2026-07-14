@@ -41,7 +41,7 @@ QWP Ingestion Protocol
 Adds support for the QuestDB Wire Protocol (QWP) alongside the existing
 ILP transports.
 
-- **QWP/UDP** (``qwpudp::``): fire-and-forget datagram ingestion,
+- **QWP/UDP** (``udp::``): fire-and-forget datagram ingestion,
   defaulting to port 9007. New configuration keys ``max_datagram_size``
   and ``multicast_ttl``; ``protocol_version`` does not apply.
 - **QWP/WebSocket** (``ws::`` / ``wss::``): acknowledged streaming

@@ -29,7 +29,7 @@ The valid protocols are:
 * ``tcps``: ILP/TCP with TLS
 * ``http``: ILP/HTTP
 * ``https``: ILP/HTTP with TLS
-* ``qwpudp``: QWP/UDP (QuestWire Protocol over UDP)
+* ``udp``: QWP/UDP (QuestWire Protocol over UDP)
 * ``ws``: QWP/WebSocket
 * ``wss``: QWP/WebSocket with TLS
 
