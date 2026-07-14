@@ -110,18 +110,32 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 10)
 
     def test_transient_failure_before_publication_resends_whole_frame(self):
-        # Connection 1 closes immediately after the WebSocket upgrade, before
-        # reading a data frame. The operation is therefore provably not
-        # delivered, so the loop re-borrows and sends the whole frame on
-        # connection 2: 10 data frames plus 1 trailing commit.
-        with QwpAckServer(close_plan=[0]) as server:
+        # Operation 1 (11 frames: 10 data + 1 commit) completes, then the
+        # server closes the pooled connection; the barrier below waits for
+        # its FIN before operation 2 starts. Racing the close against a
+        # single in-flight operation instead (e.g. close_plan=[0]) is
+        # unsound: whether the client notices before or after writing the
+        # commit frame is thread scheduling, and the post-commit surface is
+        # a legitimate in-doubt raise, not a resend. Here nothing of
+        # operation 2 can have been delivered, so it must transparently
+        # move to connection 2 and send all 11 frames again.
+        with QwpAckServer(close_plan=[11]) as server:
             with qi.Client.from_conf(_conf(server.port)) as client:
+                client.dataframe(
+                    _table(10), table_name='t_resend', at='ts',
+                    max_rows_per_batch=1)
+                deadline = time.monotonic() + 5.0
+                while (server.snapshot()['finished_connections'] < 1
+                        and time.monotonic() < deadline):
+                    time.sleep(0.005)
+                self.assertEqual(
+                    server.snapshot()['finished_connections'], 1)
                 client.dataframe(
                     _table(10), table_name='t_resend', at='ts',
                     max_rows_per_batch=1)
             stats = server.snapshot()
         self.assertEqual(stats['accepted_connections'], 2)
-        self.assertEqual(stats['binary_frames'], 10 + 1)
+        self.assertEqual(stats['binary_frames'], 11 + 11)
 
     def test_committed_prefix_failure_raises_without_resend(self):
         # 110 one-row batches: frames 1-100 are data, frame 101 is the
