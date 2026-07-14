@@ -1,34 +1,31 @@
 .. _sender:
 
-=====================
-Sending Data over ILP
-=====================
+============
+Sending Data
+============
 
 Overview
 ========
 
-The :class:`Sender <questdb.Sender>` class is a client that inserts
-rows into QuestDB via the
-`ILP protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_ (TCP
-and HTTP) or via QWP/UDP for fire-and-forget, lowest-latency ingestion.
-The sender also supports TLS and authentication (ILP only).
+For QWP/WebSocket, use one :class:`Client <questdb.Client>` for row ingestion,
+whole-dataframe ingestion, and queries. The Client owns the connection pools;
+``client.sender()`` lends a row-building sender and ``client.dataframe()``
+keeps whole sources on the direct columnar path.
 
 .. code-block:: python
 
-    from questdb import Sender, TimestampNanos
+    from questdb import Client, TimestampNanos
     import pandas as pd
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        # Adding by rows
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
-            at=TimestampNanos.now())
-        # It is highly recommended to auto-flush or to flush in batches,
-        # rather than for every row
-        sender.flush()
+    conf = 'ws::addr=localhost:9000;'
+    with Client.from_conf(conf) as client:
+        with client.sender() as sender:
+            sender.row(
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={'price': 2615.54, 'amount': 0.00044},
+                at=TimestampNanos.now())
+            sender.flush(wait=True)
 
         # Whole dataframes at once
         df = pd.DataFrame({
@@ -38,10 +35,15 @@ The sender also supports TLS and authentication (ILP only).
             'amount': [0.00044, 0.001],
             'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
-        sender.dataframe(df, table_name='trades', at='timestamp')
+        client.dataframe(df, table_name='trades', at='timestamp')
 
-The ``Sender`` object holds an internal buffer which will be flushed and sent
-at when the ``with`` block ends.
+The Client sender holds an internal QWP buffer. A successful ``with`` block
+publishes pending rows when it returns the lease to the pool.
+
+The standalone :class:`Sender <questdb.Sender>` remains available as the
+lower-level multi-transport API for ILP over HTTP/TCP, QWP/UDP, and
+QWP/WebSocket. Its ``dataframe()`` method is deprecated; see the :doc:`5.0
+migration guide <migration>`.
 
 You can read more on :ref:`sender_preparing_data` and :ref:`sender_flushing`.
 
@@ -98,14 +100,15 @@ Preparing Data
 Appending Rows
 --------------
 
-You can append as many rows as you like by calling the
-:func:`Sender.row <questdb.Sender.row>` method. The full method arguments are
-documented in the :func:`Buffer.row <questdb.Buffer.row>` method.
+You can append as many rows as you like through
+:func:`Client.sender <questdb.Client.sender>`. The row arguments match
+:func:`Buffer.row <questdb.Buffer.row>`.
 
 Appending Pandas Dataframes
 ---------------------------
 
-The sender can also append data from a Pandas dataframe.
+Use :func:`Client.dataframe <questdb.Client.dataframe>` to ingest a Pandas
+dataframe directly.
 
 This is `orders of magnitude <https://github.com/questdb/py-tsbs-benchmark/blob/main/README.md>`_
 faster than appending rows one by one.
@@ -113,9 +116,8 @@ faster than appending rows one by one.
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python
 
-For more details see :func:`Sender.dataframe <questdb.Sender.dataframe>`
-and for full argument options see
-:func:`Buffer.dataframe <questdb.Buffer.dataframe>`.
+For the old row-buffer dataframe methods and their 6.0.0 removal plan, see the
+:doc:`5.0 migration guide <migration>`.
 
 String vs Symbol Columns
 ------------------------

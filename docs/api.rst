@@ -29,6 +29,11 @@ questdb
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.ClientSender
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: questdb.QueryResult
    :members:
    :undoc-members:

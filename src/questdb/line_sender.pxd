@@ -728,7 +728,7 @@ cdef extern from "questdb/ingress/column_sender.h":
     cdef struct questdb_db:
         pass
 
-    cdef struct column_sender:
+    cdef struct qwp_sender:
         pass
 
     cdef struct direct_column_sender:
@@ -754,15 +754,24 @@ cdef extern from "questdb/ingress/column_sender.h":
         questdb_db* db
         ) noexcept nogil
 
-    column_sender* questdb_db_borrow_column_sender(
+    qwp_sender* questdb_db_borrow_sender(
         questdb_db* db,
         line_sender_error** err_out
         ) noexcept nogil
 
-    column_sender* questdb_db_borrow_column_sender_with_retry(
+    qwp_sender* questdb_db_borrow_sender_with_retry(
         questdb_db* db,
         uint64_t budget_ms,
         line_sender_error** err_out
+        ) noexcept nogil
+
+    line_sender_buffer* questdb_db_new_buffer(
+        const questdb_db* db,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    size_t questdb_db_buffer_max_name_len(
+        const questdb_db* db
         ) noexcept nogil
 
     direct_column_sender* questdb_db_borrow_direct_column_sender(
@@ -780,14 +789,14 @@ cdef extern from "questdb/ingress/column_sender.h":
         const questdb_db* db
         ) noexcept nogil
 
-    void questdb_db_return_column_sender(
+    void questdb_db_return_sender(
         questdb_db* db,
-        column_sender* conn
+        qwp_sender* sender
         ) noexcept nogil
 
-    void questdb_db_drop_column_sender(
+    void questdb_db_drop_sender(
         questdb_db* db,
-        column_sender* conn
+        qwp_sender* sender
         ) noexcept nogil
 
     void questdb_db_return_direct_column_sender(
@@ -1053,14 +1062,21 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_flush(
-        column_sender* conn,
-        column_sender_chunk* chunk,
+    bint qwp_sender_flush_buffer(
+        qwp_sender* sender,
+        line_sender_buffer* buffer,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_wait(
-        column_sender* conn,
+    bint qwp_sender_flush_buffer_and_wait(
+        qwp_sender* sender,
+        line_sender_buffer* buffer,
+        uint32_t ack_level,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint qwp_sender_wait(
+        qwp_sender* sender,
         uint32_t ack_level,
         uint64_t timeout_millis,
         line_sender_error** err_out
@@ -1090,27 +1106,6 @@ cdef extern from "questdb/ingress/column_sender.h":
         size_t column_len
         uint32_t kind
         uint32_t arg
-
-    bint column_sender_flush_arrow_batch_at_now(
-        column_sender* conn,
-        line_sender_table_name table,
-        ArrowArray* array,
-        const ArrowSchema* schema,
-        const column_sender_arrow_override* overrides,
-        size_t overrides_len,
-        line_sender_error** err_out
-        ) noexcept nogil
-
-    bint column_sender_flush_arrow_batch_at_column(
-        column_sender* conn,
-        line_sender_table_name table,
-        ArrowArray* array,
-        const ArrowSchema* schema,
-        line_sender_column_name ts_column,
-        const column_sender_arrow_override* overrides,
-        size_t overrides_len,
-        line_sender_error** err_out
-        ) noexcept nogil
 
     bint direct_column_sender_flush_arrow_batch_at_now(
         direct_column_sender* conn,
@@ -1444,10 +1439,9 @@ cdef extern from "questdb/egress/reader.h":
         reader* reader
         ) noexcept nogil
 
-    # Reader-pool entry points. Same FFI surface as questdb_db_*_column_sender
-    # but for reader handles. Live here (alongside reader)
+    # Reader-pool entry points live here (alongside reader)
     # because they wrap/unwrap reader instances; the questdb_db
-    # opaque is forward-declared from the column_sender extern block
+    # opaque is forward-declared from the ingress-pool extern block
     # above.
     reader* questdb_db_borrow_reader(
         questdb_db* db,

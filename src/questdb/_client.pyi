@@ -25,6 +25,7 @@
 __all__ = [
     "Buffer",
     "Client",
+    "ClientSender",
     "ConnectionEvent",
     "ConnectionEventKind",
     "QuestDBError",
@@ -619,6 +620,10 @@ class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
+        .. deprecated:: 5.0.0
+            Use :meth:`Client.dataframe` instead. This method is planned for
+            removal in 6.0.0.
+
         Also see the :func:`Sender.dataframe` method if you're
         not using the buffer explicitly. It supports the same parameters
         and also supports auto-flushing.
@@ -989,6 +994,57 @@ class TlsCa(TaggedEnum):
     WebpkiAndOsRoots = ...
     PemFile = ...
 
+class ClientSender:
+    """
+    A row-building sender borrowed from a :class:`Client`.
+
+    Obtain a lease with :meth:`Client.sender`. It intentionally has no
+    dataframe method; ingest whole dataframes through
+    :meth:`Client.dataframe`.
+    """
+
+    def __enter__(self) -> ClientSender: ...
+
+    def row(
+        self,
+        table_name: str,
+        *,
+        symbols: Optional[Dict[str, Optional[str]]] = None,
+        columns: Optional[
+            Dict[
+                str,
+                Union[
+                    None,
+                    bool,
+                    int,
+                    float,
+                    str,
+                    TimestampMicros,
+                    TimestampNanos,
+                    datetime,
+                    np.ndarray,
+                    Decimal,
+                ],
+            ]
+        ] = None,
+        at: Union[ServerTimestampType, TimestampNanos, datetime],
+    ) -> ClientSender:
+        """Append one row to this lease's QWP buffer."""
+
+    def __len__(self) -> int: ...
+
+    def flush(self, *, wait: bool = False) -> ClientSender:
+        """Publish buffered rows; optionally wait for the server OK ack."""
+
+    def wait(self, timeout_millis: int = 0) -> ClientSender:
+        """Wait for all publications on this lease to receive an OK ack."""
+
+    def close(self, flush: bool = True, wait: bool = False) -> None:
+        """Return the lease to its Client. Idempotent."""
+
+    def __exit__(self, exc_type, exc_val, exc_tb): ...
+
+
 class Client:
     """
     Pooled QWP/WebSocket client.
@@ -1009,6 +1065,9 @@ class Client:
         """
 
     def __enter__(self) -> Client: ...
+
+    def sender(self) -> ClientSender:
+        """Borrow a context-managed row-building sender from this Client."""
 
     def dataframe(
         self,
@@ -1418,6 +1477,10 @@ class Sender:
     ) -> Sender:
         """
         Write a Pandas DataFrame to the internal buffer.
+
+        .. deprecated:: 5.0.0
+            Use :meth:`Client.dataframe` instead. This method is planned for
+            removal in 6.0.0.
 
         Example:
 

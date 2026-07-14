@@ -2040,6 +2040,50 @@ class TestEgressWithDatabase(unittest.TestCase):
     def _exec(self, sql):
         return self.qdb_plain.http_sql_query(sql)
 
+    def test_one_client_rows_dataframe_and_query(self):
+        """One Client config owns all three intended QWP paths."""
+        table_name = 't_client_unified_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} ('
+                'ts TIMESTAMP, source SYMBOL, value LONG'
+                ') TIMESTAMP(ts) PARTITION BY DAY WAL')
+            frame = pd.DataFrame({
+                'ts': pd.to_datetime(
+                    [1_700_000_001_000_000], unit='us'),
+                'source': pd.Categorical(['dataframe']),
+                'value': np.array([2], dtype=np.int64),
+            })
+
+            with qi.Client.from_conf(self._conf()) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        table_name,
+                        symbols={'source': 'row'},
+                        columns={'value': 1},
+                        at=qi.TimestampNanos(
+                            1_700_000_000_000_000_000))
+                    sender.flush(wait=True)
+
+                client.dataframe(
+                    frame,
+                    table_name=table_name,
+                    symbols=['source'],
+                    at='ts')
+                self.qdb_plain.retry_check_table(table_name, min_rows=2)
+                result = client.query(
+                    f'SELECT source, value FROM {table_name} '
+                    'ORDER BY value').to_arrow()
+
+            self.assertEqual(
+                result.column('source').to_pylist(), ['row', 'dataframe'])
+            self.assertEqual(result.column('value').to_pylist(), [1, 2])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_type_coverage_round_trip(self):
         """One row, every QuestDB type we can express in SQL, read back
         via ``Client.query``. Single WAL apply, one query, per-column

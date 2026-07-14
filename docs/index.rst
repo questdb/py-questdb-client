@@ -15,6 +15,7 @@ Contents
    sender
    conf
    examples
+   migration
    api
    troubleshooting
    community

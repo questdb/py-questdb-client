@@ -1,4 +1,4 @@
-from questdb import Client, Sender, QuestDBError
+from questdb import Client, QuestDBError
 
 import sys
 import pandas as pd
@@ -12,15 +12,14 @@ def example(host: str = 'localhost', port: int = 9000):
             'amount': [0.00044, 0.001],
             'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
     try:
-        with Sender.from_conf(f"http::addr={host}:{port};") as sender:
+        with Client.from_conf(f"ws::addr={host}:{port};") as client:
             # Ingress: publish a Pandas DataFrame into QuestDB.
-            sender.dataframe(
+            client.dataframe(
                 df,
                 table_name='trades',  # Table name to insert into.
                 symbols=['symbol', 'side'],  # Columns to be inserted as SYMBOL types.
                 at='timestamp')  # Column containing the designated timestamps.
 
-        with Client.from_conf(f"ws::addr={host}:{port};") as client:
             # Egress: query QuestDB and materialise the result as Pandas.
             with client.query(
                     "SELECT x AS trade_id, "

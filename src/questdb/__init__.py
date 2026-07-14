@@ -7,6 +7,7 @@ from questdb import _client
 from questdb._client import (
     Buffer,
     Client,
+    ClientSender,
     Protocol,
     QueryResult,
     QuestDBError,
@@ -29,6 +30,7 @@ from questdb._client import (
 __all__ = [
     'Buffer',
     'Client',
+    'ClientSender',
     'Protocol',
     'QueryResult',
     'QuestDBError',

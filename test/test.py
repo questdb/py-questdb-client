@@ -4,6 +4,7 @@ import sys
 sys.dont_write_bytecode = True
 import os
 import unittest
+from unittest import mock
 import datetime
 import timeit
 import time
@@ -12,6 +13,7 @@ from enum import Enum
 import random
 import pathlib
 import tempfile
+import warnings
 import numpy as np
 
 import patch_path
@@ -318,6 +320,136 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 qi.QuestDBError,
                 "dataframe\\(\\) can't be called: Client is closed"):
             client.dataframe([], table_name='tbl', at=qi.ServerTimestamp)
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                "sender\\(\\) can't be called: Client is closed"):
+            client.sender()
+
+    def test_client_sender_publishes_rows_without_dataframe_surface(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            with qi.Client.from_conf(conf) as client:
+                with client.sender() as sender:
+                    self.assertIsInstance(sender, qi.ClientSender)
+                    self.assertFalse(hasattr(sender, 'dataframe'))
+                    sender.row(
+                        'weather',
+                        symbols={'city': 'London'},
+                        columns={'temperature': 21.5, 'sample': 1},
+                        at=qi.TimestampNanos(1_700_000_000_000_000_000))
+                    self.assertGreater(len(sender), 0)
+                    self.assertIs(sender.flush(wait=True), sender)
+                    self.assertEqual(len(sender), 0)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertEqual(stats['binary_frames'], 1)
+        self.assertEqual(stats['qwp1_frames'], 1)
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                "row\\(\\) can't be called: ClientSender is closed"):
+            sender.row(
+                'weather', columns={'temperature': 22.0},
+                at=qi.ServerTimestamp)
+
+    def test_client_close_waits_for_sender_lease_return(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.Client.from_conf(conf)
+            sender = client.sender()
+            close_started = threading.Event()
+            close_done = threading.Event()
+            errors = []
+
+            def close_client():
+                close_started.set()
+                try:
+                    client.close()
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    close_done.set()
+
+            thread = threading.Thread(target=close_client)
+            thread.start()
+            self.assertTrue(close_started.wait(1))
+            self.assertFalse(
+                close_done.wait(0.05),
+                'Client.close() returned while a sender lease was active')
+            sender.close(flush=False)
+            self.assertTrue(close_done.wait(2))
+            thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_client_sender_context_flushes_success_and_discards_exception(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            with qi.Client.from_conf(conf) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                with client.sender() as sender:
+                    sender.wait(5000)
+
+                with self.assertRaisesRegex(RuntimeError, 'abort row'):
+                    with client.sender() as sender:
+                        sender.row(
+                            'events', columns={'value': 2},
+                            at=qi.ServerTimestamp)
+                        raise RuntimeError('abort row')
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 1)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_dataframe_deprecations_name_replacement_removal_and_caller(self):
+        df = pd.DataFrame({'value': [1]})
+
+        buffer = qi.Buffer.ilp()
+        with mock.patch.object(warnings, 'warn') as warn:
+            buffer.dataframe(
+                df, table_name='trades', at=qi.ServerTimestamp)
+        warn.assert_called_once()
+        self.assertIs(warn.call_args.args[1], DeprecationWarning)
+        self.assertEqual(warn.call_args.kwargs['stacklevel'], 2)
+        self.assertIn('Client.dataframe()', warn.call_args.args[0])
+        self.assertIn('6.0.0', warn.call_args.args[0])
+
+        standalone = qi.Sender.from_conf(
+            'http::addr=127.0.0.1:9000;', auto_flush=False)
+        try:
+            with mock.patch.object(warnings, 'warn') as warn:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        "dataframe\\(\\) can't be called: Sender is closed"):
+                    standalone.dataframe(
+                        df, table_name='trades', at=qi.ServerTimestamp)
+            warn.assert_called_once()
+            self.assertIs(warn.call_args.args[1], DeprecationWarning)
+            self.assertEqual(warn.call_args.kwargs['stacklevel'], 2)
+            self.assertIn('Client.dataframe()', warn.call_args.args[0])
+            self.assertIn('6.0.0', warn.call_args.args[0])
+        finally:
+            standalone.close(flush=False)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

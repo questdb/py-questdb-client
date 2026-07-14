@@ -62,6 +62,13 @@ Every new key is equally available as a ``Sender`` / ``Sender.from_conf`` /
 ``multicast_ttl``, ``tls_roots_password``, ``retry_max_backoff``,
 ``qwp_ws_progress`` and ``qwp_ws_error_handler``).
 
+The pooled :class:`Client` now exposes :meth:`Client.sender`, returning a
+context-managed :class:`ClientSender` for row-at-a-time QWP/WebSocket
+ingestion. Row builders, whole-dataframe ingestion, and queries can therefore
+share one ``Client.from_conf("ws::...")`` configuration without exposing
+separate row and column sender pools. The lease has no dataframe method;
+whole dataframes continue through the direct :meth:`Client.dataframe` path.
+
 Buffer Factories
 ****************
 
@@ -155,6 +162,10 @@ Deprecations
 - Direct ``Buffer(...)`` construction is deprecated and emits a
   ``DeprecationWarning``. Use ``Buffer.ilp()``, ``Buffer.qwp()`` or
   ``Sender.new_buffer()`` instead.
+- ``Sender.dataframe()`` and ``Buffer.dataframe()`` are deprecated and emit a
+  ``DeprecationWarning``. Use ``Client.dataframe()`` for the direct,
+  whole-source QWP path. Both deprecated methods are planned for removal in
+  6.0.0; see the :doc:`migration guide <migration>`.
 
 4.1.0 (2025-11-28)
 ------------------
