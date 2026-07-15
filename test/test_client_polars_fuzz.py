@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fuzz tests for polars DataFrame ingestion via ``Client.dataframe()``.
+"""Fuzz tests for polars DataFrame ingestion via ``QuestDB.dataframe()``.
 
 Polars frames take the Arrow C Stream capsule path
 (``__arrow_c_stream__``) — pyarrow-free. Every iteration builds a random
@@ -350,7 +350,7 @@ def _build_frame(rng):
 @unittest.skipUnless(pl is not None, 'polars not installed')
 class TestClientPolarsDataframeFuzz(unittest.TestCase):
     """Round-trip fuzz: each iteration ingests a random polars frame through
-    ``Client.dataframe()`` (capsule path) to a local ``QwpAckServer``."""
+    ``QuestDB.dataframe()`` (capsule path) to a local ``QwpAckServer``."""
 
     DEFAULT_ITERS = 100
 
@@ -432,7 +432,7 @@ class TestClientPolarsDataframeFuzz(unittest.TestCase):
 
     def test_fuzz_round_trip(self):
         seeds = self._iter_seeds()
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         failures = []
         try:
             prev = 0
@@ -516,8 +516,8 @@ class _RunningQuestDb:
 
 @unittest.skipUnless(pl is not None, 'polars not installed')
 class TestClientPolarsDataframeRoundTrip(unittest.TestCase):
-    """Ingest a random polars frame via ``Client.dataframe()`` → real
-    QuestDB → read back via ``Client.query`` → assert value equivalence.
+    """Ingest a random polars frame via ``QuestDB.dataframe()`` → real
+    QuestDB → read back via ``QuestDB.query`` → assert value equivalence.
 
     Point at a running QuestDB with ``QDB_HTTP_ADDR=host:port`` (handy for
     debugging), or set ``QDB_REPO_PATH=/path/to/questdb`` to spawn a
@@ -652,7 +652,7 @@ class TestClientPolarsDataframeRoundTrip(unittest.TestCase):
             try:
                 df, shape, n_rows = self._build_simple_frame(rng)
                 self._drop_table(table_name)
-                with qi.Client.from_conf(self.conf) as client:
+                with qi.QuestDB.from_conf(self.conf) as client:
                     client.dataframe(df, table_name=table_name, at='ts')
                 self._wait_for_rows(table_name, n_rows)
 
@@ -660,7 +660,7 @@ class TestClientPolarsDataframeRoundTrip(unittest.TestCase):
                 df_in = df.select(cols).sort('id')
                 sql = (f"SELECT {','.join(cols)} FROM {table_name} "
                        f"ORDER BY id")
-                with qi.Client.from_conf(self.conf) as client:
+                with qi.QuestDB.from_conf(self.conf) as client:
                     df_out = client.query(sql).to_polars().sort('id')
 
                 mismatch = None

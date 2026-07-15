@@ -182,7 +182,7 @@ class TestPandasBase:
                 with self.assertRaisesRegex(
                         qi.QuestDBError,
                         f'{descr} objects, which are only supported on the '
-                        'columnar Client.dataframe'):
+                        'columnar QuestDB.dataframe'):
                     _dataframe(self.version, df, table_name='t',
                                at=qi.ServerTimestamp)
 

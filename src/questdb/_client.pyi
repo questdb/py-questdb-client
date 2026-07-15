@@ -23,11 +23,9 @@
 ################################################################################
 
 __all__ = [
-    "Buffer",
-    "Client",
-    "ClientSender",
     "ConnectionEvent",
     "ConnectionEventKind",
+    "QuestDB",
     "QuestDBError",
     "QuestDBErrorCode",
     "QuestDBServerRejectionError",
@@ -53,7 +51,7 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, NoReturn, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -394,31 +392,11 @@ class SenderTransaction:
 
 class Buffer:
     """
-    Buffer for serializing rows before flushing through a
-    :func:`Sender <questdb.Sender>`.
+    Internal row-serialization buffer, managed by :class:`Sender`.
 
-    Use the factory class methods to create a buffer:
-
-    * :func:`Buffer.ilp` for ILP (InfluxDB Line Protocol) buffers.
-    * :func:`Buffer.qwp` for QWP (QuestWire Protocol) buffers.
-
-    .. code-block:: python
-
-        from questdb import Buffer, Sender, Protocol, TimestampNanos
-
-        buf = Buffer.ilp(protocol_version=2)
-        buf.row(
-            'table_name',
-            symbols={'s1': 'v1'},
-            columns={'c1': True, 'c2': 0.5},
-            at=TimestampNanos.now())
-
-        with Sender(Protocol.Http, 'localhost', 9000) as sender:
-            sender.flush(buf)
-
-    Alternatively, call :func:`Sender.new_buffer` which creates the
-    correct buffer type (ILP or QWP) matching the sender's protocol.
-
+    Kept importable as ``questdb.ingress.Buffer`` for legacy ILP/HTTP and
+    ILP/TCP code that constructs buffers explicitly and flushes them via
+    ``sender.flush(buffer)``.
     """
 
     def __init__(
@@ -426,36 +404,6 @@ class Buffer:
             protocol_version: int,
             init_buf_size: int = 65536,
             max_name_len: int = 127):
-        """
-        .. deprecated::
-            Use :func:`Buffer.ilp` or :func:`Buffer.qwp` instead.
-        """
-        ...
-
-    @staticmethod
-    def ilp(
-            protocol_version: int = 2,
-            init_buf_size: int = 65536,
-            max_name_len: int = 127) -> Buffer:
-        """
-        Create an ILP (InfluxDB Line Protocol) buffer.
-
-        :param int protocol_version: The protocol version to use (1-3).
-        :param int init_buf_size: Initial capacity of the buffer in bytes.
-        :param int max_name_len: Maximum length of a table or column name.
-        """
-        ...
-
-    @staticmethod
-    def qwp(
-            init_buf_size: int = 65536,
-            max_name_len: int = 127) -> Buffer:
-        """
-        Create a QWP (QuestWire Protocol) buffer.
-
-        :param int init_buf_size: Initial capacity of the buffer in bytes.
-        :param int max_name_len: Maximum length of a table or column name.
-        """
         ...
 
     @property
@@ -620,10 +568,6 @@ class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        .. deprecated:: 5.0.0
-            Use :meth:`Client.dataframe` instead. This method is planned for
-            removal in 6.0.0.
-
         Also see the :func:`Sender.dataframe` method if you're
         not using the buffer explicitly. It supports the same parameters
         and also supports auto-flushing.
@@ -720,7 +664,7 @@ class Buffer:
             import pandas as pd
             import questdb as qi
 
-            buf = qi.Buffer.ilp(protocol_version=2)
+            buf = qi.ingress.Buffer(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -994,16 +938,18 @@ class TlsCa(TaggedEnum):
     WebpkiAndOsRoots = ...
     PemFile = ...
 
-class ClientSender:
+class _PooledSender:
     """
-    A row-building sender borrowed from a :class:`Client`.
+    A row-building sender borrowed from a :class:`QuestDB` pool.
 
-    Obtain a lease with :meth:`Client.sender`. It intentionally has no
-    dataframe method; ingest whole dataframes through
-    :meth:`Client.dataframe`.
+    Obtain a lease with :meth:`QuestDB.sender`; ``close()`` returns the
+    native sender to the pool. The surface is deliberately small:
+    ``row()``, ``flush()``, ``wait()`` and ``close()``; ``len(sender)``
+    is the number of buffered rows. ``dataframe()`` raises: DataFrame
+    bulk loads go through :meth:`QuestDB.dataframe`.
     """
 
-    def __enter__(self) -> ClientSender: ...
+    def __enter__(self) -> _PooledSender: ...
 
     def row(
         self,
@@ -1028,26 +974,34 @@ class ClientSender:
             ]
         ] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
-    ) -> ClientSender:
-        """Append one row to this lease's QWP buffer."""
+    ) -> _PooledSender:
+        """Append one row to this sender's QWP buffer."""
 
-    def __len__(self) -> int: ...
+    def dataframe(self, df: Any, *args: Any, **kwargs: Any) -> NoReturn:
+        """Raises; use :meth:`QuestDB.dataframe` instead."""
 
-    def flush(self, *, wait: bool = False) -> ClientSender:
+    def __len__(self) -> int:
+        """Number of buffered (unpublished) rows."""
+
+    def flush(self, *, wait: bool = False) -> _PooledSender:
         """Publish buffered rows; optionally wait for the server OK ack."""
 
-    def wait(self, timeout_millis: int = 0) -> ClientSender:
+    def wait(self, timeout_millis: int = 0) -> _PooledSender:
         """Wait for all publications on this lease to receive an OK ack."""
 
     def close(self, flush: bool = True, wait: bool = False) -> None:
-        """Return the lease to its Client. Idempotent."""
+        """Return this sender to its pool. Idempotent."""
 
     def __exit__(self, exc_type, exc_val, exc_tb): ...
 
 
-class Client:
+class QuestDB:
     """
-    Pooled QWP/WebSocket client.
+    Handle to a QuestDB deployment over QWP/WebSocket.
+
+    Owns the connection pool; lends row-building senders via
+    :meth:`sender`, bulk-loads DataFrames via :meth:`dataframe`, and runs
+    queries via :meth:`query`. Construct with :func:`questdb.connect`.
     """
 
     @staticmethod
@@ -1056,18 +1010,20 @@ class Client:
         *,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
-    ) -> Client:
+    ) -> QuestDB:
         """
-        Construct a pooled client from a QWP/WebSocket configuration string.
+        Construct a handle from a QWP/WebSocket configuration string.
+
+        Prefer the :func:`questdb.connect` module-level factory.
 
         ``connection_listener`` receives one :class:`ConnectionEvent` per
         connection-state transition, on a dedicated dispatcher thread.
         """
 
-    def __enter__(self) -> Client: ...
+    def __enter__(self) -> QuestDB: ...
 
-    def sender(self) -> ClientSender:
-        """Borrow a context-managed row-building sender from this Client."""
+    def sender(self) -> _PooledSender:
+        """Borrow a context-managed row-building :class:`Sender` from the pool."""
 
     def dataframe(
         self,
@@ -1079,7 +1035,7 @@ class Client:
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
         max_rows_per_batch: int = 16384,
         schema_overrides: Optional[Dict[str, object]] = None,
-    ) -> Client:
+    ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
 
@@ -1147,7 +1103,7 @@ class Client:
 
 class QueryResult:
     """
-    Result of :meth:`Client.query`. Single-use: each materialisation
+    Result of :meth:`QuestDB.query`. Single-use: each materialisation
     method consumes the underlying cursor.
 
     SYMBOL columns: :meth:`to_polars` / :meth:`to_pandas` build the
@@ -1478,9 +1434,9 @@ class Sender:
         """
         Write a Pandas DataFrame to the internal buffer.
 
-        .. deprecated:: 5.0.0
-            Use :meth:`Client.dataframe` instead. This method is planned for
-            removal in 6.0.0.
+        Available over ILP/HTTP and ILP/TCP. Over QWP/WebSocket this raises:
+        DataFrame bulk loads are a database operation there — use
+        :meth:`QuestDB.dataframe`.
 
         Example:
 

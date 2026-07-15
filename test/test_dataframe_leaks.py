@@ -97,7 +97,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
     pandas Categorical columns (``_dataframe_category_series_as_arrow``):
     every malloc'd buffer must be freed by its ``release`` callback on both
     the row path (``Buffer.dataframe`` -> ``col_t_release``) and the columnar
-    path (``Client.dataframe`` -> Rust import -> ``arrow_import_free``)."""
+    path (``QuestDB.dataframe`` -> Rust import -> ``arrow_import_free``)."""
 
     ROWS = 4096
 
@@ -137,7 +137,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 
         def work():
             for df in frames:
-                qi.Buffer.ilp(protocol_version=2).dataframe(
+                qi.Buffer(protocol_version=2).dataframe(
                     df, table_name='t', at=qi.ServerTimestamp)
 
         self._assert_stable(work, warmup=200, measure=4000)
@@ -148,7 +148,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
                     'pool_size=1;pool_max=1;pool_reap=manual;')
-            with qi.Client.from_conf(conf) as client:
+            with qi.QuestDB.from_conf(conf) as client:
                 def work():
                     for df in frames:
                         client.dataframe(
@@ -162,7 +162,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 class TestPyobjColumnarLeak(unittest.TestCase):
     """Guards the calloc'd ``pyobj_built_t`` builders
     (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes}_pyobj``)
-    reached by ``Client.dataframe`` for object-dtype columns: every native
+    reached by ``QuestDB.dataframe`` for object-dtype columns: every native
     buffer (data, validity bitmap, str byte arena) must be freed on the
     success and all-valid (bitmap-dropped) paths, and the pooled connection
     must be returned on every call."""
@@ -209,7 +209,7 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
                     'pool_size=1;pool_max=1;pool_reap=manual;')
-            with qi.Client.from_conf(conf) as client:
+            with qi.QuestDB.from_conf(conf) as client:
                 def work():
                     for df in frames:
                         client.dataframe(

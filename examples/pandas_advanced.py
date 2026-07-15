@@ -1,4 +1,5 @@
-from questdb import Client, Sender, QuestDBError
+import questdb
+from questdb import Sender, QuestDBError
 
 import sys
 import pandas as pd
@@ -26,9 +27,9 @@ def example(host: str = 'localhost', port: int = 9000):
                 symbols='auto',  # Category columns as SYMBOL. (Default)
                 at=-1)  # Last column contains the designated timestamps.
 
-        with Client.from_conf(f"ws::addr={host}:{port};") as client:
+        with questdb.connect(f"ws::addr={host}:{port};") as db:
             # Egress: query QuestDB and materialise the result as Pandas.
-            with client.query(
+            with db.query(
                     "SELECT x AS sample_id, "
                     "x / 10.0 AS value "
                     "FROM long_sequence(3)") as result:

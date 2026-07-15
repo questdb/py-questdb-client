@@ -41,7 +41,7 @@ cdef class _ReaderHandle:
     ``reader_drop_on_return`` before calling close. We never
     hold a raw ``questdb_db*`` pointer here: the reader struct
     holds an ``Arc<DbInner>`` internally, so the pool stays alive
-    even if the user's ``Client.close()`` ran after ``query()``
+    even if the user's ``QuestDB.close()`` ran after ``query()``
     returned but before the reader dealloced.
 
     ``_must_close`` defaults to ``True``: only the generator's
@@ -1973,11 +1973,11 @@ def _debug_egress_pool_stats(client):
     borrow opens a connection; the idle list grows on returns; reuse
     is implicit). Tests assert reuse by checking that ``idle == 1``
     after sequential queries that each borrowed and returned. Returns
-    ``None`` if the Client is closed.
+    ``None`` if the QuestDB handle is closed.
 
     Not part of the public API.
     """
-    cdef Client c = client
+    cdef QuestDB c = client
     cdef questdb_db* db
     try:
         db = c._begin_db_use('_debug_egress_pool_stats')
@@ -1992,7 +1992,7 @@ def _debug_egress_pool_stats(client):
 
 
 class QueryResult:
-    """Result of ``Client.query(sql)``.
+    """Result of ``QuestDB.query(sql)``.
 
     Streams query rows as Arrow record batches. **Single-use**: each
     materialisation method (``to_pandas``, ``to_arrow``, ``iter_arrow``,
@@ -2001,7 +2001,7 @@ class QueryResult:
     ``QuestDBError``.
 
     **Thread affinity**: the underlying cursor is bound to the thread that
-    created it (via ``Client.query``). Create, consume, ``cancel``,
+    created it (via ``QuestDB.query``). Create, consume, ``cancel``,
     ``close``, and drop the ``QueryResult`` on that same thread; handing it
     to another thread is undefined behaviour even with external
     synchronisation.
@@ -2024,7 +2024,7 @@ class QueryResult:
 
     Example::
 
-        with client.query('SELECT * FROM trades WHERE ts > $1') as result:
+        with db.query('SELECT * FROM trades WHERE ts > $1') as result:
             df = polars.from_arrow(result)              # no pyarrow
             # df = result.to_pandas()                   # pyarrow required
             # table = pa.table(result)                  # pyarrow required
@@ -2092,7 +2092,7 @@ class QueryResult:
         ``NaN``; ``SYMBOL`` → ``Categorical``; ``TIMESTAMP`` →
         ``datetime64`` (``NaT``); strings/decimal/uuid/binary → ``object``.
         Analysis-safe (aggregations skip ``pd.NA``/``NaN``), and feeds back
-        into :meth:`Client.dataframe` for a type round-trip — the column
+        into :meth:`QuestDB.dataframe` for a type round-trip — the column
         kinds are carried in ``df.attrs['questdb']``.
 
         ``dtype_backend="pyarrow"`` / ``"numpy_nullable"`` / ``types_mapper``

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Smoke tests for the Arrow PyCapsule Interface dispatch path
 (`__arrow_c_stream__`) used by polars / pyarrow / generic Arrow-native
-DataFrame inputs to `Client.dataframe()`.
+DataFrame inputs to `QuestDB.dataframe()`.
 """
 
 import sys
@@ -60,7 +60,7 @@ class TestCapsulePathPyArrow(unittest.TestCase):
                        _ts_us(2025, 1, 1, 12, 0, 2)],
         }, schema=schema)
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(table, table_name='trades', at='ts')
             finally:
@@ -85,7 +85,7 @@ class TestCapsulePathPyArrow(unittest.TestCase):
         }, schema=schema)
         for at in (2, -1):
             with QwpAckServer() as server:
-                client = qi.Client.from_conf(_client_conf(server.port))
+                client = qi.QuestDB.from_conf(_client_conf(server.port))
                 try:
                     client.dataframe(table, table_name='trades', at=at)
                 finally:
@@ -105,7 +105,7 @@ class TestCapsulePathPyArrow(unittest.TestCase):
             'ts': [_ts_us(2025, 1, 1)],
         }, schema=schema)
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(IndexError, 'index out of range'):
                     client.dataframe(table, table_name='oob', at=5)
@@ -124,7 +124,7 @@ class TestCapsulePathPyArrow(unittest.TestCase):
         }, schema=schema)
         table = pa.Table.from_batches([batch])
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(table, table_name='seq_log', at='ts')
             finally:
@@ -144,7 +144,7 @@ class TestCapsulePathPyArrow(unittest.TestCase):
             'ts': [_ts_us(2025, 1, 1) + i for i in range(n)],
         }, schema=schema)
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     table,
@@ -175,7 +175,7 @@ class TestCapsulePathPolars(unittest.TestCase):
             'ts':     pl.Datetime('us'),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(df, table_name='trades', at='ts')
             finally:
@@ -194,7 +194,7 @@ class TestCapsulePathPolars(unittest.TestCase):
             ],
         }, schema={'v': pl.Int64, 'ts': pl.Datetime('us')})
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(lf, table_name='lazy_t', at='ts')
             finally:
@@ -215,7 +215,7 @@ class TestServerTimestampAt(unittest.TestCase):
             'price':  [2615.54, 67234.12],
         }, schema={'symbol': pl.Utf8, 'price': pl.Float64})
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='trades', at=qi.ServerTimestamp)
@@ -232,7 +232,7 @@ class TestServerTimestampAt(unittest.TestCase):
             'price':  [2615.54, 67234.12],
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     table, table_name='trades', at=qi.ServerTimestamp)
@@ -255,7 +255,7 @@ class TestServerTimestampAt(unittest.TestCase):
             ],
         }, schema={'v': pl.Int64, 'ts': pl.Datetime('us')})
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='t', at=qi.ServerTimestamp)
@@ -272,7 +272,7 @@ class TestServerTimestampAt(unittest.TestCase):
             'price': pl.Series([], dtype=pl.Float64),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='t', at=qi.ServerTimestamp)
@@ -288,7 +288,7 @@ class TestServerTimestampAt(unittest.TestCase):
         import pandas as pd
         df = pd.DataFrame({'sym': ['a', 'b'], 'x': [1, 2]})
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='t', at=qi.ServerTimestamp)
@@ -305,7 +305,7 @@ class TestServerTimestampAt(unittest.TestCase):
         n = 64
         df = pd.DataFrame({'sym': ['s'] * n, 'x': list(range(n))})
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='t', at=qi.ServerTimestamp,
@@ -322,7 +322,7 @@ class TestServerTimestampAt(unittest.TestCase):
         df = pd.DataFrame({'sym': ['a', 'b'], 'x': [1, 2]}).convert_dtypes(
             dtype_backend='pyarrow')
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='t', at=qi.ServerTimestamp)
@@ -336,7 +336,7 @@ class TestServerTimestampAt(unittest.TestCase):
     def test_none_at_rejected_and_mentions_sentinel(self):
         df = pl.DataFrame({'v': [1]}, schema={'v': pl.Int64})
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(
                         qi.UnsupportedDataFrameShapeError,
@@ -355,7 +355,7 @@ class TestScalarAt(unittest.TestCase):
 
     def _ingest(self, df, at, **kw):
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(df, table_name='t', at=at, **kw)
             finally:
@@ -399,7 +399,7 @@ class TestScalarAt(unittest.TestCase):
     @unittest.skipIf(pl is None, 'polars not installed')
     def test_pre_epoch_datetime_rejected(self):
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(
                         ValueError, 'before the Unix epoch'):
@@ -428,7 +428,7 @@ class TestNdarrayArrayColumns(unittest.TestCase):
 
     def _ingest(self, df, **kw):
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(df, table_name='t', at='ts', **kw)
             finally:
@@ -479,7 +479,7 @@ class TestNdarrayArrayColumns(unittest.TestCase):
     def test_mixed_cell_types_rejected(self):
         import numpy as np
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(
                         qi.QuestDBError, 'mixed object cells'):
@@ -499,7 +499,7 @@ class TestServerInfoLive(unittest.TestCase):
     def test_server_info_snapshot(self):
         import time
         addr = os.environ['QDB_HTTP_ADDR']
-        with qi.Client.from_conf(f'ws::addr={addr};') as client:
+        with qi.QuestDB.from_conf(f'ws::addr={addr};') as client:
             info = client.server_info()
             self.assertIsInstance(info, qi.ServerInfo)
             self.assertIsInstance(info.role, qi.ServerRole)
@@ -550,7 +550,7 @@ class TestConnectionEvents(unittest.TestCase):
     def test_connected_fires_with_endpoint_and_counters(self):
         events, listener = self._collect()
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(
+            client = qi.QuestDB.from_conf(
                 _client_conf(server.port), connection_listener=listener)
             try:
                 client.dataframe(
@@ -580,7 +580,7 @@ class TestConnectionEvents(unittest.TestCase):
         blk.bind(('127.0.0.1', 0))
         port = blk.getsockname()[1]
         blk.close()
-        client = qi.Client.from_conf(
+        client = qi.QuestDB.from_conf(
             f'ws::addr=127.0.0.1:{port};connect_timeout=100;'
             f'reconnect_max_duration_millis=200;pool_size=1;pool_max=1;',
             connection_listener=listener)
@@ -616,7 +616,7 @@ class TestConnectionEvents(unittest.TestCase):
         server_b = QwpAckServer()
         server_b.start()
         try:
-            client = qi.Client.from_conf(
+            client = qi.QuestDB.from_conf(
                 f'ws::addr=127.0.0.1:{server_a.port},'
                 f'127.0.0.1:{server_b.port};'
                 f'connect_timeout=200;pool_size=1;pool_max=1;'
@@ -660,7 +660,7 @@ class TestConnectionEvents(unittest.TestCase):
 
     def test_listener_must_be_callable(self):
         with self.assertRaisesRegex(TypeError, 'must be callable'):
-            qi.Client.from_conf(
+            qi.QuestDB.from_conf(
                 'ws::addr=127.0.0.1:9000;',
                 connection_listener='not-callable')
 
@@ -669,7 +669,7 @@ class TestConnectionEvents(unittest.TestCase):
         def bad_listener(event):
             raise RuntimeError('listener bug')
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(
+            client = qi.QuestDB.from_conf(
                 _client_conf(server.port), connection_listener=bad_listener)
             try:
                 client.dataframe(
@@ -768,7 +768,7 @@ class TestSchemaOverrides(unittest.TestCase):
             ], dtype=pl.Datetime('us', time_zone='UTC')),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df,
@@ -800,7 +800,7 @@ class TestSchemaOverrides(unittest.TestCase):
             ], dtype=pl.Datetime('us', time_zone='UTC')),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df,
@@ -818,7 +818,7 @@ class TestSchemaOverrides(unittest.TestCase):
     def test_schema_overrides_rejects_decimal_kind(self):
         with self.assertRaisesRegex(ValueError, 'kind'):
             with QwpAckServer() as server:
-                client = qi.Client.from_conf(_client_conf(server.port))
+                client = qi.QuestDB.from_conf(_client_conf(server.port))
                 try:
                     client.dataframe(
                         object(),
@@ -839,7 +839,7 @@ class TestSchemaOverrides(unittest.TestCase):
             'ts':   [_ts_us(2025, 1, 1), _ts_us(2025, 1, 2)],
         }, schema=schema)
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     table,
@@ -861,7 +861,7 @@ class TestSchemaOverrides(unittest.TestCase):
             'x': [1, 2], 'ts': [_ts_us(2025, 1, 1), _ts_us(2025, 1, 2)],
         }, schema=schema)
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(ValueError, 'kind'):
                     client.dataframe(
@@ -882,7 +882,7 @@ class TestSchemaOverrides(unittest.TestCase):
             'loc': [1, 2], 'ts': [_ts_us(2025, 1, 1), _ts_us(2025, 1, 2)],
         }, schema=schema)
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(ValueError, 'geohash bits'):
                     client.dataframe(
@@ -907,7 +907,7 @@ class TestPyArrowRecordBatchDirect(unittest.TestCase):
             'ts': [_ts_us(2025, 1, 1) + i for i in range(3)],
         }, schema=schema)
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(batch, table_name='from_rb', at='ts')
             finally:
@@ -930,7 +930,7 @@ class TestSchemaOverridesPandas(unittest.TestCase):
                 dtype=pd.ArrowDtype(pa.timestamp('us'))),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df,
@@ -1018,7 +1018,7 @@ class TestCapsulePathPolarsMissing(unittest.TestCase):
         pandas falls through the capsule + pyarrow paths and raises.
         """
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaises((TypeError, qi.QuestDBError)):
                     client.dataframe(object(), table_name='t', at=None)
@@ -1049,7 +1049,7 @@ class TestWriterMixingInOneChunk(unittest.TestCase):
                 dtype='datetime64[ns]'),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(df, table_name='mixed', at='ts')
             finally:
@@ -1083,7 +1083,7 @@ class TestPandasPlannerRouting(unittest.TestCase):
                 dtype=pd.ArrowDtype(pa.float16())),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(df, table_name='arrow_pandas', at='ts')
             finally:
@@ -1110,7 +1110,7 @@ class TestPandasPlannerRouting(unittest.TestCase):
                 dtype=pd.ArrowDtype(pa.int64())),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='arrow_pandas_symbols',
@@ -1140,7 +1140,7 @@ class TestPandasPlannerRouting(unittest.TestCase):
             'v': pd.Series([1, 2], dtype='int64'),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 client.dataframe(
                     df, table_name='mixed_arrow_symbols',
@@ -1171,7 +1171,7 @@ class TestPandasPlannerRouting(unittest.TestCase):
                 dtype='datetime64[ns]'),
         })
         with QwpAckServer() as server:
-            client = qi.Client.from_conf(_client_conf(server.port))
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaises(qi.QuestDBError):
                     client.dataframe(df_bad, table_name='t', at='ts')

@@ -1422,7 +1422,7 @@ class TestWithDatabase(unittest.TestCase):
         self._require_qwp_udp()
         t1 = uuid.uuid4().hex
         t2 = uuid.uuid4().hex
-        buf = qi.Buffer.qwp()
+        buf = qi.Buffer._new_qwp()
         buf.row(t1, columns={'round': 1}, at=qi.TimestampNanos.now())
         with self._mk_udp_sender() as sender:
             sender.flush(buf)
@@ -1610,7 +1610,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_ilp_buffer_rejected(self):
         self._require_qwp_udp()
-        buf = qi.Buffer.ilp(protocol_version=2)
+        buf = qi.Buffer(protocol_version=2)
         buf.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
         with self._mk_udp_sender() as sender:
             with self.assertRaisesRegex(
@@ -1619,7 +1619,7 @@ class TestWithDatabase(unittest.TestCase):
 
     def test_qwp_udp_buffer_rejected_by_http(self):
         self._require_qwp_udp()
-        buf = qi.Buffer.qwp()
+        buf = qi.Buffer._new_qwp()
         buf.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
         with qi.Sender(
                 qi.Protocol.Http, self.qdb_plain.host,
@@ -2006,7 +2006,7 @@ class TestWithDatabase(unittest.TestCase):
 
 
 class TestEgressWithDatabase(unittest.TestCase):
-    """Live-server coverage for ``Client.query(...)``.
+    """Live-server coverage for ``QuestDB.query(...)``.
 
     Reuses ``TestWithDatabase`` fixture setup. The egress reader path
     is HTTP/QWP-only; we don't replicate the TLS+auth ingress matrix
@@ -2041,7 +2041,7 @@ class TestEgressWithDatabase(unittest.TestCase):
         return self.qdb_plain.http_sql_query(sql)
 
     def test_one_client_rows_dataframe_and_query(self):
-        """One Client config owns all three intended QWP paths."""
+        """One QuestDB config owns all three intended QWP paths."""
         table_name = 't_client_unified_' + uuid.uuid4().hex[:8]
         try:
             self._exec(
@@ -2055,7 +2055,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 'value': np.array([2], dtype=np.int64),
             })
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 with client.sender() as sender:
                     sender.row(
                         table_name,
@@ -2086,7 +2086,7 @@ class TestEgressWithDatabase(unittest.TestCase):
 
     def test_type_coverage_round_trip(self):
         """One row, every QuestDB type we can express in SQL, read back
-        via ``Client.query``. Single WAL apply, one query, per-column
+        via ``QuestDB.query``. Single WAL apply, one query, per-column
         assertions on Arrow dtype and value.
 
         Decimal / Array are deferred: their SQL literal syntax varies
@@ -2120,7 +2120,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 ")")
             self.qdb_plain.retry_check_table(table_name, min_rows=1)
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 table = client.query(
                     f'SELECT * FROM {table_name}').to_arrow()
 
@@ -2196,7 +2196,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f'CREATE TABLE {table_name} '
                 '(ts TIMESTAMP, x LONG) '
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 pdf = client.query(
                     f'SELECT * FROM {table_name} WHERE x = 1'
                 ).to_pandas()
@@ -2210,7 +2210,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 pass
 
     def test_polars_from_arrow_consumes_capsule(self):
-        """``Client.query`` exposes ``__arrow_c_stream__`` directly off
+        """``QuestDB.query`` exposes ``__arrow_c_stream__`` directly off
         the Rust cursor, so polars can consume it without pyarrow being
         the import-time mediator. Pins that contract: the polars frame
         round-trips the rows and our lazy ``_PYARROW`` global stays
@@ -2230,7 +2230,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f"('2024-01-01T00:00:00Z', 42, 'hello'), "
                 f"('2024-01-02T00:00:00Z', 7, 'world')")
             self.qdb_plain.retry_check_table(table_name, min_rows=2)
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 with client.query(
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
@@ -2267,19 +2267,19 @@ class TestEgressWithDatabase(unittest.TestCase):
                 'sym': pd.Series(exp, dtype='string[pyarrow]'),
                 'v': np.arange(n, dtype=np.int64),
             })
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 client.dataframe(
                     df, table_name=table_name, at='ts', symbols=['sym'])
             self.qdb_plain.retry_check_table(table_name, min_rows=n)
             sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 full = client.query(sql).to_polars()
             self.assertEqual(full.shape, (n, 2))
             self.assertIsInstance(full.schema['sym'], pl.Categorical)
             self.assertGreater(full['sym'].null_count(), 0)
             self.assertEqual(full['v'].to_list(), list(range(n)))
             self.assertEqual(full['sym'].cast(pl.Utf8).to_list(), exp)
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 frames = list(client.query(sql).iter_polars())
             self.assertGreater(len(frames), 1)
             stitched = pl.concat(frames, how='vertical')
@@ -2312,7 +2312,7 @@ class TestEgressWithDatabase(unittest.TestCase):
         try:
             self._make_table(table_name, 1)
             sql = f'SELECT lg FROM {table_name}'
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 result = client.query(sql)
                 result.to_arrow()
                 with self.assertRaises(qi.QuestDBError) as cm:
@@ -2342,7 +2342,7 @@ class TestEgressWithDatabase(unittest.TestCase):
         try:
             self._make_table(table_name, 8)
             sql = f'SELECT lg FROM {table_name}'
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 with client.query(sql) as result:
                     result.cancel()
                     result.cancel()
@@ -2372,7 +2372,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
             sql = f'SELECT lg FROM {table_name}'
             empty_sql = f'SELECT lg FROM {empty_name} WHERE lg = -1'
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 gc.collect()
                 before = sum(
                     1 for o in gc.get_objects()
@@ -2399,7 +2399,7 @@ class TestEgressWithDatabase(unittest.TestCase):
     def test_bad_sql_raises_ingress_error(self):
         """Server-side parse error surfaces as an ``QuestDBError`` from
         ``client.query`` with a usable message."""
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError) as cm:
                 client.query(
                     'SELECT * FROM nonexistent_table_xyz_abc_123'
@@ -2439,7 +2439,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.qdb_plain.retry_check_table(table_name, min_rows=1)
 
             sql = f'SELECT lg, vc FROM {table_name}'
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 default = client.query(sql).to_pandas()
                 arrow_backed = client.query(sql).to_pandas(
                     dtype_backend='pyarrow')
@@ -2467,7 +2467,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertIsInstance(nullable['vc'].dtype, pd.StringDtype)
 
             # Mutual-exclusion + invalid-value rejection.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 with self.assertRaises(ValueError):
                     client.query(sql).to_pandas(
                         dtype_backend='pyarrow', types_mapper=lambda t: None)
@@ -2505,7 +2505,7 @@ class TestEgressWithDatabase(unittest.TestCase):
 
             # Wire format: SYMBOL arrives as a dictionary with an
             # unsigned index — the input that breaks pandas conversion.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 table = client.query(sql).to_arrow()
             sym_type = table.schema.field('sym').type
             self.assertTrue(
@@ -2516,24 +2516,24 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f'expected unsigned dict index; got {sym_type.index_type}')
 
             # default to_pandas: must not raise; SYMBOL -> Categorical.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 default = client.query(sql).to_pandas()
             self.assertEqual(str(default['sym'].dtype), 'category')
             self.assertEqual(list(default['sym']), ['aa', 'bb', 'aa'])
             self.assertEqual(list(default['lg']), [1, 2, 3])
 
             # pyarrow + numpy_nullable backends: also must not raise.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 arrow_backed = client.query(sql).to_pandas(
                     dtype_backend='pyarrow')
             self.assertEqual(list(arrow_backed['sym']), ['aa', 'bb', 'aa'])
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 nullable = client.query(sql).to_pandas(
                     dtype_backend='numpy_nullable')
             self.assertEqual(list(nullable['sym']), ['aa', 'bb', 'aa'])
 
             # streaming iter_pandas exercises the same per-batch recast.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 syms = []
                 for chunk in client.query(sql).iter_pandas():
                     syms.extend(chunk['sym'].tolist())
@@ -2546,7 +2546,7 @@ class TestEgressWithDatabase(unittest.TestCase):
 
     def test_numpy_egress_round_trip(self):
         """The native (default) ``to_pandas()`` output feeds straight back
-        into ``Client.dataframe`` and reproduces the same values for the
+        into ``QuestDB.dataframe`` and reproduces the same values for the
         types that round-trip through the numpy path
         (long/double/bool/varchar/symbol/timestamp). Also checks the
         ``df.attrs['questdb']`` round-trip metadata is attached.
@@ -2567,7 +2567,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f"('2024-01-01T00:00:02Z', 3, 3.5, true, 'cc', 's1')")
             self.qdb_plain.retry_check_table(src, min_rows=3)
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 df = client.query(
                     f'SELECT {cols} FROM {src} ORDER BY ts').to_pandas()
 
@@ -2584,11 +2584,11 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f'CREATE TABLE {dst} '
                 '(ts TIMESTAMP, lg LONG, db DOUBLE, bl BOOLEAN, '
                 'vc VARCHAR, sym SYMBOL) TIMESTAMP(ts) PARTITION BY DAY WAL')
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=dst, at='ts')
             self.qdb_plain.retry_check_table(dst, min_rows=3)
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 back = client.query(
                     f'SELECT {cols} FROM {dst} ORDER BY ts').to_pandas()
             self.assertEqual(list(back['lg']), [1, 2, 3])
@@ -2622,7 +2622,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f"('2024-01-01T00:00:00Z', 7, 10, 1.5, 'x'), "
                 f"('2024-01-01T00:00:01Z', NULL, 20, NULL, NULL)")
             self.qdb_plain.retry_check_table(table_name, min_rows=2)
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 df = client.query(
                     f'SELECT lg, lg2, db, vc FROM {table_name} ORDER BY ts'
                 ).to_pandas()
@@ -2646,7 +2646,7 @@ class TestEgressWithDatabase(unittest.TestCase):
 
     def test_numpy_egress_nullable_round_trip(self):
         """A nullable LONG round-trips through the default hybrid output:
-        query -> to_pandas (Int64 with pd.NA) -> Client.dataframe (normalised
+        query -> to_pandas (Int64 with pd.NA) -> QuestDB.dataframe (normalised
         to object + validity) -> query reproduces the value and the null.
         """
         import pandas as pd
@@ -2662,17 +2662,17 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f"('2024-01-01T00:00:01Z', NULL), "
                 f"('2024-01-01T00:00:02Z', 9)")
             self.qdb_plain.retry_check_table(src, min_rows=3)
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 df = client.query(
                     f'SELECT ts, lg FROM {src} ORDER BY ts').to_pandas()
             self.assertEqual(str(df['lg'].dtype), 'Int64')
             self._exec(
                 f'CREATE TABLE {dst} (ts TIMESTAMP, lg LONG) '
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=dst, at='ts')
             self.qdb_plain.retry_check_table(dst, min_rows=3)
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 back = client.query(
                     f'SELECT lg FROM {dst} ORDER BY ts').to_pandas()
             self.assertEqual(back['lg'].iloc[0], 7)
@@ -2705,7 +2705,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f"('2024-01-01T00:00:01Z', '255.0.0.1', #u33e, 'B')")
             self.qdb_plain.retry_check_table(src, min_rows=2)
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 df = client.query(
                     f'SELECT {cols} FROM {src} ORDER BY ts').to_pandas()
             meta = df.attrs['questdb']['columns']
@@ -2714,11 +2714,11 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(meta['gh']['kind'], 'geohash')
             self.assertEqual(meta['gh']['precision_bits'], 20)
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=dst, at='ts')
             self.qdb_plain.retry_check_table(dst, min_rows=2)
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 back = client.query(
                     f'SELECT ip, gh, c FROM {dst}').to_pandas()
             bmeta = back.attrs['questdb']['columns']
@@ -2772,7 +2772,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             sql = f'SELECT lg, db, vc FROM {table_name} ORDER BY ts'
 
             # 1. Arrow level: verify the validity bitmap arrived.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 table = client.query(sql).to_arrow()
             lg_col = table.column('lg')
             self.assertEqual(lg_col.null_count, 1,
@@ -2785,7 +2785,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             # 2. default to_pandas — native hybrid: a nullable LONG with
             #    nulls becomes Int64 (pd.NA); DOUBLE null is NaN; VARCHAR
             #    null is None.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 default = client.query(sql).to_pandas()
             self.assertEqual(str(default['lg'].dtype), 'Int64')
             self.assertEqual(default['lg'].iloc[0], 42)
@@ -2797,7 +2797,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertTrue(pd.isna(default['vc'].iloc[1]))
 
             # 3. pyarrow-backed to_pandas — pd.NA preserved.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 arrow_backed = client.query(sql).to_pandas(
                     dtype_backend='pyarrow')
             self.assertIsInstance(arrow_backed['lg'].dtype, pd.ArrowDtype)
@@ -2808,7 +2808,7 @@ class TestEgressWithDatabase(unittest.TestCase):
 
             # 4. numpy_nullable to_pandas — pd.NA preserved via
             #    Int64Dtype / Float64Dtype / StringDtype.
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 nullable = client.query(sql).to_pandas(
                     dtype_backend='numpy_nullable')
             self.assertIsInstance(nullable['lg'].dtype, pd.Int64Dtype)
@@ -2839,7 +2839,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f'CREATE TABLE {table_name} '
                 '(ts TIMESTAMP, lg LONG) '
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
-            # Ingest via Client.dataframe — the python int range
+            # Ingest via QuestDB.dataframe — the python int range
             # accepts INT64_MIN cleanly, sidestepping the SQL
             # parser ambiguity around the literal.
             # Also exercise tz-aware ingest (was rejected by columnar v1
@@ -2852,12 +2852,12 @@ class TestEgressWithDatabase(unittest.TestCase):
                 'lg': np.array(
                     [42, np.iinfo(np.int64).min], dtype=np.int64),
             })
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=table_name, at='ts')
             self.qdb_plain.retry_check_table(table_name, min_rows=2)
 
             sql = f'SELECT lg FROM {table_name} ORDER BY ts'
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 table = client.query(sql).to_arrow()
 
             # The INT64_MIN row collapses to NULL server-side.
@@ -2876,7 +2876,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 pass
 
     def test_sequential_queries_on_one_client(self):
-        """Open one Client, run several queries in sequence. Catches
+        """Open one QuestDB handle, run several queries in sequence. Catches
         regressions in any per-call reader/cursor lifecycle assumption.
         Pool-reuse assertions live in ``TestEgressPool`` so this test
         stays focused on the per-query result shape.
@@ -2894,7 +2894,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f"('2024-01-01T00:00:02Z', 3)")
             self.qdb_plain.retry_check_table(table_name, min_rows=3)
 
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 first = client.query(
                     f'SELECT count() FROM {table_name}').to_arrow()
                 self.assertEqual(first.num_rows, 1)
@@ -2987,12 +2987,12 @@ class TestEgressPool(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_idle_grows_on_sequential_use(self):
-        """After N sequential queries on one Client the pool holds
+        """After N sequential queries on one QuestDB handle the pool holds
         exactly one idle reader. (The lifted-out pool-reuse assertion
         previously in test_sequential_queries_on_one_client.)
         """
         table = self._seed_table(n_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             for _ in range(5):
                 client.query(f'SELECT count() FROM {table}').to_arrow()
             in_use, idle = qi._debug_egress_pool_stats(client)
@@ -3007,7 +3007,7 @@ class TestEgressPool(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_query_after_client_close_via_held_iterator(self):
-        """The architecture promises that ``Client.close()`` can free
+        """The architecture promises that ``QuestDB.close()`` can free
         the user-facing handle while a still-streaming cursor exists.
         The ``Arc<DbInner>`` inside ``line_reader.ownership.Pooled``
         is what keeps the pool's transport alive across that window.
@@ -3018,7 +3018,7 @@ class TestEgressPool(unittest.TestCase):
         would surface as a use-after-free here.
         """
         table = self._seed_table(n_rows=64)
-        client = qi.Client.from_conf(self._conf())
+        client = qi.QuestDB.from_conf(self._conf())
         try:
             result = client.query(f'SELECT x FROM {table} ORDER BY x')
             it = result.iter_arrow()
@@ -3044,7 +3044,7 @@ class TestEgressPool(unittest.TestCase):
         """
         import gc
         table = self._seed_table(n_rows=64)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             # Seed the pool with a fully-drained reader so idle==1.
             client.query(f'SELECT count() FROM {table}').to_arrow()
             in_use, idle = qi._debug_egress_pool_stats(client)
@@ -3092,7 +3092,7 @@ class TestEgressPool(unittest.TestCase):
         socket error."""
         table = self._seed_table(n_rows=64)
         conf = self._conf(pool_size='1', pool_max='1')
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             # Hold one reader by starting an iterator and not
             # exhausting it.
             held_result = client.query(
@@ -3126,7 +3126,7 @@ class TestEgressPool(unittest.TestCase):
     def test_pool_conf_keys_accepted_by_reader(self):
         """The reader's conf parser accepts ``ws::`` / ``wss::`` schemes and
         ignores ``pool_*`` keys. Verify
-        that a pool-configured Client produces a working egress
+        that a pool-configured QuestDB handle produces a working egress
         reader (a regression in the accept list would surface as a
         ConfigError on the first ``query()``).
         """
@@ -3136,7 +3136,7 @@ class TestEgressPool(unittest.TestCase):
             pool_max='4',
             pool_idle_timeout_ms='30000',
             pool_reap='manual')
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             r = client.query(f'SELECT count() FROM {table}').to_arrow()
             self.assertEqual(r.column(0).to_pylist(), [3])
 
@@ -3145,7 +3145,7 @@ class TestEgressPool(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_concurrent_queries_share_pool(self):
-        """N threads × M queries on one Client with ``pool_size=K``.
+        """N threads × M queries on one QuestDB handle with ``pool_size=K``.
         Asserts: no exceptions; pool grew at most to ``K``; all
         readers returned (``in_use==0`` at end); pool stays under
         ``pool_max``.
@@ -3168,7 +3168,7 @@ class TestEgressPool(unittest.TestCase):
             except BaseException as e:
                 errors.append(repr(e))
 
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             threads = [
                 threading.Thread(target=worker, args=(client,))
                 for _ in range(n_threads)]
@@ -3198,7 +3198,7 @@ class TestEgressPool(unittest.TestCase):
     def test_long_running_stream_does_not_starve_other_queries(self):
         """Thread A holds a streaming cursor across a Barrier (one
         batch pulled, one pending). Thread B runs M short queries on
-        the same Client. The pool must auto-grow to a second reader
+        the same QuestDB handle. The pool must auto-grow to a second reader
         for B; B must not wait for A. Pure correctness assertion;
         no timing comparison.
         """
@@ -3211,7 +3211,7 @@ class TestEgressPool(unittest.TestCase):
         errors = []
         b_query_count = 16
 
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             def slow_a():
                 try:
                     result = client.query(
@@ -3261,7 +3261,7 @@ class TestEgressPool(unittest.TestCase):
 
 class TestColumnIngressNarrowTypes(unittest.TestCase):
     """End-to-end tests for the narrow Arrow primitive types added to
-    ``Client.dataframe`` column ingress: ``pa.int8/16/32`` →
+    ``QuestDB.dataframe`` column ingress: ``pa.int8/16/32`` →
     BYTE/SHORT/INT, unsigned Arrow integers, ``pa.float16/32``,
     and Arrow timestamp units through the QWP/WebSocket classifier.
 
@@ -3337,7 +3337,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         return pd.array(arr, dtype=pd.ArrowDtype(arr.type))
 
     def _assert_table_empty(self, table):
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(f'SELECT count() FROM {table}').to_arrow()
         self.assertEqual(got.column(0).to_pylist(), [0])
 
@@ -3354,10 +3354,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._create_table(table, 'v BYTE')
         values = pa.array([-127, -1, 0, 1, 127], type=pa.int8())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int8())
@@ -3374,10 +3374,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [-32767, -1, 0, 1, 32767], type=pa.int16())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int16())
@@ -3398,10 +3398,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [-2147483647, -1, 0, 1, 2147483647], type=pa.int32())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int32())
@@ -3417,10 +3417,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [-1.5, 0.0, 0.5, 1.0, 3.14], type=pa.float32())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.float32())
@@ -3453,10 +3453,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'nullable_d': pd.Series(
                 [4.5, pd.NA, -6.25], dtype=pd.Float64Dtype()),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT arrow_l, nullable_l, arrow_d, nullable_d '
                 f'FROM {table} ORDER BY ts').to_arrow()
@@ -3480,10 +3480,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             ['alpha', None, 'gamma', 'delta', 'epsilon'],
             type=pa.large_string())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').to_pylist(), values.to_pylist())
@@ -3504,10 +3504,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [-100, None, 0, None, 200], type=pa.int16())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int16())
@@ -3534,10 +3534,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [-2147483648, 42], type=pa.int32())
         df = self._make_df_with_ts('v', values, 2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int32())
@@ -3565,10 +3565,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'TIMESTAMP(ts) PARTITION BY DAY WAL')
         values = pa.array([1, 2, 3, 4, 5], type=pa.int8())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int64())
@@ -3585,10 +3585,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'TIMESTAMP(ts) PARTITION BY DAY WAL')
         values = pa.array([0.5, 1.5, 2.5], type=pa.float32())
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.float64())
@@ -3635,10 +3635,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         wire_bytes = [self._uuid_to_wire(u) for u in uuids]
         values = pa.array(wire_bytes, type=pa.binary(16))
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
@@ -3665,10 +3665,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             uuid_type,
             pa.array(wire_bytes, type=pa.binary(16)))
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
@@ -3687,10 +3687,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [w0, None, w2, None, w4], type=pa.binary(16))
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         col = got.column('v')
@@ -3712,10 +3712,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         uuids = [uuid_mod.uuid4() for _ in range(3)]
         values = pa.array([str(u) for u in uuids], type=pa.string())
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         # Server-side coercion lands the value as a UUID; egress
@@ -3737,7 +3737,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             ['not-a-uuid', 'also-not'], type=pa.string())
         df = self._make_df_with_ts('v', values, 2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
@@ -3771,14 +3771,14 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [b'\x00' * 8, b'\xff' * 8], type=pa.binary(8))
         df = self._make_df_with_ts('v', values, 2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
     # ---------- UInt32 / IPV4 policy ----------
 
     def test_pa_uint32_round_trip_as_long(self):
-        """Plain ``pa.uint32()`` widens to LONG on Client.dataframe.
+        """Plain ``pa.uint32()`` widens to LONG on QuestDB.dataframe.
 
         The Rust Arrow ingestion path reserves IPV4 for UInt32 fields
         with ``questdb.column_type=ipv4`` metadata. Pandas drops Arrow
@@ -3792,10 +3792,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         ints = [1, 2, 3, 0, 4294967295]
         values = pa.array(ints, type=pa.uint32())
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int64())
@@ -3809,10 +3809,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         ints = [0, 2 ** 63 - 1, 42]
         values = pa.array(ints, type=pa.uint64())
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(got.column('v').type, pa.int64())
@@ -3847,10 +3847,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 dtype=pd.ArrowDtype(pa.float16())),
         })
 
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT u8, u16, u32, u64, f16 FROM {table} '
                 'ORDER BY timestamp'
@@ -3874,7 +3874,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._create_table(table, 'v LONG')
         values = pa.array([0, 2 ** 63], type=pa.uint64())
         df = self._make_df_with_ts('v', values, 2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
                     r'UInt64 value 9223372036854775808 .* does not fit QuestDB LONG'):
@@ -3894,7 +3894,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 [1700000000_000000, None], ts_type),
             'v': self._arrow_series([1, 2], pa.int64()),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
         self.assertIn('null', str(cm.exception).lower())
@@ -3910,7 +3910,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'ts': self._arrow_series([-1, 1700000000_000000], ts_type),
             'v': self._arrow_series([1, 2], pa.int64()),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
         self.assertIn('unix epoch', str(cm.exception).lower())
@@ -3937,10 +3937,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                     [raw], pa.timestamp(unit, tz='UTC')),
                 'v': pd.Series([1], dtype=np.int64),  # numpy -> manual
             })
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=table, at='ts')
             self.qdb_plain.retry_check_table(table, min_rows=1)
-            with qi.Client.from_conf(self._conf()) as client:
+            with qi.QuestDB.from_conf(self._conf()) as client:
                 got = client.query(f'SELECT ts FROM {table}').to_arrow()
             self.assertEqual(
                 got.column('ts').type, pa.timestamp('us', tz='UTC'))
@@ -3962,7 +3962,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 [1686832496789, None], pa.timestamp('ms', tz='UTC')),
             'v': pd.Series([1, 2], dtype=np.int64),  # numpy -> manual
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(
                     qi.UnsupportedDataFrameShapeError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
@@ -3987,10 +3987,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 [1700000002_000000, None], ts_type),
             'v': self._arrow_series([1, 2], pa.int64()),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT event_ts FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(
@@ -4013,10 +4013,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 [-1, 1700000002_000000], ts_type),
             'v': self._arrow_series([1, 2], pa.int64()),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT event_ts FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(
@@ -4043,7 +4043,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 seq_values.astype(np.float64) * 0.25,
                 pa.float64()),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
             try:
                 client.dataframe(
@@ -4056,7 +4056,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(io_stats['sync_calls'], 1)
 
         self.qdb_plain.retry_check_table(table, min_rows=rows)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             count = client.query(
                 f'SELECT count() FROM {table}').to_arrow()
             expected_seq = [0, 31999, 32000, 32001, 63999, 64000]
@@ -4091,13 +4091,13 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         })
         conf = (f'ws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};max_buf_size=4096;')
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             # One logical batch (max_rows_per_batch == rows) forces the core to
             # split it, rather than the Python chunker pre-splitting by rows.
             client.dataframe(df, table_name=table, at='ts',
                              max_rows_per_batch=rows)
         self.qdb_plain.retry_check_table(table, min_rows=rows)
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             got = client.query(
                 f'SELECT count(), min(seq), max(seq) FROM {table}').to_arrow()
         self.assertEqual(got.column(0).to_pylist(), [rows])
@@ -4125,7 +4125,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         })
         conf = (f'ws::addr={self.qdb_plain.host}:'
                 f'{self.qdb_plain.http_server_port};max_buf_size=4096;')
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             with self.assertRaises(qi.QuestDBError) as ctx:
                 client.dataframe(df, table_name=table, at='ts')
         self.assertEqual(
@@ -4145,7 +4145,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 ['alpha', 'beta', 'gamma'], pa.string()),
             'seq': pd.Series([1, 2, 3], dtype='int64'),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(
                 df,
                 table_name=table,
@@ -4178,7 +4178,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'note': self._arrow_series(
                 ['alpha', 'beta', 'gamma'], dict_type),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts', symbols=False)
 
         resp = self.qdb_plain.retry_check_table(table, min_rows=3)
@@ -4200,7 +4200,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'note': self._arrow_series(
                 ['alpha', 'beta', 'gamma'], dict_type),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(
                 df, table_name=table, at='ts', symbols=['region'])
 
@@ -4225,7 +4225,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         ips = ['192.168.1.10', '10.0.0.1', '127.0.0.1']
         values = pa.array(ips, type=pa.string())
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError) as cm:
                 client.dataframe(df, table_name=table, at='ts')
             self.assertIn('ipv4', str(cm.exception).lower())
@@ -4238,7 +4238,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             ['not-an-ip', '999.999.999.999'], type=pa.string())
         df = self._make_df_with_ts('v', values, 2)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
@@ -4252,7 +4252,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._create_table(table, 'v IPV4')
         values = pa.array([1, 2, 3], type=pa.uint32())
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError):
                 client.dataframe(df, table_name=table, at='ts')
 
@@ -4274,10 +4274,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         v2 = bytes([0] * 32)
         values = pa.array([v0, v1, v2], type=pa.binary(32))
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         col = got.column('v')
@@ -4303,10 +4303,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array(
             [v0, None, v2, None, v4], type=pa.binary(32))
         df = self._make_df_with_ts('v', values, 5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         col = got.column('v')
@@ -4344,10 +4344,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         table = self._table()
         values = pa.array([0, 1, 255], type=pa.uint8())
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY v').to_arrow()
         self.assertEqual(got.column('v').type, pa.int32())
@@ -4362,10 +4362,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         table = self._table()
         values = pa.array([0, 1, 65535], type=pa.uint16())
         df = self._make_df_with_ts('v', values, 3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY v').to_arrow()
         self.assertEqual(got.column('v').type, pa.int32())
@@ -4373,7 +4373,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
 
 
 class TestColumnIngressFailover(unittest.TestCase):
-    """Within-call failover for ``Client.dataframe`` (the column path).
+    """Within-call failover for ``QuestDB.dataframe`` (the column path).
 
     Connect-time / between-operation failover is automatic in Rust (the
     next pool borrow auto-selects the live primary); these tests pin the
@@ -4474,13 +4474,13 @@ class TestColumnIngressFailover(unittest.TestCase):
         })
 
     def _read_back_v(self, table):
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         return got.column('v').to_pylist()
 
     def test_sf_conf_dataframe_stays_direct_numpy(self):
-        """``Client.dataframe`` ignores ``sf_dir``: the NumPy path stays on
+        """``QuestDB.dataframe`` ignores ``sf_dir``: the NumPy path stays on
         the direct column sender and never touches the store-and-forward
         spool."""
         table = self._table('t_sf_conf_df_np_')
@@ -4501,7 +4501,7 @@ class TestColumnIngressFailover(unittest.TestCase):
         })
 
         with tempfile.TemporaryDirectory(prefix='py-df-sf-conf-np-') as sf_dir:
-            with qi.Client.from_conf(
+            with qi.QuestDB.from_conf(
                     self._sfa_conf(sender_id, sf_dir)) as client:
                 client.dataframe(
                     df, table_name=table, at='ts', symbols=['sym'])
@@ -4518,7 +4518,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             [[0, 'alpha'], [1, 'bravo'], [2, 'alpha']])
 
     def test_sf_conf_dataframe_stays_direct_arrow(self):
-        """``Client.dataframe`` ignores ``sf_dir``: the Arrow capsule path
+        """``QuestDB.dataframe`` ignores ``sf_dir``: the Arrow capsule path
         stays on the direct column sender and never touches the
         store-and-forward spool."""
         if pyarrow is None:
@@ -4552,7 +4552,7 @@ class TestColumnIngressFailover(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(
                 prefix='py-df-sf-conf-arrow-') as sf_dir:
-            with qi.Client.from_conf(
+            with qi.QuestDB.from_conf(
                     self._sfa_conf(sender_id, sf_dir)) as client:
                 client.dataframe(
                     df,
@@ -4594,7 +4594,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             'v': np.array([2], dtype=np.int64),
         })
 
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(valid1, table_name=table, at='ts')
             with self.assertRaises(qi.QuestDBError) as raised:
                 client.dataframe(rejected, table_name=table, at='ts')
@@ -4620,7 +4620,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             endpoints=endpoints,
             reconnect_max_duration_millis='30000')
         df = self._pandas_df(2000)
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
         self.assertEqual(self._read_back_v(table), list(range(2000)))
@@ -4636,7 +4636,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             endpoints=endpoints,
             reconnect_max_duration_millis='30000')
         df = self._arrow_df(2000)
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
         self.assertEqual(self._read_back_v(table), list(range(2000)))
@@ -4658,7 +4658,7 @@ class TestColumnIngressFailover(unittest.TestCase):
                 for i in range(1500)],
             'v': list(range(1500)),
         })
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=1500)
         self.assertEqual(self._read_back_v(table), list(range(1500)))
@@ -4671,7 +4671,7 @@ class TestColumnIngressFailover(unittest.TestCase):
         table = self._table()
         self._create_table(table)
         df = self._pandas_df(20000)
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(reconnect_max_duration_millis='60000')) as client:
             # Warm the pool so a live conn is idle, then bounce: the next
             # borrow hands back that now-stale conn, the flush hits a dead
@@ -4689,7 +4689,7 @@ class TestColumnIngressFailover(unittest.TestCase):
         table = self._table()
         self._create_table(table)
         df = self._arrow_df(20000)
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(reconnect_max_duration_millis='60000')) as client:
             client.dataframe(self._arrow_df(2), table_name=table, at='ts')
             self.qdb_plain.stop()
@@ -4710,7 +4710,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             f'CREATE TABLE {table} (ts TIMESTAMP, v LONG) '
             'TIMESTAMP(ts) PARTITION BY DAY WAL')
         df = self._pandas_df(20000)
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(reconnect_max_duration_millis='60000')) as client:
             client.dataframe(
                 self._pandas_df(2), table_name=warm_table, at='ts')
@@ -4756,7 +4756,7 @@ class TestColumnIngressFailover(unittest.TestCase):
             raise ValueError('source stream failed')
 
         reader = pyarrow.RecordBatchReader.from_batches(schema, batches())
-        with qi.Client.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError):
                 client.dataframe(reader, table_name=table, at='ts')
 
@@ -4842,7 +4842,7 @@ class TestEgressFailover(unittest.TestCase):
         table = self._seed(n)
         expected = list(range(n))
 
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
             result = client.query(f'SELECT v FROM {table} ORDER BY ts')
             # Bounce before the (single-use) materialisation drains the
@@ -4859,7 +4859,7 @@ class TestEgressFailover(unittest.TestCase):
         n = 200000
         table = self._seed(n)
         expected = list(range(n))
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
             result = client.query(f'SELECT v FROM {table} ORDER BY ts')
             self.qdb_plain.stop()
@@ -4875,7 +4875,7 @@ class TestEgressFailover(unittest.TestCase):
         n = 200000
         table = self._seed(n)
         expected = list(range(n))
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
             result = client.query(f'SELECT v FROM {table} ORDER BY ts')
             self.qdb_plain.stop()
@@ -4896,7 +4896,7 @@ class TestEgressFailover(unittest.TestCase):
         endpoints = [
             (self.qdb_plain.host, self._unused_tcp_port()),
             (self.qdb_plain.host, self.qdb_plain.http_server_port)]
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(endpoints=endpoints,
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
@@ -4916,7 +4916,7 @@ class TestEgressFailover(unittest.TestCase):
         endpoints = [
             (self.qdb_plain.host, self._unused_tcp_port()),
             (self.qdb_plain.host, self.qdb_plain.http_server_port)]
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(endpoints=endpoints,
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
@@ -4934,7 +4934,7 @@ class TestEgressFailover(unittest.TestCase):
         # finish and buffer before the graceful fixture bounce breaks the
         # WebSocket, making the test depend on timing.
         n = 100000000
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000',
                            max_batch_rows='1024')) as client:
             it = client.query(
@@ -4954,7 +4954,7 @@ class TestEgressFailover(unittest.TestCase):
     def test_iter_pandas_surfaces_failover_would_duplicate(self):
         """Same contract for the numpy streaming ``iter_pandas``."""
         n = 100000000
-        with qi.Client.from_conf(
+        with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000',
                            max_batch_rows='1024')) as client:
             it = client.query(
@@ -5041,7 +5041,7 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
     """Reader connect-time role/auth failover, ported from Java's
     ``QwpQueryClientMultiHostFailoverTest``. The pool opens lazily, so the
     connect walk -- and any role/auth error -- surfaces on the first borrow
-    (``Client.query()``), not at ``Client.from_conf``. These run against
+    (``QuestDB.query()``), not at ``QuestDB.from_conf``. These run against
     in-process fakes only and need no QuestDB instance."""
 
     def _server(self, status_code, role_header=None):
@@ -5067,7 +5067,7 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [replica, auth],
             auth_timeout_ms=2000, failover='off', target='any')
-        client = qi.Client.from_conf(conf)
+        client = qi.QuestDB.from_conf(conf)
         self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
             client.query('SELECT 1')
@@ -5089,7 +5089,7 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2],
             auth_timeout_ms=2000, failover='off', target='any')
-        client = qi.Client.from_conf(conf)
+        client = qi.QuestDB.from_conf(conf)
         self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
             client.query('SELECT 1')
@@ -5108,7 +5108,7 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2, r3],
             auth_timeout_ms=2000, failover='off', target='any')
-        client = qi.Client.from_conf(conf)
+        client = qi.QuestDB.from_conf(conf)
         self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
             client.query('SELECT 1')

@@ -85,7 +85,7 @@ def run_layer3(args):
 
         # --- Read it back through the egress paths. ---
         paths = args.path or ALL_PATHS
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             read_sql = f"SELECT * FROM {table_name}"
             wire_bytes = measure_egress_wire_bytes(client, read_sql)
             zero_copy = verify_zero_copy(client, read_sql)

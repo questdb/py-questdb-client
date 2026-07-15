@@ -1,5 +1,5 @@
 """
-Deterministic, seed-controlled fuzz coverage for Client.dataframe().
+Deterministic, seed-controlled fuzz coverage for QuestDB.dataframe().
 
 Mirrors the seed-and-replay convention from
 ``c-questdb-client/system_test/qwp_ws_fuzz.py``:
@@ -13,7 +13,7 @@ Mirrors the seed-and-replay convention from
     failing iteration can be reproduced by setting
     ``QDB_CLIENT_FUZZ_ITER_SEED=<seed>`` to run that one iteration alone.
 
-Every iteration drives ``Client.dataframe()`` round-trip through a local
+Every iteration drives ``QuestDB.dataframe()`` round-trip through a local
 ``QwpAckServer`` fixture (no real QuestDB required) and asserts:
 
   - Frames the v1 planner rejects raise before any QWP/WebSocket binary frame
@@ -22,7 +22,7 @@ Every iteration drives ``Client.dataframe()`` round-trip through a local
     ``QuestDBError``.
   - Frames the v1 planner accepts complete without raising and produce at
     least one QWP1 binary frame at the server (unless the frame is empty,
-    in which case ``Client.dataframe()`` is a no-op).
+    in which case ``QuestDB.dataframe()`` is a no-op).
   - The pool reuses a single TCP accept across the whole iteration loop
     (``pool_size=pool_max=1``, ``pool_reap=manual``).
   - The server reports no protocol-level errors at any point.
@@ -486,7 +486,7 @@ def _build_frame(rng):
     Return (df, kwargs, expected_supported).
 
     ``expected_supported`` describes the static v1 planner's accept/reject
-    decision. If True and ``len(df) == 0``, ``Client.dataframe()`` returns
+    decision. If True and ``len(df) == 0``, ``QuestDB.dataframe()`` returns
     early without sending; otherwise an accepted frame produces at least
     one binary frame on the wire.
 
@@ -578,7 +578,7 @@ def _build_frame(rng):
 
 @unittest.skipIf(pd is None or pa is None, 'pandas/pyarrow not installed')
 class TestClientDataframeFuzz(unittest.TestCase):
-    """Round-trip fuzz: every iteration goes through Client.dataframe() to
+    """Round-trip fuzz: every iteration goes through QuestDB.dataframe() to
     a local QwpAckServer."""
 
     DEFAULT_ITERS = 100
@@ -592,14 +592,14 @@ class TestClientDataframeFuzz(unittest.TestCase):
             cls.master_seed = None
             cls.iters = 1
             sys.stderr.write(
-                f'>>>> Client.dataframe fuzz: '
+                f'>>>> QuestDB.dataframe fuzz: '
                 f'iter_seed_override={_format_seed(cls.iter_seed_override)}, '
                 f'iters=1\n')
             return
         cls.master_seed = _derive_master_seed()
         cls.iters = _parse_int_env(ITERS_ENV) or cls.DEFAULT_ITERS
         sys.stderr.write(
-            f'>>>> Client.dataframe fuzz: master_seed='
+            f'>>>> QuestDB.dataframe fuzz: master_seed='
             f'{_format_seed(cls.master_seed)}, iters={cls.iters}\n')
 
     def setUp(self):
@@ -682,7 +682,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
 
     def test_fuzz_round_trip(self):
         seeds = self._iter_seeds()
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         failures = []
         try:
             prev = 0
@@ -732,7 +732,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
             'ts': pd.Series(_datetime_array(2)),
             'seq': pd.Series([1, 2], dtype='int64'),
         })
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             for at_val in (
                     qi.TimestampNanos(1_700_000_000_000_000_000),
@@ -746,7 +746,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
 
     def test_rejects_pre_epoch_scalar_at(self):
         df = pd.DataFrame({'seq': pd.Series([1, 2], dtype='int64')})
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             with self.assertRaisesRegex(ValueError, 'before the Unix epoch'):
                 client.dataframe(
@@ -776,7 +776,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
                     dtype='int64').astype('datetime64[ms, UTC]'),
                 'v': pd.Series([1, 2], dtype='int64')}),
         ]
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', FutureWarning)
@@ -801,7 +801,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
                 'ts': pd.Series(_datetime_array(2)),
             })
             self.assertEqual(str(df.dtypes['sym']), 'str')
-            client = qi.Client.from_conf(self.conf)
+            client = qi.QuestDB.from_conf(self.conf)
             try:
                 client.dataframe(df, table_name='t', at='ts')
             finally:
@@ -815,7 +815,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
     def test_coarse_datetime_at_units(self):
         # pandas 3.0 infers datetime64[us] (and coarser) instead of [ns];
         # every unit must be accepted as the designated timestamp.
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             for unit in ('us', 'ms', 's'):
                 df = pd.DataFrame({
@@ -839,7 +839,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
             'ts': pd.Series(_datetime_array(2)),
             'seq': pd.Series([1, 2], dtype='int64'),
         })
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             client.dataframe(df, table_name='t', at=qi.ServerTimestamp)
         finally:
@@ -854,7 +854,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
             'tbl': pd.Series(['a', 'b'], dtype='string[pyarrow]'),
             'seq': pd.Series([1, 2], dtype='int64'),
         })
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             with self.assertRaises(qi.UnsupportedDataFrameShapeError):
                 client.dataframe(df, table_name_col='tbl', at='ts')
@@ -863,7 +863,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
         self.assertEqual(self.server.snapshot()['binary_frames'], 0)
 
     def test_closed_client_methods_reject(self):
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         client.close()
         df = pd.DataFrame({
             'ts': pd.Series(_datetime_array(1)),
@@ -903,7 +903,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
             's': pd.Series(items, dtype='string[pyarrow]'),
             'seq': pd.Series(np.arange(n_rows, dtype=np.int64)),
         })
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
             try:
@@ -920,7 +920,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
             f'got io_stats={io_stats}')
         self.assertEqual(
             io_stats['sync_calls'], 1,
-            f'expected exactly one sync per Client.dataframe() call; '
+            f'expected exactly one sync per QuestDB.dataframe() call; '
             f'got io_stats={io_stats}')
         stats = self.server.snapshot()
         self.assertEqual(stats['errors'], [])
@@ -947,7 +947,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
                 choices, dtype=pd.CategoricalDtype(categories=sym_pool))),
             'seq': pd.Series(np.arange(n_rows, dtype=np.int64)),
         })
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
             try:
@@ -984,7 +984,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
         self.assertEqual(
             df['sym'].cat.codes.dtype, np.int16,
             'expected i16 code width for cardinality > 128')
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             client.dataframe(df, table_name='hi_card_sym', at='ts')
         finally:
@@ -1005,7 +1005,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
         for i in range(n_int_cols):
             df_cols[f'i{i:02d}'] = pd.Series(seq + i * 1_000_000)
         df = pd.DataFrame(df_cols)
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
             try:
@@ -1039,7 +1039,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
                            dtype='string[pyarrow]'),
         })
         for _ in range(n_cycles):
-            client = qi.Client.from_conf(self.conf)
+            client = qi.QuestDB.from_conf(self.conf)
             try:
                 client.dataframe(df, table_name='seq_lifecycle', at='ts',
                                  symbols=False)
@@ -1061,7 +1061,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
             'ts': pd.Series([], dtype='datetime64[ns]'),
             'seq': pd.Series([], dtype='int64'),
         })
-        client = qi.Client.from_conf(self.conf)
+        client = qi.QuestDB.from_conf(self.conf)
         try:
             client.dataframe(df, table_name='t', at='ts')
         finally:
@@ -1072,12 +1072,12 @@ class TestClientDataframeFuzz(unittest.TestCase):
 
     def test_from_conf_rejects_non_qwp_websocket(self):
         with self.assertRaises(qi.QuestDBError) as cm:
-            qi.Client.from_conf('tcp::addr=localhost:9009;')
+            qi.QuestDB.from_conf('tcp::addr=localhost:9009;')
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.ConfigError)
 
     def test_from_conf_requires_addr(self):
         with self.assertRaises(qi.QuestDBError) as cm:
-            qi.Client.from_conf('ws::pool_size=1;')
+            qi.QuestDB.from_conf('ws::pool_size=1;')
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.ConfigError)
 
 
@@ -1120,7 +1120,7 @@ def _normalize_for_compare(df):
     'Round-trip fuzz needs a real QuestDB. Set QDB_REPO_PATH=<questdb checkout> '
     'to enable. Matches the gating convention in system_test.py.')
 class TestClientDataframeRoundTrip(unittest.TestCase):
-    """Ingest via Client.dataframe → real QuestDB → read back via
+    """Ingest via QuestDB.dataframe → real QuestDB → read back via
     Client.query → assert frame equivalence.
 
     Set ``QDB_REPO_PATH=/path/to/questdb`` to enable. Uses a class-scoped
@@ -1249,7 +1249,7 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
             try:
                 df, shape, n_rows = self._build_simple_frame(rng)
                 self._drop_table(table_name)
-                with qi.Client.from_conf(self.conf) as client:
+                with qi.QuestDB.from_conf(self.conf) as client:
                     client.dataframe(df, table_name=table_name, at='ts')
                 self._wait_for_rows(table_name, n_rows)
 
@@ -1258,7 +1258,7 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
                 cols = [c for c in df.columns if c != 'ts']
                 sql = (f"SELECT {','.join(cols)} FROM {table_name} "
                        f"ORDER BY id")
-                with qi.Client.from_conf(self.conf) as client:
+                with qi.QuestDB.from_conf(self.conf) as client:
                     result = client.query(sql)
                     df_out = result.to_pandas()
 
@@ -1307,11 +1307,11 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
 
         try:
             self._drop_table(table_name)
-            with qi.Client.from_conf(self.conf) as client:
+            with qi.QuestDB.from_conf(self.conf) as client:
                 client.dataframe(df, table_name=table_name, at='ts')
             self._wait_for_rows(table_name, len(df))
 
-            with qi.Client.from_conf(self.conf) as client:
+            with qi.QuestDB.from_conf(self.conf) as client:
                 table = client.query(
                     f'SELECT timestamp, seq, large_text, dict_text '
                     f'FROM {table_name} ORDER BY seq').to_arrow()
@@ -1350,11 +1350,11 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
 
             try:
                 self._drop_table(table_name)
-                with qi.Client.from_conf(self.conf) as client:
+                with qi.QuestDB.from_conf(self.conf) as client:
                     client.dataframe(df, table_name=table_name, at='ts')
                 self._wait_for_rows(table_name, len(df))
 
-                with qi.Client.from_conf(self.conf) as client:
+                with qi.QuestDB.from_conf(self.conf) as client:
                     table = client.query(
                         f'SELECT timestamp, seq FROM {table_name} '
                         f'ORDER BY seq').to_arrow()
@@ -1397,11 +1397,11 @@ class TestClientDataframeRoundTrip(unittest.TestCase):
 
         try:
             self._drop_table(table_name)
-            with qi.Client.from_conf(self.conf) as client:
+            with qi.QuestDB.from_conf(self.conf) as client:
                 client.dataframe(df, table_name=table_name, at='ts')
             self._wait_for_rows(table_name, len(df))
 
-            with qi.Client.from_conf(self.conf) as client:
+            with qi.QuestDB.from_conf(self.conf) as client:
                 table = client.query(
                     f'SELECT timestamp, seq, u8, u16, u64, f16 '
                     f'FROM {table_name} ORDER BY seq').to_arrow()

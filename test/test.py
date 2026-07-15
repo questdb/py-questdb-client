@@ -291,39 +291,57 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'requires a QWP/WebSocket configuration string'):
-            qi.Client.from_conf('tcp::addr=localhost:9009;')
+            qi.QuestDB.from_conf('tcp::addr=localhost:9009;')
 
     def test_client_from_conf_requires_addr(self):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'Missing "addr" parameter'):
-            qi.Client.from_conf('ws::pool_size=1;')
+            qi.QuestDB.from_conf('ws::pool_size=1;')
 
     def test_client_close_is_idempotent(self):
-        client = qi.Client.__new__(qi.Client)
+        client = qi.QuestDB.__new__(qi.QuestDB)
         client.close()
         client.close()
 
     def test_closed_client_methods_reject(self):
-        client = qi.Client.__new__(qi.Client)
+        client = qi.QuestDB.__new__(qi.QuestDB)
 
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "__enter__\\(\\) can't be called: Client is closed"):
+                "__enter__\\(\\) can't be called: QuestDB is closed"):
             with client:
                 pass
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "reap_idle\\(\\) can't be called: Client is closed"):
+                "reap_idle\\(\\) can't be called: QuestDB is closed"):
             client.reap_idle()
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "dataframe\\(\\) can't be called: Client is closed"):
+                "dataframe\\(\\) can't be called: QuestDB is closed"):
             client.dataframe([], table_name='tbl', at=qi.ServerTimestamp)
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "sender\\(\\) can't be called: Client is closed"):
+                "sender\\(\\) can't be called: QuestDB is closed"):
             client.sender()
+
+    def test_module_connect_factory(self):
+        import questdb
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'pool_size=1;'
+                'pool_max=1;'
+                'pool_reap=manual;')
+            with questdb.connect(conf) as db:
+                self.assertIsInstance(db, questdb.QuestDB)
+                with db.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 1)
 
     def test_client_sender_publishes_rows_without_dataframe_surface(self):
         with QwpAckServer() as server:
@@ -332,10 +350,21 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
-            with qi.Client.from_conf(conf) as client:
+            with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
-                    self.assertIsInstance(sender, qi.ClientSender)
-                    self.assertFalse(hasattr(sender, 'dataframe'))
+                    self.assertIsInstance(sender, qi._PooledSender)
+                    self.assertNotIsInstance(sender, qi.Sender)
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            'QuestDB.dataframe'):
+                        sender.dataframe(None, table_name='weather')
+                    for name in (
+                            'establish', 'transaction', 'new_buffer',
+                            'published_fsn', 'acked_fsn', 'await_acked_fsn',
+                            'flush_and_get_fsn', 'drive_once',
+                            'poll_qwp_ws_error', 'close_drain',
+                            'protocol_version', 'auto_flush'):
+                        self.assertFalse(hasattr(sender, name), name)
                     sender.row(
                         'weather',
                         symbols={'city': 'London'},
@@ -353,7 +382,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['qwp1_frames'], 1)
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "row\\(\\) can't be called: ClientSender is closed"):
+                "row\\(\\) can't be called: Sender is closed"):
             sender.row(
                 'weather', columns={'temperature': 22.0},
                 at=qi.ServerTimestamp)
@@ -365,7 +394,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
-            client = qi.Client.from_conf(conf)
+            client = qi.QuestDB.from_conf(conf)
             sender = client.sender()
             close_started = threading.Event()
             close_done = threading.Event()
@@ -400,7 +429,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
-            with qi.Client.from_conf(conf) as client:
+            with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
                     sender.row(
                         'events', columns={'value': 1},
@@ -421,18 +450,15 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 1)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
-    def test_dataframe_deprecations_name_replacement_removal_and_caller(self):
+    def test_dataframe_protocol_matrix(self):
         df = pd.DataFrame({'value': [1]})
 
-        buffer = qi.Buffer.ilp()
+        buffer = qi.Buffer(protocol_version=2)
         with mock.patch.object(warnings, 'warn') as warn:
             buffer.dataframe(
                 df, table_name='trades', at=qi.ServerTimestamp)
-        warn.assert_called_once()
-        self.assertIs(warn.call_args.args[1], DeprecationWarning)
-        self.assertEqual(warn.call_args.kwargs['stacklevel'], 2)
-        self.assertIn('Client.dataframe()', warn.call_args.args[0])
-        self.assertIn('6.0.0', warn.call_args.args[0])
+        warn.assert_not_called()
+        self.assertGreater(len(buffer), 0)
 
         standalone = qi.Sender.from_conf(
             'http::addr=127.0.0.1:9000;', auto_flush=False)
@@ -443,13 +469,19 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         "dataframe\\(\\) can't be called: Sender is closed"):
                     standalone.dataframe(
                         df, table_name='trades', at=qi.ServerTimestamp)
-            warn.assert_called_once()
-            self.assertIs(warn.call_args.args[1], DeprecationWarning)
-            self.assertEqual(warn.call_args.kwargs['stacklevel'], 2)
-            self.assertIn('Client.dataframe()', warn.call_args.args[0])
-            self.assertIn('6.0.0', warn.call_args.args[0])
+            warn.assert_not_called()
         finally:
             standalone.close(flush=False)
+
+        ws_sender = qi.Sender.from_conf('ws::addr=127.0.0.1:9000;')
+        try:
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    r'dataframe\(\) is not available over ws'):
+                ws_sender.dataframe(
+                    df, table_name='trades', at=qi.ServerTimestamp)
+        finally:
+            ws_sender.close(flush=False)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
@@ -468,7 +500,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
-            client = qi.Client.from_conf(conf)
+            client = qi.QuestDB.from_conf(conf)
             try:
                 for _ in range(3):
                     client.dataframe(df, table_name='trades', at='ts')
@@ -498,7 +530,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
-            client = qi.Client.from_conf(conf)
+            client = qi.QuestDB.from_conf(conf)
             try:
                 with self.assertRaises(qi.UnsupportedDataFrameShapeError) as cm:
                     client.dataframe(df, table_name='trades', at='ts')
@@ -535,7 +567,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_reap=manual;')
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
             try:
-                client = qi.Client.from_conf(conf)
+                client = qi.QuestDB.from_conf(conf)
                 try:
                     client.dataframe(
                         table, table_name='trades', at='ts',
@@ -569,7 +601,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_size=1;'
                 'pool_max=1;'
                 'pool_reap=manual;')
-            client = qi.Client.from_conf(conf)
+            client = qi.QuestDB.from_conf(conf)
             errors = []
 
             def ingest():
@@ -597,7 +629,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertGreater(close_elapsed, 0.05)
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "reap_idle\\(\\) can't be called: Client is closed"):
+                "reap_idle\\(\\) can't be called: QuestDB is closed"):
             client.reap_idle()
 
     @unittest.skipIf(pd is None or pyarrow is None,
@@ -622,7 +654,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_max=1;'
                 'pool_reap=manual;'
                 'max_buf_size=1000000;')
-            client = qi.Client.from_conf(conf)
+            client = qi.QuestDB.from_conf(conf)
             try:
                 with self.assertRaises(qi.QuestDBError) as ctx:
                     client.dataframe(df, table_name='trades', at='ts')
@@ -2376,27 +2408,75 @@ class TestUninitializedBuffer(unittest.TestCase):
                 sender.flush(self._make_uninit())
 
 
-class TestBufferFactory(unittest.TestCase):
-    def test_direct_construction_deprecated(self):
-        with self.assertWarns(DeprecationWarning):
-            buf = qi.Buffer(2)
-        self.assertEqual(len(buf), 0)
+class TestIngressShim(unittest.TestCase):
+    def test_import_warns_once_and_reexports(self):
+        sys.modules.pop('questdb.ingress', None)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            import questdb.ingress as ingress
+        self.assertTrue(any(
+            issubclass(w.category, DeprecationWarning) for w in caught))
+        self.assertIs(ingress.IngressError, qi.QuestDBError)
+        self.assertIs(ingress.IngressErrorCode, qi.QuestDBErrorCode)
+        self.assertIs(ingress.Sender, qi.Sender)
+        self.assertIs(ingress.Buffer, qi.Buffer)
+        self.assertIs(ingress.Protocol, qi.Protocol)
 
-    def test_ilp_factory(self):
-        buf = qi.Buffer.ilp()
+    def test_legacy_buffer_flow(self):
+        import questdb.ingress as ingress
+        buf = ingress.Buffer(2)
+        buf.row(
+            'tbl', columns={'x': 1.5},
+            at=ingress.TimestampNanos(1_700_000_000_000_000_000))
+        self.assertGreater(len(bytes(buf)), 0)
+
+    def test_no_ws_era_names(self):
+        import questdb.ingress as ingress
+        for name in ('connect', 'QuestDB', 'QueryResult'):
+            with self.assertRaises(AttributeError):
+                getattr(ingress, name)
+
+    def test_tagged_enum_importable(self):
+        from questdb.ingress import TaggedEnum
+        self.assertIs(TaggedEnum, qi.TaggedEnum)
+
+    def test_warn_high_reconnects_writes_through(self):
+        import questdb
+        import questdb.ingress as ingress
+        original = qi.WARN_HIGH_RECONNECTS
+        try:
+            ingress.WARN_HIGH_RECONNECTS = not original
+            self.assertEqual(qi.WARN_HIGH_RECONNECTS, not original)
+            self.assertEqual(ingress.WARN_HIGH_RECONNECTS, not original)
+            self.assertEqual(questdb.WARN_HIGH_RECONNECTS, not original)
+            questdb.WARN_HIGH_RECONNECTS = original
+            self.assertEqual(ingress.WARN_HIGH_RECONNECTS, original)
+        finally:
+            qi.WARN_HIGH_RECONNECTS = original
+
+
+class TestBufferConstruction(unittest.TestCase):
+    def test_ilp_construction(self):
+        with mock.patch.object(warnings, 'warn') as warn:
+            buf = qi.Buffer(protocol_version=2)
+        warn.assert_not_called()
         self.assertEqual(len(buf), 0)
         buf.row('tbl', columns={'x': 1}, at=qi.ServerTimestamp)
         self.assertGreater(len(bytes(buf)), 0)
 
+    def test_not_exported_from_package(self):
+        import questdb
+        self.assertNotIn('Buffer', questdb.__all__)
+
     def test_ilp_invalid_version(self):
         for bad in (0, 4):
             with self.assertRaises(qi.QuestDBError) as cm:
-                qi.Buffer.ilp(bad)
+                qi.Buffer(bad)
             self.assertEqual(
                 cm.exception.code, qi.QuestDBErrorCode.ProtocolVersionError)
 
-    def test_qwp_factory(self):
-        buf = qi.Buffer.qwp()
+    def test_qwp_construction(self):
+        buf = qi.Buffer._new_qwp()
         self.assertIsInstance(buf, qi.Buffer)
         self.assertEqual(len(buf), 0)
         self.assertGreater(buf.capacity(), 0)

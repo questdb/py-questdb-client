@@ -232,7 +232,7 @@ cdef dict _PYOBJ_SOURCE_DESCR = {
 }
 
 
-# Object-column sources only the columnar `Client.dataframe()` path can ingest;
+# Object-column sources only the columnar `QuestDB.dataframe()` path can ingest;
 # the row-oriented `Sender.dataframe()` has no ILP target for them.
 cdef frozenset _COLUMNAR_ONLY_PYOBJ_SOURCES = frozenset((
     col_source_t.col_source_uuid_pyobj,
@@ -241,7 +241,7 @@ cdef frozenset _COLUMNAR_ONLY_PYOBJ_SOURCES = frozenset((
 ))
 
 
-# Compatibility matrix for the Python dataframe planner. `Client.dataframe()`
+# Compatibility matrix for the Python dataframe planner. `QuestDB.dataframe()`
 # uses the Rust Arrow RecordBatch route as the canonical Arrow policy when its
 # public routing constraints are satisfied.
 cdef dict _TARGET_TO_SOURCES = {
@@ -1648,7 +1648,7 @@ cdef void_int _dataframe_resolve_target(
             QuestDBErrorCode.BadDataFrame,
             f'Column {pandas_col.name!r} holds '
             f'{_PYOBJ_SOURCE_DESCR[col.setup.source]} objects, which are only '
-            f'supported on the columnar Client.dataframe() path, not the '
+            f'supported on the columnar QuestDB.dataframe() path, not the '
             f'row-oriented Sender.dataframe().')
     raise QuestDBError(
         QuestDBErrorCode.BadDataFrame,

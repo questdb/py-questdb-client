@@ -7,19 +7,20 @@ Sending Data
 Overview
 ========
 
-For QWP/WebSocket, use one :class:`Client <questdb.Client>` for row ingestion,
-whole-dataframe ingestion, and queries. The Client owns the connection pools;
-``client.sender()`` lends a row-building sender and ``client.dataframe()``
+For QWP/WebSocket, use one :class:`QuestDB <questdb.QuestDB>` for row ingestion,
+whole-dataframe ingestion, and queries. The handle owns the connection pools;
+``db.sender()`` lends a row-building sender and ``db.dataframe()``
 keeps whole sources on the direct columnar path.
 
 .. code-block:: python
 
-    from questdb import Client, TimestampNanos
+    import questdb
+    from questdb import TimestampNanos
     import pandas as pd
 
     conf = 'ws::addr=localhost:9000;'
-    with Client.from_conf(conf) as client:
-        with client.sender() as sender:
+    with questdb.connect(conf) as db:
+        with db.sender() as sender:
             sender.row(
                 'trades',
                 symbols={'symbol': 'ETH-USD', 'side': 'sell'},
@@ -35,9 +36,9 @@ keeps whole sources on the direct columnar path.
             'amount': [0.00044, 0.001],
             'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
-        client.dataframe(df, table_name='trades', at='timestamp')
+        db.dataframe(df, table_name='trades', at='timestamp')
 
-The Client sender holds an internal QWP buffer. A successful ``with`` block
+The pooled sender holds an internal QWP buffer. A successful ``with`` block
 publishes pending rows when it returns the lease to the pool.
 
 The standalone :class:`Sender <questdb.Sender>` remains available as the
@@ -101,13 +102,13 @@ Appending Rows
 --------------
 
 You can append as many rows as you like through
-:func:`Client.sender <questdb.Client.sender>`. The row arguments match
-:func:`Buffer.row <questdb.Buffer.row>`.
+:meth:`QuestDB.sender <questdb.QuestDB.sender>`. The row arguments match
+:meth:`Sender.row <questdb.Sender.row>`.
 
 Appending Pandas Dataframes
 ---------------------------
 
-Use :func:`Client.dataframe <questdb.Client.dataframe>` to ingest a Pandas
+Use :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` to ingest a Pandas
 dataframe directly.
 
 This is `orders of magnitude <https://github.com/questdb/py-tsbs-benchmark/blob/main/README.md>`_
@@ -530,38 +531,24 @@ If you need better performance:
 Advanced Usage
 ==============
 
-Independent Buffers
--------------------
+Independent Buffers (legacy)
+----------------------------
 
-All examples so far have shown appending data to the sender's internal buffer.
-
-You can also create independent buffers and send them independently.
-
-This is useful for more complex applications whishing to decouple the
-serialisation logic from the sending logic.
-
-Note that the sender's auto-flushing logic will not apply to independent
-buffers.
-
-You can create a standalone buffer with :func:`Buffer.ilp` (for ILP senders)
-or :func:`Buffer.qwp` (for QWP/UDP senders). Alternatively, call
-:func:`Sender.new_buffer` which creates the correct buffer type matching the
-sender's protocol.
+Buffers are managed internally by senders and are not part of the top-level
+5.0 API. Legacy ILP/HTTP and ILP/TCP code that builds buffers explicitly and
+flushes them with ``sender.flush(buffer)`` — including the multi-database
+``flush(buf, clear=False)`` fan-out pattern — keeps working through the
+deprecated ``questdb.ingress`` compatibility shim:
 
 .. code-block:: python
 
-    from questdb import Buffer, Sender, TimestampNanos
+    from questdb.ingress import Buffer, Sender, TimestampNanos
 
-    buf = Buffer.ilp(protocol_version=2)
+    buf = Buffer(protocol_version=2)
     buf.row(
         'trades',
         symbols={'symbol': 'ETH-USD', 'side': 'sell'},
         columns={'price': 2615.54, 'amount': 0.00044},
-        at=TimestampNanos.now())
-    buf.row(
-        'trades',
-        symbols={'symbol': 'BTC-USD', 'side': 'sell'},
-        columns={'price': 39269.98, 'amount': 0.001},
         at=TimestampNanos.now())
 
     conf = 'http::addr=localhost:9000;'
@@ -572,46 +559,18 @@ The ``transactional`` parameter is optional and defaults to ``False``.
 When set to ``True``, the buffer is guaranteed to be committed as a single
 transaction, but must only contain rows for a single table.
 
-You should not mix using a transaction block with flushing an independent buffer transactionally.
-
-Multiple Databases
-------------------
-
-Handling buffers explicitly is also useful when sending data to multiple
-databases via the ``.flush(buf, clear=False)`` option.
-
-.. code-block:: python
-
-    from questdb import Buffer, Sender, TimestampNanos
-
-    buf = Buffer.ilp(protocol_version=2)
-    buf.row(
-        'trades',
-        symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-        columns={'price': 2615.54, 'amount': 0.00044},
-        at=TimestampNanos.now())
-
-    conf1 = 'http::addr=db1.host.com:9000;'
-    conf2 = 'http::addr=db2.host.com:9000;'
-    with Sender.from_conf(conf1) as sender1, Sender.from_conf(conf2) as sender2:
-        sender1.flush(buf1, clear=False)
-        sender2.flush(buf2, clear=False)
-
-    buf.clear()
-
-This uses the ``clear=False`` parameter which otherwise defaults to ``True``.
+For new code, decouple serialization from sending by borrowing one sender per
+thread from a :func:`questdb.connect` pool instead of sharing buffers.
 
 Threading Considerations
 ------------------------
 
-Neither buffer API nor the sender object are thread-safe, but can be shared
-between threads if you take care of exclusive access (such as using a lock)
-yourself.
+A sender object is not thread-safe, but can be shared between threads if you
+take care of exclusive access (such as using a lock) yourself.
 
-Independent buffers also allows you to prepare separate buffers in different
-threads and then send them later through a single exclusively locked sender.
-
-Alternatively you can also create multiple senders, one per thread.
+The simplest concurrency rule: borrow (or create) one sender per thread. With
+QWP/WebSocket, :meth:`QuestDB.sender <questdb.QuestDB.sender>` makes this
+cheap — each borrow leases a pooled connection.
 
 Notice that the ``questdb`` python module is mostly implemented in native code
 and is designed to release the Python GIL whenever possible, so you can expect
@@ -875,10 +834,6 @@ Key differences from ILP:
   is deferred to flush. ``len(sender)`` returns an estimated size hint, not the
   exact serialized byte count.
 
-* **Standalone buffers.** Use :func:`Buffer.qwp` (not :func:`Buffer.ilp`) to
-  create standalone QWP buffers. Alternatively, use :func:`Sender.new_buffer`
-  which creates the correct buffer type automatically.
-
 * **Auto-flush.** ``auto_flush_bytes`` defaults to ``max_datagram_size`` (1400
   by default) so that rows are flushed when the buffer approaches a single
   datagram's worth of data. Rows and interval thresholds work the same as ILP.
@@ -925,20 +880,17 @@ it durably applies them, so the client can confirm delivery.
 * **Draining on close.** :func:`Sender.close_drain` waits for outstanding
   frames to be acknowledged before closing.
 
-* **Standalone buffers.** As with QWP/UDP, use :func:`Buffer.qwp` or
-  :func:`Sender.new_buffer`.
-
 .. _query_egress:
 
 Querying data
 =============
 
-:class:`Client` reads query results back over the QWP/WebSocket read endpoint.
-:func:`Client.query` returns a single-use :class:`QueryResult` that streams rows
+:class:`QuestDB` reads query results back over the QWP/WebSocket read endpoint.
+:meth:`QuestDB.query` returns a single-use :class:`QueryResult` that streams rows
 as Arrow record batches::
 
-    with qi.Client.from_conf('ws::addr=localhost:9000;') as client:
-        with client.query('SELECT * FROM trades WHERE ts > $1') as result:
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.query('SELECT * FROM trades WHERE ts > $1') as result:
             df = result.to_pandas()
 
 A :class:`QueryResult` can be materialised with ``to_arrow`` / ``to_pandas`` or
@@ -960,8 +912,8 @@ frame, the dedicated methods avoid the re-reconciliation that
 ``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
-The same :class:`Client` can ingest dataframes through the pooled columnar QWP
-path with :func:`Client.dataframe`. Dataframe ingestion always uses the direct
+The same :class:`QuestDB` can ingest dataframes through the pooled columnar QWP
+path with :meth:`QuestDB.dataframe`. Dataframe ingestion always uses the direct
 (non-store-and-forward) column sender, independent of ``sf_dir``, and returns
 once the whole frame is committed (``AckLevel::Ok``). On a transient connection
 failure the frame is re-sent from the caller's DataFrame only when the failed

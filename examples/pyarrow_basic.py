@@ -1,14 +1,15 @@
 """PyArrow Table / RecordBatch ingest and query example.
 
-`Client.dataframe()` accepts any object exposing the Arrow PyCapsule
+`QuestDB.dataframe()` accepts any object exposing the Arrow PyCapsule
 Interface (`__arrow_c_stream__`) — pyarrow Table, RecordBatch, DuckDB
 relations, cudf, etc. — and routes through
 `column_sender_flush_arrow_batch` one-shot. No per-column Cython
-dispatch, no chunk lifecycle. `Client.query()` can materialise query
+dispatch, no chunk lifecycle. `QuestDB.query()` can materialise query
 results as a pyarrow `Table` with `QueryResult.to_arrow()`.
 """
 
-from questdb import Client, QuestDBError
+import questdb
+from questdb import QuestDBError
 import sys
 
 
@@ -32,12 +33,12 @@ def example(host: str = 'localhost', port: int = 9000):
 
     try:
         conf = f'ws::addr={host}:{port};'
-        with Client.from_conf(conf) as client:
+        with questdb.connect(conf) as db:
             # Ingress: publish a PyArrow Table into QuestDB.
-            client.dataframe(table, table_name='trades', at='ts')
+            db.dataframe(table, table_name='trades', at='ts')
 
             # Egress: query QuestDB and materialise the result as PyArrow.
-            with client.query(
+            with db.query(
                     "SELECT x AS trade_id, "
                     "x * 10.0 AS price, "
                     "timestamp_sequence("
@@ -72,8 +73,8 @@ def schema_metadata_example(host: str = 'localhost', port: int = 9000):
 
     try:
         conf = f'ws::addr={host}:{port};'
-        with Client.from_conf(conf) as client:
-            client.dataframe(table, table_name='locations', at='ts')
+        with questdb.connect(conf) as db:
+            db.dataframe(table, table_name='locations', at='ts')
     except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 

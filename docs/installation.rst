@@ -18,14 +18,14 @@ The ``dataframe`` extra bundles ``pandas`` and ``pyarrow``:
 * ``dataframe`` → ``pandas`` and ``pyarrow``
 
 Install it to ingest a **pandas** DataFrame, or to use the
-``to_pandas`` / ``to_arrow`` / ``iter_*`` helpers on ``Client.query()``
+``to_pandas`` / ``to_arrow`` / ``iter_*`` helpers on ``QuestDB.query()``
 results. polars, pyarrow, duckdb and any other Arrow-native source need
 no extra — they go through the Arrow PyCapsule Interface; just install
 the source library as usual.
 
 Without it, you may still ingest data row-by-row through
-``Sender.row()`` and ``Buffer.row()``, and read query results through
-the ``__arrow_c_stream__`` PyCapsule protocol.
+``Sender.row()``, and read query results through the
+``__arrow_c_stream__`` PyCapsule protocol.
 
 PIP
 ---
@@ -50,28 +50,29 @@ Equivalents for poetry::
 Verifying the Installation
 ==========================
 
-If you want to check that you've installed the wheel correctly, you can run the
-following statements from a ``python3`` interactive shell:
+If you want to check that you've installed the wheel correctly, you can run
+the following statements from a ``python3`` interactive shell:
 
 .. code-block:: python
 
     >>> import questdb
-    >>> buf = questdb.Buffer.ilp()
-    >>> buf.row('test', symbols={'a': 'b'}, columns={'x': 1}, at=questdb.ServerTimestamp)
-    <questdb.Buffer object at 0x104b68240>
-    >>> bytes(buf)
-    b'test,a=b x=1i\n'
+    >>> questdb.__version__
+    '5.0.0'
+    >>> questdb.connect
+    <function connect at 0x104b68240>
 
-If you also want to check you can serialize from Pandas
-(which requires additional dependencies):
+With a QuestDB server running locally, you can verify a full round trip
+(ingestion and query) in a few lines:
 
 .. code-block:: python
 
     >>> import questdb
-    >>> import pandas as pd
-    >>> df = pd.DataFrame({'a': [1, 2]})
-    >>> buf = questdb.Buffer.ilp()
-    >>> buf.dataframe(df, table_name='test', at=questdb.ServerTimestamp)
-    <questdb.Buffer object at 0x104b68240>
-    >>> bytes(buf)
-    b'test a=1i\ntest a=2i\n'
+    >>> db = questdb.connect('ws::addr=localhost:9000;')
+    >>> with db.sender() as sender:
+    ...     sender.row('install_check', columns={'x': 1},
+    ...                at=questdb.ServerTimestamp)
+    ...     sender.flush(wait=True)
+    >>> db.query('SELECT count() FROM install_check').to_pandas()
+       count
+    0      1
+    >>> db.close()

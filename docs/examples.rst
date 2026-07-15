@@ -24,7 +24,7 @@ QWP/WebSocket from Polars
 -------------------------
 
 The following example ingests a Polars ``DataFrame`` over QWP/WebSocket via
-:meth:`Client.dataframe`, runs a query into Polars, and includes a
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, runs a query into Polars, and includes a
 ``schema_overrides`` variant.
 
 .. literalinclude:: ../examples/polars_basic.py
@@ -36,7 +36,7 @@ QWP/WebSocket from PyArrow
 --------------------------
 
 The following example ingests a PyArrow table over QWP/WebSocket via
-:meth:`Client.dataframe` and runs a query into PyArrow.
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` and runs a query into PyArrow.
 
 .. literalinclude:: ../examples/pyarrow_basic.py
    :language: python
@@ -66,21 +66,6 @@ and also uses TLS.
    :language: python
 
 
-Explicit Buffers
-----------------
-
-For more :ref:`advanced use cases <sender_advanced>` where the same messages
-need to be sent to multiple questdb instances or you want to decouple
-serialization and sending (as may be in a multi-threaded application) construct
-:class:`Buffer <questdb.Buffer>` objects explicitly, then pass them to
-the :func:`Sender.flush <questdb.Sender.flush>` method.
-
-Note that this bypasses :ref:`auto-flushing <sender_auto_flush>`.
-
-.. literalinclude:: ../examples/buffer.py
-   :language: python
-
-
 Ticking Data and Auto-Flush
 ---------------------------
 
@@ -106,7 +91,7 @@ The following example shows how to insert data from a Pandas DataFrame to the
    :language: python
 
 For details on all options, see the
-:func:`Buffer.dataframe <questdb.Buffer.dataframe>` method.
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` method.
 
 
 ``pd.Categorical`` and multiple tables
@@ -131,7 +116,7 @@ After running this example, the rows will be split across the ``'humidity'``,
 ``'temp_c'`` and ``'voc_index'`` tables.
 
 For details on all options, see the
-:func:`Buffer.dataframe <questdb.Buffer.dataframe>` method.
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` method.
 
 Loading Pandas from a Parquet File
 ----------------------------------
@@ -146,7 +131,7 @@ name.
    :language: python
 
 For details on all options, see the
-:func:`Buffer.dataframe <questdb.Buffer.dataframe>` method.
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` method.
 
 
 Decimal Types (QuestDB 9.2.0+)

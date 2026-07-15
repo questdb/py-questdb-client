@@ -27,15 +27,13 @@
 # cython: binding=True
 
 """
-API for fast data ingestion into QuestDB.
+API for fast data ingestion into and querying from QuestDB.
 """
 
 __all__ = [
-    'Buffer',
-    'Client',
-    'ClientSender',
     'ConnectionEvent',
     'ConnectionEventKind',
+    'QuestDB',
     'QuestDBError',
     'QuestDBErrorCode',
     'QuestDBServerRejectionError',
@@ -265,7 +263,7 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     per-column reasons are also folded into ``str(exc)`` so a bare
     ``print(exc)`` explains *why* the frame was rejected, and — when the
     designated timestamp is at fault — how to fix it on
-    :meth:`Client.dataframe` (name a valid timestamp column, or pass
+    :meth:`QuestDB.dataframe` (name a valid timestamp column, or pass
     ``ServerTimestamp``).
     """
     def __init__(self, msg, column_failures=None):
@@ -279,8 +277,8 @@ cdef str _format_unsupported_dataframe_msg(str msg, tuple column_failures):
     # Surface the per-column reasons (otherwise stranded on the
     # `.column_failures` attribute) so a plain `str(exc)` says what to fix
     # instead of a bare "columnar v1". When the designated timestamp is the
-    # problem, point at the two Client-side remedies (name a valid column,
-    # or let the server stamp) — keeping the user on Client.dataframe()
+    # problem, point at the two client-side remedies (name a valid column,
+    # or let the server stamp) — keeping the user on QuestDB.dataframe()
     # rather than steering them off to the row path.
     if not column_failures:
         return msg
@@ -801,9 +799,9 @@ cdef class TimestampNanos:
         return f'TimestampNanos({self.value})'
 
 
-cdef class Client
-cdef class ClientSender
+cdef class QuestDB
 cdef class Sender
+cdef class _PooledSender
 cdef class Buffer
 
 
@@ -996,38 +994,11 @@ cdef class SenderTransaction:
 
 cdef class Buffer:
     """
-    Buffer for serializing rows before flushing through a
-    :func:`Sender <questdb.Sender>`.
+    Internal row-serialization buffer, managed by :class:`Sender`.
 
-    Use the factory class methods to create a buffer:
-
-    * :func:`Buffer.ilp` for ILP (InfluxDB Line Protocol) buffers.
-    * :func:`Buffer.qwp` for QWP (QuestWire Protocol) buffers.
-
-    .. code-block:: python
-
-        from questdb import Buffer, Sender, Protocol, TimestampNanos
-
-        buf = Buffer.ilp(protocol_version=2)
-        buf.row(
-            'table_name',
-            symbols={'s1': 'v1'},
-            columns={'c1': True, 'c2': 0.5},
-            at=TimestampNanos.now())
-
-        with Sender(Protocol.Http, 'localhost', 9000) as sender:
-            sender.flush(buf)
-
-    Alternatively, call :func:`Sender.new_buffer` which creates the
-    correct buffer type (ILP or QWP) matching the sender's protocol:
-
-    .. code-block:: python
-
-        from questdb import Sender, Protocol
-
-        with Sender(Protocol.Http, 'localhost', 9000) as sender:
-            buf = sender.new_buffer()
-
+    Kept importable as ``questdb.ingress.Buffer`` for legacy ILP/HTTP and
+    ILP/TCP code that constructs buffers explicitly and flushes them via
+    ``sender.flush(buffer)``.
     """
     cdef line_sender_buffer* _impl
     cdef qdb_pystr_buf* _b
@@ -1049,14 +1020,6 @@ cdef class Buffer:
             protocol_version: int,
             init_buf_size: int=65536,
             max_name_len: int=127):
-        """
-        .. deprecated::
-            Use :func:`Buffer.ilp` or :func:`Buffer.qwp` instead.
-        """
-        warnings.warn(
-            'Buffer() is deprecated, use Buffer.ilp() or Buffer.qwp() instead.',
-            DeprecationWarning,
-            stacklevel=2)
         if protocol_version not in range(1, 4):
             raise QuestDBError(
                 QuestDBErrorCode.ProtocolVersionError,
@@ -1064,40 +1027,9 @@ cdef class Buffer:
         self._init_ilp_impl(protocol_version, init_buf_size, max_name_len)
 
     @staticmethod
-    def ilp(
-            protocol_version: int=2,
+    def _new_qwp(
             init_buf_size: int=65536,
             max_name_len: int=127):
-        """
-        Create an ILP (InfluxDB Line Protocol) buffer.
-
-        :param int protocol_version: The protocol version to use (1-3).
-            Defaults to ``2``.
-        :param int init_buf_size: Initial capacity of the buffer in bytes.
-            Defaults to ``65536`` (64KiB).
-        :param int max_name_len: Maximum length of a table or column name.
-            Defaults to ``127``.
-        """
-        if protocol_version not in range(1, 4):
-            raise QuestDBError(
-                QuestDBErrorCode.ProtocolVersionError,
-                'Invalid protocol version. Supported versions are 1-3.')
-        cdef Buffer buf = Buffer.__new__(Buffer)
-        buf._init_ilp_impl(protocol_version, init_buf_size, max_name_len)
-        return buf
-
-    @staticmethod
-    def qwp(
-            init_buf_size: int=65536,
-            max_name_len: int=127):
-        """
-        Create a QWP (QuestWire Protocol) buffer.
-
-        :param int init_buf_size: Initial capacity of the buffer in bytes.
-            Defaults to ``65536`` (64KiB).
-        :param int max_name_len: Maximum length of a table or column name.
-            Defaults to ``127``.
-        """
         cdef Buffer buf = Buffer.__new__(Buffer)
         buf._init_qwp_impl(init_buf_size, max_name_len)
         return buf
@@ -1554,10 +1486,6 @@ cdef class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        .. deprecated:: 5.0.0
-            Use :meth:`Client.dataframe` instead. This method is planned for
-            removal in 6.0.0.
-
         Also see the :func:`Sender.dataframe` method if you're
         not using the buffer explicitly. It supports the same parameters
         and also supports auto-flushing.
@@ -1656,7 +1584,7 @@ cdef class Buffer:
             import pandas as pd
             import questdb as qi
 
-            buf = qi.Buffer.ilp(protocol_version=2)
+            buf = qi.ingress.Buffer(protocol_version=2)
             # ...
 
             df = pd.DataFrame({
@@ -1825,11 +1753,6 @@ cdef class Buffer:
         * Columns of ``str``, ``float`` or ``int`` or ``float`` Python objects.
         * The ``'string[python]'`` dtype.
         """
-        warnings.warn(
-            'Buffer.dataframe() is deprecated and will be removed in '
-            'questdb 6.0.0; use Client.dataframe() instead.',
-            DeprecationWarning,
-            stacklevel=2)
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -2144,7 +2067,7 @@ class ConnectionEventKind(TaggedEnum):
 class ConnectionEvent:
     """
     One connection-state transition, delivered to the
-    ``connection_listener`` registered via :meth:`Client.from_conf`.
+    ``connection_listener`` registered via :meth:`QuestDB.from_conf`.
 
     Listeners run on a dedicated dispatcher thread — never on an I/O or
     caller thread — fed by a bounded inbox with a drop-oldest overflow
@@ -2218,7 +2141,7 @@ class ServerRole(TaggedEnum):
 class ServerInfo:
     """
     Snapshot of the server's ``SERVER_INFO`` handshake, as advertised on
-    the connection :meth:`Client.server_info` sampled. Fields mirror the
+    the connection :meth:`QuestDB.server_info` sampled. Fields mirror the
     Rust reader's ``ServerInfo``.
     """
     #: Cluster role; :attr:`ServerRole.Other` for unrecognised role bytes.
@@ -2874,7 +2797,7 @@ cdef void_int _dataframe_columnar_validate_plan(
     cdef object failures = _dataframe_columnar_plan_failures(df, plan)
     if failures:
         raise UnsupportedDataFrameShapeError(
-            'DataFrame is not supported by Client.dataframe() columnar v1.',
+            'DataFrame is not supported by QuestDB.dataframe() columnar v1.',
             failures)
 
 
@@ -3500,7 +3423,7 @@ cdef void_int _dataframe_columnar_prebuild_pyobj(
     """
     Walk every PyObject-sourced column once and stash typed buffers on
     `plan.pyobj_built`. Runs after `validate_plan` and before the chunk
-    emission loop in `Client.dataframe()`.
+    emission loop in `QuestDB.dataframe()`.
     """
     cdef size_t i
     cdef col_t* col
@@ -5596,185 +5519,14 @@ cdef bint _is_batch_too_large_error(object exc):
         or ('value_data' in msg and 'exceeds' in msg))
 
 
-cdef class ClientSender:
+cdef class QuestDB:
     """
-    A row-building sender borrowed from a :class:`Client`.
+    Handle to a QuestDB deployment over QWP/WebSocket.
 
-    Obtain a lease with :meth:`Client.sender`. The lease owns one internal
-    QWP buffer and returns its native sender to the Client pool when closed.
-    It intentionally has no dataframe method; ingest whole dataframes through
-    :meth:`Client.dataframe`.
-    """
-    cdef qwp_sender* _sender
-    cdef questdb_db* _db
-    cdef Client _client
-    cdef Buffer _buffer
-    cdef object _lock
-
-    def __cinit__(self):
-        self._sender = NULL
-        self._db = NULL
-        self._client = None
-        self._buffer = None
-        self._lock = threading.RLock()
-
-    cdef void _attach(
-            self,
-            Client client,
-            questdb_db* db,
-            qwp_sender* sender,
-            Buffer buffer) noexcept:
-        self._client = client
-        self._db = db
-        self._sender = sender
-        self._buffer = buffer
-
-    cdef void_int _check_open(self, str method) except -1:
-        if self._sender == NULL:
-            raise QuestDBError(
-                QuestDBErrorCode.InvalidApiCall,
-                f"{method}() can't be called: ClientSender is closed.")
-
-    cdef void_int _wait_locked(self, uint64_t timeout_millis) except -1:
-        cdef line_sender_error* err = NULL
-        cdef PyThreadState* gs = NULL
-        cdef bint ok = False
-        _ensure_doesnt_have_gil(&gs)
-        ok = qwp_sender_wait(
-            self._sender,
-            qwpws_ack_level.qwpws_ack_level_ok,
-            timeout_millis,
-            &err)
-        _ensure_has_gil(&gs)
-        if not ok:
-            raise c_err_to_py(err)
-
-    cdef void_int _flush_locked(self, bint wait) except -1:
-        cdef line_sender_error* err = NULL
-        cdef PyThreadState* gs = NULL
-        cdef bint ok = False
-        self._check_open('flush')
-        if line_sender_buffer_row_count(self._buffer._impl) == 0:
-            if wait:
-                self._wait_locked(0)
-            return 0
-        _ensure_doesnt_have_gil(&gs)
-        if wait:
-            ok = qwp_sender_flush_buffer_and_wait(
-                self._sender,
-                self._buffer._impl,
-                qwpws_ack_level.qwpws_ack_level_ok,
-                &err)
-        else:
-            ok = qwp_sender_flush_buffer(
-                self._sender, self._buffer._impl, &err)
-        _ensure_has_gil(&gs)
-        if not ok:
-            raise c_err_to_py(err)
-        qdb_pystr_buf_clear(self._buffer._b)
-
-    cdef void _release_locked(self) noexcept:
-        cdef qwp_sender* sender = self._sender
-        cdef questdb_db* db = self._db
-        cdef Client client = self._client
-        cdef PyThreadState* gs = NULL
-        if sender == NULL:
-            return
-        self._sender = NULL
-        self._db = NULL
-        self._buffer = None
-        _ensure_doesnt_have_gil(&gs)
-        questdb_db_return_sender(db, sender)
-        _ensure_has_gil(&gs)
-        if client is not None:
-            client._end_db_use()
-        self._client = None
-
-    def __enter__(self):
-        with self._lock:
-            self._check_open('__enter__')
-        return self
-
-    def row(
-            self,
-            table_name: str,
-            *,
-            symbols: Optional[Dict[str, Optional[str]]] = None,
-            columns: Optional[Dict[
-                str,
-                Union[None, bool, int, float, str, TimestampMicros,
-                      TimestampNanos, datetime.datetime, numpy.ndarray,
-                      Decimal]]] = None,
-            at: Union[ServerTimestampType, TimestampNanos,
-                      datetime.datetime]):
-        """Append one row to this lease's QWP buffer."""
-        if at is None:
-            raise QuestDBError(
-                QuestDBErrorCode.InvalidTimestamp,
-                "`at` must be of type TimestampNanos, datetime, or "
-                "ServerTimestamp")
-        with self._lock:
-            self._check_open('row')
-            self._buffer._row(
-                False, table_name, symbols, columns, at)
-        return self
-
-    def __len__(self):
-        with self._lock:
-            self._check_open('__len__')
-            return line_sender_buffer_row_count(self._buffer._impl)
-
-    def flush(self, *, bint wait=False):
-        """
-        Publish and clear buffered rows.
-
-        By default this returns after local store-and-forward acceptance.
-        Pass ``wait=True`` to wait for the server's OK acknowledgement.
-        """
-        with self._lock:
-            self._flush_locked(wait)
-        return self
-
-    def wait(self, timeout_millis: int=0):
-        """
-        Wait for every publication on this lease to receive an OK ack.
-
-        ``timeout_millis`` is a no-progress timeout; ``0`` waits indefinitely.
-        """
-        if timeout_millis < 0:
-            raise ValueError('timeout_millis must be non-negative.')
-        with self._lock:
-            self._check_open('wait')
-            self._wait_locked(<uint64_t>timeout_millis)
-        return self
-
-    cpdef close(self, bint flush=True, bint wait=False):
-        """
-        Return this lease to its Client. Idempotent.
-
-        Pending rows are published by default. ``wait=True`` additionally
-        waits for an OK ack before returning the sender to the pool.
-        """
-        with self._lock:
-            try:
-                if flush and self._sender != NULL:
-                    self._flush_locked(wait)
-            finally:
-                self._release_locked()
-
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
-        self.close(exc_type is None, False)
-
-    def __dealloc__(self):
-        if self._lock is not None:
-            with self._lock:
-                self._release_locked()
-
-
-cdef class Client:
-    """
-    Pooled QWP/WebSocket client for row and dataframe ingestion plus query
-    egress.
+    Owns the connection pool; lends row-building senders via
+    :meth:`sender`, bulk-loads DataFrames via :meth:`dataframe`, and runs
+    queries via :meth:`query`. Construct with :func:`questdb.connect`.
+    Instances are safe to share across threads.
     """
     cdef questdb_db* _db
     cdef object _conf_str
@@ -5797,7 +5549,7 @@ cdef class Client:
             if db == NULL:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
-                    f"{method}() can't be called: Client is closed.")
+                    f"{method}() can't be called: QuestDB is closed.")
             self._active_uses += 1
             return db
         finally:
@@ -5807,7 +5559,7 @@ cdef class Client:
         self._state_cond.acquire()
         try:
             if self._active_uses == 0:
-                raise RuntimeError('Client use counter underflow.')
+                raise RuntimeError('QuestDB use counter underflow.')
             self._active_uses -= 1
             if self._active_uses == 0:
                 self._state_cond.notify_all()
@@ -5821,7 +5573,9 @@ cdef class Client:
             connection_listener=None,
             connection_event_inbox_capacity: int = 0):
         """
-        Construct a pooled client from a QWP/WebSocket configuration string.
+        Construct a handle from a QWP/WebSocket configuration string.
+
+        Prefer the :func:`questdb.connect` module-level factory.
 
         The underlying connection pool is opened by `questdb_db_connect`.
         Dataframe ingestion always uses the direct (non-store-and-forward)
@@ -5851,14 +5605,14 @@ cdef class Client:
         cdef object protocol
         cdef dict params
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
-        cdef Client client = Client.__new__(Client)
+        cdef QuestDB db = QuestDB.__new__(QuestDB)
         cdef PyThreadState* gs = NULL
         try:
             protocol, params = parse_conf_str(b, conf_str)
             if protocol not in (Protocol.Ws, Protocol.Wss):
                 raise QuestDBError(
                     QuestDBErrorCode.ConfigError,
-                    'Client.from_conf() requires a QWP/WebSocket '
+                    'questdb.connect() requires a QWP/WebSocket '
                     'configuration string: ws:: or wss::.')
             if params.get('addr') is None:
                 raise QuestDBError(
@@ -5872,25 +5626,25 @@ cdef class Client:
                     f'not {_fqn(type(connection_listener))}')
             str_to_utf8(b, <PyObject*>conf_str, &c_conf)
             _ensure_doesnt_have_gil(&gs)
-            client._db = questdb_db_connect(c_conf.buf, c_conf.len, &err)
+            db._db = questdb_db_connect(c_conf.buf, c_conf.len, &err)
             _ensure_has_gil(&gs)
-            if client._db == NULL:
+            if db._db == NULL:
                 raise c_err_to_py(err)
             if connection_listener is not None:
-                # The Client owns the only strong reference the trampoline
+                # The QuestDB handle owns the only strong reference the trampoline
                 # relies on; it lives until close() frees the pool, which
                 # stops the dispatcher before the reference is cleared.
-                client._connection_listener = connection_listener
+                db._connection_listener = connection_listener
                 if not questdb_db_set_connection_event_handler(
-                        client._db,
+                        db._db,
                         _connection_event_trampoline,
-                        <void*>client._connection_listener,
+                        <void*>db._connection_listener,
                         <size_t>connection_event_inbox_capacity,
                         &err):
-                    client._connection_listener = None
+                    db._connection_listener = None
                     raise c_err_to_py(err)
-            client._conf_str = conf_str
-            return client
+            db._conf_str = conf_str
+            return db
         finally:
             _ensure_has_gil(&gs)
             qdb_pystr_buf_free(b)
@@ -5901,23 +5655,23 @@ cdef class Client:
             if self._db == NULL:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
-                    '__enter__() can\'t be called: Client is closed.')
+                    '__enter__() can\'t be called: QuestDB is closed.')
         finally:
             self._state_cond.release()
         return self
 
     def sender(self):
         """
-        Borrow a context-managed row-building sender from this Client.
+        Borrow a context-managed row-building sender from the pool.
 
-        The lease participates in the Client's active-use count until it is
-        closed. :meth:`Client.close` therefore waits for outstanding leases.
+        The lease participates in the handle's active-use count until it is
+        closed. :meth:`QuestDB.close` therefore waits for outstanding leases.
         """
         cdef questdb_db* db = NULL
         cdef qwp_sender* sender = NULL
         cdef line_sender_error* err = NULL
         cdef Buffer buffer = None
-        cdef ClientSender lease = None
+        cdef _PooledSender lease = None
         cdef PyThreadState* gs = NULL
         cdef bint db_use = False
         db = self._begin_db_use('sender')
@@ -5938,7 +5692,7 @@ cdef class Client:
             buffer._max_name_len = questdb_db_buffer_max_name_len(db)
             buffer._qwp = True
 
-            lease = ClientSender.__new__(ClientSender)
+            lease = _PooledSender.__new__(_PooledSender)
             lease._attach(self, db, sender, buffer)
             sender = NULL
             db_use = False
@@ -6081,7 +5835,7 @@ cdef class Client:
                      datetime.datetime)) and not (
                     isinstance(at, int) and not isinstance(at, bool)):
                 raise UnsupportedDataFrameShapeError(
-                    'Client.dataframe requires `at` to be the designated '
+                    'QuestDB.dataframe requires `at` to be the designated '
                     'timestamp column (by name or index), a fixed timestamp '
                     'shared by every row (TimestampNanos / datetime), or '
                     'the explicit `ServerTimestamp` sentinel to let the '
@@ -6281,7 +6035,7 @@ cdef class Client:
         """
         # Borrow a reader from the same `questdb_db` pool that hosts
         # the ingress writers. The pool amortises TCP+TLS handshake
-        # cost across many `Client.query()` calls: the first call
+        # cost across many `QuestDB.query()` calls: the first call
         # opens a connection, subsequent calls hit the idle-list
         # cache. See `c-questdb-client/questdb-rs/src/ingress/
         # column_sender/db.rs` for the pool's structure.
@@ -7396,9 +7150,11 @@ cdef class Sender:
         """
         Write a Pandas DataFrame to the internal buffer.
 
-        .. deprecated:: 5.0.0
-            Use :meth:`Client.dataframe` instead. This method is planned for
-            removal in 6.0.0.
+        Available over ILP/HTTP, ILP/TCP and QWP/UDP (over UDP the frame is
+        serialized row by row into fire-and-forget datagrams, with the same
+        delivery caveats as ``row()``). Over QWP/WebSocket this raises:
+        DataFrame bulk loads are a database operation there — use
+        :meth:`QuestDB.dataframe`.
 
         Example:
 
@@ -7423,8 +7179,8 @@ cdef class Sender:
             with qi.Sender.from_env() as sender:
                 sender.dataframe(df, table_name='race_metrics', at='ts')
 
-        This method builds on top of the :func:`Buffer.dataframe` method.
-        See its documentation for details on arguments.
+        See the buffer-level ``dataframe`` documentation for details on
+        the supported column types and arguments.
 
         Additionally, this method also supports auto-flushing the buffer
         as specified in the ``Sender``'s ``auto_flush`` constructor argument.
@@ -7437,12 +7193,14 @@ cdef class Sender:
         In case of data errors with auto-flushing enabled, some of the rows
         may have been transmitted to the server already.
         """
-        warnings.warn(
-            'Sender.dataframe() is deprecated and will be removed in '
-            'questdb 6.0.0; use Client.dataframe() instead.',
-            DeprecationWarning,
-            stacklevel=2)
         cdef auto_flush_t af = auto_flush_blank()
+        if _is_qwp_ws_protocol(self._c_protocol):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'dataframe() is not available over ws. DataFrame bulk loads '
+                'are a database operation: connect with questdb.connect() '
+                'and call QuestDB.dataframe(df, table_name=..., at=...). '
+                'For row streaming on this sender, use row().')
         if self._in_txn:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -7585,12 +7343,12 @@ cdef class Sender:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'QWP sender requires a QWP buffer. Use Sender.new_buffer() '
-                'or Buffer.qwp() to build a matching buffer.')
+                'to build a matching buffer.')
         if buffer._qwp and not need_qwp:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'ILP sender requires an ILP buffer. Use Sender.new_buffer() '
-                'or Buffer.ilp() to build a matching buffer.')
+                'to build a matching buffer.')
 
     def flush_and_get_fsn(self, Buffer buffer=None):
         """
@@ -7888,3 +7646,190 @@ cdef class Sender:
     def __dealloc__(self):
         self._close()
         free(self._last_flush_ms)
+
+
+cdef class _PooledSender:
+    """
+    A row-building sender borrowed from a :class:`QuestDB` pool.
+
+    Obtain a lease with :meth:`QuestDB.sender`; ``close()`` returns the
+    native sender to the pool. Rows publish into an ordered,
+    store-and-forward-covered QWP stream over one pooled connection.
+
+    The surface is deliberately small: ``row()``, ``flush()``, ``wait()``
+    and ``close()``. ``len(sender)`` is the number of buffered rows.
+    DataFrame bulk loads go through :meth:`QuestDB.dataframe`.
+    """
+    cdef qwp_sender* _qwp
+    cdef questdb_db* _db
+    cdef QuestDB _handle
+    cdef Buffer _buffer
+    cdef object _lock
+
+    def __cinit__(self):
+        self._qwp = NULL
+        self._db = NULL
+        self._handle = None
+        self._buffer = None
+        self._lock = threading.RLock()
+
+    cdef void _attach(
+            self,
+            QuestDB handle,
+            questdb_db* db,
+            qwp_sender* sender,
+            Buffer buffer) noexcept:
+        self._handle = handle
+        self._db = db
+        self._qwp = sender
+        self._buffer = buffer
+
+    cdef void_int _check_open(self, str method) except -1:
+        if self._qwp == NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{method}() can't be called: Sender is closed.")
+
+    cdef void_int _wait_locked(self, uint64_t timeout_millis) except -1:
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef bint ok = False
+        _ensure_doesnt_have_gil(&gs)
+        ok = qwp_sender_wait(
+            self._qwp,
+            qwpws_ack_level.qwpws_ack_level_ok,
+            timeout_millis,
+            &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise c_err_to_py(err)
+
+    cdef void_int _flush_locked(self, bint wait) except -1:
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef bint ok = False
+        self._check_open('flush')
+        if line_sender_buffer_row_count(self._buffer._impl) == 0:
+            if wait:
+                self._wait_locked(0)
+            return 0
+        _ensure_doesnt_have_gil(&gs)
+        if wait:
+            ok = qwp_sender_flush_buffer_and_wait(
+                self._qwp,
+                self._buffer._impl,
+                qwpws_ack_level.qwpws_ack_level_ok,
+                &err)
+        else:
+            ok = qwp_sender_flush_buffer(
+                self._qwp, self._buffer._impl, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise c_err_to_py(err)
+        qdb_pystr_buf_clear(self._buffer._b)
+
+    cdef void _release_locked(self) noexcept:
+        cdef qwp_sender* sender = self._qwp
+        cdef questdb_db* db = self._db
+        cdef QuestDB handle = self._handle
+        cdef PyThreadState* gs = NULL
+        if sender == NULL:
+            return
+        self._qwp = NULL
+        self._db = NULL
+        self._buffer = None
+        _ensure_doesnt_have_gil(&gs)
+        questdb_db_return_sender(db, sender)
+        _ensure_has_gil(&gs)
+        if handle is not None:
+            handle._end_db_use()
+        self._handle = None
+
+    def __enter__(self):
+        with self._lock:
+            self._check_open('__enter__')
+        return self
+
+    def row(
+            self,
+            table_name: str,
+            *,
+            symbols: Optional[Dict[str, Optional[str]]] = None,
+            columns: Optional[Dict[
+                str,
+                Union[None, bool, int, float, str, TimestampMicros,
+                      TimestampNanos, datetime.datetime, numpy.ndarray,
+                      Decimal]]] = None,
+            at: Union[ServerTimestampType, TimestampNanos,
+                      datetime.datetime]):
+        """Append one row to this sender's QWP buffer."""
+        if at is None:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
+                "`at` must be of type TimestampNanos, datetime, or "
+                "ServerTimestamp")
+        with self._lock:
+            self._check_open('row')
+            self._buffer._row(
+                False, table_name, symbols, columns, at)
+        return self
+
+    def dataframe(self, df, *args, **kwargs):
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidApiCall,
+            'dataframe() is not available on a pooled sender. DataFrame '
+            'bulk loads are a database operation: call '
+            'QuestDB.dataframe(df, table_name=..., at=...) on the handle '
+            'this sender was borrowed from. For row streaming, use row().')
+
+    def __len__(self):
+        """Number of buffered (unpublished) rows."""
+        with self._lock:
+            self._check_open('__len__')
+            return line_sender_buffer_row_count(self._buffer._impl)
+
+    def flush(self, *, bint wait=False):
+        """
+        Publish and clear buffered rows.
+
+        By default this returns after local store-and-forward acceptance.
+        Pass ``wait=True`` to wait for the server's OK acknowledgement.
+        """
+        with self._lock:
+            self._flush_locked(wait)
+        return self
+
+    def wait(self, timeout_millis: int=0):
+        """
+        Wait for every publication on this sender to receive an OK ack.
+
+        ``timeout_millis`` is a no-progress timeout; ``0`` waits indefinitely.
+        """
+        if timeout_millis < 0:
+            raise ValueError('timeout_millis must be non-negative.')
+        with self._lock:
+            self._check_open('wait')
+            self._wait_locked(<uint64_t>timeout_millis)
+        return self
+
+    def close(self, flush: bool=True, wait: bool=False):
+        """
+        Return this sender to its pool. Idempotent.
+
+        Pending rows are published by default. ``wait=True`` additionally
+        waits for an OK ack before returning the sender to the pool.
+        """
+        with self._lock:
+            try:
+                if flush and self._qwp != NULL:
+                    self._flush_locked(wait)
+            finally:
+                self._release_locked()
+
+    def __exit__(self, exc_type, _exc_val, _exc_tb):
+        self.close(exc_type is None, False)
+
+    def __dealloc__(self):
+        if self._lock is not None:
+            with self._lock:
+                self._release_locked()

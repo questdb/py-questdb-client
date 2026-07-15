@@ -9,27 +9,19 @@ questdb
 
     from questdb import *
 
+.. autofunction:: questdb.connect
+
+.. autoclass:: questdb.QuestDB
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: questdb.Sender
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.Buffer
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 .. autoclass:: questdb.SenderTransaction
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-.. autoclass:: questdb.Client
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-.. autoclass:: questdb.ClientSender
    :members:
    :undoc-members:
    :show-inheritance:

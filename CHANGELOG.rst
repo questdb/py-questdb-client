@@ -12,14 +12,37 @@ Breaking changes
 ~~~~~~~~~~~~~~~~~
 
 - The public API now lives at the top level of the ``questdb`` package:
-  ``from questdb import Sender, Buffer, Client, QueryResult, ...`` (the compiled
-  module is now the private ``questdb._client``). The ``questdb.ingress``
-  module has been removed; update imports from ``questdb.ingress`` to
-  ``questdb``.
-- ``IngressError`` is renamed to :class:`QuestDBError`, ``IngressErrorCode`` to
-  :class:`QuestDBErrorCode`, and ``IngressServerRejectionError`` to
-  :class:`QuestDBServerRejectionError` (the names now also cover the query
-  egress path, which raises the same types).
+  ``from questdb import Sender, QuestDB, QueryResult, ...`` (the compiled
+  module is now the private ``questdb._client``). ``questdb.ingress`` remains
+  as a deprecated compatibility shim re-exporting the 4.x ILP/HTTP and
+  ILP/TCP surface (``Sender``, ``Buffer``, ``Protocol``, ``IngressError``,
+  ...) with a single import-time ``DeprecationWarning``; new code imports
+  from ``questdb``.
+- The QWP/WebSocket entry point is :func:`questdb.connect`, returning a
+  :class:`QuestDB` handle (previously named ``Client``). The handle lends
+  row-building senders (:meth:`QuestDB.sender`), bulk-loads DataFrames
+  (:meth:`QuestDB.dataframe`) and runs queries (:meth:`QuestDB.query`).
+- The sender borrowed from the pool is a lean pooled row sender (the
+  ``ClientSender`` name is gone; it exposes ``row()``, ``flush()``,
+  ``wait()`` and ``close()``, and is not a ``Sender`` subclass — the
+  standalone-only API such as ``establish()`` or FSN tracking simply does
+  not exist on it). One concurrency rule applies everywhere: borrow one
+  sender per thread.
+- ``Buffer`` is no longer part of the top-level API. Buffers are managed
+  internally by senders; for concurrent serialization borrow more senders.
+  Legacy explicit-buffer code keeps working through the ``questdb.ingress``
+  shim.
+- ``Sender.dataframe()`` over ``ws::`` / ``wss::`` now raises
+  :class:`QuestDBError`: DataFrame bulk loads over QWP are a database
+  operation — use :meth:`QuestDB.dataframe`, which uses the direct columnar
+  path (independent of ``sf_dir``, commits on return, precise ``in_doubt``
+  failure semantics). Over ILP/HTTP, ILP/TCP and QWP/UDP,
+  ``Sender.dataframe()`` remains fully supported and is no longer deprecated
+  (over UDP it serializes row by row into fire-and-forget datagrams, with
+  the same delivery caveats as ``row()``).
+- ``IngressError`` is renamed to :class:`QuestDBError` and
+  ``IngressErrorCode`` to :class:`QuestDBErrorCode` (the names now also cover
+  the query egress path, which raises the same types).
 - The error model is unified across ingestion and queries. Query/reader
   failures now surface their own :class:`QuestDBErrorCode` members
   (``HandshakeError``, ``UnsupportedServer``, ``ProtocolError``,
@@ -62,24 +85,18 @@ Every new key is equally available as a ``Sender`` / ``Sender.from_conf`` /
 ``multicast_ttl``, ``tls_roots_password``, ``retry_max_backoff``,
 ``qwp_ws_progress`` and ``qwp_ws_error_handler``).
 
-The pooled :class:`Client` now exposes :meth:`Client.sender`, returning a
-context-managed :class:`ClientSender` for row-at-a-time QWP/WebSocket
-ingestion. Row builders, whole-dataframe ingestion, and queries can therefore
-share one ``Client.from_conf("ws::...")`` configuration without exposing
-separate row and column sender pools. The lease has no dataframe method;
-whole dataframes continue through the direct :meth:`Client.dataframe` path.
-
-Buffer Factories
-****************
-
-``Buffer.ilp()`` and ``Buffer.qwp()`` construct protocol-specific
-buffers. Direct ``Buffer(...)`` construction is deprecated in favour of
-these factories and ``Sender.new_buffer()``.
+The pooled :class:`QuestDB` handle exposes :meth:`QuestDB.sender`, returning
+a context-managed row sender for row-at-a-time QWP/WebSocket ingestion.
+Row builders, whole-dataframe ingestion, and queries share one
+``questdb.connect("ws::...")`` configuration without exposing separate row
+and column sender pools. The pooled sender's ``dataframe()`` raises with
+guidance; whole dataframes go through the direct :meth:`QuestDB.dataframe`
+path.
 
 Query Egress
 ************
 
-Adds :class:`Client` with :meth:`Client.query`, returning a
+Adds :meth:`QuestDB.query`, returning a
 :class:`QueryResult` that streams rows as Arrow record batches over the
 QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
 ``to_pandas``, ``to_polars``, ``iter_arrow``, ``iter_pandas``,
@@ -98,17 +115,17 @@ straight from the QWP column buffers: a nullable integer column becomes a
 pandas nullable ``Int*`` when it contains nulls and plain numpy otherwise,
 ``double`` stays numpy with ``NaN``, ``TIMESTAMP`` → ``datetime64``, and
 the QuestDB column kinds are recorded in ``df.attrs['questdb']`` for a type
-round-trip through :meth:`Client.dataframe`. Pass
+round-trip through :meth:`QuestDB.dataframe`. Pass
 ``dtype_backend="pyarrow"`` / ``"numpy_nullable"`` (or ``types_mapper=``)
 to select the pyarrow-backed conversion instead.
 
-:class:`Client` is a context manager and exposes :meth:`Client.close` and
-:meth:`Client.reap_idle` for pooled-connection lifecycle management.
+:class:`QuestDB` is a context manager and exposes :meth:`QuestDB.close` and
+:meth:`QuestDB.reap_idle` for pooled-connection lifecycle management.
 
 Columnar DataFrame Ingestion
 ****************************
 
-Adds :meth:`Client.dataframe`, ingesting pandas / polars / pyarrow and
+Adds :meth:`QuestDB.dataframe`, ingesting pandas / polars / pyarrow and
 any Arrow C Data Interface object over QWP/WebSocket. A
 ``schema_overrides`` keyword reclassifies columns as ``symbol``,
 ``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
@@ -117,7 +134,7 @@ bounds the rows sent per columnar batch.
 
 The designated-timestamp argument ``at`` is the timestamp column itself,
 given by name (``str``) or position (``int``); unlike
-:meth:`Sender.dataframe` / :meth:`Buffer.dataframe` it does not accept a
+:meth:`Sender.dataframe` / ``Buffer.dataframe`` it does not accept a
 scalar ``datetime`` / ``TimestampNanos`` / ``ServerTimestamp``. A frame
 produced by :meth:`QueryResult.to_pandas` round-trips back to the same
 QuestDB column types automatically: the kinds recorded in
@@ -141,11 +158,9 @@ appropriate table-level deduplication guarantee.
 Build & dependencies
 ~~~~~~~~~~~~~~~~~~~~~~
 
-- The bundled ``c-questdb-client`` native library is upgraded to 6.1.0,
+- The bundled ``c-questdb-client`` native library is upgraded to 7.0.0,
   providing the QWP transports, the columnar ``column_sender`` API and the
   ``line_reader`` query API that back the new features above.
-- The minimum supported Python is raised from 3.8 to **3.10**; Python 3.8
-  and 3.9 are no longer supported.
 - ``numpy>=1.21.0`` is now a hard runtime dependency (previously it was
   pulled in only via the ``dataframe`` extra).
 - **pyarrow is now optional.** It is imported lazily, only when actually
@@ -159,13 +174,9 @@ Build & dependencies
 Deprecations
 ~~~~~~~~~~~~
 
-- Direct ``Buffer(...)`` construction is deprecated and emits a
-  ``DeprecationWarning``. Use ``Buffer.ilp()``, ``Buffer.qwp()`` or
-  ``Sender.new_buffer()`` instead.
-- ``Sender.dataframe()`` and ``Buffer.dataframe()`` are deprecated and emit a
-  ``DeprecationWarning``. Use ``Client.dataframe()`` for the direct,
-  whole-source QWP path. Both deprecated methods are planned for removal in
-  6.0.0; see the :doc:`migration guide <migration>`.
+- The ``questdb.ingress`` module is deprecated (kept as a compatibility shim
+  for 4.x ILP/HTTP and ILP/TCP code); it emits one ``DeprecationWarning`` at
+  import. New code imports from ``questdb``.
 
 4.1.0 (2025-11-28)
 ------------------

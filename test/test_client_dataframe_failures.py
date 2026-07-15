@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Direct-path unhappy-path coverage for ``Client.dataframe``.
+Direct-path unhappy-path coverage for ``QuestDB.dataframe``.
 
 Each test injects a precise failure through ``QwpAckServer``'s fault
 knobs (per-connection close plans, advertised batch-size caps,
@@ -71,7 +71,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         ])
         reader = pa.RecordBatchReader.from_batches(schema, [])
         with QwpAckServer() as server:
-            with qi.Client.from_conf(_conf(server.port)) as client:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
                 client.dataframe(reader, table_name='t_empty', at='ts')
             stats = server.snapshot()
         self.assertEqual(stats['binary_frames'], 0)
@@ -99,7 +99,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             time.sleep(0.15)
 
         with QwpAckServer(close_plan=[10], defer_aware_acks=True) as server:
-            with qi.Client.from_conf(_conf(server.port)) as client:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
                 reader = pa.RecordBatchReader.from_batches(schema, batches())
                 with self.assertRaises(qi.QuestDBError) as raised:
                     client.dataframe(reader, table_name='t_stream', at='ts')
@@ -120,7 +120,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         # operation 2 can have been delivered, so it must transparently
         # move to connection 2 and send all 11 frames again.
         with QwpAckServer(close_plan=[11]) as server:
-            with qi.Client.from_conf(_conf(server.port)) as client:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
                 client.dataframe(
                     _table(10), table_name='t_resend', at='ts',
                     max_rows_per_batch=1)
@@ -144,7 +144,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         # past the checkpoint, so a whole-frame re-send would duplicate
         # the committed prefix: the call must raise instead of retrying.
         with QwpAckServer(close_plan=[105]) as server:
-            with qi.Client.from_conf(_conf(server.port)) as client:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
                 with self.assertRaises(qi.QuestDBError) as raised:
                     client.dataframe(
                         _table(110), table_name='t_prefix', at='ts',
@@ -165,7 +165,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         # commit and the trailing commit.
         with QwpAckServer(
                 max_batch_size=1024, defer_aware_acks=True) as server:
-            with qi.Client.from_conf(_conf(server.port)) as client:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
                 client.dataframe(
                     _table(1280, str_len=64), table_name='t_cap',
                     at='ts', max_rows_per_batch=16)
@@ -195,7 +195,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                         close_plan=[140],
                         max_batch_size=1024,
                         defer_aware_acks=True) as server:
-                    with qi.Client.from_conf(
+                    with qi.QuestDB.from_conf(
                             _conf(
                                 server.port,
                                 reconnect_max_duration_millis=3000)) as client:
@@ -233,7 +233,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             blocker.bind(('127.0.0.1', 0))
             port = blocker.getsockname()[1]
             started = time.monotonic()
-            with qi.Client.from_conf(
+            with qi.QuestDB.from_conf(
                     _conf(port, reconnect_max_duration_millis=300,
                           connect_timeout=100)) as client:
                 with self.assertRaises(qi.QuestDBError) as raised:
@@ -338,7 +338,7 @@ class TestClientDataframeFaultFuzz(unittest.TestCase):
                 close_plan=close_plan,
                 max_batch_size=cap,
                 defer_aware_acks=(mode != 'disconnect')) as server:
-            with qi.Client.from_conf(
+            with qi.QuestDB.from_conf(
                     _conf(server.port,
                           reconnect_max_duration_millis=3000)) as client:
                 err = None

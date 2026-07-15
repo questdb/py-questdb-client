@@ -35,7 +35,7 @@ The most common way to insert data is from a Pandas dataframe.
 
     import numpy as np
     import pandas as pd
-    from questdb import Client
+    import questdb
 
     df = pd.DataFrame({
         'symbol': pd.Categorical(['ETH-USD', 'BTC-USD']),
@@ -53,8 +53,8 @@ The most common way to insert data is from a Pandas dataframe.
         'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
     conf = 'ws::addr=localhost:9000;'
-    with Client.from_conf(conf) as client:
-        client.dataframe(df, table_name='trades', at='timestamp')
+    with questdb.connect(conf) as db:
+        db.dataframe(df, table_name='trades', at='timestamp')
 
 You can also send individual rows. This only requires a more minimal installation::
 
@@ -63,11 +63,12 @@ You can also send individual rows. This only requires a more minimal installatio
 .. code-block:: python
 
     import numpy as np
-    from questdb import Client, TimestampNanos
+    import questdb
+    from questdb import TimestampNanos
 
     conf = 'ws::addr=localhost:9000;'
-    with Client.from_conf(conf) as client:
-        with client.sender() as sender:
+    with questdb.connect(conf) as db:
+        with db.sender() as sender:
             sender.row(
                 'trades',
                 symbols={'symbol': 'ETH-USD', 'side': 'sell'},
@@ -93,9 +94,10 @@ To connect via the `older TCP protocol <https://py-questdb-client.readthedocs.io
 
 See the `5.0 migration guide
 <https://py-questdb-client.readthedocs.io/en/latest/migration.html>`_ when
-moving existing ``Sender.dataframe()`` or ``Buffer.dataframe()`` code to
-``Client.dataframe()``. Those two methods are deprecated in 5.0 and planned
-for removal in 6.0.0.
+moving existing code to 5.0: ``questdb.connect()`` is the new
+QWP/WebSocket entry point, DataFrame bulk loads over QWP/WebSocket go through
+``QuestDB.dataframe()``, and the 4.x ``questdb.ingress`` import location is
+now a deprecated compatibility shim.
 
 
 You can continue by reading the

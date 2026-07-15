@@ -285,7 +285,10 @@ Valid options are:
 Buffer
 ======
 
-* ``protocol_version`` - ``int (1, 2)``: Buffer protocol version.
+Settings for the sender's internal serialization buffer.
+
+* ``protocol_version`` - ``int (1, 2, 3)``: Buffer protocol version.
+  Version 3 is required for ``DECIMAL`` columns.
 
 * ``init_buf_size`` - ``int > 0``: Initial buffer capacity.
     

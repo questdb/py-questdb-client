@@ -550,7 +550,7 @@ def timed_call(fn):
 
 
 def run_row_path(df, rows, iterations, warmups):
-    buf = qi.Buffer.qwp()
+    buf = qi.Buffer._new_qwp()
 
     def once():
         buf.clear()
@@ -608,7 +608,7 @@ def run_client_ack(
     last = None
     with QwpAckServer(ack_delay_s=ack_delay_s) as server:
         conf = _make_ack_conf(server)
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             qi._debug_dataframe_columnar_io_stats(enabled=False, reset=True)
             for _ in range(warmups):
                 client.dataframe(df, table_name="bench_numeric", at="ts")
@@ -632,7 +632,7 @@ def run_client_ack(
         reconnects_after_first = max(0, stats["accepted_connections"] - 1)
         if reconnects_after_first:
             raise AssertionError(
-                "pooled Client opened extra physical connections: "
+                "pooled QuestDB opened extra physical connections: "
                 f"{stats['accepted_connections']} accepts")
         if stats["errors"]:
             raise AssertionError(
@@ -644,7 +644,7 @@ def run_client_ack(
         if max_seconds is not None and iterations >= min_calls:
             if total_s > max_seconds:
                 raise AssertionError(
-                    f"{iterations} Client.dataframe calls took "
+                    f"{iterations} QuestDB.dataframe calls took "
                     f"{total_s:.3f}s, over {max_seconds:.3f}s")
         last = {
             "ack_server": stats,
@@ -676,7 +676,7 @@ def run_cold_warm_split(df, rows, warm_iters, *, ack_delay_s=0.0):
     warm_cpu = []
     with QwpAckServer(ack_delay_s=ack_delay_s) as server:
         conf = _make_ack_conf(server)
-        with qi.Client.from_conf(conf) as client:
+        with qi.QuestDB.from_conf(conf) as client:
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
 
             def once():
@@ -801,9 +801,11 @@ def run_real_row_path(
         reset_count += len(reset_sqls)
 
     with qi.Sender.from_conf(row_conf, auto_flush=False) as sender:
+        row_buf = sender.new_buffer()
+
         def once():
-            sender.dataframe(df, table_name=table_name, at="ts")
-            fsn = sender.flush_and_get_fsn()
+            row_buf.dataframe(df, table_name=table_name, at="ts")
+            fsn = sender.flush_and_get_fsn(row_buf)
             acked = True
             if fsn is not None:
                 acked = sender.await_acked_fsn(fsn, await_ack_ms)
@@ -864,7 +866,7 @@ def run_real_client_path(
         execute_sqls(http_base, reset_sqls)
         reset_count += len(reset_sqls)
 
-    with qi.Client.from_conf(conf) as client:
+    with qi.QuestDB.from_conf(conf) as client:
         def once():
             client.dataframe(df, table_name=table_name, at="ts")
             return {
@@ -961,7 +963,7 @@ def columnar_support_report(schema_name, rows, max_rows_per_chunk=None,
     else:
         with QwpAckServer() as server:
             try:
-                with qi.Client.from_conf(_make_ack_conf(server)) as client:
+                with qi.QuestDB.from_conf(_make_ack_conf(server)) as client:
                     client.dataframe(df, table_name=table_name, at="ts")
             except qi.UnsupportedDataFrameShapeError as exc:
                 report["client_rejection"] = _exception_report(exc)
@@ -1031,12 +1033,12 @@ def compute_wire_bytes(df):
     """Encode the DataFrame once to a QWP buffer to learn the per-flush wire
     size, used for the mib_per_s metric in the JSON contract (plan s3.2).
 
-    This is the bytes pushed per ``Client.dataframe`` flush for this schema; it
+    This is the bytes pushed per ``QuestDB.dataframe`` flush for this schema; it
     is deterministic for a given DataFrame, so one encode suffices. Paths that
     talk to a server prefer the bytes the server actually observed (see
     ``measured_wire_bytes_per_call``); this is the fallback estimate.
     """
-    buf = qi.Buffer.qwp()
+    buf = qi.Buffer._new_qwp()
     buf.dataframe(df, table_name="bench_wire_size", at="ts")
     return len(buf)
 
@@ -1315,7 +1317,7 @@ def main():
         "--support-report",
         action="store_true",
         help=(
-            "Report Client.dataframe v1 eligibility, chunk planning, and "
+            "Report QuestDB.dataframe v1 eligibility, chunk planning, and "
             "pre-publication rejection details instead of timing paths."))
     parser.add_argument(
         "--schema-sql",

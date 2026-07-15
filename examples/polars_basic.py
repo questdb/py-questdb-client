@@ -1,12 +1,13 @@
 """Polars DataFrame ingest and query example.
 
-`Client.dataframe()` accepts polars `DataFrame` and `LazyFrame` directly,
+`QuestDB.dataframe()` accepts polars `DataFrame` and `LazyFrame` directly,
 riding the Arrow PyCapsule Interface (`__arrow_c_stream__`) straight into
-`column_sender_flush_arrow_batch`. `Client.query()` can materialise query
+`column_sender_flush_arrow_batch`. `QuestDB.query()` can materialise query
 results as a polars `DataFrame` with `QueryResult.to_polars()`.
 """
 
-from questdb import Client, QuestDBError
+import questdb
+from questdb import QuestDBError
 import datetime
 import sys
 
@@ -28,18 +29,18 @@ def example(host: str = 'localhost', port: int = 9000):
 
     try:
         conf = f'ws::addr={host}:{port};'
-        with Client.from_conf(conf) as client:
+        with questdb.connect(conf) as db:
             # Ingress: publish a Polars DataFrame into QuestDB.
-            client.dataframe(df, table_name='trades', at='ts')
+            db.dataframe(df, table_name='trades', at='ts')
 
-            client.dataframe(
+            db.dataframe(
                 df,
                 table_name='trades_chunked',
                 at='ts',
                 max_rows_per_batch=2)
 
             # Egress: query QuestDB and materialise the result as Polars.
-            with client.query(
+            with db.query(
                     "SELECT x AS trade_id, "
                     "x * 10.0 AS price, "
                     "timestamp_sequence("
@@ -71,8 +72,8 @@ def schema_overrides_example(host: str = 'localhost', port: int = 9000):
 
     try:
         conf = f'ws::addr={host}:{port};'
-        with Client.from_conf(conf) as client:
-            client.dataframe(
+        with questdb.connect(conf) as db:
+            db.dataframe(
                 df,
                 table_name='ipv4_log',
                 at='ts',

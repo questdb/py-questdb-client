@@ -398,7 +398,7 @@ def main():
     table_name = args.real_table or _bench_table_name(args.schema)
     paths = args.path or ALL_PATHS
 
-    with qi.Client.from_conf(args.real_conf) as client:
+    with qi.QuestDB.from_conf(args.real_conf) as client:
         if args.real_http is not None:
             actual = fetch_row_count(args.real_http, table_name)
             if actual != args.rows:
