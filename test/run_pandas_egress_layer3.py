@@ -54,7 +54,7 @@ def run_layer3(args):
         http_base = f"http://{qdb.host}:{qdb.http_server_port}"
         conf = (
             f"ws::addr={qdb.host}:{qdb.http_server_port};"
-            "pool_size=1;pool_max=1;pool_reap=manual;")
+            "sender_pool_min=1;sender_pool_max=1;pool_reap=manual;")
         schema = args.schema
         df = build_schema_df(
             schema, args.rows,

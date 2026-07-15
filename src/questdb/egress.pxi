@@ -371,8 +371,71 @@ cdef void _failover_reset_trampoline(
     (<int*>user_data)[0] += 1
 
 
+cdef void_int _bind_query_params(reader_query* query, object binds) except -1:
+    """Append positional binds matching the SQL's ``$1``..``$N`` placeholders.
+
+    Bind calls follow the C ABI's deferred-error contract (they return
+    void; the only native-side failure surfaces from execute), so the only
+    errors raised here are Python-side type rejections.
+    """
+    cdef bytes utf8
+    cdef bytes uuid_wire
+    cdef line_sender_utf8 c_utf8
+    cdef line_sender_error* utf8_err = NULL
+    cdef object u_int
+    cdef Py_ssize_t idx = 0
+    for value in binds:
+        idx += 1
+        if value is None:
+            reader_query_bind_null_varchar(query)
+        elif value is True or value is False:
+            reader_query_bind_bool(query, value)
+        elif isinstance(value, int):
+            if value < INT64_MIN or value > INT64_MAX:
+                raise OverflowError(
+                    f'query bind ${idx}: int out of the signed 64-bit '
+                    f'range QuestDB LONG supports: {value}')
+            reader_query_bind_i64(query, value)
+        elif isinstance(value, float):
+            reader_query_bind_f64(query, value)
+        elif isinstance(value, str):
+            utf8 = value.encode('utf-8')
+            if not line_sender_utf8_init(
+                    &c_utf8,
+                    <size_t>len(utf8),
+                    <const char*>utf8,
+                    &utf8_err):
+                raise c_err_to_py(utf8_err)
+            reader_query_bind_varchar(query, c_utf8)
+        elif isinstance(value, TimestampNanos):
+            reader_query_bind_timestamp_nanos(query, value.value)
+        elif isinstance(value, TimestampMicros):
+            reader_query_bind_timestamp_micros(query, value.value)
+        elif isinstance(value, datetime.datetime):
+            reader_query_bind_timestamp_micros(
+                query, datetime_to_micros(value))
+        elif isinstance(value, uuid.UUID):
+            # QuestDB's UUID wire layout: low 64 bits little-endian, then
+            # high 64 bits little-endian (matching the ingestion side and
+            # the Java client's (lo, hi) long-pair encoding).
+            u_int = value.int
+            uuid_wire = (
+                (u_int & 0xFFFFFFFFFFFFFFFF).to_bytes(8, 'little')
+                + (u_int >> 64).to_bytes(8, 'little'))
+            reader_query_bind_uuid(
+                query, <const uint8_t*>PyBytes_AsString(uuid_wire))
+        else:
+            raise TypeError(
+                f'query bind ${idx}: unsupported type '
+                f'{_fqn(type(value))}. Supported: None, bool, int, float, '
+                f'str, datetime.datetime, TimestampMicros, TimestampNanos, '
+                f'uuid.UUID.')
+    return 0
+
+
 cdef _CursorHandle _execute_query(
-        _ReaderHandle reader_handle, str sql, bint reset_symbol_dict=True):
+        _ReaderHandle reader_handle, str sql, object binds,
+        bint reset_symbol_dict=True):
     """Execute a SQL query and return a _CursorHandle.
 
     The query is prepared with an ``on_failover_reset`` trampoline that
@@ -409,6 +472,13 @@ cdef _CursorHandle _execute_query(
                 QuestDBErrorCode.ServerFlushError,
                 'reader_prepare returned NULL without setting err')
         raise _reader_err_to_py(err)
+
+    if binds is not None:
+        try:
+            _bind_query_params(query, binds)
+        except:
+            reader_query_free(query)
+            raise
 
     reader_query_set_reset_symbol_dict(query, reset_symbol_dict)
 
@@ -939,11 +1009,13 @@ cdef object _decimal_type():
     return _DECIMAL_TYPE
 
 
-cdef int _reader_check(bint ok, questdb_error* err, str what) except -1:
+cdef int _reader_check(bint ok, questdb_error** err, str what) except -1:
+    # By address, not value: reading `err` in the same argument list as the
+    # FFI call that writes it is indeterminately sequenced (C11 6.5.2.2p10).
     if ok:
         return 0
-    if err != NULL:
-        raise _reader_err_to_py(err)
+    if err[0] != NULL:
+        raise _reader_err_to_py(err[0])
     raise QuestDBError(
         QuestDBErrorCode.ServerFlushError,
         what + ' returned false without err_out')
@@ -995,7 +1067,7 @@ cdef object _numpy_fixed_chunk(
             'numpy egress does not support column kind 0x{:02X} yet'.format(
                 <int>kind))
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     itemsize = dtype.itemsize
     if cd.value_stride != itemsize:
@@ -1041,7 +1113,7 @@ cdef object _numpy_varlen_chunk(
     cdef cnp.ndarray out
     cdef bint is_binary = kind == reader_column_kind_binary
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
@@ -1088,7 +1160,7 @@ cdef object _numpy_symbol_codes_chunk(
     cdef size_t r
     cdef int64_t[::1] mv
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     out = np.empty(row_count, dtype=np.int64)
     if row_count == 0:
@@ -1136,7 +1208,7 @@ cdef object _numpy_geohash_chunk(
     cdef Py_ssize_t nbytes
     cdef unsigned char* src
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     stride = cd.value_stride
     if stride == 1:
@@ -1188,7 +1260,7 @@ cdef object _numpy_uuid_chunk(
     cdef uint64_t hi
     cdef cnp.ndarray out
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
@@ -1220,7 +1292,7 @@ cdef object _numpy_long256_chunk(
     cdef size_t r
     cdef cnp.ndarray out
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
@@ -1255,7 +1327,7 @@ cdef object _numpy_decimal_chunk(
     cdef int scale
     cdef cnp.ndarray out
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
@@ -1306,7 +1378,7 @@ cdef object _numpy_array_chunk(
             'numpy egress supports only double arrays (kind 0x{:02X})'.format(
                 <int>kind))
     _reader_check(
-        reader_batch_array_column_data(batch, col_idx, &ad, &err), err,
+        reader_batch_array_column_data(batch, col_idx, &ad, &err), &err,
         'reader_batch_array_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
@@ -1396,7 +1468,7 @@ cdef object _numpy_validity_mask(
     cdef Py_ssize_t vbytes
     cdef unsigned char* vsrc
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), err,
+        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'reader_batch_column_data')
     if row_count == 0 or cd.validity == NULL:
         return None
@@ -1455,12 +1527,12 @@ cdef tuple _numpy_extract_meta(const reader_batch* batch):
         _reader_check(
             reader_batch_column_name(
                 batch, col_idx, &name_buf, &name_len, &err),
-            err, 'reader_batch_column_name')
+            &err, 'reader_batch_column_name')
         col_names.append(
             PyUnicode_FromStringAndSize(name_buf, <Py_ssize_t>name_len))
         _reader_check(
             reader_batch_column_kind(batch, col_idx, &kind, &err),
-            err, 'reader_batch_column_kind')
+            &err, 'reader_batch_column_kind')
         col_kinds.append(<int>kind)
         col_scales.append(None)
         col_precision.append(None)
@@ -1626,7 +1698,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                     first = False
                 if has_symbol:
                     _reader_check(
-                        reader_batch_symbol_dict(batch, &sd, &err), err,
+                        reader_batch_symbol_dict(batch, &sd, &err), &err,
                         'reader_batch_symbol_dict')
                     if sd.entry_count > prev_dict_n:
                         _symbol_categories_extend(
@@ -1921,7 +1993,7 @@ cdef class _NumpyBatchIter:
                 n_cols = <size_t>len(self.col_names)
                 if self.has_symbol:
                     _reader_check(
-                        reader_batch_symbol_dict(batch, &sd, &err), err,
+                        reader_batch_symbol_dict(batch, &sd, &err), &err,
                         'reader_batch_symbol_dict')
                     if sd.entry_count > self.prev_dict_n:
                         _symbol_categories_extend(
@@ -2024,7 +2096,8 @@ class QueryResult:
 
     Example::
 
-        with db.query('SELECT * FROM trades WHERE ts > $1') as result:
+        with db.query('SELECT * FROM trades WHERE ts > $1',
+                      [datetime.datetime(2026, 7, 1)]) as result:
             df = polars.from_arrow(result)              # no pyarrow
             # df = result.to_pandas()                   # pyarrow required
             # table = pa.table(result)                  # pyarrow required

@@ -147,7 +147,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
         frames = self._frames()
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
-                    'pool_size=1;pool_max=1;pool_reap=manual;')
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
             with qi.QuestDB.from_conf(conf) as client:
                 def work():
                     for df in frames:
@@ -208,7 +208,7 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         frames = self._frames()
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
-                    'pool_size=1;pool_max=1;pool_reap=manual;')
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
             with qi.QuestDB.from_conf(conf) as client:
                 def work():
                     for df in frames:

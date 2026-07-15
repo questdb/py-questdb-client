@@ -297,7 +297,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'Missing "addr" parameter'):
-            qi.QuestDB.from_conf('ws::pool_size=1;')
+            qi.QuestDB.from_conf('ws::sender_pool_min=1;')
 
     def test_client_close_is_idempotent(self):
         client = qi.QuestDB.__new__(qi.QuestDB)
@@ -325,13 +325,22 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 "sender\\(\\) can't be called: QuestDB is closed"):
             client.sender()
 
+    def test_query_binds_container_validation(self):
+        # Rejected before any reader is borrowed, so no server is needed
+        # (pools connect lazily).
+        with qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;') as client:
+            for bad in ({'a': 1}, 42, 'x', {1, 2}):
+                with self.assertRaisesRegex(
+                        TypeError, '"binds" must be a list or tuple'):
+                    client.query('SELECT $1', bad)
+
     def test_module_connect_factory(self):
         import questdb
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             with questdb.connect(conf) as db:
                 self.assertIsInstance(db, questdb.QuestDB)
@@ -347,8 +356,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
@@ -388,8 +397,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             client = qi.QuestDB.from_conf(conf)
             sender = client.sender()
@@ -423,8 +432,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
@@ -496,8 +505,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             client = qi.QuestDB.from_conf(conf)
             try:
@@ -526,8 +535,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             client = qi.QuestDB.from_conf(conf)
             try:
@@ -561,8 +570,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             qi._debug_dataframe_columnar_io_stats(enabled=True, reset=True)
             try:
@@ -597,8 +606,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer(ack_delay_s=0.2) as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             client = qi.QuestDB.from_conf(conf)
             errors = []
@@ -649,8 +658,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;'
                 'max_buf_size=1000000;')
             client = qi.QuestDB.from_conf(conf)
@@ -687,8 +696,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             _samples, _cpu_samples, last = run_real_client_path(
                 df,
@@ -715,8 +724,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
-                'pool_size=1;'
-                'pool_max=1;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
                 'pool_reap=manual;')
             _samples, _cpu_samples, last = run_real_row_path(
                 df,
@@ -731,8 +740,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(last['path'], 'real-row')
         self.assertTrue(last['acked'])
         self.assertEqual(last['rows_ingested'], 2)
-        self.assertNotIn('pool_size', last['conf'])
-        self.assertNotIn('pool_max', last['conf'])
+        self.assertNotIn('sender_pool_min', last['conf'])
+        self.assertNotIn('sender_pool_max', last['conf'])
         self.assertNotIn('pool_reap', last['conf'])
         self.assertEqual(row_stats['errors'], [])
         self.assertEqual(row_stats['accepted_connections'], 1)
@@ -934,6 +943,69 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.Sender.from_conf(
                 'ws::addr=localhost:9000;qwp_ws_progress=manual;',
                 qwp_ws_progress=qi.QwpWsProgress.Background)
+
+    def test_dataframe_schema_overrides_rejects_non_websocket_protocol(self):
+        sender = qi.Sender(qi.Protocol.Tcp, '127.0.0.1', 9009)
+        try:
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    'schema_overrides is only supported over QWP/WebSocket'):
+                sender.dataframe(
+                    object(),
+                    table_name='t',
+                    at=qi.ServerTimestamp,
+                    schema_overrides={'x': 'symbol'})
+        finally:
+            sender.close(False)
+
+    def test_qwpws_flush_and_keep_and_get_fsn_happy_path(self):
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};',
+                    auto_flush=False) as sender:
+                buf = sender.new_buffer()
+                buf.row(
+                    't', columns={'v': 1},
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+                size_before = len(buf)
+                self.assertGreater(size_before, 0)
+                fsn = sender.flush_and_keep_and_get_fsn(buf)
+                self.assertIsNotNone(fsn)
+                self.assertEqual(len(buf), size_before)
+                self.assertTrue(sender.await_acked_fsn(fsn, 10000))
+                self.assertEqual(sender.published_fsn(), fsn)
+                self.assertGreaterEqual(sender.acked_fsn(), fsn)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_qwpws_drive_once_manual_progress_happy_path(self):
+        with QwpAckServer() as server:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};'
+                'qwp_ws_progress=manual;',
+                auto_flush=False)
+            try:
+                sender.establish()
+                buf = sender.new_buffer()
+                buf.row(
+                    't', columns={'v': 1},
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+                fsn = sender.flush_and_get_fsn(buf)
+                self.assertIsNotNone(fsn)
+                deadline = time.monotonic() + 10.0
+                acked = sender.acked_fsn()
+                while ((acked is None or acked < fsn)
+                        and time.monotonic() < deadline):
+                    sender.drive_once()
+                    acked = sender.acked_fsn()
+                self.assertIsNotNone(acked)
+                self.assertGreaterEqual(acked, fsn)
+            finally:
+                sender.close(False)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
 
 class TestBases:
@@ -2192,7 +2264,8 @@ class TestBases:
             ts0 = self.timestamp_cls(0)
             self.assertEqual(ts0.value, 0)
 
-            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+            with self.assertRaisesRegex(
+                    ValueError, 'value must be a non-negative'):
                 self.timestamp_cls(-1)
 
         def test_from_datetime(self):
@@ -2209,7 +2282,8 @@ class TestBases:
             ts2 = self.timestamp_cls.from_datetime(dt2)
             self.assertEqual(ts2.value, 0)
 
-            with self.assertRaisesRegex(ValueError, 'value must be a positive'):
+            with self.assertRaisesRegex(
+                    ValueError, 'value must be a non-negative'):
                 self.timestamp_cls.from_datetime(
                     datetime.datetime(1969, 12, 31, tzinfo=utc))
 
@@ -2234,6 +2308,18 @@ class TestTimestampMicros(TestBases.Timestamp):
 class TestTimestampNanos(TestBases.Timestamp):
     timestamp_cls = qi.TimestampNanos
     ns_scale = 1
+
+    def test_from_datetime_out_of_int64_range(self):
+        utc = datetime.timezone.utc
+        ts = qi.TimestampNanos.from_datetime(
+            datetime.datetime(2262, 4, 11, tzinfo=utc))
+        self.assertGreater(ts.value, 0)
+        with self.assertRaisesRegex(ValueError, 'out of range'):
+            qi.TimestampNanos.from_datetime(
+                datetime.datetime(2262, 4, 12, tzinfo=utc))
+        with self.assertRaisesRegex(ValueError, 'out of range'):
+            qi.TimestampNanos.from_datetime(
+                datetime.datetime(2300, 1, 1, tzinfo=utc))
 
 
 def build_conf(protocol, host, port, **kwargs):

@@ -32,8 +32,8 @@ except ImportError:
 def _client_conf(port):
     return (
         f'ws::addr=127.0.0.1:{port};'
-        'pool_size=1;'
-        'pool_max=1;'
+        'sender_pool_min=1;'
+        'sender_pool_max=1;'
         'pool_reap=manual;')
 
 
@@ -582,7 +582,7 @@ class TestConnectionEvents(unittest.TestCase):
         blk.close()
         client = qi.QuestDB.from_conf(
             f'ws::addr=127.0.0.1:{port};connect_timeout=100;'
-            f'reconnect_max_duration_millis=200;pool_size=1;pool_max=1;',
+            f'reconnect_max_duration_millis=200;sender_pool_min=1;sender_pool_max=1;',
             connection_listener=listener)
         try:
             import pandas as pd
@@ -619,7 +619,7 @@ class TestConnectionEvents(unittest.TestCase):
             client = qi.QuestDB.from_conf(
                 f'ws::addr=127.0.0.1:{server_a.port},'
                 f'127.0.0.1:{server_b.port};'
-                f'connect_timeout=200;pool_size=1;pool_max=1;'
+                f'connect_timeout=200;sender_pool_min=1;sender_pool_max=1;'
                 f'pool_reap=manual;',
                 connection_listener=listener)
             try:
@@ -919,11 +919,13 @@ class TestPyArrowRecordBatchDirect(unittest.TestCase):
 
 class TestSchemaOverridesPandas(unittest.TestCase):
 
-    @unittest.skipIf(pa is None or pl is None, 'pyarrow + polars required')
-    def test_pandas_dataframe_with_schema_overrides_ipv4(self):
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_arrow_backed_pandas_with_schema_overrides_ipv4(self):
         import pandas as pd
         df = pd.DataFrame({
-            'addr': pd.Series([0x0A000001, 0xC0A80101], dtype='uint32'),
+            'addr': pd.Series(
+                pa.array([0x0A000001, 0xC0A80101], type=pa.uint32()),
+                dtype=pd.ArrowDtype(pa.uint32())),
             'ts': pd.Series(
                 pa.array([_ts_us(2025, 1, 1), _ts_us(2025, 1, 2)],
                          type=pa.timestamp('us')),
@@ -941,6 +943,34 @@ class TestSchemaOverridesPandas(unittest.TestCase):
                 client.close()
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_numpy_backed_pandas_with_schema_overrides_raises(self):
+        # A NumPy-backed column routes the frame to the NumPy planner,
+        # which does not apply schema_overrides: passing them must raise
+        # rather than silently ship the column with its default type.
+        import pandas as pd
+        df = pd.DataFrame({
+            'addr': pd.Series([0x0A000001, 0xC0A80101], dtype='uint32'),
+            'ts': pd.Series(
+                pa.array([_ts_us(2025, 1, 1), _ts_us(2025, 1, 2)],
+                         type=pa.timestamp('us')),
+                dtype=pd.ArrowDtype(pa.timestamp('us'))),
+        })
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.UnsupportedDataFrameShapeError,
+                        'schema_overrides requires the Arrow columnar path'):
+                    client.dataframe(
+                        df,
+                        table_name='ipv4_pandas',
+                        at='ts',
+                        schema_overrides={'addr': 'ipv4'})
+                self.assertEqual(server.snapshot()['qwp1_frames'], 0)
+            finally:
+                client.close()
 
 
 class TestBenchFlushArrowBatch(unittest.TestCase):

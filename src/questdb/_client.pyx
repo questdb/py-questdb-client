@@ -104,6 +104,7 @@ import datetime
 import os
 import threading
 import time
+import uuid
 import warnings
 import logging
 
@@ -640,8 +641,14 @@ cdef int64_t datetime_to_nanos(cp_datetime dt):
     """
     Convert a `datetime.datetime` to nanoseconds since the epoch.
     """
+    cdef double seconds = floor(dt.timestamp())
+    if seconds >= 9223372036.0 or seconds < -9223372036.0:
+        raise ValueError(
+            'datetime is out of range for a nanosecond timestamp: '
+            'must be between 1677-09-21T00:12:44Z and '
+            '2262-04-11T23:47:16Z.')
     return (
-        <int64_t>floor(dt.timestamp()) *
+        <int64_t>seconds *
         <int64_t>(1000000000) +
         <int64_t>(dt.microsecond * 1000))
 
@@ -705,7 +712,7 @@ cdef class TimestampMicros:
 
     def __cinit__(self, value: int):
         if value < 0:
-            raise ValueError('value must be a positive integer.')
+            raise ValueError('value must be a non-negative integer.')
         self._value = value
 
     @classmethod
@@ -770,7 +777,7 @@ cdef class TimestampNanos:
 
     def __cinit__(self, value: int):
         if value < 0:
-            raise ValueError('value must be a positive integer.')
+            raise ValueError('value must be a non-negative integer.')
         self._value = value
 
     @classmethod
@@ -1273,8 +1280,10 @@ cdef class Buffer:
                 'float',
                 'str',
                 'TimestampMicros',
+                'TimestampNanos',
                 'datetime.datetime',
-                'numpy.ndarray'))
+                'numpy.ndarray',
+                'decimal.Decimal'))
             raise TypeError(
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
@@ -1283,7 +1292,7 @@ cdef class Buffer:
         cdef PyObject* sender = NULL
         if self._row_complete_sender != None:
             sender = PyWeakref_GetObject(self._row_complete_sender)
-            if sender != NULL:
+            if sender != NULL and <object>sender is not None:
                 may_flush_on_row_complete(self, <Sender><object>sender)
 
     cdef inline void_int _at_ts_us(self, TimestampMicros ts) except -1:
@@ -4183,6 +4192,10 @@ cdef void_int _dataframe_columnar_populate_chunk(
             _dataframe_columnar_append_field(
                 chunk, col, prebuilt, row_offset, row_count)
             field_count += 1
+        elif col.setup.target != col_target_t.col_target_skip:
+            raise RuntimeError(
+                'Unsupported columnar field target: %d.'
+                % <int>col.setup.target)
 
     if field_count == 0:
         raise RuntimeError(
@@ -5304,7 +5317,7 @@ cdef bint _dataframe_client_try_capsule_path(
         object symbols,
         object at,
         size_t max_rows_per_batch,
-        object schema_overrides,
+        object validated_overrides,
         bint* committed_prefix,
         bint* nonreplayable_consumed) except -1:
     cdef qdb_pystr_buf* b = NULL
@@ -5319,7 +5332,6 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef Py_ssize_t total_rows = 0
     cdef Py_ssize_t offset = 0
     cdef Py_ssize_t chunk_rows
-    cdef object validated_overrides
     cdef object symbol_overrides
     cdef object merged_overrides
     cdef bint can_slice = False
@@ -5343,8 +5355,6 @@ cdef bint _dataframe_client_try_capsule_path(
         return False
     if table_name_col is not None:
         return False
-
-    validated_overrides = _validate_schema_overrides(schema_overrides)
 
     # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
     # peak memory. `LazyFrame.collect_batches()` would stream natively
@@ -5590,6 +5600,8 @@ cdef void_int _direct_dataframe_run(
     cdef double remaining = 0.0
     cdef bint committed_prefix = False
     cdef bint nonreplayable_consumed = False
+    cdef object validated_overrides = _validate_schema_overrides(
+        schema_overrides)
     if max_rows_per_batch <= 0:
         raise ValueError('max_rows_per_batch must be >= 1.')
     if isinstance(at, datetime.datetime) and at.timestamp() < 0:
@@ -5623,10 +5635,20 @@ cdef void_int _direct_dataframe_run(
                     symbols,
                     at,
                     max_rows_per_batch,
-                    schema_overrides,
+                    validated_overrides,
                     &committed_prefix,
                     &nonreplayable_consumed):
                 return 0
+            if validated_overrides is not None:
+                raise UnsupportedDataFrameShapeError(
+                    'schema_overrides requires the Arrow columnar path: '
+                    'fully Arrow-backed input (pyarrow / polars, or pandas '
+                    'where every column uses ArrowDtype) without '
+                    '`table_name_col`. This input falls back to the NumPy '
+                    'planner, which does not apply schema_overrides; '
+                    'convert the frame, e.g. '
+                    "df.convert_dtypes(dtype_backend='pyarrow'), or drop "
+                    'schema_overrides.')
             _dataframe_numpy_publish(
                 src, budget_ms, b, plan, df, table_name,
                 table_name_col, symbols, at, max_rows_per_batch,
@@ -5837,9 +5859,10 @@ cdef class QuestDB:
             if db._db == NULL:
                 raise c_err_to_py(err)
             if connection_listener is not None:
-                # The QuestDB handle owns the only strong reference the trampoline
-                # relies on; it lives until close() frees the pool, which
-                # stops the dispatcher before the reference is cleared.
+                # The QuestDB handle owns the only strong reference the
+                # trampoline relies on. It is held until the handle is
+                # deallocated; close() stops the dispatcher first, so the
+                # reference always outlives the last callback.
                 db._connection_listener = connection_listener
                 if not questdb_db_set_connection_event_handler(
                         db._db,
@@ -5977,9 +6000,10 @@ cdef class QuestDB:
           ``i64::MAX`` are accepted as ``LONG``. Larger ``UInt64`` values are
           rejected because QuestDB QWP-WS encodes integers as signed ``i64``.
           Signed ``int8``/``int16`` land as QuestDB ``INT``; the row-oriented
-          :meth:`Sender.dataframe` instead widens every integer to ``LONG``, so
-          ingest a given table through a single path to avoid a first-write
-          column-type mismatch.
+          :meth:`Sender.dataframe` instead widens every integer to ``LONG``.
+          Likewise ``float32`` lands here as ``FLOAT`` but is widened to
+          ``DOUBLE`` by the row path — ingest a given table through a single
+          path to avoid a first-write column-type mismatch.
         - **String / Symbol**: object-dtype ``str``, ``pa.string()``,
           ``pa.large_string()``, ``pd.CategoricalDtype`` of strings.
         - **Timestamp**: NumPy ``datetime64`` units accepted by pandas and
@@ -6014,8 +6038,10 @@ cdef class QuestDB:
         ``schema_overrides`` reclassifies columns by name, mapping each to
         ``'symbol'``, ``'ipv4'``, ``'char'``, or ``'geohash'`` (e.g.
         ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
-        rejected. ``max_rows_per_batch`` bounds the rows sent per columnar
-        batch.
+        rejected. It requires the Arrow columnar path (fully Arrow-backed
+        input without ``table_name_col``); on input that falls back to the
+        NumPy planner it raises :class:`UnsupportedDataFrameShapeError`.
+        ``max_rows_per_batch`` bounds the rows sent per columnar batch.
         """
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
@@ -6045,7 +6071,12 @@ cdef class QuestDB:
             if db_use:
                 self._end_db_use()
 
-    def query(self, str sql, *, bint reset_symbol_dict=True) -> QueryResult:
+    def query(
+            self,
+            str sql,
+            object binds=None,
+            *,
+            bint reset_symbol_dict=True) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
 
@@ -6057,6 +6088,31 @@ cdef class QuestDB:
         settings apply to both directions.
 
         :param sql: SQL text to execute. Forwarded verbatim to QuestDB.
+
+        :param binds: Positional bind parameters matching the ``$1``..``$N``
+            placeholders in ``sql``, as a list or tuple. Always prefer binds
+            over interpolating values into the SQL text — they take no
+            escaping and keep types exact. Supported Python types and their
+            QuestDB bind types:
+
+            - ``None`` → SQL NULL (bound as a VARCHAR null)
+            - ``bool`` → BOOLEAN
+            - ``int`` → LONG (must fit signed 64-bit)
+            - ``float`` → DOUBLE
+            - ``str`` → VARCHAR
+            - ``datetime.datetime`` → TIMESTAMP (microseconds; naive values
+              are interpreted per the same rules as ingestion)
+            - :class:`TimestampMicros` → TIMESTAMP
+            - :class:`TimestampNanos` → TIMESTAMP_NS
+            - ``uuid.UUID`` → UUID
+
+            Any other type raises :class:`TypeError` naming the placeholder.
+
+            .. code-block:: python
+
+                res = db.query(
+                    'SELECT * FROM trades WHERE ts > $1 AND sym = $2',
+                    [datetime.datetime(2026, 7, 1), 'BTC-USD'])
 
         :param reset_symbol_dict: When ``True`` (the default), the server
             resets the connection's SYMBOL dictionary before this query so it
@@ -6087,10 +6143,15 @@ cdef class QuestDB:
         cdef _ReaderHandle reader_handle
         cdef _CursorHandle cursor_handle
         cdef questdb_db* db
+        if binds is not None and not isinstance(binds, (list, tuple)):
+            raise TypeError(
+                '"binds" must be a list or tuple of positional bind '
+                f'parameters (or None), not {_fqn(type(binds))}')
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
-            cursor_handle = _execute_query(reader_handle, sql, reset_symbol_dict)
+            cursor_handle = _execute_query(
+                reader_handle, sql, binds, reset_symbol_dict)
         finally:
             self._end_db_use()
         return QueryResult(cursor_handle)
@@ -6576,6 +6637,8 @@ cdef class Sender:
 
         self._init_buf_size = init_buf_size or 65536
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
+        if self._last_flush_ms == NULL:
+            raise MemoryError()
 
         # Retain a clone of the fully-configured opts (auth/TLS included) so a
         # ws sender's dataframe() can open a poolless direct columnar
@@ -6589,6 +6652,7 @@ cdef class Sender:
         self._impl = NULL
         self._buffer = None
         self._qwp_ws_error_handler = None
+        self._connection_listener = None
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
@@ -7214,8 +7278,9 @@ cdef class Sender:
         bulk-loaded through a poolless direct columnar connection opened from
         this sender's configuration for the call (the same direct path as
         :meth:`QuestDB.dataframe`, carrying the sender's auth/TLS regardless
-        of how it was constructed); ``max_rows_per_batch`` and
-        ``schema_overrides`` apply only on that path. The direct load has no
+        of how it was constructed); ``max_rows_per_batch`` applies only on
+        that path, and passing ``schema_overrides`` on any other protocol
+        raises. The direct load has no
         ordering relationship with rows buffered via :meth:`row` and does not
         flush them.
 
@@ -7285,6 +7350,12 @@ cdef class Sender:
                 return self
             finally:
                 qdb_pystr_buf_free(ws_b)
+        if schema_overrides is not None:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'schema_overrides is only supported over QWP/WebSocket; '
+                'the row-serializing protocols ignore it. Drop the '
+                'argument or connect over ws:: / wss::.')
         if self._in_txn:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -7694,6 +7765,7 @@ cdef class Sender:
             _ensure_has_gil(&gs)
             self._impl = NULL
         self._qwp_ws_error_handler = None
+        self._connection_listener = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1

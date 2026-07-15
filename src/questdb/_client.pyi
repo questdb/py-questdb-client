@@ -1075,7 +1075,13 @@ class QuestDB:
           exporters, wrapped into a one-batch ``pa.Table``).
         """
 
-    def query(self, sql: str, *, reset_symbol_dict: bool = True) -> QueryResult:
+    def query(
+        self,
+        sql: str,
+        binds: Optional[Union[list, tuple]] = None,
+        *,
+        reset_symbol_dict: bool = True,
+    ) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
 
@@ -1579,6 +1585,20 @@ class Sender:
     def qwp_ws_errors_dropped(self) -> int:
         """
         Number of QWP/WebSocket diagnostics dropped from the bounded ring.
+        """
+
+    @property
+    def connection_events_dropped(self) -> int:
+        """
+        Total connection events discarded by the listener inbox's
+        drop-oldest policy. ``0`` when no listener is registered.
+        """
+
+    @property
+    def connection_events_delivered(self) -> int:
+        """
+        Total connection events delivered to the listener. ``0`` when no
+        listener is registered.
         """
 
     def close_drain(self):

@@ -24,7 +24,7 @@ Every iteration drives ``QuestDB.dataframe()`` round-trip through a local
     least one QWP1 binary frame at the server (unless the frame is empty,
     in which case ``QuestDB.dataframe()`` is a no-op).
   - The pool reuses a single TCP accept across the whole iteration loop
-    (``pool_size=pool_max=1``, ``pool_reap=manual``).
+    (``sender_pool_min=sender_pool_max=1``, ``pool_reap=manual``).
   - The server reports no protocol-level errors at any point.
 
 Usage::
@@ -607,7 +607,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
         self.server.start()
         self.conf = (
             f'ws::addr=127.0.0.1:{self.server.port};'
-            'pool_size=1;pool_max=1;pool_reap=manual;')
+            'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
 
     def tearDown(self):
         self.server.stop()
@@ -1077,7 +1077,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
 
     def test_from_conf_requires_addr(self):
         with self.assertRaises(qi.QuestDBError) as cm:
-            qi.QuestDB.from_conf('ws::pool_size=1;')
+            qi.QuestDB.from_conf('ws::sender_pool_min=1;')
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.ConfigError)
 
 

@@ -376,7 +376,7 @@ class TestClientPolarsDataframeFuzz(unittest.TestCase):
         self.server.start()
         self.conf = (
             f'ws::addr=127.0.0.1:{self.server.port};'
-            'pool_size=1;pool_max=1;pool_reap=manual;')
+            'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
 
     def tearDown(self):
         self.server.stop()

@@ -10,6 +10,7 @@ import shutil
 import socket
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 import pathlib
@@ -581,19 +582,25 @@ class TestWithDatabase(unittest.TestCase):
                 self.assertEqual(diagnostic.status, 0x03)
                 self.assertEqual(diagnostic.from_fsn, rejected_fsn)
                 self.assertEqual(diagnostic.to_fsn, rejected_fsn)
-                if captured:
-                    callback_diagnostic = captured[0]
-                    self.assertEqual(
-                        callback_diagnostic.category, diagnostic.category)
-                    self.assertEqual(
-                        callback_diagnostic.applied_policy,
-                        diagnostic.applied_policy)
-                    self.assertEqual(
-                        callback_diagnostic.status, diagnostic.status)
-                    self.assertEqual(
-                        callback_diagnostic.from_fsn, diagnostic.from_fsn)
-                    self.assertEqual(
-                        callback_diagnostic.to_fsn, diagnostic.to_fsn)
+                deadline = time.monotonic() + 10.0
+                while not captured and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(
+                    captured,
+                    'qwp_ws_error_handler was never invoked for the '
+                    'terminal rejection')
+                callback_diagnostic = captured[0]
+                self.assertEqual(
+                    callback_diagnostic.category, diagnostic.category)
+                self.assertEqual(
+                    callback_diagnostic.applied_policy,
+                    diagnostic.applied_policy)
+                self.assertEqual(
+                    callback_diagnostic.status, diagnostic.status)
+                self.assertEqual(
+                    callback_diagnostic.from_fsn, diagnostic.from_fsn)
+                self.assertEqual(
+                    callback_diagnostic.to_fsn, diagnostic.to_fsn)
             finally:
                 sender.close(False)
 
@@ -606,6 +613,56 @@ class TestWithDatabase(unittest.TestCase):
             self.assertIn([0, 10.5], resp['dataset'])
         else:
             self.assertEqual(resp['dataset'], [[0, 10.5]])
+
+    def test_qwp_websocket_raising_error_handler_is_swallowed(self):
+        # A handler that raises must not crash the process, leak the
+        # exception across the C callback boundary, or prevent the
+        # terminal rejection from surfacing on the next sender call.
+        self._require_qwp_ws()
+        table_name = uuid.uuid4().hex
+        sender_id = 'py-raise-cb-' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE "{table_name}" '
+            '(id LONG, px DOUBLE, bad LONG, timestamp TIMESTAMP) '
+            'TIMESTAMP(timestamp) PARTITION BY DAY WAL')
+
+        invoked = []
+
+        def raising_handler(error):
+            invoked.append(error)
+            raise RuntimeError('handler exploded')
+
+        with tempfile.TemporaryDirectory(
+                prefix='py-qwp-ws-raise-cb-') as sf_dir:
+            sender = qi.Sender.from_conf(
+                self._mk_qwpws_conf(
+                    sender_id,
+                    sf_dir,
+                    reconnect_max_duration_millis=30000,
+                    close_flush_timeout_millis=30000),
+                qwp_ws_error_handler=raising_handler)
+            try:
+                sender.establish()
+                sender.row(
+                    table_name,
+                    columns={'id': 0, 'px': 10.5},
+                    at=qi.TimestampMicros(1_700_000_000_000_000))
+                sender.flush_and_get_fsn()
+                sender.row(
+                    table_name,
+                    columns={'id': 1, 'bad': 'not-a-long'},
+                    at=qi.TimestampMicros(1_700_000_000_001_000))
+                rejected_fsn = sender.flush_and_get_fsn()
+                with self.assertRaises(qi.QuestDBServerRejectionError):
+                    sender.await_acked_fsn(rejected_fsn, 30000)
+                deadline = time.monotonic() + 10.0
+                while not invoked and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(
+                    invoked,
+                    'raising qwp_ws_error_handler was never invoked')
+            finally:
+                sender.close(False)
 
     def test_qwp_websocket_schema_fuzz(self):
         self._require_qwp_fuzz()
@@ -2335,6 +2392,84 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_query_binds(self):
+        """Positional ``$1``..``$N`` bind parameters: the full supported
+        type matrix round-trips through WHERE-clause equality, and the
+        client-side rejections (container type, int overflow, unsupported
+        value type) raise before any server round-trip."""
+        table_name = 't_egress_binds_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG, dbl DOUBLE, sym SYMBOL, '
+                'flag BOOLEAN, u UUID) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            bound_uuid = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+            self._exec(
+                f'INSERT INTO {table_name} VALUES '
+                f"('2024-01-01T00:00:01.000000Z', 7, 1.5, 'BTC-USD', "
+                f"true, '{bound_uuid}')")
+            self.qdb_plain.retry_check_table(table_name, min_rows=1)
+
+            def count(sql, binds):
+                with qi.QuestDB.from_conf(self._conf()) as client:
+                    frame = client.query(sql, binds).to_pandas()
+                return int(frame['n'][0])
+
+            ts = datetime.datetime(
+                2024, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc)
+            checks = [
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE lg = $1', [7], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE lg = $1', (8,), 0),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE dbl = $1', [1.5], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE sym = $1', ['BTC-USD'], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE flag = $1', [True], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE ts = $1', [ts], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE ts = $1',
+                 [qi.TimestampMicros(1_704_067_201_000_000)], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE ts = $1',
+                 [qi.TimestampNanos(1_704_067_201_000_000_000)], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE u = $1', [bound_uuid], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE u = $1', [uuid.uuid4()], 0),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE $1 IS NULL', [None], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE ts > $1 AND sym = $2',
+                 [datetime.datetime(
+                     2020, 1, 1, tzinfo=datetime.timezone.utc),
+                  'BTC-USD'], 1),
+            ]
+            for sql, binds, expect in checks:
+                self.assertEqual(count(sql, binds), expect, (sql, binds))
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                with self.assertRaisesRegex(
+                        TypeError, '"binds" must be a list or tuple'):
+                    client.query('SELECT $1', {'a': 1})
+                with self.assertRaises(OverflowError):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE lg = $1', [2 ** 63])
+                with self.assertRaisesRegex(TypeError, r'\$1'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE lg = $1', [object()])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_cancel_is_safe_and_idempotent(self):
         """``cancel()`` drives the FFI cancel on a live cursor without
         raising, is idempotent, and is a no-op after ``close()``."""
@@ -3081,17 +3216,20 @@ class TestEgressPool(unittest.TestCase):
             self.assertEqual((in_use, idle), (0, 1))
 
     # ------------------------------------------------------------------
-    # pool_max — the InvalidApiCall("pool exhausted") error path
+    # query_pool_max — the InvalidApiCall("pool exhausted") error path
     # ------------------------------------------------------------------
 
     def test_pool_max_exhausted_raises_not_hangs(self):
-        """When the pool is at ``pool_max`` and a second borrow is
-        attempted, the Rust side returns
-        ``InvalidApiCall("Reader pool exhausted")``. Verify it
+        """When the reader pool is at ``query_pool_max`` and a second
+        borrow is attempted with ``acquire_timeout_ms=0``, the Rust side
+        returns ``InvalidApiCall("Reader pool exhausted")``. Verify it
         surfaces as an ``QuestDBError``, not a hang or generic
         socket error."""
         table = self._seed_table(n_rows=64)
-        conf = self._conf(pool_size='1', pool_max='1')
+        conf = self._conf(
+            query_pool_min='1',
+            query_pool_max='1',
+            acquire_timeout_ms='0')
         with qi.QuestDB.from_conf(conf) as client:
             # Hold one reader by starting an iterator and not
             # exhausting it.
@@ -3132,9 +3270,12 @@ class TestEgressPool(unittest.TestCase):
         """
         table = self._seed_table(n_rows=3)
         conf = self._conf(
-            pool_size='2',
-            pool_max='4',
-            pool_idle_timeout_ms='30000',
+            sender_pool_min='2',
+            sender_pool_max='4',
+            query_pool_min='2',
+            query_pool_max='4',
+            acquire_timeout_ms='5000',
+            idle_timeout_ms='30000',
             pool_reap='manual')
         with qi.QuestDB.from_conf(conf) as client:
             r = client.query(f'SELECT count() FROM {table}').to_arrow()
@@ -3145,14 +3286,14 @@ class TestEgressPool(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_concurrent_queries_share_pool(self):
-        """N threads × M queries on one QuestDB handle with ``pool_size=K``.
+        """N threads × M queries on one QuestDB handle with ``query_pool_min=K``.
         Asserts: no exceptions; pool grew at most to ``K``; all
         readers returned (``in_use==0`` at end); pool stays under
-        ``pool_max``.
+        ``query_pool_max``.
         """
         import threading
         table = self._seed_table(n_rows=3)
-        conf = self._conf(pool_size='4', pool_max='8')
+        conf = self._conf(query_pool_min='4', query_pool_max='8')
         n_threads = 8
         per_thread = 25
         sql = f'SELECT count() FROM {table}'
@@ -3192,7 +3333,7 @@ class TestEgressPool(unittest.TestCase):
             self.assertGreaterEqual(idle, 1)
             self.assertLessEqual(
                 idle, 8,
-                f'idle={idle} exceeds pool_max=8 — auto-grow '
+                f'idle={idle} exceeds query_pool_max=8 — auto-grow '
                 f'overshot or returns leaked readers')
 
     def test_long_running_stream_does_not_starve_other_queries(self):
@@ -3204,7 +3345,7 @@ class TestEgressPool(unittest.TestCase):
         """
         import threading
         table = self._seed_table(n_rows=64)
-        conf = self._conf(pool_size='2', pool_max='4')
+        conf = self._conf(query_pool_min='2', query_pool_max='4')
 
         a_progress = threading.Event()
         b_done = threading.Event()
@@ -4420,8 +4561,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         sfa_extra = {
             'sender_id': sender_id,
             'sf_dir': sf_dir,
-            'pool_size': '1',
-            'pool_max': '1',
+            'sender_pool_min': '1',
+            'sender_pool_max': '1',
             'pool_reap': 'manual',
             'reconnect_max_duration_millis': '30000',
             'close_flush_timeout_millis': '30000',

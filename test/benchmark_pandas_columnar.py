@@ -573,8 +573,8 @@ def run_row_path(df, rows, iterations, warmups):
 def _make_ack_conf(server):
     return (
         f"ws::addr=127.0.0.1:{server.port};"
-        "pool_size=1;"
-        "pool_max=1;"
+        "sender_pool_min=1;"
+        "sender_pool_max=1;"
         "pool_reap=manual;")
 
 
@@ -788,7 +788,7 @@ def run_real_row_path(
         setup_sqls=(),
         reset_sqls=(),
         await_ack_ms=30000):
-    row_conf = strip_conf_keys(conf, {"pool_size", "pool_max", "pool_reap"})
+    row_conf = strip_conf_keys(conf, {"sender_pool_min", "sender_pool_max", "pool_reap"})
     setup_results = execute_sqls(http_base, setup_sqls)
     reset_count = 0
     samples = []

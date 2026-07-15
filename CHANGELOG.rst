@@ -104,7 +104,13 @@ Query Egress
 
 Adds :meth:`QuestDB.query`, returning a
 :class:`QueryResult` that streams rows as Arrow record batches over the
-QWP/WebSocket read endpoint. Results can be consumed via ``to_arrow``,
+QWP/WebSocket read endpoint. Queries take positional bind parameters
+matching ``$1``..``$N`` placeholders —
+``db.query('SELECT * FROM trades WHERE ts > $1 AND sym = $2', [ts, 'BTC-USD'])``
+— covering ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
+``datetime.datetime``, :class:`TimestampMicros`, :class:`TimestampNanos`
+and ``uuid.UUID``; always prefer binds over interpolating values into the
+SQL text. Results can be consumed via ``to_arrow``,
 ``to_pandas``, ``to_polars``, ``iter_arrow``, ``iter_pandas``,
 ``iter_polars`` or the Arrow C stream PyCapsule protocol
 (``__arrow_c_stream__``). ``to_polars`` / ``iter_polars`` use pyarrow to
@@ -127,6 +133,11 @@ to select the pyarrow-backed conversion instead.
 
 :class:`QuestDB` is a context manager and exposes :meth:`QuestDB.close` and
 :meth:`QuestDB.reap_idle` for pooled-connection lifecycle management.
+Pool sizing follows the Java client's configuration keys:
+``sender_pool_min`` / ``sender_pool_max`` (ingestion, defaults 1/4),
+``query_pool_min`` / ``query_pool_max`` (readers, defaults 1/4),
+``acquire_timeout_ms`` (default 5000 — how long a borrow waits at the cap
+before failing; ``0`` fails fast) and ``idle_timeout_ms`` (default 60000).
 
 Columnar DataFrame Ingestion
 ****************************
@@ -135,16 +146,36 @@ Adds :meth:`QuestDB.dataframe`, ingesting pandas / polars / pyarrow and
 any Arrow C Data Interface object over QWP/WebSocket. A
 ``schema_overrides`` keyword reclassifies columns as ``symbol``,
 ``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
-('geohash', 20)}``). A ``max_rows_per_batch`` keyword (default 16384)
-bounds the rows sent per columnar batch.
+('geohash', 20)}``); it requires fully Arrow-backed input — on input that
+falls back to the NumPy planner it raises
+:class:`UnsupportedDataFrameShapeError` rather than being silently
+ignored. A ``max_rows_per_batch`` keyword (default 16384) bounds the
+rows sent per columnar batch.
 
 The designated-timestamp argument ``at`` is the timestamp column itself,
-given by name (``str``) or position (``int``); unlike
-:meth:`Sender.dataframe` / ``Buffer.dataframe`` it does not accept a
-scalar ``datetime`` / ``TimestampNanos`` / ``ServerTimestamp``. A frame
+given by name (``str``) or position (``int``), a fixed
+``TimestampNanos`` / ``datetime`` shared by every row, or the explicit
+``ServerTimestamp`` sentinel. A frame
 produced by :meth:`QueryResult.to_pandas` round-trips back to the same
 QuestDB column types automatically: the kinds recorded in
 ``df.attrs['questdb']`` and pandas nullable extension dtypes are honoured.
+
+Connection Observability
+************************
+
+A ``connection_listener`` callable (accepted by :func:`questdb.connect`,
+:meth:`QuestDB.from_conf` and the ``Sender`` constructors, alongside a
+``connection_event_inbox_capacity`` bound) receives one
+:class:`ConnectionEvent` per connection-state transition — initial
+connect, per-endpoint attempt failures, failover, terminal auth
+rejection — classified by :class:`ConnectionEventKind`. The listener
+runs on a dedicated dispatcher thread fed by a bounded drop-oldest
+inbox; delivery totals are exposed as ``connection_events_delivered`` /
+``connection_events_dropped`` on both :class:`QuestDB` and
+:class:`Sender`. :meth:`QuestDB.server_info` snapshots the server's
+``SERVER_INFO`` handshake as a :class:`ServerInfo` (role as
+:class:`ServerRole`, failover epoch, capabilities and cluster / node /
+zone ids).
 
 Errors
 ******

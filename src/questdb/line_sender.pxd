@@ -57,7 +57,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_failover_retry,
         line_sender_error_role_mismatch,
         line_sender_error_connect_timeout,
-        # Query / reader (egress) categories, unified into this enum (20..34).
+        # Query / reader (egress) categories, unified into this enum (20..36).
         line_sender_error_handshake_error,
         line_sender_error_unsupported_server,
         line_sender_error_protocol_error,
@@ -1244,6 +1244,45 @@ cdef extern from "questdb/egress/reader.h":
     void reader_query_set_reset_symbol_dict(
         reader_query* query,
         cbool reset
+        ) noexcept nogil
+
+    void reader_query_bind_bool(
+        reader_query* query,
+        cbool v
+        ) noexcept nogil
+
+    void reader_query_bind_i64(
+        reader_query* query,
+        int64_t v
+        ) noexcept nogil
+
+    void reader_query_bind_f64(
+        reader_query* query,
+        double v
+        ) noexcept nogil
+
+    void reader_query_bind_timestamp_micros(
+        reader_query* query,
+        int64_t v
+        ) noexcept nogil
+
+    void reader_query_bind_timestamp_nanos(
+        reader_query* query,
+        int64_t v
+        ) noexcept nogil
+
+    void reader_query_bind_varchar(
+        reader_query* query,
+        line_sender_utf8 v
+        ) noexcept nogil
+
+    void reader_query_bind_uuid(
+        reader_query* query,
+        const uint8_t* value
+        ) noexcept nogil
+
+    void reader_query_bind_null_varchar(
+        reader_query* query
         ) noexcept nogil
 
     reader_cursor* reader_execute(

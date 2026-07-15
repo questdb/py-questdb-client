@@ -890,8 +890,15 @@ Querying data
 as Arrow record batches::
 
     with questdb.connect('ws::addr=localhost:9000;') as db:
-        with db.query('SELECT * FROM trades WHERE ts > $1') as result:
+        with db.query('SELECT * FROM trades WHERE ts > $1',
+                      [datetime.datetime(2026, 7, 1)]) as result:
             df = result.to_pandas()
+
+Positional bind parameters fill the ``$1``..``$N`` placeholders — always
+prefer them over interpolating values into the SQL text. Supported bind
+types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
+``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`,
+:class:`TimestampNanos <questdb.TimestampNanos>`, and ``uuid.UUID``.
 
 A :class:`QueryResult` can be materialised with ``to_arrow`` / ``to_pandas`` or
 streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
