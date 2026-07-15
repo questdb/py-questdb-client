@@ -851,12 +851,13 @@ cdef extern from "questdb/ingress/column_sender.h":
         const questdb_connection_event* event
         ) noexcept with gil
 
-    bint questdb_db_set_connection_event_handler(
-        questdb_db* db,
+    questdb_db* questdb_db_connect_with_event_handler(
+        const char* conf,
+        size_t conf_len,
         questdb_connection_event_cb callback,
         void* user_data,
         size_t inbox_capacity,
-        line_sender_error** err_out
+        questdb_error** err_out
         ) noexcept nogil
 
     uint64_t questdb_db_connection_events_dropped(

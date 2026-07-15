@@ -5805,7 +5805,9 @@ cdef class QuestDB:
 
         Prefer the :func:`questdb.connect` module-level factory.
 
-        The underlying connection pool is opened by `questdb_db_connect`.
+        The underlying connection pool is opened by `questdb_db_connect`, or
+        `questdb_db_connect_with_event_handler` when a connection listener is
+        supplied.
         Dataframe ingestion always uses the direct (non-store-and-forward)
         QWP/WebSocket column sender, independent of ``sf_dir``. On a transient
         connection failure the frame is re-sent from the caller's DataFrame
@@ -5835,6 +5837,7 @@ cdef class QuestDB:
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef QuestDB db = QuestDB.__new__(QuestDB)
         cdef PyThreadState* gs = NULL
+        cdef void* connection_listener_data = NULL
         try:
             protocol, params = parse_conf_str(b, conf_str)
             if protocol not in (Protocol.Ws, Protocol.Wss):
@@ -5853,25 +5856,30 @@ cdef class QuestDB:
                     '"connection_listener" must be callable or None, '
                     f'not {_fqn(type(connection_listener))}')
             str_to_utf8(b, <PyObject*>conf_str, &c_conf)
+            if connection_listener is not None:
+                # Register as part of pool construction so recovery senders
+                # pre-opened by connect cannot emit events before the listener
+                # exists. The handle keeps the callback target alive until
+                # close() has stopped and joined the dispatcher.
+                db._connection_listener = connection_listener
+                connection_listener_data = <void*>db._connection_listener
             _ensure_doesnt_have_gil(&gs)
-            db._db = questdb_db_connect(c_conf.buf, c_conf.len, &err)
+            if connection_listener_data == NULL:
+                db._db = questdb_db_connect(c_conf.buf, c_conf.len, &err)
+            else:
+                db._db = questdb_db_connect_with_event_handler(
+                    c_conf.buf,
+                    c_conf.len,
+                    _connection_event_trampoline,
+                    connection_listener_data,
+                    <size_t>connection_event_inbox_capacity,
+                    &err)
             _ensure_has_gil(&gs)
             if db._db == NULL:
+                # A failed listener-aware connect fences its dispatcher before
+                # returning, so the callback target is now safe to release.
+                db._connection_listener = None
                 raise c_err_to_py(err)
-            if connection_listener is not None:
-                # The QuestDB handle owns the only strong reference the
-                # trampoline relies on. It is held until the handle is
-                # deallocated; close() stops the dispatcher first, so the
-                # reference always outlives the last callback.
-                db._connection_listener = connection_listener
-                if not questdb_db_set_connection_event_handler(
-                        db._db,
-                        _connection_event_trampoline,
-                        <void*>db._connection_listener,
-                        <size_t>connection_event_inbox_capacity,
-                        &err):
-                    db._connection_listener = None
-                    raise c_err_to_py(err)
             db._conf_str = conf_str
             return db
         finally:
