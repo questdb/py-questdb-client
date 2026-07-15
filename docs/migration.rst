@@ -36,27 +36,40 @@ The pooled sender publishes into the store-and-forward QWP path. A plain
 for the server's OK acknowledgement. To ingest concurrently, borrow one
 sender per thread.
 
-Move ws dataframe calls to QuestDB.dataframe
-============================================
+DataFrame bulk loads over QWP/WebSocket
+=======================================
 
-Over ``ws::`` / ``wss::``, ``sender.dataframe()`` raises: DataFrame bulk
-loads over QWP are a database operation, not stream usage. Call
-:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` on the handle:
+Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
+path — a database operation, not stream serialization. Three equivalent
+entry points:
 
 .. code-block:: python
 
-    # Before: dataframe -> row Buffer serialization on the sender.
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        # On the handle:
+        db.dataframe(frame, table_name='weather', at='ts')
+
+        # Or on a pooled sender — same path, direct connection from the pool:
+        with db.sender() as sender:
+            sender.row('weather', columns={'t': 21.5}, at=ServerTimestamp)
+            sender.dataframe(frame, table_name='weather', at='ts')
+            sender.flush()
+
+    # Or on a standalone sender — same path, poolless direct connection:
     with Sender.from_conf('ws::addr=localhost:9000;') as sender:
         sender.dataframe(frame, table_name='weather', at='ts')
 
-    # After: direct columnar ingestion on the handle.
-    with questdb.connect('ws::addr=localhost:9000;') as db:
-        db.dataframe(frame, table_name='weather', at='ts')
-
-``QuestDB.dataframe()`` commits the whole source before returning, is
-independent of ``sf_dir``, and re-sends from your DataFrame on transient
-failures (raising with ``in_doubt`` set when a blind re-send could duplicate
-rows). It does not convert the dataframe into row calls.
+All commit the whole source before returning, are independent of ``sf_dir``,
+and re-send from your DataFrame on transient failures (raising with
+``in_doubt`` set when a blind re-send could duplicate rows); none converts
+the dataframe into row calls. ``dataframe()`` opens a direct connection just
+for that call (borrowed from the pool for a pooled sender, opened from the
+sender's own configuration — carrying its auth/TLS — for a standalone one)
+and commits immediately — it has **no ordering relationship** with rows
+buffered on a sender via ``row()`` and does not flush them; publish those
+with ``flush()``. This works for any standalone ws sender, whether built
+via ``Sender.from_conf`` / ``Sender.from_env`` or the ``Sender(...)``
+constructor.
 
 Over ILP/HTTP, ILP/TCP and QWP/UDP, ``sender.dataframe()`` is unchanged and
 fully supported (over UDP it serializes row by row into fire-and-forget

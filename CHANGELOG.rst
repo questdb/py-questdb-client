@@ -32,14 +32,20 @@ Breaking changes
   internally by senders; for concurrent serialization borrow more senders.
   Legacy explicit-buffer code keeps working through the ``questdb.ingress``
   shim.
-- ``Sender.dataframe()`` over ``ws::`` / ``wss::`` now raises
-  :class:`QuestDBError`: DataFrame bulk loads over QWP are a database
-  operation — use :meth:`QuestDB.dataframe`, which uses the direct columnar
-  path (independent of ``sf_dir``, commits on return, precise ``in_doubt``
-  failure semantics). Over ILP/HTTP, ILP/TCP and QWP/UDP,
-  ``Sender.dataframe()`` remains fully supported and is no longer deprecated
-  (over UDP it serializes row by row into fire-and-forget datagrams, with
-  the same delivery caveats as ``row()``).
+- Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
+  path — a database operation, independent of ``sf_dir``, committed on
+  return, with precise ``in_doubt`` failure semantics. Available as
+  :meth:`QuestDB.dataframe` on the handle, as ``dataframe()`` on a pooled
+  sender from :meth:`QuestDB.sender` (which borrows a direct connection from
+  the pool for that call), and as ``dataframe()`` on any standalone
+  :class:`Sender` (which opens a poolless direct connection from the sender's
+  own configuration for that call, carrying its auth/TLS regardless of how
+  the sender was built). In all cases the direct load has no ordering
+  relationship with rows buffered via ``row()`` and does not flush them.
+  Over ILP/HTTP, ILP/TCP and QWP/UDP, ``Sender.dataframe()`` remains fully
+  supported and is no longer deprecated (over UDP it serializes row by row
+  into fire-and-forget datagrams, with the same delivery caveats as
+  ``row()``).
 - ``IngressError`` is renamed to :class:`QuestDBError` and
   ``IngressErrorCode`` to :class:`QuestDBErrorCode` (the names now also cover
   the query egress path, which raises the same types).
@@ -89,9 +95,9 @@ The pooled :class:`QuestDB` handle exposes :meth:`QuestDB.sender`, returning
 a context-managed row sender for row-at-a-time QWP/WebSocket ingestion.
 Row builders, whole-dataframe ingestion, and queries share one
 ``questdb.connect("ws::...")`` configuration without exposing separate row
-and column sender pools. The pooled sender's ``dataframe()`` raises with
-guidance; whole dataframes go through the direct :meth:`QuestDB.dataframe`
-path.
+and column sender pools. The pooled sender's ``dataframe()`` routes to the
+same direct columnar path as :meth:`QuestDB.dataframe`, borrowing a direct
+connection from the pool for that call only.
 
 Query Egress
 ************

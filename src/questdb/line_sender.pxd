@@ -785,6 +785,21 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    direct_column_sender* direct_column_sender_from_conf(
+        const char* conf,
+        size_t conf_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    direct_column_sender* direct_column_sender_from_opts(
+        const line_sender_opts* opts,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    void direct_column_sender_free(
+        direct_column_sender* sender
+        ) noexcept nogil
+
     uint64_t questdb_db_reconnect_max_duration_ms(
         const questdb_db* db
         ) noexcept nogil

@@ -354,10 +354,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 with client.sender() as sender:
                     self.assertIsInstance(sender, qi._PooledSender)
                     self.assertNotIsInstance(sender, qi.Sender)
-                    with self.assertRaisesRegex(
-                            qi.QuestDBError,
-                            'QuestDB.dataframe'):
-                        sender.dataframe(None, table_name='weather')
+                    self.assertTrue(callable(sender.dataframe))
                     for name in (
                             'establish', 'transaction', 'new_buffer',
                             'published_fsn', 'acked_fsn', 'await_acked_fsn',
@@ -473,15 +470,17 @@ class TestQwpWebSocketApi(unittest.TestCase):
         finally:
             standalone.close(flush=False)
 
-        ws_sender = qi.Sender.from_conf('ws::addr=127.0.0.1:9000;')
-        try:
-            with self.assertRaisesRegex(
-                    qi.QuestDBError,
-                    r'dataframe\(\) is not available over ws'):
-                ws_sender.dataframe(
-                    df, table_name='trades', at=qi.ServerTimestamp)
-        finally:
-            ws_sender.close(flush=False)
+        # A ws sender's dataframe() is available regardless of how it was
+        # built (from_conf or constructor); both retain a clone of the opts.
+        # The actual round-trip needs a live server (see the e2e suite);
+        # here just confirm the method exists and a closed sender rejects it.
+        ws_ctor = qi.Sender(qi.Protocol.Ws, '127.0.0.1', 9000)
+        self.assertTrue(callable(ws_ctor.dataframe))
+        ws_ctor.close(flush=False)
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"can't be called: Sender is closed"):
+            ws_ctor.dataframe(df, table_name='trades', at=qi.ServerTimestamp)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

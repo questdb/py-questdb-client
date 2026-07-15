@@ -5263,8 +5263,40 @@ cdef object _capsule_slice_rows(
     return None
 
 
+cdef struct direct_conn_source_t:
+    # Pooled borrow when ``db != NULL``; otherwise a poolless standalone
+    # connection opened from ``opts`` per call.
+    questdb_db* db
+    const line_sender_opts* opts
+
+
+cdef direct_column_sender* _direct_conn_open(
+        direct_conn_source_t* src,
+        uint64_t budget_ms,
+        line_sender_error** err) noexcept nogil:
+    if src.db != NULL:
+        if budget_ms == 0:
+            return questdb_db_borrow_direct_column_sender(src.db, err)
+        return questdb_db_borrow_direct_column_sender_with_retry(
+            src.db, budget_ms, err)
+    return direct_column_sender_from_opts(src.opts, err)
+
+
+cdef void _direct_conn_close(
+        direct_conn_source_t* src,
+        direct_column_sender* conn,
+        bint force_drop) noexcept nogil:
+    if src.db != NULL:
+        if force_drop:
+            questdb_db_drop_direct_column_sender(src.db, conn)
+        else:
+            questdb_db_return_direct_column_sender(src.db, conn)
+    else:
+        direct_column_sender_free(conn)
+
+
 cdef bint _dataframe_client_try_capsule_path(
-        questdb_db* db,
+        direct_conn_source_t* src,
         uint64_t budget_ms,
         object df,
         object table_name,
@@ -5394,11 +5426,7 @@ cdef bint _dataframe_client_try_capsule_path(
                 c_overrides[i].arg = <uint32_t>arg_int
 
         _ensure_doesnt_have_gil(&gs)
-        if budget_ms == 0:
-            conn = questdb_db_borrow_direct_column_sender(db, &err)
-        else:
-            conn = questdb_db_borrow_direct_column_sender_with_retry(
-                db, budget_ms, &err)
+        conn = _direct_conn_open(src, budget_ms, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -5441,16 +5469,194 @@ cdef bint _dataframe_client_try_capsule_path(
     finally:
         _ensure_has_gil(&gs)
         if conn != NULL:
-            if force_drop_conn:
-                questdb_db_drop_direct_column_sender(db, conn)
-            else:
-                questdb_db_return_direct_column_sender(db, conn)
+            _direct_conn_close(src, conn, force_drop_conn)
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
         if c_overrides != NULL:
             free(c_overrides)
         if b != NULL:
             qdb_pystr_buf_free(b)
+
+
+cdef void_int _dataframe_numpy_publish(
+        direct_conn_source_t* src,
+        uint64_t budget_ms,
+        qdb_pystr_buf* b,
+        dataframe_plan_t* plan,
+        object df,
+        object table_name,
+        object table_name_col,
+        object symbols,
+        object at,
+        size_t max_rows_per_batch,
+        bint* committed_prefix) except -1:
+    cdef column_sender_chunk* chunk = NULL
+    cdef direct_column_sender* conn = NULL
+    cdef line_sender_error* err = NULL
+    cdef PyThreadState* gs = NULL
+    cdef bint flushed = False
+    cdef bint force_drop_conn = False
+    cdef size_t rows_per_chunk
+    cdef size_t row_offset
+    cdef size_t chunk_rows
+    try:
+        df = _dataframe_normalize_nullable(df)
+        df = _dataframe_normalize_at_timestamp(df, at)
+        _dataframe_plan_build(
+            b,
+            df,
+            table_name,
+            table_name_col,
+            symbols,
+            at,
+            plan,
+            _FIELD_TARGETS_QWP)
+        if (plan.col_count == 0) or (plan.row_count == 0):
+            return 0
+
+        _dataframe_apply_roundtrip_overrides(df, plan)
+        _dataframe_columnar_promote_ndarray_cols(df, plan)
+        _dataframe_columnar_validate_plan(df, plan)
+        _dataframe_columnar_prebuild_pyobj(df, plan)
+        rows_per_chunk = _dataframe_columnar_rows_per_chunk(
+            plan, max_rows_per_batch)
+
+        _ensure_doesnt_have_gil(&gs)
+        conn = _direct_conn_open(src, budget_ms, &err)
+        _ensure_has_gil(&gs)
+        if conn == NULL:
+            raise c_err_to_py(err)
+
+        chunk = column_sender_chunk_new(
+            plan.c_table_name.buf,
+            plan.c_table_name.len,
+            &err)
+        if chunk == NULL:
+            raise c_err_to_py(err)
+        try:
+            row_offset = 0
+            while row_offset < plan.row_count:
+                if not column_sender_chunk_clear(chunk, &err):
+                    raise c_err_to_py(err)
+                chunk_rows = rows_per_chunk
+                if chunk_rows > plan.row_count - row_offset:
+                    chunk_rows = plan.row_count - row_offset
+                _dataframe_columnar_populate_chunk(
+                    plan,
+                    chunk,
+                    row_offset,
+                    chunk_rows)
+                _dataframe_columnar_flush(
+                    conn,
+                    chunk,
+                    row_offset != 0,
+                    committed_prefix)
+                flushed = True
+                row_offset += chunk_rows
+
+            _dataframe_columnar_sync(conn)
+        except:
+            force_drop_conn = _dataframe_columnar_force_drop_after_error(
+                conn, flushed)
+            raise
+
+        return 0
+    finally:
+        _ensure_has_gil(&gs)
+        if conn != NULL:
+            _direct_conn_close(src, conn, force_drop_conn)
+        if chunk != NULL:
+            column_sender_chunk_free(chunk)
+        # The plan is rebuilt on each failover attempt; release this
+        # attempt's plan so a re-send starts from a blank plan.
+        dataframe_plan_release(plan)
+        plan[0] = dataframe_plan_blank()
+
+
+cdef void_int _direct_dataframe_run(
+        direct_conn_source_t* src,
+        double reconnect_max_s,
+        qdb_pystr_buf* b,
+        dataframe_plan_t* plan,
+        object df,
+        object table_name,
+        object table_name_col,
+        object symbols,
+        object at,
+        size_t max_rows_per_batch,
+        object schema_overrides) except -1:
+    cdef uint64_t budget_ms = 0
+    cdef double deadline = 0.0
+    cdef double remaining = 0.0
+    cdef bint committed_prefix = False
+    cdef bint nonreplayable_consumed = False
+    if max_rows_per_batch <= 0:
+        raise ValueError('max_rows_per_batch must be >= 1.')
+    if isinstance(at, datetime.datetime) and at.timestamp() < 0:
+        raise ValueError(
+            'Bad argument `at`: Cannot use a datetime before the '
+            'Unix epoch (1970-01-01 00:00:00).')
+    if not isinstance(
+            at,
+            (str, ServerTimestampType, TimestampNanos,
+             datetime.datetime)) and not (
+            isinstance(at, int) and not isinstance(at, bool)):
+        raise UnsupportedDataFrameShapeError(
+            'dataframe() requires `at` to be the designated timestamp '
+            'column (by name or index), a fixed timestamp shared by every '
+            'row (TimestampNanos / datetime), or the explicit '
+            '`ServerTimestamp` sentinel to let the server assign each '
+            'row\'s timestamp on arrival.')
+    # A zero budget (standalone from-conf source) makes a single attempt:
+    # a transient failure surfaces immediately rather than re-dialling.
+    deadline = time.monotonic() + reconnect_max_s
+    while True:
+        # Reclaim string storage from a prior attempt's released plan.
+        qdb_pystr_buf_clear(b)
+        try:
+            if _dataframe_client_try_capsule_path(
+                    src,
+                    budget_ms,
+                    df,
+                    table_name,
+                    table_name_col,
+                    symbols,
+                    at,
+                    max_rows_per_batch,
+                    schema_overrides,
+                    &committed_prefix,
+                    &nonreplayable_consumed):
+                return 0
+            _dataframe_numpy_publish(
+                src, budget_ms, b, plan, df, table_name,
+                table_name_col, symbols, at, max_rows_per_batch,
+                &committed_prefix)
+            return 0
+        except QuestDBError as exc:
+            # FailoverRetry = transient flush/sync; SocketError = a
+            # re-borrow that has not reached a live primary yet.
+            if exc.code not in (
+                    QuestDBErrorCode.FailoverRetry,
+                    QuestDBErrorCode.SocketError):
+                raise
+            # The native operation may have committed a split prefix, or an
+            # explicit intermediate sync already committed one. Restarting
+            # from row 0 would duplicate it.
+            if exc.in_doubt or committed_prefix:
+                raise
+            # A drained one-shot stream has no rows left to replay: retrying
+            # would report success while writing nothing.
+            if nonreplayable_consumed:
+                raise QuestDBError(
+                    exc.code,
+                    f'{exc} The input stream was already partially '
+                    f'consumed and cannot be replayed; retry with a '
+                    f'fresh reader.',
+                    in_doubt=exc.in_doubt) from exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise
+            budget_ms = <uint64_t>(remaining * 1000.0)
 
 
 cdef void_int _capsule_consume_stream_with_hint(
@@ -5815,190 +6021,29 @@ cdef class QuestDB:
         cdef dataframe_plan_t plan = dataframe_plan_blank()
         cdef questdb_db* db = NULL
         cdef bint db_use = False
-        cdef uint64_t budget_ms = 0
-        cdef double deadline = 0.0
-        cdef double remaining = 0.0
-        cdef bint committed_prefix = False
-        cdef bint nonreplayable_consumed = False
+        cdef direct_conn_source_t src
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
-            if max_rows_per_batch <= 0:
-                raise ValueError('max_rows_per_batch must be >= 1.')
-            if isinstance(at, datetime.datetime) and at.timestamp() < 0:
-                raise ValueError(
-                    'Bad argument `at`: Cannot use a datetime before the '
-                    'Unix epoch (1970-01-01 00:00:00).')
-            if not isinstance(
-                    at,
-                    (str, ServerTimestampType, TimestampNanos,
-                     datetime.datetime)) and not (
-                    isinstance(at, int) and not isinstance(at, bool)):
-                raise UnsupportedDataFrameShapeError(
-                    'QuestDB.dataframe requires `at` to be the designated '
-                    'timestamp column (by name or index), a fixed timestamp '
-                    'shared by every row (TimestampNanos / datetime), or '
-                    'the explicit `ServerTimestamp` sentinel to let the '
-                    'server assign each row\'s timestamp on arrival.')
-            # Overall failover deadline, matching the row sender's
-            # `reconnect_max_duration` budget.
-            deadline = time.monotonic() + \
-                questdb_db_reconnect_max_duration_ms(db) / 1000.0
-            while True:
-                # Reclaim string storage from a prior attempt's released plan.
-                qdb_pystr_buf_clear(b)
-                try:
-                    if _dataframe_client_try_capsule_path(
-                            db,
-                            budget_ms,
-                            df,
-                            table_name,
-                            table_name_col,
-                            symbols,
-                            at,
-                            max_rows_per_batch,
-                            schema_overrides,
-                            &committed_prefix,
-                            &nonreplayable_consumed):
-                        return self
-                    return self._dataframe_numpy_publish(
-                        db, budget_ms, b, &plan, df, table_name,
-                        table_name_col, symbols, at, max_rows_per_batch,
-                        &committed_prefix)
-                except QuestDBError as exc:
-                    # FailoverRetry = transient flush/sync; SocketError = a
-                    # re-borrow that has not reached a live primary yet.
-                    if exc.code not in (
-                            QuestDBErrorCode.FailoverRetry,
-                            QuestDBErrorCode.SocketError):
-                        raise
-                    # The native operation may have committed a split prefix, or
-                    # an explicit intermediate sync already committed one.
-                    # Restarting from row 0 would duplicate it.
-                    if exc.in_doubt or committed_prefix:
-                        raise
-                    # A drained one-shot stream has no rows left to replay:
-                    # retrying would report success while writing nothing.
-                    if nonreplayable_consumed:
-                        raise QuestDBError(
-                            exc.code,
-                            f'{exc} The input stream was already partially '
-                            f'consumed and cannot be replayed; retry with a '
-                            f'fresh reader.',
-                            in_doubt=exc.in_doubt) from exc
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0.0:
-                        raise
-                    # The next attempt re-borrows with the row API's reconnect
-                    # backoff (`borrow_conn_with_retry`), bounded by the
-                    # remaining budget; no extra client-side sleep.
-                    budget_ms = <uint64_t>(remaining * 1000.0)
-        finally:
-            qdb_pystr_buf_free(b)
-            if db_use:
-                self._end_db_use()
-
-    cdef object _dataframe_numpy_publish(
-            self,
-            questdb_db* db,
-            uint64_t budget_ms,
-            qdb_pystr_buf* b,
-            dataframe_plan_t* plan,
-            object df,
-            object table_name,
-            object table_name_col,
-            object symbols,
-            object at,
-            size_t max_rows_per_batch,
-            bint* committed_prefix):
-        cdef column_sender_chunk* chunk = NULL
-        cdef direct_column_sender* conn = NULL
-        cdef line_sender_error* err = NULL
-        cdef PyThreadState* gs = NULL
-        cdef bint flushed = False
-        cdef bint force_drop_conn = False
-        cdef size_t rows_per_chunk
-        cdef size_t row_offset
-        cdef size_t chunk_rows
-        try:
-            df = _dataframe_normalize_nullable(df)
-            df = _dataframe_normalize_at_timestamp(df, at)
-            _dataframe_plan_build(
+            src.db = db
+            src.opts = NULL
+            _direct_dataframe_run(
+                &src,
+                questdb_db_reconnect_max_duration_ms(db) / 1000.0,
                 b,
+                &plan,
                 df,
                 table_name,
                 table_name_col,
                 symbols,
                 at,
-                plan,
-                _FIELD_TARGETS_QWP)
-            if (plan.col_count == 0) or (plan.row_count == 0):
-                return self
-
-            _dataframe_apply_roundtrip_overrides(df, plan)
-            _dataframe_columnar_promote_ndarray_cols(df, plan)
-            _dataframe_columnar_validate_plan(df, plan)
-            _dataframe_columnar_prebuild_pyobj(df, plan)
-            rows_per_chunk = _dataframe_columnar_rows_per_chunk(
-                plan, max_rows_per_batch)
-
-            _ensure_doesnt_have_gil(&gs)
-            if budget_ms == 0:
-                conn = questdb_db_borrow_direct_column_sender(db, &err)
-            else:
-                conn = questdb_db_borrow_direct_column_sender_with_retry(
-                    db, budget_ms, &err)
-            _ensure_has_gil(&gs)
-            if conn == NULL:
-                raise c_err_to_py(err)
-
-            chunk = column_sender_chunk_new(
-                plan.c_table_name.buf,
-                plan.c_table_name.len,
-                &err)
-            if chunk == NULL:
-                raise c_err_to_py(err)
-            try:
-                row_offset = 0
-                while row_offset < plan.row_count:
-                    if not column_sender_chunk_clear(chunk, &err):
-                        raise c_err_to_py(err)
-                    chunk_rows = rows_per_chunk
-                    if chunk_rows > plan.row_count - row_offset:
-                        chunk_rows = plan.row_count - row_offset
-                    _dataframe_columnar_populate_chunk(
-                        plan,
-                        chunk,
-                        row_offset,
-                        chunk_rows)
-                    _dataframe_columnar_flush(
-                        conn,
-                        chunk,
-                        row_offset != 0,
-                        committed_prefix)
-                    flushed = True
-                    row_offset += chunk_rows
-
-                _dataframe_columnar_sync(conn)
-            except:
-                force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                    conn, flushed)
-                raise
-
+                max_rows_per_batch,
+                schema_overrides)
             return self
         finally:
-            _ensure_has_gil(&gs)
-            if conn != NULL:
-                if force_drop_conn:
-                    questdb_db_drop_direct_column_sender(db, conn)
-                else:
-                    questdb_db_return_direct_column_sender(db, conn)
-            if chunk != NULL:
-                column_sender_chunk_free(chunk)
-            # The plan is rebuilt on each failover attempt; release this
-            # attempt's plan so a re-send starts from a blank plan.
-            dataframe_plan_release(plan)
-            plan[0] = dataframe_plan_blank()
+            qdb_pystr_buf_free(b)
+            if db_use:
+                self._end_db_use()
 
     def query(self, str sql, *, bint reset_symbol_dict=True) -> QueryResult:
         """
@@ -6182,6 +6227,10 @@ cdef class Sender:
     cdef size_t _init_buf_size
     cdef bint _in_txn
     cdef int64_t _slot_id
+    # A clone of the fully-configured opts for QWP/WebSocket senders, retained
+    # so dataframe() can open a poolless direct columnar connection per call
+    # (carrying auth/TLS). NULL for other protocols.
+    cdef line_sender_opts* _qwp_ws_opts
 
     cdef void_int _set_sender_fields(
             self,
@@ -6528,6 +6577,12 @@ cdef class Sender:
         self._init_buf_size = init_buf_size or 65536
         self._last_flush_ms = <int64_t*>calloc(1, sizeof(int64_t))
 
+        # Retain a clone of the fully-configured opts (auth/TLS included) so a
+        # ws sender's dataframe() can open a poolless direct columnar
+        # connection per call, independent of how it was built.
+        if _is_qwp_ws_protocol(self._c_protocol) and self._opts != NULL:
+            self._qwp_ws_opts = line_sender_opts_clone(self._opts)
+
     def __cinit__(self):
         self._c_protocol = line_sender_protocol_tcp
         self._opts = NULL
@@ -6539,6 +6594,7 @@ cdef class Sender:
         self._init_buf_size = 0
         self._in_txn = False
         self._slot_id = -1
+        self._qwp_ws_opts = NULL
 
     def __init__(
             self,
@@ -6804,7 +6860,7 @@ cdef class Sender:
                 connection_event_inbox_capacity,
                 params.get('init_buf_size'),
                 params.get('max_name_len'))
-            
+
             return sender
         finally:
             qdb_pystr_buf_free(b)
@@ -7146,15 +7202,22 @@ cdef class Sender:
             table_name: Optional[str] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
-            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
+            at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
+            max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
+            schema_overrides: Optional[Dict[str, object]] = None):
         """
-        Write a Pandas DataFrame to the internal buffer.
+        Write a Pandas DataFrame to QuestDB.
 
-        Available over ILP/HTTP, ILP/TCP and QWP/UDP (over UDP the frame is
-        serialized row by row into fire-and-forget datagrams, with the same
-        delivery caveats as ``row()``). Over QWP/WebSocket this raises:
-        DataFrame bulk loads are a database operation there — use
-        :meth:`QuestDB.dataframe`.
+        Over ILP/HTTP and ILP/TCP the frame is serialized into the internal
+        row buffer; over QWP/UDP into fire-and-forget datagrams, with the
+        same delivery caveats as ``row()``. Over QWP/WebSocket the frame is
+        bulk-loaded through a poolless direct columnar connection opened from
+        this sender's configuration for the call (the same direct path as
+        :meth:`QuestDB.dataframe`, carrying the sender's auth/TLS regardless
+        of how it was constructed); ``max_rows_per_batch`` and
+        ``schema_overrides`` apply only on that path. The direct load has no
+        ordering relationship with rows buffered via :meth:`row` and does not
+        flush them.
 
         Example:
 
@@ -7194,13 +7257,34 @@ cdef class Sender:
         may have been transmitted to the server already.
         """
         cdef auto_flush_t af = auto_flush_blank()
+        cdef direct_conn_source_t src
+        cdef qdb_pystr_buf* ws_b = NULL
+        cdef dataframe_plan_t ws_plan
         if _is_qwp_ws_protocol(self._c_protocol):
-            raise QuestDBError(
-                QuestDBErrorCode.InvalidApiCall,
-                'dataframe() is not available over ws. DataFrame bulk loads '
-                'are a database operation: connect with questdb.connect() '
-                'and call QuestDB.dataframe(df, table_name=..., at=...). '
-                'For row streaming on this sender, use row().')
+            if self._qwp_ws_opts == NULL:
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    "dataframe() can't be called: Sender is closed.")
+            src.db = NULL
+            src.opts = self._qwp_ws_opts
+            ws_b = qdb_pystr_buf_new()
+            ws_plan = dataframe_plan_blank()
+            try:
+                _direct_dataframe_run(
+                    &src,
+                    0.0,
+                    ws_b,
+                    &ws_plan,
+                    df,
+                    table_name,
+                    table_name_col,
+                    symbols,
+                    at,
+                    max_rows_per_batch,
+                    schema_overrides)
+                return self
+            finally:
+                qdb_pystr_buf_free(ws_b)
         if self._in_txn:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -7601,6 +7685,9 @@ cdef class Sender:
         self._buffer = None
         line_sender_opts_free(self._opts)
         self._opts = NULL
+        if self._qwp_ws_opts != NULL:
+            line_sender_opts_free(self._qwp_ws_opts)
+            self._qwp_ws_opts = NULL
         if self._impl != NULL:
             _ensure_doesnt_have_gil(&gs)
             line_sender_close(self._impl)
@@ -7774,13 +7861,43 @@ cdef class _PooledSender:
                 False, table_name, symbols, columns, at)
         return self
 
-    def dataframe(self, df, *args, **kwargs):
-        raise QuestDBError(
-            QuestDBErrorCode.InvalidApiCall,
-            'dataframe() is not available on a pooled sender. DataFrame '
-            'bulk loads are a database operation: call '
-            'QuestDB.dataframe(df, table_name=..., at=...) on the handle '
-            'this sender was borrowed from. For row streaming, use row().')
+    def dataframe(
+            self,
+            df,
+            *,
+            table_name: Optional[str] = None,
+            table_name_col: Union[None, int, str] = None,
+            symbols: Union[str, bool, List[int], List[str]] = 'auto',
+            at: Union[ServerTimestampType, int, str, TimestampNanos,
+                      datetime.datetime],
+            max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
+            schema_overrides: Optional[Dict[str, object]] = None):
+        """
+        Bulk-load a whole DataFrame over a direct columnar connection
+        borrowed from the pool for the duration of this call.
+
+        This is the pooled equivalent of :meth:`QuestDB.dataframe`: the frame
+        is committed over its own connection and becomes visible to SQL
+        immediately, without waiting for rows appended to this sender with
+        :meth:`row` to drain. There is therefore **no ordering relationship**
+        between ``dataframe()`` and buffered rows — ``dataframe()`` does not
+        flush them; publish those with :meth:`flush`.
+
+        Arguments mirror :meth:`QuestDB.dataframe`.
+        """
+        cdef QuestDB handle
+        with self._lock:
+            self._check_open('dataframe')
+            handle = self._handle
+        handle.dataframe(
+            df,
+            table_name=table_name,
+            table_name_col=table_name_col,
+            symbols=symbols,
+            at=at,
+            max_rows_per_batch=max_rows_per_batch,
+            schema_overrides=schema_overrides)
+        return self
 
     def __len__(self):
         """Number of buffered (unpublished) rows."""

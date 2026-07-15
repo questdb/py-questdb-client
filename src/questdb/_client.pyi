@@ -51,7 +51,7 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, NoReturn, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -977,8 +977,22 @@ class _PooledSender:
     ) -> _PooledSender:
         """Append one row to this sender's QWP buffer."""
 
-    def dataframe(self, df: Any, *args: Any, **kwargs: Any) -> NoReturn:
-        """Raises; use :meth:`QuestDB.dataframe` instead."""
+    def dataframe(
+        self,
+        df: Any,
+        *,
+        table_name: Optional[str] = None,
+        table_name_col: Union[None, int, str] = None,
+        symbols: Union[str, bool, List[int], List[str]] = "auto",
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
+        max_rows_per_batch: int = 16384,
+        schema_overrides: Optional[Dict[str, object]] = None,
+    ) -> _PooledSender:
+        """
+        Bulk-load a DataFrame over a direct columnar connection borrowed
+        from the pool for this call. No ordering relationship with rows
+        buffered via :meth:`row`. Mirrors :meth:`QuestDB.dataframe`.
+        """
 
     def __len__(self) -> int:
         """Number of buffered (unpublished) rows."""
@@ -1430,13 +1444,20 @@ class Sender:
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
+        max_rows_per_batch: int = 16384,
+        schema_overrides: Optional[Dict[str, object]] = None,
     ) -> Sender:
         """
-        Write a Pandas DataFrame to the internal buffer.
+        Write a Pandas DataFrame to QuestDB.
 
-        Available over ILP/HTTP and ILP/TCP. Over QWP/WebSocket this raises:
-        DataFrame bulk loads are a database operation there — use
-        :meth:`QuestDB.dataframe`.
+        Over ILP/HTTP, ILP/TCP and QWP/UDP the frame is serialized through the
+        row buffer. Over QWP/WebSocket it is bulk-loaded through a poolless
+        direct columnar connection opened from this sender's own configuration
+        (the same direct path as :meth:`QuestDB.dataframe`, carrying the
+        sender's auth/TLS regardless of how it was built; ``max_rows_per_batch``
+        and ``schema_overrides`` apply only there). The direct load has no
+        ordering relationship with rows buffered via :meth:`row` and does not
+        flush them.
 
         Example:
 
