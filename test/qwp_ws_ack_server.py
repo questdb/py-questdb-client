@@ -221,7 +221,7 @@ class QwpAckServer:
                 if close_after is not None and frames_handled >= close_after:
                     _fin_close(conn)
                     break
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # The peer dropping its connection (e.g. a failed dataframe
             # call discarding uncommitted frames) is a normal lifecycle
             # event, not a protocol error.
