@@ -435,6 +435,17 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QuestDB.from_conf(
                 'ws::addr=127.0.0.1:1;', qwp_ws_error_handler=42)
 
+    def test_from_conf_rejects_bad_inbox_capacities(self):
+        # Regression: these conversions must raise while holding the GIL
+        # instead of crashing in the no-GIL connect region.
+        for kwargs in (
+                {'connection_event_inbox_capacity': -1},
+                {'qwp_ws_error_inbox_capacity': -1},
+                {'connection_event_inbox_capacity': 'lots'},
+                {'qwp_ws_error_inbox_capacity': None}):
+            with self.assertRaises((TypeError, OverflowError)):
+                qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;', **kwargs)
+
     def test_pool_rejection_handler_receives_server_rejection(self):
         rejections = []
         delivered = threading.Event()

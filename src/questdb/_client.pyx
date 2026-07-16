@@ -5938,6 +5938,8 @@ cdef class QuestDB:
         cdef PyThreadState* gs = NULL
         cdef void* connection_listener_data = NULL
         cdef questdb_connection_event_cb connection_event_cb = NULL
+        cdef size_t c_event_inbox_capacity
+        cdef size_t c_error_inbox_capacity
         try:
             protocol, params = parse_conf_str(b, conf_str)
             if protocol not in (Protocol.Ws, Protocol.Wss):
@@ -5975,16 +5977,20 @@ cdef class QuestDB:
             if qwp_ws_error_handler is None:
                 qwp_ws_error_handler = _default_qwp_ws_error_handler
             db._qwp_ws_error_handler = qwp_ws_error_handler
+            # Convert to C integers while still holding the GIL: a bad
+            # value must raise here, not inside the nogil region below.
+            c_event_inbox_capacity = connection_event_inbox_capacity
+            c_error_inbox_capacity = qwp_ws_error_inbox_capacity
             _ensure_doesnt_have_gil(&gs)
             db._db = questdb_db_connect_with_handlers(
                 c_conf.buf,
                 c_conf.len,
                 connection_event_cb,
                 connection_listener_data,
-                <size_t>connection_event_inbox_capacity,
+                c_event_inbox_capacity,
                 <line_sender_qwpws_error_cb>_qwp_ws_error_trampoline,
                 <void*>db._qwp_ws_error_handler,
-                <size_t>qwp_ws_error_inbox_capacity,
+                c_error_inbox_capacity,
                 &err)
             _ensure_has_gil(&gs)
             if db._db == NULL:
@@ -6883,7 +6889,7 @@ cdef class Sender:
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
             object tls_verify=None,  # default: True
-            object tls_ca=None,  # default: TlsCa.WebpkiRoots
+            object tls_ca=None,  # TLS default: TlsCa.WebpkiAndOsRoots
             object tls_roots=None,
             str tls_roots_password=None,
             object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
@@ -6977,7 +6983,7 @@ cdef class Sender:
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
             object tls_verify=None,  # default: True
-            object tls_ca=None,  # default: TlsCa.WebpkiRoots
+            object tls_ca=None,  # TLS default: TlsCa.WebpkiAndOsRoots
             object tls_roots=None,
             str tls_roots_password=None,
             object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
@@ -7155,7 +7161,7 @@ cdef class Sender:
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
             object tls_verify=None,  # default: True
-            object tls_ca=None,  # default: TlsCa.WebpkiRoots
+            object tls_ca=None,  # TLS default: TlsCa.WebpkiAndOsRoots
             object tls_roots=None,
             str tls_roots_password=None,
             object max_buf_size=None,  # 100 * 1024 * 1024 - 100MiB
