@@ -3818,42 +3818,70 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
              decimal.Decimal('3.75')])
 
     def test_timestamp_field_null_and_pre_epoch(self):
-        """TIMESTAMP *field* columns: datetime64[us] NaT ingests as NULL,
-        and pre-epoch values (both us and ns) ingest correctly. Only
-        datetime64[ns] NaT is rejected -- the ns->micros conversion would
-        turn the INT64_MIN null sentinel into a bogus 1677 timestamp.
+        """TIMESTAMP *field* columns ingest NaT as NULL and keep pre-epoch
+        values, for datetime64[us] and datetime64[ns] alike. The [ns] case
+        is re-exported through Arrow so its INT64_MIN null sentinel survives
+        (the zero-copy ns->us path would corrupt it into a 1677 timestamp),
+        and both units must yield identical values for the same instant.
         """
         import datetime as _dt
         self._require_qwp_ws()
-        table = self._table()
-        self._create_table(table, 'vts TIMESTAMP')
+        utc = _dt.timezone.utc
         at = np.array(
             ['2024-01-01T00:00:00', '2024-01-01T00:00:01',
              '2024-01-01T00:00:02'], dtype='datetime64[us]')
+        for unit in ('us', 'ns'):
+            table = self._table()
+            self._create_table(table, 'vts TIMESTAMP')
+            df = pd.DataFrame({
+                'ts': at,
+                'vts': np.array(
+                    ['1960-01-01', 'NaT', '2024-01-03'],
+                    dtype=f'datetime64[{unit}]'),
+            })
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=table, at='ts')
+            self.qdb_plain.retry_check_table(table, min_rows=3)
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                got = client.query(
+                    f'SELECT vts FROM {table} ORDER BY ts').to_arrow()
+            vals = got.column('vts').to_pylist()
+            self.assertEqual(
+                vals[0], _dt.datetime(1960, 1, 1, tzinfo=utc), unit)
+            self.assertIsNone(vals[1], unit)
+            self.assertEqual(
+                vals[2], _dt.datetime(2024, 1, 3, tzinfo=utc), unit)
+
+    def test_object_decimal_column_round_trip(self):
+        """Object-dtype ``decimal.Decimal`` columns ingest on the columnar
+        path (re-exported through Arrow, width/scale inferred), including
+        nulls and in a frame mixed with a plain numpy column.
+        """
+        import decimal as _decimal
+        self._require_qwp_ws()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table = self._table()
+        self._create_table(table, 'x LONG, amt DECIMAL(18,3)')
         df = pd.DataFrame({
-            'ts': at,
-            'vts': np.array(
-                ['1960-01-01', 'NaT', '2024-01-03'], dtype='datetime64[us]'),
+            'ts': np.array(
+                ['2024-01-01T00:00:00', '2024-01-01T00:00:01',
+                 '2024-01-01T00:00:02'], dtype='datetime64[us]'),
+            'x': np.array([1, 2, 3], dtype=np.int64),
+            'amt': pd.Series(
+                [_decimal.Decimal('1.500'), None,
+                 _decimal.Decimal('-2.250')], dtype=object),
         })
         with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=3)
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
-                f'SELECT vts FROM {table} ORDER BY ts').to_arrow()
-        utc = _dt.timezone.utc
-        vals = got.column('vts').to_pylist()
-        self.assertEqual(vals[0], _dt.datetime(1960, 1, 1, tzinfo=utc))
-        self.assertIsNone(vals[1])
-        self.assertEqual(vals[2], _dt.datetime(2024, 1, 3, tzinfo=utc))
-        df_ns = pd.DataFrame({
-            'ts': at,
-            'vts': np.array(
-                ['2024-01-01', 'NaT', '2024-01-03'], dtype='datetime64[ns]'),
-        })
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            with self.assertRaisesRegex(qi.QuestDBError, 'NaT'):
-                client.dataframe(df_ns, table_name=self._table(), at='ts')
+                f'SELECT x, amt FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('x').to_pylist(), [1, 2, 3])
+        self.assertEqual(
+            got.column('amt').to_pylist(),
+            [_decimal.Decimal('1.500'), None, _decimal.Decimal('-2.250')])
 
     def test_int8_round_trip(self):
         """pa.int8 → BYTE wire → server stores as BYTE → egress
