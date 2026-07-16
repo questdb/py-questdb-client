@@ -40,8 +40,7 @@ def example(host: str = 'localhost', port: int = 9000):
                 latest = r.query(
                     'SELECT * FROM trades LIMIT -5').to_pandas()
                 per_symbol = r.query(
-                    'SELECT symbol, count() FROM trades',
-                    reset_symbol_dict=False).to_pandas()
+                    'SELECT symbol, count() FROM trades').to_pandas()
             print(latest)
             print(per_symbol)
 

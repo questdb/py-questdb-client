@@ -32,8 +32,7 @@ def example(host: str = 'localhost', port: int = 9000):
                 print(recent)
 
                 by_symbol = q.query(
-                    'SELECT symbol, count() FROM trades',
-                    reset_symbol_dict=False,
+                    'SELECT symbol, count() FROM trades'
                 ).to_pandas()
                 print(by_symbol)
 
