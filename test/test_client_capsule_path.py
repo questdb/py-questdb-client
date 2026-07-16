@@ -8,6 +8,7 @@ import sys
 sys.dont_write_bytecode = True
 import datetime
 import os
+import struct
 import unittest
 
 import patch_path
@@ -339,9 +340,12 @@ class TestServerTimestampAt(unittest.TestCase):
             client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(
-                        qi.UnsupportedDataFrameShapeError,
-                        r'`ServerTimestamp` sentinel'):
+                        qi.QuestDBError,
+                        r'`ServerTimestamp` sentinel') as raised:
                     client.dataframe(df, table_name='t', at=None)
+                self.assertEqual(
+                    raised.exception.code,
+                    qi.QuestDBErrorCode.InvalidTimestamp)
             finally:
                 client.close()
 
@@ -395,6 +399,34 @@ class TestScalarAt(unittest.TestCase):
             qi.TimestampNanos(self.AT_NANOS), max_rows_per_batch=16)
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['qwp1_frames'], 4)
+
+    def _ingest_recorded(self, df, at):
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(df, table_name='t', at=at)
+            finally:
+                client.close()
+            server.wait_binary_frames_settled()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        return b''.join(stats['binary_payloads'])
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_scalar_at_nanos_on_wire(self):
+        # The sentinel's little-endian int64 nanos must land in the frame
+        # bytes when `at` is a fixed timestamp, and must be absent when
+        # the server assigns each row's timestamp. Covers the Arrow batch
+        # route (pyarrow table) and the numpy chunk route (pandas frame).
+        import pandas as pd
+        sentinel = struct.pack('<q', self.AT_NANOS)
+        for df in (pa.table({'v': [1, 2]}),
+                   pd.DataFrame({'v': [1, 2]})):
+            scalar_bytes = self._ingest_recorded(
+                df, qi.TimestampNanos(self.AT_NANOS))
+            server_bytes = self._ingest_recorded(df, qi.ServerTimestamp)
+            self.assertIn(sentinel, scalar_bytes)
+            self.assertNotIn(sentinel, server_bytes)
 
     @unittest.skipIf(pl is None, 'polars not installed')
     def test_pre_epoch_datetime_rejected(self):

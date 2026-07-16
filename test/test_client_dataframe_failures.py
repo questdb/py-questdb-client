@@ -248,6 +248,71 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertLess(elapsed, 5.0)
 
 
+@unittest.skipIf(pd is None, 'pandas not installed')
+class TestClientDataframeArgValidation(unittest.TestCase):
+    """Bad arguments and bad object-column payloads must raise a typed
+    ``QuestDBError`` before anything is dialed: every test here points the
+    client at an unreachable address, so a connection attempt would fail
+    with a socket error instead of the pinned validation code."""
+
+    def _client(self):
+        return qi.QuestDB.from_conf(_conf(1))
+
+    def test_at_nat_raises_invalid_timestamp(self):
+        with self._client() as client:
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, 'NaT is not a valid timestamp') as raised:
+                client.dataframe(
+                    pd.DataFrame({'v': [1]}), table_name='t', at=pd.NaT)
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.InvalidTimestamp)
+
+    def test_at_none_or_bad_type_raises_invalid_timestamp(self):
+        with self._client() as client:
+            for at in (None, 3.5, b'ts'):
+                with self.subTest(at=at):
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            r'`ServerTimestamp` sentinel') as raised:
+                        client.dataframe(
+                            pd.DataFrame({'v': [1]}), table_name='t', at=at)
+                    self.assertEqual(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.InvalidTimestamp)
+
+    def test_object_int_overflow_names_column(self):
+        with self._client() as client:
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, r"'big'") as raised:
+                client.dataframe(
+                    pd.DataFrame({'big': pd.Series([2 ** 63], dtype=object)}),
+                    table_name='t', at=qi.ServerTimestamp)
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.BadDataFrame)
+
+    def test_object_str_lone_surrogate_names_column(self):
+        with self._client() as client:
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, r"'txt'") as raised:
+                client.dataframe(
+                    pd.DataFrame(
+                        {'txt': pd.Series(['ok', '\ud800'], dtype=object)}),
+                    table_name='t', at=qi.ServerTimestamp)
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.InvalidUtf8)
+
+    def test_mixed_dtype_ndarray_object_column_raises_array_error(self):
+        with self._client() as client:
+            with self.assertRaises(qi.QuestDBError) as raised:
+                client.dataframe(
+                    pd.DataFrame({'arr': pd.Series(
+                        [np.array([1.0]),
+                         np.array([1], dtype=np.int32)], dtype=object)}),
+                    table_name='t', at=qi.ServerTimestamp)
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.ArrayError)
+
+
 def _fault_frame(n_rows, str_len, arrow_route):
     ts = [1_700_000_000_000_000 + i * 1_000 for i in range(n_rows)]
     vs = list(range(n_rows))

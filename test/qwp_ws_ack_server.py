@@ -14,7 +14,7 @@ QWP_FLAG_DEFER_COMMIT = 0x01
 class QwpAckServer:
     def __init__(self, *, host="127.0.0.1", ack_delay_s=0.0,
                  close_plan=None, max_batch_size=0,
-                 defer_aware_acks=False):
+                 defer_aware_acks=False, record_payloads=False):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -28,12 +28,16 @@ class QwpAckServer:
         semantics — frames flagged QWP_FLAG_DEFER_COMMIT are not acked
         until the next non-deferred (commit-boundary) frame arrives,
         which acks cumulatively. Default acks every frame immediately.
+
+        `record_payloads`: when True, retain each binary frame's full
+        payload bytes (exposed as `binary_payloads` in `snapshot()`).
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
         self._close_iter = iter(close_plan) if close_plan is not None else None
         self.max_batch_size = max_batch_size
         self.defer_aware_acks = defer_aware_acks
+        self.record_payloads = record_payloads
         self.port = None
         self._sock = None
         self._stop = threading.Event()
@@ -46,6 +50,7 @@ class QwpAckServer:
         self.qwp1_frame_count = 0
         self.binary_bytes = 0
         self.binary_prefixes = []
+        self.binary_payloads = []
         self.control_frame_count = 0
         self.errors = []
 
@@ -93,6 +98,7 @@ class QwpAckServer:
                 "qwp1_frames": self.qwp1_frame_count,
                 "binary_bytes": self.binary_bytes,
                 "binary_prefixes": list(self.binary_prefixes),
+                "binary_payloads": list(self.binary_payloads),
                 "control_frames": self.control_frame_count,
                 "errors": list(self.errors),
             }
@@ -208,6 +214,8 @@ class QwpAckServer:
                     self.binary_bytes += len(payload)
                     if len(self.binary_prefixes) < 16:
                         self.binary_prefixes.append(payload[:8].hex())
+                    if self.record_payloads:
+                        self.binary_payloads.append(payload)
                 if self.ack_delay_s:
                     time.sleep(self.ack_delay_s)
                 seq = next_seq

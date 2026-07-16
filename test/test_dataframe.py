@@ -650,6 +650,28 @@ class TestPandasBase:
                 plan['supported'],
                 f'tz-aware field column failures={plan["failures"]!r}')
 
+        def test_debug_dataframe_columnar_plan_accepts_object_datetime_field(self):
+            # Object-dtype datetime cells targeting a (non-designated)
+            # timestamp field column are supported on the columnar path.
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+                't': pd.Series([
+                    dt.datetime(2024, 1, 1, 12, 0, 0),
+                    dt.datetime(2024, 1, 1, 12, 0, 1)], dtype=object),
+                'v': pd.Series([1.0, 2.0], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(
+                plan['supported'],
+                f'object-datetime field column failures={plan["failures"]!r}')
+            self.assertEqual(plan['failures'], [])
+
         def test_debug_dataframe_columnar_plan_rejects_unsupported_shape(self):
             df = pd.DataFrame({
                 'tbl': ['t1'],
@@ -741,7 +763,6 @@ class TestPandasBase:
                 col for col in row_plan['cols']
                 if col['orig_name'] == 'label')
             self.assertEqual(label_col['source_code'], 406000)
-            self.assertFalse(label_col['large_string_cast_to_utf8'])
 
             plan = qi._debug_dataframe_columnar_plan(
                 df, table_name='trades', at='ts')
@@ -766,6 +787,32 @@ class TestPandasBase:
             for drop in (b'"a"', b'"b"'):
                 self.assertNotIn(drop, buf)
 
+        def test_arrow_backed_column_empty_leading_chunk(self):
+            # A zero-length leading chunk must be stepped over: the
+            # values from the following chunk must serialize, not come
+            # out as empty strings.
+            ser = pd.concat([
+                pd.Series([], dtype='string[pyarrow]'),
+                pd.Series(['a', 'b'], dtype='string[pyarrow]')])
+            self.assertEqual(ser.array.__arrow_array__().num_chunks, 2)
+            df = pd.DataFrame({'x': ser})
+            buf = _dataframe(
+                self.version, df, table_name='t', at=qi.ServerTimestamp)
+            self.assertEqual(buf, b't x="a"\nt x="b"\n')
+            self.assertNotIn(b'x=""', buf)
+
+        def test_arrow_backed_column_empty_mid_frame_chunk(self):
+            ser = pd.concat([
+                pd.Series(['a'], dtype='string[pyarrow]'),
+                pd.Series([], dtype='string[pyarrow]'),
+                pd.Series(['b'], dtype='string[pyarrow]')])
+            self.assertEqual(ser.array.__arrow_array__().num_chunks, 3)
+            df = pd.DataFrame({'x': ser})
+            buf = _dataframe(
+                self.version, df, table_name='t', at=qi.ServerTimestamp)
+            self.assertEqual(buf, b't x="a"\nt x="b"\n')
+            self.assertNotIn(b'x=""', buf)
+
         def test_debug_dataframe_columnar_plan_preserves_large_string_category(self):
             symbols = pd.Series(
                 pa.array(
@@ -788,7 +835,7 @@ class TestPandasBase:
             sym_col = next(
                 col for col in row_plan['cols']
                 if col['orig_name'] == 'sym')
-            self.assertFalse(sym_col['large_string_cast_to_utf8'])
+            self.assertEqual(sym_col['source_code'], 403000)
 
             plan = qi._debug_dataframe_columnar_plan(
                 df, table_name='trades', at='ts')
@@ -1349,6 +1396,28 @@ class TestPandasBase:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
                     '.*exceeds the maximum supported scale of 76.*'):
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+
+        def test_decimal_pyobj_positive_exponent(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            # A representable positive exponent expands into the unscaled
+            # mantissa with scale 0.
+            df = pd.DataFrame({'dec': [Decimal('1E+20')]})
+            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+            (scale, mantissa) = _decode_decimal_payload(buf.splitlines()[0])
+            self.assertEqual(scale, 0)
+            self.assertEqual(
+                int.from_bytes(mantissa, byteorder='big', signed=True),
+                10 ** 20)
+
+            # An out-of-range exponent must raise cleanly instead of
+            # being truncated to a bogus narrower value.
+            df = pd.DataFrame({'dec': [Decimal('1E+100')]})
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    '.*Decimal exponent 100 exceeds the maximum supported'
+                    ' value of 76.*'):
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
 
         def test_decimal_arrow_columns(self):

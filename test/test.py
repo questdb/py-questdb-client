@@ -70,6 +70,7 @@ from test_client_capsule_path import (
     TestPandasPlannerRouting,
 )
 from test_client_dataframe_failures import (
+    TestClientDataframeArgValidation,
     TestClientDataframeDirectFailures,
     TestClientDataframeFaultFuzz,
 )
@@ -156,6 +157,14 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(info.epoch, 7)
         with self.assertRaises(Exception):
             info.epoch = 8  # frozen
+
+    def test_connection_types_exported_from_package(self):
+        from questdb import (
+            ConnectionEvent, ConnectionEventKind, ServerInfo, ServerRole)
+        self.assertIs(ConnectionEvent, qi.ConnectionEvent)
+        self.assertIs(ConnectionEventKind, qi.ConnectionEventKind)
+        self.assertIs(ServerInfo, qi.ServerInfo)
+        self.assertIs(ServerRole, qi.ServerRole)
 
     def test_ingress_error_can_carry_qwpws_diagnostic(self):
         err = qi.QuestDBError(
@@ -2299,10 +2308,36 @@ class TestBases:
             one_sec = 1000000000 // self.ns_scale
             self.assertLess(delta, one_sec)
 
+        def test_repr(self):
+            self.assertEqual(
+                repr(self.timestamp_cls(123)),
+                f'{self.timestamp_cls.__name__}(123)')
+            self.assertEqual(
+                repr(self.timestamp_cls(0)),
+                f'{self.timestamp_cls.__name__}(0)')
+
 
 class TestTimestampMicros(TestBases.Timestamp):
     timestamp_cls = qi.TimestampMicros
     ns_scale = 1000
+
+    def test_from_datetime_exact_far_future(self):
+        # A float `dt.timestamp() * 1e6` conversion loses microsecond
+        # precision this far out; the result must be exact.
+        utc = datetime.timezone.utc
+        ts = qi.TimestampMicros.from_datetime(
+            datetime.datetime(2600, 1, 1, 0, 0, 0, 999999, tzinfo=utc))
+        self.assertEqual(ts.value, 19880899200999999)
+
+    def test_from_datetime_pre_epoch_rejected(self):
+        # Half a second before the epoch converts to -500000 micros and
+        # must trip the non-negative check, not wrap or truncate to 0.
+        utc = datetime.timezone.utc
+        with self.assertRaisesRegex(
+                ValueError, 'value must be a non-negative'):
+            qi.TimestampMicros.from_datetime(
+                datetime.datetime(
+                    1969, 12, 31, 23, 59, 59, 500000, tzinfo=utc))
 
 
 class TestTimestampNanos(TestBases.Timestamp):
@@ -2525,6 +2560,10 @@ class TestIngressShim(unittest.TestCase):
         from questdb.ingress import TaggedEnum
         self.assertIs(TaggedEnum, qi.TaggedEnum)
 
+    def test_version_reexported(self):
+        import questdb.ingress as ingress
+        self.assertEqual(ingress.VERSION, qi.VERSION)
+
     def test_warn_high_reconnects_writes_through(self):
         import questdb
         import questdb.ingress as ingress
@@ -2565,6 +2604,29 @@ class TestBufferConstruction(unittest.TestCase):
         self.assertIsInstance(buf, qi.Buffer)
         self.assertEqual(len(buf), 0)
         self.assertGreater(buf.capacity(), 0)
+
+
+class TestReinitRejected(unittest.TestCase):
+    """Calling `__init__` a second time on an already-initialized native
+    object must raise instead of leaking or corrupting the impl state."""
+
+    def test_buffer_reinit(self):
+        buf = qi.Buffer(protocol_version=2)
+        buf.row('tbl', columns={'x': 1}, at=qi.ServerTimestamp)
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'already initialized') as cm:
+            buf.__init__(protocol_version=2)
+        self.assertEqual(
+            cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertGreater(len(buf), 0)
+
+    def test_sender_reinit(self):
+        sender = qi.Sender('tcp', '127.0.0.1', 9009)
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'already initialized') as cm:
+            sender.__init__('tcp', '127.0.0.1', 9009)
+        self.assertEqual(
+            cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
 
 
 if __name__ == '__main__':
