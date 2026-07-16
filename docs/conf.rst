@@ -63,6 +63,12 @@ Connection
   If omitted, the port will be defaulted to 9009 for TCP(s),
   9000 for HTTP(s) and QWP/WebSocket, and 9007 for QWP/UDP.
 
+  For ``ws`` / ``wss`` the value may be a comma-separated server list naming
+  every node of the deployment, e.g.
+  ``ws::addr=node1:9000,node2:9000,node3:9000;``. One configuration string
+  configures the whole deployment; the client walks the list to find a
+  suitable node and fails over within it.
+
 * ``bind_interface`` - TCP/QWP-UDP only, ``str``: Network interface to bind
   from. Useful if you have an accelerated network interface (e.g. Solarflare)
   and want to use it.
@@ -85,6 +91,59 @@ Connection
   called (``manual``).
 
   Default: ``background``.
+
+.. _sender_conf_pooling:
+
+Connection pooling (QWP/WebSocket)
+==================================
+
+The following keys apply to the :class:`QuestDB <questdb.QuestDB>` handle
+returned by :func:`questdb.connect` (or
+:meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>`), which owns
+connection pools for both ingestion and queries. The key names align with
+the Java client's configuration.
+
+* ``sender_pool_min`` - ``int``: Warm/minimum sender (ingestion)
+  connections the reaper keeps once connections have been opened.
+
+  Default: 1.
+
+* ``sender_pool_max`` - ``int``: Cap on the ingestion and direct
+  (DataFrame) pools, each capped independently.
+
+  Default: 4.
+
+* ``query_pool_min`` - ``int``: Warm/minimum reader (query) connections.
+
+  Default: 1.
+
+* ``query_pool_max`` - ``int``: Cap on the reader pool.
+
+  Default: 4.
+
+* ``acquire_timeout_ms`` - ``int``: How long a borrow at the cap waits for
+  a connection to be returned before failing. ``0`` fails fast.
+
+  Default: 5000.
+
+* ``idle_timeout_ms`` - ``int``: Idle time after which above-minimum idle
+  connections are reaped.
+
+  Default: 60000.
+
+* ``pool_reap`` - ``'auto'`` | ``'manual'``: With ``auto``, a background
+  thread periodically reaps idle above-minimum connections per
+  ``idle_timeout_ms``. With ``manual``, no background thread runs and the
+  application calls :meth:`QuestDB.reap_idle <questdb.QuestDB.reap_idle>`
+  on its own cadence.
+
+  Default: ``'auto'``.
+
+* ``sf_dir`` - ``str``: Opt-in directory for disk-backed store-and-forward
+  queues used by the pooled ingestion senders. DataFrame ingestion
+  (:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` and the
+  ``dataframe()`` method on pooled and standalone ws senders) always uses
+  the direct column path and is independent of ``sf_dir``.
 
 .. _sender_conf_auth:
 

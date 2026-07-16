@@ -8,8 +8,11 @@ Connect once, then stream, load, or query
 The QWP/WebSocket API has one connection-owning root, the :class:`QuestDB
 <questdb.QuestDB>` handle returned by :func:`questdb.connect`:
 
-* :meth:`QuestDB.sender <questdb.QuestDB.sender>` lends a row-building
-  :class:`Sender <questdb.Sender>`;
+* :meth:`QuestDB.sender <questdb.QuestDB.sender>` lends a pooled
+  row-building sender — a lean lease exposing ``row()``, ``dataframe()``,
+  ``flush()``, ``wait()`` and ``close()``, not a :class:`Sender
+  <questdb.Sender>` instance (``isinstance`` checks and type annotations
+  must not assume the ``Sender`` class);
 * :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` bulk-loads a whole
   DataFrame through the direct columnar path; and
 * :meth:`QuestDB.query <questdb.QuestDB.query>` executes queries.
@@ -95,3 +98,32 @@ New code imports from the top-level package:
 ``Buffer`` is not part of the top-level API: buffers are managed internally
 by senders. Where 4.x code built buffers on worker threads and flushed them
 through one sender, borrow one pooled sender per thread instead.
+
+Behavioural changes to watch for
+================================
+
+* **Broader** ``except IngressError``. ``IngressError`` is an alias of the
+  unified :class:`QuestDBError <questdb.QuestDBError>`, so handlers written
+  for 4.x ingestion errors now also catch query, pool and egress failures
+  raised through the same handle. Narrow by ``err.code`` where that matters.
+
+* ``BadDataFrame.value`` **changed**. The ``BadDataFrame`` error code's
+  numeric ``.value`` moved from 14 to ``0x10000``; raw value 14 now belongs
+  to ``ServerRejection``. Codes 0–13 are unchanged. Compare by member
+  identity (``err.code is QuestDBErrorCode.BadDataFrame``), never by
+  integer.
+
+* **Stricter timestamp handling.** Pre-epoch ``datetime`` scalars now floor
+  toward negative infinity instead of truncating toward zero (4.x encoded
+  fractional-second pre-epoch instants one second too high);
+  :meth:`TimestampNanos.from_datetime <questdb.TimestampNanos.from_datetime>`
+  raises ``ValueError`` for datetimes outside the 64-bit nanosecond range
+  instead of silently overflowing; and negative sub-second
+  ``datetime.timedelta`` durations (e.g. ``timedelta(milliseconds=-500)``)
+  raise ``ValueError`` instead of being mis-read as positive.
+
+* **Naive datetimes.** DataFrame column cells — numpy ``datetime64`` values
+  and Python ``datetime`` objects alike — interpret naive (timezone-unaware)
+  values as UTC, following the pandas convention. Scalar timestamps (``at=``
+  and ``datetime`` values passed to ``row()``) keep the 4.x local-time
+  interpretation. Pass timezone-aware datetimes to avoid ambiguity.

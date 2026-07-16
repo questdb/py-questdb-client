@@ -43,8 +43,11 @@ publishes pending rows when it returns the lease to the pool.
 
 The standalone :class:`Sender <questdb.Sender>` remains available as the
 lower-level multi-transport API for ILP over HTTP/TCP, QWP/UDP, and
-QWP/WebSocket. Its ``dataframe()`` method is deprecated; see the :doc:`5.0
-migration guide <migration>`.
+QWP/WebSocket. Its ``dataframe()`` method is fully supported on every
+transport; over ``ws::`` / ``wss::`` it opens (and closes) its own direct
+columnar connection per call, so batch accordingly or use
+:func:`questdb.connect` for repeated loads. See the :doc:`5.0 migration
+guide <migration>`.
 
 You can read more on :ref:`sender_preparing_data` and :ref:`sender_flushing`.
 
@@ -117,7 +120,7 @@ faster than appending rows one by one.
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python
 
-For the old row-buffer dataframe methods and their 6.0.0 removal plan, see the
+For how the 4.x row-buffer dataframe methods map onto the 5.0 API, see the
 :doc:`5.0 migration guide <migration>`.
 
 String vs Symbol Columns
@@ -233,6 +236,15 @@ QuestDB stores timestamps as either microseconds (``TIMESTAMP`` QuestDB column
 type) or nanoseconds (``TIMESTAMP_NS`` QuestDB column type) as a numeric value
 from unix epoch in UTC. Any timezone information is dropped when sent to
 the database.
+
+.. note::
+
+    Naive (timezone-unaware) timestamps in DataFrame column cells — numpy
+    ``datetime64`` values and Python ``datetime`` objects alike — are
+    interpreted as UTC, following the pandas convention. Scalar timestamps
+    (``at=`` and ``datetime`` values passed to ``row()``) keep the 4.x
+    local-time interpretation of naive values (``datetime.timestamp()``
+    semantics). Pass timezone-aware datetimes to avoid ambiguity.
 
 .. note::
 
@@ -879,6 +891,16 @@ it durably applies them, so the client can confirm delivery.
 
 * **Draining on close.** :func:`Sender.close_drain` waits for outstanding
   frames to be acknowledged before closing.
+
+* **DataFrame bulk loads.** A standalone ws/wss ``Sender.dataframe()`` does
+  not serialize into the sender's row stream: it opens (and closes) its own
+  poolless direct columnar connection per call, built from the sender's own
+  configuration (carrying its auth/TLS), and commits before returning. It
+  has no ordering relationship with rows buffered via ``row()`` and does
+  not flush them. Per-call connection setup is not free — batch your frames
+  accordingly, or use :func:`questdb.connect` / :class:`QuestDB
+  <questdb.QuestDB>` for repeated loads (its ``dataframe()`` borrows a
+  pooled direct connection instead).
 
 .. _query_egress:
 

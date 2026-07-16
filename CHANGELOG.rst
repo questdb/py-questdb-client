@@ -16,18 +16,17 @@ Breaking changes
   module is now the private ``questdb._client``). ``questdb.ingress`` remains
   as a deprecated compatibility shim re-exporting the 4.x ILP/HTTP and
   ILP/TCP surface (``Sender``, ``Buffer``, ``Protocol``, ``IngressError``,
-  ...) with a single import-time ``DeprecationWarning``; new code imports
-  from ``questdb``.
+  ``VERSION``, ...) with a single import-time ``DeprecationWarning``; new
+  code imports from ``questdb``.
 - The QWP/WebSocket entry point is :func:`questdb.connect`, returning a
-  :class:`QuestDB` handle (previously named ``Client``). The handle lends
+  :class:`QuestDB` handle. The handle lends
   row-building senders (:meth:`QuestDB.sender`), bulk-loads DataFrames
   (:meth:`QuestDB.dataframe`) and runs queries (:meth:`QuestDB.query`).
-- The sender borrowed from the pool is a lean pooled row sender (the
-  ``ClientSender`` name is gone; it exposes ``row()``, ``flush()``,
-  ``wait()`` and ``close()``, and is not a ``Sender`` subclass — the
-  standalone-only API such as ``establish()`` or FSN tracking simply does
-  not exist on it). One concurrency rule applies everywhere: borrow one
-  sender per thread.
+- The sender borrowed from the pool is a lean pooled row sender: it
+  exposes ``row()``, ``dataframe()``, ``flush()``, ``wait()`` and
+  ``close()``, and is not a ``Sender`` subclass — the standalone-only API
+  such as ``establish()`` or FSN tracking simply does not exist on it. One
+  concurrency rule applies everywhere: borrow one sender per thread.
 - ``Buffer`` is no longer part of the top-level API. Buffers are managed
   internally by senders; for concurrent serialization borrow more senders.
   Legacy explicit-buffer code keeps working through the ``questdb.ingress``
@@ -55,11 +54,34 @@ Breaking changes
   ``InvalidBind``, ``ServerSchemaMismatch``, ``ServerParseError``,
   ``ServerInternalError``, ``ServerSecurityError``, ``LimitExceeded``,
   ``ServerLimitExceeded``, ``SchemaDrift``, ``NoSchema``, ``ArrowExport``)
-  rather than being bucketed under ``ServerFlushError``; ``Cancelled`` and
-  ``FailoverWouldDuplicate`` are now backed by real FFI codes (their numeric
-  ``.value`` changed accordingly — compare by member identity, e.g.
-  ``err.code is QuestDBErrorCode.Cancelled``, which is the stable contract,
-  not by integer). Existing member names are unchanged.
+  rather than being bucketed under ``ServerFlushError``. Existing member
+  names are unchanged and the numeric codes 0–13 are identical to 4.x. The
+  only shifted 4.x member is ``BadDataFrame``, whose ``.value`` moved from
+  14 to ``0x10000`` (it is a Python-only sentinel with no backing FFI
+  code); raw value 14 now belongs to the new ``ServerRejection``. Compare
+  by member identity, e.g. ``err.code is QuestDBErrorCode.BadDataFrame`` —
+  that is the stable contract, not the integer value.
+- Catching errors from the ``questdb.ingress`` shim is broader than in 4.x:
+  ``IngressError`` is an alias of the unified :class:`QuestDBError`, so
+  ``except IngressError`` now also catches query, pool and egress failures
+  raised through the same handle.
+- Pre-epoch ``datetime`` values passed as scalars (``at=`` or ``row()``
+  column values) now floor toward negative infinity when converted to an
+  epoch timestamp. 4.1.0 truncated toward zero, encoding pre-epoch instants
+  with a fractional second one second too high; such values now serialize
+  lower than before, at the correct instant.
+- :meth:`TimestampNanos.from_datetime` now raises ``ValueError`` for
+  datetimes outside the signed 64-bit nanosecond range (1677-09-21 to
+  2262-04-11 UTC); 4.x silently overflowed.
+- Millisecond-duration parameters given as a negative sub-second
+  ``datetime.timedelta`` (e.g. ``timedelta(milliseconds=-500)``) now raise
+  ``ValueError``; 4.x silently mis-accepted them as positive durations.
+- Naive (timezone-unaware) timestamps in DataFrame column cells — numpy
+  ``datetime64`` values and Python ``datetime`` objects alike — are
+  interpreted as UTC, following the pandas convention. Scalar timestamps
+  (``at=`` and ``datetime`` values passed to ``row()``) keep the 4.x
+  local-time interpretation of naive values (``datetime.timestamp()``
+  semantics); pass timezone-aware datetimes to avoid ambiguity.
 
 Features
 ~~~~~~~~
@@ -137,7 +159,11 @@ Pool sizing follows the Java client's configuration keys:
 ``sender_pool_min`` / ``sender_pool_max`` (ingestion, defaults 1/4),
 ``query_pool_min`` / ``query_pool_max`` (readers, defaults 1/4),
 ``acquire_timeout_ms`` (default 5000 — how long a borrow waits at the cap
-before failing; ``0`` fails fast) and ``idle_timeout_ms`` (default 60000).
+before failing; ``0`` fails fast), ``idle_timeout_ms`` (default 60000 —
+after which above-minimum idle connections are reaped) and ``pool_reap``
+(``auto`` | ``manual``, default ``auto`` — whether a background thread
+reaps idle connections, or the application calls :meth:`QuestDB.reap_idle`
+on its own cadence).
 
 Columnar DataFrame Ingestion
 ****************************
@@ -202,8 +228,9 @@ Build & dependencies
   pulled in only via the ``dataframe`` extra).
 - **pyarrow is now optional.** It is imported lazily, only when actually
   needed (``pd.ArrowDtype`` columns, pyarrow sources, ``schema_overrides``,
-  and the ``to_arrow`` / ``iter_arrow`` / ``dtype_backend`` helpers). The
-  ``to_polars`` / ``__arrow_c_stream__`` egress paths and the default
+  ``to_polars`` / ``iter_polars``, and the ``to_arrow`` / ``iter_arrow`` /
+  ``dtype_backend`` helpers). The ``__arrow_c_stream__`` egress path
+  (consumed as ``polars.from_arrow(result)``) and the default
   ``to_pandas`` / ``iter_pandas`` work without pyarrow.
 - The ``dataframe`` extra now pins ``pandas>=1.3.5`` and
   ``pyarrow>=10.0.1``.

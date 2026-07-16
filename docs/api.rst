@@ -31,6 +31,26 @@ questdb
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.ConnectionEvent
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ConnectionEventKind
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ServerInfo
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.ServerRole
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: questdb.QuestDBError
    :members:
    :undoc-members:
