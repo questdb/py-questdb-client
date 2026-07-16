@@ -343,7 +343,7 @@ class TestPandasBase:
 
             # Same timestamp, specified in various ways.
             t1_setup = dt.datetime(2018, 3, 10, 0, 0, 0, tzinfo=dt.timezone.utc)
-            t1 = t1_setup.astimezone(tz=None).replace(tzinfo=None)  # naive, local
+            t1 = t1_setup.replace(tzinfo=None)  # naive, interpreted as UTC
             t2 = dt.datetime(2018, 3, 10, 0, 0, 0, tzinfo=dt.timezone.utc)
             t3 = dt.datetime(2018, 3, 9, 19, 0, 0, tzinfo=_TZ)
             t4 = qi.TimestampNanos(1520640000000000000)
@@ -380,7 +380,7 @@ class TestPandasBase:
 
             # Epoch 0, specified in various ways.
             e1_setup = dt.datetime(1970, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
-            e1 = e1_setup.astimezone(tz=None).replace(tzinfo=None)  # naive, local
+            e1 = e1_setup.replace(tzinfo=None)  # naive, interpreted as UTC
             e2 = dt.datetime(1970, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
             e3 = dt.datetime(1969, 12, 31, 19, 0, 0, tzinfo=_TZ)
             e4 = qi.TimestampNanos(0)

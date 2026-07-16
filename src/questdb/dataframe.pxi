@@ -1180,7 +1180,7 @@ cdef ssize_t _dataframe_resolve_at(
         at_value_out[0] = at_nanos._value
         return -1
     elif isinstance(at, cp_datetime):
-        if at.timestamp() < 0:
+        if datetime_to_micros(at) < 0:
             raise ValueError(
                 'Bad argument `at`: Cannot use a datetime before the ' +
                 'Unix epoch (1970-01-01 00:00:00).')

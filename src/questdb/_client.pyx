@@ -633,13 +633,51 @@ cdef object _UTC_EPOCH = datetime.datetime(
     1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
+_NAIVE_DATETIME_POLICY = None
+_NAIVE_DATETIME_WARNED = False
+
+
+cdef str _resolve_naive_datetime_policy():
+    global _NAIVE_DATETIME_POLICY
+    if _NAIVE_DATETIME_POLICY is None:
+        policy = os.environ.get('QUESTDB_NAIVE_DATETIME', 'utc').lower()
+        if policy not in ('utc', 'error'):
+            raise ValueError(
+                'Invalid QUESTDB_NAIVE_DATETIME environment variable: '
+                f'{policy!r}. Valid values: \'utc\' (default), \'error\'.')
+        _NAIVE_DATETIME_POLICY = policy
+    return _NAIVE_DATETIME_POLICY
+
+
+cdef object _as_utc_aware(cp_datetime dt):
+    global _NAIVE_DATETIME_WARNED
+    if dt.tzinfo is not None:
+        return dt
+    if _resolve_naive_datetime_policy() == 'error':
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidTimestamp,
+            'Naive datetime rejected (QUESTDB_NAIVE_DATETIME=error): '
+            'attach a timezone, e.g. dt.replace(tzinfo=timezone.utc) '
+            'or dt.astimezone().')
+    if not _NAIVE_DATETIME_WARNED:
+        _NAIVE_DATETIME_WARNED = True
+        warnings.warn(
+            'Naive datetime interpreted as UTC (questdb 4.x used local '
+            'time). If you meant "now", use TimestampNanos.now() or '
+            'datetime.now(timezone.utc); pass timezone-aware datetimes '
+            'to silence this warning.',
+            UserWarning,
+            stacklevel=3)
+    return dt.replace(tzinfo=datetime.timezone.utc)
+
+
 cdef int64_t datetime_to_micros(cp_datetime dt):
     """
     Convert a :class:`datetime.datetime` to microseconds since the epoch.
 
-    Naive datetimes are interpreted as local time.
+    Naive datetimes are interpreted as UTC.
     """
-    cdef object aware = dt if dt.tzinfo is not None else dt.astimezone()
+    cdef object aware = _as_utc_aware(dt)
     cdef object delta = aware - _UTC_EPOCH
     return (
         <int64_t>delta.days * <int64_t>86_400_000_000 +
@@ -711,10 +749,12 @@ cdef class TimestampMicros:
             datetime.datetime.now(tz=datetime.timezone.utc))
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
-    the timezone to use. This is because ``datetime`` objects without an
-    associated timezone are assumed to be in the local timezone and it is easy
-    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
-    bug).
+    the timezone to use. A ``datetime`` object without an associated timezone
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
+    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    Note that ``datetime.datetime.now()`` is your local wall clock: use
+    ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
+    class for the current instant.
     """
     cdef int64_t _value
 
@@ -776,10 +816,12 @@ cdef class TimestampNanos:
             datetime.datetime.now(tz=datetime.timezone.utc))
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
-    the timezone to use. This is because ``datetime`` objects without an
-    associated timezone are assumed to be in the local timezone and it is easy
-    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
-    bug).
+    the timezone to use. A ``datetime`` object without an associated timezone
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
+    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    Note that ``datetime.datetime.now()`` is your local wall clock: use
+    ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
+    class for the current instant.
     """
     cdef int64_t _value
 
@@ -1415,7 +1457,7 @@ cdef class Buffer:
 
             # Float columns and timestamp specified as `datetime.datetime`.
             # Pay special attention to the timezone, which if unspecified is
-            # assumed to be the local timezone (and not UTC).
+            # interpreted as UTC.
             buffer.row(
                 'sensor data',
                 columns={
@@ -1570,10 +1612,11 @@ cdef class Buffer:
             use ``TimestampNanos.now()``.
             When passing a ``datetime.datetime`` object, the timestamp is
             converted to nanoseconds.
-            A ``datetime`` object is assumed to be in the local timezone unless
-            one is specified explicitly (so call
-            ``datetime.datetime.now(tz=datetime.timezone.utc)`` instead
-            of ``datetime.datetime.utcnow()`` for the current timestamp to
+            A naive ``datetime`` object is interpreted as UTC; a
+            ``UserWarning`` is emitted once per process, and
+            ``QUESTDB_NAIVE_DATETIME=error`` rejects naive values instead
+            (call ``datetime.datetime.now(tz=datetime.timezone.utc)``
+            for the current timestamp to
             avoid bugs).
 
             To specify a different timestamp for each row, pass in a column name
@@ -2835,24 +2878,45 @@ cdef object _dataframe_columnar_ndarray_col_to_arrow(object df, col_t* col):
         for cell in series])
 
 
-cdef void_int _dataframe_columnar_promote_ndarray_cols(
+cdef object _dataframe_columnar_col_from_pandas(object df, col_t* col):
+    # Re-export a pandas column as a pyarrow Array: pyarrow infers the
+    # Arrow type (decimal width/scale, timestamp unit, ...) and carries a
+    # validity bitmap for nulls, which the Rust Arrow importer then encodes.
+    return _PYARROW.Array.from_pandas(df.iloc[:, col.setup.orig_index])
+
+
+cdef void_int _dataframe_columnar_promote_cols(
         object df,
         dataframe_plan_t* plan) except -1:
-    # Columns of object-dtype numpy-array cells reach this planner as the
-    # row-oriented `arr_f64_numpyobj` source, which the columnar wire
-    # cannot emit directly. Re-export each as an Arrow list<double> array
-    # and let the Rust Arrow importer classify it as ARRAY(DOUBLE) — the
-    # same route capsule-path list columns take.
+    # Some column shapes have no contiguous native buffer the columnar wire
+    # can emit directly. Re-export each as an Arrow array and let the Rust
+    # Arrow importer classify it — the same route the all-Arrow capsule path
+    # takes:
+    #   - object-dtype numpy-array cells -> list<double> (ARRAY(DOUBLE));
+    #   - object-dtype Decimal -> DECIMAL (width/scale inferred);
+    #   - datetime64[ns] timestamp fields carrying NaT, whose INT64_MIN null
+    #     sentinel the zero-copy ns->us path would corrupt into a 1677 value.
     cdef size_t col_index
     cdef col_t* col
     cdef ArrowArray* chunk
     cdef object arrow_array
     for col_index in range(plan.col_count):
         col = &plan.cols.d[col_index]
-        if col.setup.source != col_source_t.col_source_arr_f64_numpyobj:
+        if col.setup.source == col_source_t.col_source_arr_f64_numpyobj:
+            _dataframe_require_pyarrow()
+            arrow_array = _dataframe_columnar_ndarray_col_to_arrow(df, col)
+        elif col.setup.source == col_source_t.col_source_decimal_pyobj:
+            _dataframe_require_pyarrow()
+            arrow_array = _dataframe_columnar_col_from_pandas(df, col)
+        elif (col.setup.target == col_target_t.col_target_column_ts
+                and col.setup.source == col_source_t.col_source_dt64ns_numpy
+                and _dataframe_columnar_i64_has_nat(
+                    <const int64_t*>col.setup.chunks.chunks[0].buffers[1],
+                    plan.row_count)):
+            _dataframe_require_pyarrow()
+            arrow_array = _dataframe_columnar_col_from_pandas(df, col)
+        else:
             continue
-        _dataframe_require_pyarrow()
-        arrow_array = _dataframe_columnar_ndarray_col_to_arrow(df, col)
         chunk = &col.setup.chunks.chunks[0]
         if chunk.release != NULL:
             chunk.release(chunk)
@@ -5541,7 +5605,7 @@ cdef void_int _dataframe_numpy_publish(
             return 0
 
         _dataframe_apply_roundtrip_overrides(df, plan)
-        _dataframe_columnar_promote_ndarray_cols(df, plan)
+        _dataframe_columnar_promote_cols(df, plan)
         _dataframe_columnar_validate_plan(df, plan)
         _dataframe_columnar_prebuild_pyobj(df, plan)
         rows_per_chunk = _dataframe_columnar_rows_per_chunk(
@@ -5627,12 +5691,12 @@ cdef void_int _direct_dataframe_run(
                 QuestDBErrorCode.InvalidTimestamp,
                 'Bad argument `at`: NaT is not a valid timestamp.')
         try:
-            at_timestamp = at.timestamp()
+            at_micros = datetime_to_micros(at)
         except ValueError as ve:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
                 f'Bad argument `at`: {ve}') from ve
-        if at_timestamp < 0:
+        if at_micros < 0:
             raise ValueError(
                 'Bad argument `at`: Cannot use a datetime before the '
                 'Unix epoch (1970-01-01 00:00:00).')
@@ -6048,14 +6112,13 @@ cdef class QuestDB:
           ``pa.timestamp`` with unit ``s``, ``ms``, ``us``, or ``ns``
           (tz-aware accepted on Arrow-backed columns in the Rust Arrow route).
           Null timestamps (``NaT`` / ``None``) and values before the Unix
-          epoch are supported on ``datetime64[us]``, object-dtype, and
-          Arrow-backed columns; a ``datetime64[ns]`` column cannot carry
-          ``NaT`` (its ``INT64_MIN`` sentinel is corrupted by the ns->us
-          conversion — use ``datetime64[us]`` or object dtype for nulls).
+          epoch are supported on every timestamp column type; a
+          ``datetime64[ns]`` field carrying ``NaT`` is re-exported through
+          Arrow so its ``INT64_MIN`` null sentinel is preserved.
         - **Decimal**: Arrow-backed ``pa.decimal{32,64,128,256}`` columns
-          (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18). Plain
-          object-dtype columns of ``decimal.Decimal`` are not accepted on the
-          columnar path; back them with an Arrow decimal type instead.
+          (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18), or
+          object-dtype columns of ``decimal.Decimal`` (re-exported through
+          Arrow; the decimal width and scale are inferred from the values).
         - **Array**: Arrow ``pa.list_`` / ``pa.large_list`` /
           ``pa.fixed_size_list`` columns with a ``float64`` leaf (nested for
           multi-dimensional), and object-dtype columns of ``float64``
@@ -6157,10 +6220,9 @@ cdef class QuestDB:
             - ``int`` → LONG (must fit signed 64-bit)
             - ``float`` → DOUBLE
             - ``str`` → VARCHAR
-            - ``datetime.datetime`` → TIMESTAMP (microseconds; a naive value
-              is read as local time, matching scalar ``at=`` / ``row()`` —
-              unlike naive DataFrame timestamp columns, which are UTC. Pass a
-              tz-aware datetime to avoid ambiguity)
+            - ``datetime.datetime`` → TIMESTAMP (microseconds; a naive
+              value is interpreted as UTC, the same rule as everywhere else
+              in the API)
             - :class:`TimestampMicros` → TIMESTAMP
             - :class:`TimestampNanos` → TIMESTAMP_NS
             - ``uuid.UUID`` → UUID

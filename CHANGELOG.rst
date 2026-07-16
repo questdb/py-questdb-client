@@ -80,12 +80,17 @@ Breaking changes
 - Millisecond-duration parameters given as a negative sub-second
   ``datetime.timedelta`` (e.g. ``timedelta(milliseconds=-500)``) now raise
   ``ValueError``; 4.x silently mis-accepted them as positive durations.
-- Naive (timezone-unaware) timestamps in DataFrame column cells — numpy
-  ``datetime64`` values and Python ``datetime`` objects alike — are
-  interpreted as UTC, following the pandas convention. Scalar timestamps
-  (``at=`` and ``datetime`` values passed to ``row()``) keep the 4.x
-  local-time interpretation of naive values (``datetime.timestamp()``
-  semantics); pass timezone-aware datetimes to avoid ambiguity.
+- Naive (timezone-unaware) timestamps are interpreted as UTC everywhere:
+  DataFrame column cells, scalar ``at=`` values, ``datetime`` values passed
+  to ``row()``, ``TimestampNanos.from_datetime`` /
+  ``TimestampMicros.from_datetime``, and query bind parameters. 4.x
+  interpreted naive *scalars* in the process-local timezone
+  (``datetime.timestamp()`` semantics) — the first naive conversion on such
+  a path now emits a one-per-process ``UserWarning``. Note that
+  ``datetime.now()`` is your local wall clock: for "now", use
+  ``TimestampNanos.now()`` or ``datetime.now(timezone.utc)``. Set the
+  ``QUESTDB_NAIVE_DATETIME=error`` environment variable to reject naive
+  ``datetime`` objects outright instead.
 
 Features
 ~~~~~~~~

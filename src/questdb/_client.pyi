@@ -251,10 +251,12 @@ class TimestampMicros:
             datetime.datetime.now(tz=datetime.timezone.utc))
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
-    the timezone to use. This is because ``datetime`` objects without an
-    associated timezone are assumed to be in the local timezone and it is easy
-    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
-    bug).
+    the timezone to use. A ``datetime`` object without an associated timezone
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
+    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    Note that ``datetime.datetime.now()`` is your local wall clock: use
+    ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
+    class for the current instant.
     """
 
     def __init__(self, value: int): ...
@@ -302,10 +304,12 @@ class TimestampNanos:
             datetime.datetime.now(tz=datetime.timezone.utc))
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
-    the timezone to use. This is because ``datetime`` objects without an
-    associated timezone are assumed to be in the local timezone and it is easy
-    to make mistakes (e.g. passing ``datetime.datetime.utcnow()`` is a likely
-    bug).
+    the timezone to use. A ``datetime`` object without an associated timezone
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
+    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    Note that ``datetime.datetime.now()`` is your local wall clock: use
+    ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
+    class for the current instant.
     """
 
     def __init__(self, value: int): ...
@@ -491,7 +495,7 @@ class Buffer:
 
             # Float columns and timestamp specified as `datetime.datetime`.
             # Pay special attention to the timezone, which if unspecified is
-            # assumed to be the local timezone (and not UTC).
+            # interpreted as UTC.
             buffer.row(
                 'sensor data',
                 columns={
@@ -633,10 +637,11 @@ class Buffer:
             use ``TimestampNanos.now()``.
             When passing a ``datetime.datetime`` object, the timestamp is
             converted to nanoseconds.
-            A ``datetime`` object is assumed to be in the local timezone unless
-            one is specified explicitly (so call
-            ``datetime.datetime.now(tz=datetime.timezone.utc)`` instead
-            of ``datetime.datetime.utcnow()`` for the current timestamp to
+            A naive ``datetime`` object is interpreted as UTC; a
+            ``UserWarning`` is emitted once per process, and
+            ``QUESTDB_NAIVE_DATETIME=error`` rejects naive values instead
+            (call ``datetime.datetime.now(tz=datetime.timezone.utc)``
+            for the current timestamp to
             avoid bugs).
 
             To specify a different timestamp for each row, pass in a column name

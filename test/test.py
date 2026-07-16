@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import subprocess
 
 sys.dont_write_bytecode = True
 import os
@@ -2344,8 +2345,7 @@ class TestBases:
                 self.timestamp_cls.from_datetime(
                     datetime.datetime(1969, 12, 31, tzinfo=utc))
 
-            dt_naive = datetime.datetime(2022, 1, 1, 12, 0, 0, 0,
-                                         tzinfo=utc).astimezone(None).replace(tzinfo=None)
+            dt_naive = datetime.datetime(2022, 1, 1, 12, 0, 0, 0)
             ts3 = self.timestamp_cls.from_datetime(dt_naive)
             self.assertEqual(ts3.value, 1641038400000000000 // self.ns_scale)
 
@@ -2391,6 +2391,43 @@ class TestTimestampMicros(TestBases.Timestamp):
 class TestTimestampNanos(TestBases.Timestamp):
     timestamp_cls = qi.TimestampNanos
     ns_scale = 1
+
+    def test_naive_datetime_is_utc(self):
+        naive = datetime.datetime(2026, 7, 16, 12, 0)
+        aware = naive.replace(tzinfo=datetime.timezone.utc)
+        self.assertEqual(
+            self.timestamp_cls.from_datetime(naive).value,
+            self.timestamp_cls.from_datetime(aware).value)
+
+    def test_naive_datetime_warns_once_per_process(self):
+        qi._NAIVE_DATETIME_WARNED = False
+        naive = datetime.datetime(2026, 7, 16, 12, 0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            self.timestamp_cls.from_datetime(naive)
+            self.timestamp_cls.from_datetime(naive)
+        emitted = [w for w in caught if issubclass(w.category, UserWarning)]
+        self.assertEqual(len(emitted), 1)
+        self.assertIn('interpreted as UTC', str(emitted[0].message))
+        self.assertIn('If you meant "now"', str(emitted[0].message))
+
+    def test_naive_datetime_error_policy(self):
+        code = (
+            'import datetime\n'
+            'from questdb._client import TimestampNanos, QuestDBError\n'
+            'try:\n'
+            '    TimestampNanos.from_datetime(datetime.datetime(2026, 1, 1))\n'
+            '    raise SystemExit("no raise")\n'
+            'except QuestDBError as e:\n'
+            '    assert e.code.name == "InvalidTimestamp", e.code\n'
+            'print("rejected")\n')
+        env = dict(os.environ)
+        env['QUESTDB_NAIVE_DATETIME'] = 'error'
+        proc = subprocess.run(
+            [sys.executable, '-c', code],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('rejected', proc.stdout)
 
     def test_from_datetime_out_of_int64_range(self):
         utc = datetime.timezone.utc

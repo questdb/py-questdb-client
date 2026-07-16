@@ -239,12 +239,12 @@ the database.
 
 .. note::
 
-    Naive (timezone-unaware) timestamps in DataFrame column cells — numpy
-    ``datetime64`` values and Python ``datetime`` objects alike — are
-    interpreted as UTC, following the pandas convention. Scalar timestamps
-    (``at=`` and ``datetime`` values passed to ``row()``) keep the 4.x
-    local-time interpretation of naive values (``datetime.timestamp()``
-    semantics). Pass timezone-aware datetimes to avoid ambiguity.
+    Naive (timezone-unaware) timestamps are interpreted as UTC everywhere:
+    DataFrame column cells, scalar ``at=`` values, ``row()`` values and
+    query binds. Beware that ``datetime.now()`` is your local wall clock —
+    for "now", use ``TimestampNanos.now()`` or
+    ``datetime.now(timezone.utc)``. Set ``QUESTDB_NAIVE_DATETIME=error``
+    to reject naive ``datetime`` objects outright.
 
 .. note::
 
