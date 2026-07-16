@@ -998,8 +998,10 @@ class PooledSender:
     ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
-        from the pool for this call. No ordering relationship with rows
-        buffered via :meth:`row`. Mirrors :meth:`QuestDB.dataframe`.
+        from the pool for this call. Prefer :meth:`QuestDB.dataframe`:
+        this convenience is not part of the sender's row stream and has
+        no ordering relationship with rows buffered via :meth:`row`.
+        Mirrors :meth:`QuestDB.dataframe`.
         """
 
     def __len__(self) -> int:

@@ -8170,7 +8170,8 @@ cdef class PooledSender:
         Bulk-load a whole DataFrame over a direct columnar connection
         borrowed from the pool for the duration of this call.
 
-        This is the pooled equivalent of :meth:`QuestDB.dataframe`: the frame
+        Prefer :meth:`QuestDB.dataframe` — this convenience forwards to the
+        same path and is **not** part of this sender's row stream: the frame
         is committed over its own connection and becomes visible to SQL
         immediately, without waiting for rows appended to this sender with
         :meth:`row` to drain. There is therefore **no ordering relationship**

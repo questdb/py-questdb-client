@@ -54,22 +54,25 @@ DataFrame bulk loads over QWP/WebSocket
 =======================================
 
 Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
-path — a database operation, not stream serialization. Three equivalent
-entry points:
+path — a database operation, not stream serialization. The recommended
+entry point is :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` on the
+handle; the sender variants exist as conveniences and share the same path:
 
 .. code-block:: python
 
     with questdb.connect('ws::addr=localhost:9000;') as db:
-        # On the handle:
+        # Recommended — on the handle:
         db.dataframe(frame, table_name='weather', at='ts')
 
-        # Or on a pooled sender — same path, direct connection from the pool:
+        # Convenience: on a pooled sender — same path, direct connection
+        # from the pool; NOT part of the sender's row stream:
         with db.sender() as sender:
             sender.row('weather', columns={'t': 21.5}, at=ServerTimestamp)
             sender.dataframe(frame, table_name='weather', at='ts')
             sender.flush()
 
-    # Or on a standalone sender — same path, poolless direct connection:
+    # Convenience: on a standalone sender — same path, poolless direct
+    # connection:
     with Sender.from_conf('ws::addr=localhost:9000;') as sender:
         sender.dataframe(frame, table_name='weather', at='ts')
 
