@@ -2,8 +2,8 @@
 Examples
 ========
 
-Basics
-======
+Getting started
+===============
 
 .. _connect_example:
 
@@ -16,6 +16,18 @@ waits for the server acknowledgement, then runs a bind-parameter query into
 pandas.
 
 .. literalinclude:: ../examples/connect_basic.py
+   :language: python
+
+.. _connect_query_example:
+
+Queries
+-------
+
+The following example runs DDL through ``query()``, binds positional
+parameters, streams a large result batch by batch, and leases one reader
+connection for a run of queries with a warm ``SYMBOL`` dictionary.
+
+.. literalinclude:: ../examples/connect_query.py
    :language: python
 
 .. _connect_dataframe_example:
@@ -31,78 +43,17 @@ connection with ``db.query()`` and runs two queries on it, reusing the
 .. literalinclude:: ../examples/connect_dataframe.py
    :language: python
 
-.. _qwp_udp_example:
+.. _connect_random_data_example:
 
-QWP over UDP
-------------
+Ticking data and flush cadence
+------------------------------
 
-The following example sends a row using QuestWire Protocol over UDP.
+The following example mimics an application loop producing rows at random
+intervals. The pooled sender has no auto-flush, so it publishes on an
+explicit row-count / elapsed-time cadence.
 
-Requires a QuestDB instance with QWP/UDP receiver support enabled. The
-default listener port is ``9007``.
-
-.. literalinclude:: ../examples/qwp_udp.py
+.. literalinclude:: ../examples/connect_random_data.py
    :language: python
-
-.. _ws_polars_example:
-
-QWP/WebSocket from Polars
--------------------------
-
-The following example ingests a Polars ``DataFrame`` over QWP/WebSocket via
-:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, runs a query into Polars, and includes a
-``schema_overrides`` variant.
-
-.. literalinclude:: ../examples/polars_basic.py
-   :language: python
-
-.. _ws_pyarrow_example:
-
-QWP/WebSocket from PyArrow
---------------------------
-
-The following example ingests a PyArrow table over QWP/WebSocket via
-:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` and runs a query into PyArrow.
-
-.. literalinclude:: ../examples/pyarrow_basic.py
-   :language: python
-
-HTTP with Token Auth
---------------------
-
-The following example connects to the database and sends two rows (lines).
-
-The connection is made via HTTPS and uses token based authentication.
-
-The data is sent at the end of the ``with`` block.
-
-.. literalinclude:: ../examples/http_basic.py
-   :language: python
-
-
-.. _auth_and_tls_example:
-
-TCP Authentication and TLS
---------------------------
-
-Continuing from the previous example, the connection is authenticated
-and also uses TLS.
-
-.. literalinclude:: ../examples/auth_and_tls.py
-   :language: python
-
-
-Ticking Data and Auto-Flush
----------------------------
-
-The following example somewhat mimics the behavior of a loop in an application.
-
-It creates random ticking data at a random interval and uses non-default
-auto-flush settings.
-
-.. literalinclude:: ../examples/random_data.py
-   :language: python
-
 
 Data Frames
 ===========
@@ -159,43 +110,138 @@ name.
 For details on all options, see the
 :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` method.
 
+.. _ws_polars_example:
+
+Polars
+------
+
+The following example ingests a Polars ``DataFrame`` over QWP/WebSocket via
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, runs a query into
+Polars, and includes a ``schema_overrides`` variant.
+
+.. literalinclude:: ../examples/polars_basic.py
+   :language: python
+
+.. _ws_pyarrow_example:
+
+PyArrow
+-------
+
+The following example ingests a PyArrow table over QWP/WebSocket via
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` and runs a query into
+PyArrow.
+
+.. literalinclude:: ../examples/pyarrow_basic.py
+   :language: python
 
 Decimal Types (QuestDB 9.2.0+)
 ------------------------------
 
 The following example shows how to insert data with decimal precision using
-Python's :class:`decimal.Decimal` type.
+Python's :class:`decimal.Decimal` type, both row by row and as an
+object-dtype DataFrame column.
 
-Requires QuestDB server 9.2.0+ and :ref:`protocol version 3 <sender_conf_protocol_version>`
-(must be :ref:`configured explicitly for TCP/TCPS <sender_conf_protocol_version>`).
-``DECIMAL`` columns must be :ref:`pre-created <sender_auto_creation>` (auto-creation not supported).
-See the :ref:`troubleshooting guide <troubleshooting-flushing>` for common errors.
-
-First, create the table with ``DECIMAL`` columns:
-
-.. code-block:: sql
-
-    CREATE TABLE financial_data (
-        symbol SYMBOL,
-        price DECIMAL(18, 6),
-        quantity DECIMAL(12, 4),
-        timestamp TIMESTAMP_NS
-    ) TIMESTAMP(timestamp) PARTITION BY DAY;
-
-Then insert data using Python decimals:
+Requires QuestDB server 9.2.0+. ``DECIMAL`` columns must be
+:ref:`pre-created <sender_auto_creation>` (auto-creation not supported); the
+examples create them through ``query()``.
 
 .. literalinclude:: ../examples/decimal_basic.py
    :language: python
 
-For better performance with DataFrames, use PyArrow decimal types:
+For better performance with DataFrames, use PyArrow decimal types, which
+carry width and scale in the column type:
 
 .. literalinclude:: ../examples/decimal_arrow.py
    :language: python
 
 .. note::
 
-    For HTTP/HTTPS, protocol version 3 is auto-negotiated.
-    For TCP/TCPS, explicitly configure: ``tcp::addr=localhost:9009;protocol_version=3;``
+    Over ``ws::`` / ``wss::`` decimal support is negotiated automatically.
+    On the legacy ILP transports, HTTP/HTTPS auto-negotiates
+    :ref:`protocol version 3 <sender_conf_protocol_version>` while TCP/TCPS
+    must configure it explicitly:
+    ``tcp::addr=localhost:9009;protocol_version=3;``.
 
 For more details, see the
 `QuestDB DECIMAL documentation <https://questdb.com/docs/reference/sql/datatypes/#decimal>`_.
+
+Production
+==========
+
+.. _connect_auth_tls_example:
+
+TLS, token auth, multi-host
+---------------------------
+
+The following production-shaped example combines TLS with OS trust roots, a
+bearer token, a multi-node ``addr`` list, a disk-backed store-and-forward
+spool, and a connection-event listener.
+
+.. literalinclude:: ../examples/connect_auth_tls.py
+   :language: python
+
+Other transports
+================
+
+.. _qwp_udp_example:
+
+QWP over UDP
+------------
+
+The following example sends a row using QuestWire Protocol over UDP.
+
+Requires a QuestDB instance with QWP/UDP receiver support enabled. The
+default listener port is ``9007``.
+
+.. literalinclude:: ../examples/qwp_udp.py
+   :language: python
+
+Legacy ILP (HTTP/TCP)
+=====================
+
+The 4.x-style standalone :class:`Sender <questdb.Sender>` remains fully
+supported for InfluxDB Line Protocol ingestion.
+
+HTTP with Token Auth
+--------------------
+
+The following example connects to the database and sends two rows (lines).
+
+The connection is made via HTTPS and uses token based authentication.
+
+The data is sent at the end of the ``with`` block.
+
+.. literalinclude:: ../examples/http_basic.py
+   :language: python
+
+HTTP Transactions
+-----------------
+
+The following example sends rows atomically inside an ILP/HTTP transaction,
+a capability unique to the HTTP transport.
+
+.. literalinclude:: ../examples/http_transaction.py
+   :language: python
+
+TCP Basics
+----------
+
+The following example writes rows over ILP/TCP with auto-flush.
+
+.. literalinclude:: ../examples/tcp_basic.py
+   :language: python
+
+.. _auth_and_tls_example:
+
+TCP Authentication and TLS
+--------------------------
+
+Continuing from the previous example, the connection is authenticated
+and also uses TLS.
+
+.. literalinclude:: ../examples/tcp_auth_tls.py
+   :language: python
+
+Further legacy examples — ECDSA auth (``tcp_auth.py``) and configuration
+loading (``http_from_conf.py``) — live in the repository's
+`examples directory <https://github.com/questdb/py-questdb-client/tree/main/examples>`_.

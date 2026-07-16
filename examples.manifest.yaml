@@ -1,16 +1,3 @@
-- name: ilp
-  lang: python
-  path: examples/basic.py
-  header: |-
-    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
-    and [repo](https://github.com/questdb/py-questdb-client).
-
-    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
-    including ingesting data from Pandas dataframes.
-
-    ```
-    python3 -m pip install -U questdb
-    ```
 - name: qwpws
   lang: python
   path: examples/connect_basic.py
@@ -23,6 +10,22 @@
 
     ```
     python3 -m pip install -U questdb
+    ```
+  addr:
+    host: localhost
+    port: 9000
+- name: qwpws-query
+  lang: python
+  path: examples/connect_query.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb pandas
     ```
   addr:
     host: localhost
@@ -43,72 +46,6 @@
   addr:
     host: localhost
     port: 9000
-- name: qwpudp
-  lang: python
-  path: examples/qwp_udp.py
-  header: |-
-    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
-    and [repo](https://github.com/questdb/py-questdb-client).
-
-    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
-    including ingesting data from Pandas dataframes.
-
-    ```
-    python3 -m pip install -U questdb
-    ```
-  addr:
-    host: localhost
-    port: 9007
-- name: ilp-auth
-  lang: python
-  path: examples/auth.py
-  header: |-
-    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
-    and [repo](https://github.com/questdb/py-questdb-client).
-
-    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
-    including ingesting data from Pandas dataframes.
-
-    ```
-    python3 -m pip install -U questdb
-    ```
-  auth:
-    kid: testUser1
-    d: 5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48
-    x: fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU
-    y: Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac
-  addr:
-    host: localhost
-    port: 9009
-- name: ilp-auth-tls
-  lang: python
-  path: examples/auth_and_tls.py
-  header: |-
-    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
-    and [repo](https://github.com/questdb/py-questdb-client).
-
-    ```
-    python3 -m pip install -U questdb
-    ```
-  auth:
-    kid: testUser1
-    d: 5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48
-    x: fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU
-    y: Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac
-  addr:
-    host: localhost
-    port: 9009
-- name: ilp-from-conf
-  lang: python
-  path: examples/from_conf.py
-  header: |-
-    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
-    and [repo](https://github.com/questdb/py-questdb-client).
-
-    ```
-    python3 -m pip install -U questdb
-    ```
-  conf: http::addr=localhost:9000;
 - name: qwpws-polars
   lang: python
   path: examples/polars_basic.py
@@ -137,3 +74,82 @@
     python3 -m pip install -U 'questdb[dataframe]'
     ```
   conf: ws::addr=localhost:9000;
+- name: qwpudp
+  lang: python
+  path: examples/qwp_udp.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  addr:
+    host: localhost
+    port: 9007
+- name: ilp
+  lang: python
+  path: examples/tcp_basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+- name: ilp-auth
+  lang: python
+  path: examples/tcp_auth.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  auth:
+    kid: testUser1
+    d: 5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48
+    x: fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU
+    y: Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac
+  addr:
+    host: localhost
+    port: 9009
+- name: ilp-auth-tls
+  lang: python
+  path: examples/tcp_auth_tls.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  auth:
+    kid: testUser1
+    d: 5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48
+    x: fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU
+    y: Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac
+  addr:
+    host: localhost
+    port: 9009
+- name: ilp-from-conf
+  lang: python
+  path: examples/http_from_conf.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  conf: http::addr=localhost:9000;
