@@ -25,6 +25,8 @@
 __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
+    "PooledQuery",
+    "PooledSender",
     "QuestDB",
     "QuestDBError",
     "QuestDBErrorCode",
@@ -1693,3 +1695,7 @@ class Sender:
 
         This is implemented by calling :func:`Sender.close`.
         """
+
+
+PooledSender = _PooledSender
+PooledQuery = _PooledQuery

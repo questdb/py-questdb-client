@@ -166,6 +166,13 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(ServerInfo, qi.ServerInfo)
         self.assertIs(ServerRole, qi.ServerRole)
 
+    def test_pooled_lease_types_exported_from_package(self):
+        from questdb import PooledQuery, PooledSender
+        self.assertIs(PooledSender, qi.PooledSender)
+        self.assertIs(PooledQuery, qi.PooledQuery)
+        self.assertIs(PooledSender, qi._PooledSender)
+        self.assertIs(PooledQuery, qi._PooledQuery)
+
     def test_ingress_error_can_carry_qwpws_diagnostic(self):
         err = qi.QuestDBError(
             qi.QuestDBErrorCode.SocketError,

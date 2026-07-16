@@ -33,6 +33,8 @@ API for fast data ingestion into and querying from QuestDB.
 __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
+    'PooledQuery',
+    'PooledSender',
     'QuestDB',
     'QuestDBError',
     'QuestDBErrorCode',
@@ -8272,3 +8274,7 @@ cdef class _PooledQuery:
         if self._lock is not None:
             with self._lock:
                 self._release_locked()
+
+
+PooledSender = _PooledSender
+PooledQuery = _PooledQuery

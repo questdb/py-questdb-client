@@ -27,6 +27,10 @@ Breaking changes
   ``close()``, and is not a ``Sender`` subclass — the standalone-only API
   such as ``establish()`` or FSN tracking simply does not exist on it. One
   concurrency rule applies everywhere: borrow one sender per thread.
+  The lease types are exported as :class:`questdb.PooledSender` and
+  :class:`questdb.PooledQuery` for ``isinstance`` checks and type
+  annotations; instances are only ever constructed by
+  :meth:`QuestDB.sender` and :meth:`QuestDB.query`.
 - ``Buffer`` is no longer part of the top-level API. Buffers are managed
   internally by senders; for concurrent serialization borrow more senders.
   Legacy explicit-buffer code keeps working through the ``questdb.ingress``
