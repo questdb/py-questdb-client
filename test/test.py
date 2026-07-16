@@ -2424,6 +2424,9 @@ class TestTimestampNanos(TestBases.Timestamp):
             '    assert e.code.name == "InvalidTimestamp", e.code\n'
             'print("rejected")\n')
         env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, [
+            os.path.dirname(os.path.dirname(qi.__file__)),
+            env.get('PYTHONPATH')]))
         env['QUESTDB_NAIVE_DATETIME'] = 'error'
         proc = subprocess.run(
             [sys.executable, '-c', code],
@@ -2442,6 +2445,9 @@ class TestTimestampNanos(TestBases.Timestamp):
             '    assert "Invalid QUESTDB_NAIVE_DATETIME" in str(e), e\n'
             'print("rejected")\n')
         env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, [
+            os.path.dirname(os.path.dirname(qi.__file__)),
+            env.get('PYTHONPATH')]))
         env['QUESTDB_NAIVE_DATETIME'] = 'local'
         proc = subprocess.run(
             [sys.executable, '-c', code],
