@@ -130,6 +130,4 @@ Behavioural changes to watch for
   times, convert with ``dt.astimezone()``; if they were already UTC, use
   ``dt.replace(tzinfo=timezone.utc)`` (or just silence the one-time
   ``UserWarning``). ``datetime.now()`` callers should switch to
-  ``TimestampNanos.now()`` or ``datetime.now(timezone.utc)``. Set
-  ``QUESTDB_NAIVE_DATETIME=error`` to reject naive ``datetime`` objects
-  outright.
+  ``TimestampNanos.now()`` or ``datetime.now(timezone.utc)``.

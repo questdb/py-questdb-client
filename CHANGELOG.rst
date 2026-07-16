@@ -88,9 +88,7 @@ Breaking changes
   (``datetime.timestamp()`` semantics) — the first naive conversion on such
   a path now emits a one-per-process ``UserWarning``. Note that
   ``datetime.now()`` is your local wall clock: for "now", use
-  ``TimestampNanos.now()`` or ``datetime.now(timezone.utc)``. Set the
-  ``QUESTDB_NAIVE_DATETIME=error`` environment variable to reject naive
-  ``datetime`` objects outright instead.
+  ``TimestampNanos.now()`` or ``datetime.now(timezone.utc)``.
 
 Features
 ~~~~~~~~

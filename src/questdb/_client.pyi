@@ -252,8 +252,7 @@ class TimestampMicros:
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
     the timezone to use. A ``datetime`` object without an associated timezone
-    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
-    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process).
     Note that ``datetime.datetime.now()`` is your local wall clock: use
     ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
     class for the current instant.
@@ -305,8 +304,7 @@ class TimestampNanos:
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
     the timezone to use. A ``datetime`` object without an associated timezone
-    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
-    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process).
     Note that ``datetime.datetime.now()`` is your local wall clock: use
     ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
     class for the current instant.
@@ -637,9 +635,9 @@ class Buffer:
             use ``TimestampNanos.now()``.
             When passing a ``datetime.datetime`` object, the timestamp is
             converted to nanoseconds.
-            A naive ``datetime`` object is interpreted as UTC; a
-            ``UserWarning`` is emitted once per process, and
-            ``QUESTDB_NAIVE_DATETIME=error`` rejects naive values instead
+            A naive ``datetime`` object is interpreted as UTC — never
+            your machine's local timezone — and a ``UserWarning`` is
+            emitted once per process
             (call ``datetime.datetime.now(tz=datetime.timezone.utc)``
             for the current timestamp to
             avoid bugs).

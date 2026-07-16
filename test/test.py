@@ -2413,47 +2413,7 @@ class TestTimestampNanos(TestBases.Timestamp):
         self.assertIn('interpreted as UTC', str(emitted[0].message))
         self.assertIn('If you meant "now"', str(emitted[0].message))
 
-    def test_naive_datetime_error_policy(self):
-        code = (
-            'import datetime\n'
-            'from questdb._client import TimestampNanos, QuestDBError\n'
-            'try:\n'
-            '    TimestampNanos.from_datetime(datetime.datetime(2026, 1, 1))\n'
-            '    raise SystemExit("no raise")\n'
-            'except QuestDBError as e:\n'
-            '    assert e.code.name == "InvalidTimestamp", e.code\n'
-            'print("rejected")\n')
-        env = dict(os.environ)
-        env['PYTHONPATH'] = os.pathsep.join(filter(None, [
-            os.path.dirname(os.path.dirname(qi.__file__)),
-            env.get('PYTHONPATH')]))
-        env['QUESTDB_NAIVE_DATETIME'] = 'error'
-        proc = subprocess.run(
-            [sys.executable, '-c', code],
-            env=env, capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn('rejected', proc.stdout)
 
-    def test_naive_datetime_invalid_policy(self):
-        code = (
-            'import datetime\n'
-            'from questdb._client import TimestampNanos\n'
-            'try:\n'
-            '    TimestampNanos.from_datetime(datetime.datetime(2026, 1, 1))\n'
-            '    raise SystemExit("no raise")\n'
-            'except ValueError as e:\n'
-            '    assert "Invalid QUESTDB_NAIVE_DATETIME" in str(e), e\n'
-            'print("rejected")\n')
-        env = dict(os.environ)
-        env['PYTHONPATH'] = os.pathsep.join(filter(None, [
-            os.path.dirname(os.path.dirname(qi.__file__)),
-            env.get('PYTHONPATH')]))
-        env['QUESTDB_NAIVE_DATETIME'] = 'local'
-        proc = subprocess.run(
-            [sys.executable, '-c', code],
-            env=env, capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn('rejected', proc.stdout)
 
     def test_from_datetime_out_of_int64_range(self):
         utc = datetime.timezone.utc

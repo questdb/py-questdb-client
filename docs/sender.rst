@@ -243,8 +243,7 @@ the database.
     DataFrame column cells, scalar ``at=`` values, ``row()`` values and
     query binds. Beware that ``datetime.now()`` is your local wall clock —
     for "now", use ``TimestampNanos.now()`` or
-    ``datetime.now(timezone.utc)``. Set ``QUESTDB_NAIVE_DATETIME=error``
-    to reject naive ``datetime`` objects outright.
+    ``datetime.now(timezone.utc)``.
 
 .. note::
 

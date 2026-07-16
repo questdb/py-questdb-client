@@ -633,32 +633,13 @@ cdef object _UTC_EPOCH = datetime.datetime(
     1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
-_NAIVE_DATETIME_POLICY = None
 _NAIVE_DATETIME_WARNED = False
-
-
-cdef str _resolve_naive_datetime_policy():
-    global _NAIVE_DATETIME_POLICY
-    if _NAIVE_DATETIME_POLICY is None:
-        policy = os.environ.get('QUESTDB_NAIVE_DATETIME', 'utc').lower()
-        if policy not in ('utc', 'error'):
-            raise ValueError(
-                'Invalid QUESTDB_NAIVE_DATETIME environment variable: '
-                f'{policy!r}. Valid values: \'utc\' (default), \'error\'.')
-        _NAIVE_DATETIME_POLICY = policy
-    return _NAIVE_DATETIME_POLICY
 
 
 cdef object _as_utc_aware(cp_datetime dt):
     global _NAIVE_DATETIME_WARNED
     if dt.tzinfo is not None:
         return dt
-    if _resolve_naive_datetime_policy() == 'error':
-        raise QuestDBError(
-            QuestDBErrorCode.InvalidTimestamp,
-            'Naive datetime rejected (QUESTDB_NAIVE_DATETIME=error): '
-            'attach a timezone, e.g. dt.replace(tzinfo=timezone.utc) '
-            'or dt.astimezone().')
     if not _NAIVE_DATETIME_WARNED:
         _NAIVE_DATETIME_WARNED = True
         warnings.warn(
@@ -750,8 +731,7 @@ cdef class TimestampMicros:
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
     the timezone to use. A ``datetime`` object without an associated timezone
-    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
-    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process).
     Note that ``datetime.datetime.now()`` is your local wall clock: use
     ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
     class for the current instant.
@@ -817,8 +797,7 @@ cdef class TimestampNanos:
 
     We recommend that when using ``datetime`` objects, you explicitly pass in
     the timezone to use. A ``datetime`` object without an associated timezone
-    is interpreted as UTC (a ``UserWarning`` is emitted once per process;
-    set ``QUESTDB_NAIVE_DATETIME=error`` to reject naive values instead).
+    is interpreted as UTC (a ``UserWarning`` is emitted once per process).
     Note that ``datetime.datetime.now()`` is your local wall clock: use
     ``datetime.datetime.now(datetime.timezone.utc)`` or ``now()`` on this
     class for the current instant.
@@ -1612,9 +1591,9 @@ cdef class Buffer:
             use ``TimestampNanos.now()``.
             When passing a ``datetime.datetime`` object, the timestamp is
             converted to nanoseconds.
-            A naive ``datetime`` object is interpreted as UTC; a
-            ``UserWarning`` is emitted once per process, and
-            ``QUESTDB_NAIVE_DATETIME=error`` rejects naive values instead
+            A naive ``datetime`` object is interpreted as UTC — never
+            your machine's local timezone — and a ``UserWarning`` is
+            emitted once per process
             (call ``datetime.datetime.now(tz=datetime.timezone.utc)``
             for the current timestamp to
             avoid bugs).
