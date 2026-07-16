@@ -23,8 +23,8 @@ license-files = ["LICENSE.txt"]
 dependencies = ["numpy>=1.21.0"]  # Keep in sync with build-system.requires
 
 [[project.authors]]
-name = "Adam Cimarosti"
-email = "adam@questdb.com"
+name = "Vlad Ilyushchenko"
+email = "vlad@questdb.com"
 
 [project.optional-dependencies]
 publish = ["twine", "wheel"]
