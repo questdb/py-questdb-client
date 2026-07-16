@@ -81,6 +81,7 @@ cdef class _ReaderHandle:
         self._close()
 
 
+@cython.no_gc_clear
 cdef class _CursorHandle:
     """Owns a ``reader_cursor*`` + back-ref to its reader.
 
@@ -92,7 +93,7 @@ cdef class _CursorHandle:
     ``_owns_reader`` selects who releases the reader. The one-shot
     ``QuestDB.query(sql)`` path leaves it ``True``: the cursor is the
     reader's sole owner, so ``_free()`` closes the reader eagerly. A
-    ``_PooledQuery`` lease sets it ``False``: the lease keeps its
+    ``PooledReader`` lease sets it ``False``: the lease keeps its
     reader across queries, so ``_free()`` releases only the cursor and
     drops the back-reference. The clean-drain paths clear
     ``_reader_ref._must_close`` *before* calling ``_free()``, so the
@@ -325,9 +326,13 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
     try:
         handle = _ReaderHandle()
     except:
-        reader_close(reader)
+        with nogil:
+            reader_close(reader)
         raise
     handle._attach(reader)
+    # A freshly borrowed reader is pristine: recycle it unless a query
+    # arms _must_close at the network boundary (_execute_query).
+    handle._must_close = False
     return handle
 
 

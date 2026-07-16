@@ -42,8 +42,8 @@ The pooled sender publishes into the store-and-forward QWP path. A plain
 ``flush()`` returns after local acceptance; ``flush(wait=True)`` also waits
 for the server's OK acknowledgement of everything published through the
 lease. The wait is a pure ack barrier — only a terminal connection failure
-raises. Server rejections are pushed to the pool's ``qwp_ws_error_handler``
-(a :func:`questdb.connect` keyword; one :class:`questdb.QwpWsError` per
+raises. Server rejections are pushed to the pool's ``error_handler``
+(a :func:`questdb.connect` keyword; one :class:`questdb.SenderError` per
 rejection, on a dedicated dispatcher thread). Without a handler every
 rejection is logged through the ``questdb`` logger — ``ERROR`` for terminal
 rejections, ``WARNING`` for retriable ones, which the queue replays — so

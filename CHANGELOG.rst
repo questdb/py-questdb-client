@@ -2,11 +2,27 @@
 
 
 Changelog
-
 =========
 
-5.0.0
------
+5.0.0 (unreleased)
+------------------
+
+Highlights
+~~~~~~~~~~
+
+- One QWP/WebSocket handle for everything: :func:`questdb.connect` returns
+  a pooled, thread-safe :class:`QuestDB <questdb.QuestDB>` that streams
+  rows, bulk-loads DataFrames, and runs SQL queries.
+- Acknowledged, durable ingestion: rows publish into a store-and-forward
+  queue with automatic reconnect and replay; opt into disk persistence
+  with ``sf_dir`` to survive client restarts.
+- Server rejections are never silent: every rejection is pushed to a
+  handler (or the ``questdb`` logger), with terminal failures also raised
+  from the affected sender.
+- Query egress: SQL with bind parameters streamed back as Arrow record
+  batches into pandas, polars, or pyarrow — pyarrow-free by default.
+- Columnar DataFrame ingestion for pandas / polars / pyarrow and any
+  Arrow C Data Interface source.
 
 Breaking changes
 ~~~~~~~~~~~~~~~~~
@@ -30,20 +46,12 @@ Breaking changes
   ``close()``, and is not a ``Sender`` subclass — the standalone-only API
   such as ``establish()`` or FSN tracking simply does not exist on it. One
   concurrency rule applies everywhere: borrow one sender per thread.
+  The pooled sender has no auto-flush: flushing is always explicit
+  (``flush()``, or ``flush(wait=True)`` for the server acknowledgement).
   The lease types are exported as :class:`questdb.PooledSender` and
   :class:`questdb.PooledReader` for ``isinstance`` checks and type
   annotations; instances are only ever constructed by
   :meth:`QuestDB.sender <questdb.QuestDB.sender>` and :meth:`QuestDB.reader <questdb.QuestDB.reader>`.
-- Server rejections observed by the pool's store-and-forward connections
-  are pushed to the ``qwp_ws_error_handler`` callable passed to
-  :func:`questdb.connect` (one :class:`questdb.QwpWsError` per rejection,
-  on a dedicated dispatcher thread; totals via
-  :attr:`QuestDB.rejection_events_delivered <questdb.QuestDB.rejection_events_delivered>` /
-  :attr:`QuestDB.rejection_events_dropped <questdb.QuestDB.rejection_events_dropped>`). Without a handler every
-  rejection is logged through the ``questdb`` logger, so rejections are
-  never silent. ``PooledSender.flush(wait=True)`` / ``wait()`` are pure
-  ack barriers scoped to the lease's own publications: only a terminal
-  connection failure raises there.
 - ``Buffer`` is no longer part of the top-level API. Buffers are managed
   internally by senders; for concurrent serialization borrow more senders.
   Legacy explicit-buffer code keeps working through the ``questdb.ingress``
@@ -119,10 +127,10 @@ ILP transports.
   ingestion with frame-sequence-number (FSN) tracking. New ``Sender``
   methods ``flush_and_get_fsn``, ``flush_and_keep_and_get_fsn``,
   ``published_fsn``, ``acked_fsn``, ``await_acked_fsn``, ``drive_once``,
-  ``poll_qwp_ws_error``, ``qwp_ws_errors_dropped`` and ``close_drain``.
-  Server diagnostics are reported through a ``qwp_ws_error_handler``
-  callback or polled as :class:`QwpWsError <questdb.QwpWsError>` values (classified by the
-  :class:`QwpWsErrorCategory <questdb.QwpWsErrorCategory>`, :class:`QwpWsErrorPolicy <questdb.QwpWsErrorPolicy>` and
+  ``poll_error``, ``error_events_dropped`` and ``close_drain``.
+  Server diagnostics are reported through an ``error_handler``
+  callback or polled as :class:`SenderError <questdb.SenderError>` values (classified by the
+  :class:`SenderErrorCategory <questdb.SenderErrorCategory>`, :class:`SenderErrorPolicy <questdb.SenderErrorPolicy>` and
   :class:`QwpWsProgress <questdb.QwpWsProgress>` enums); terminal server rejections raise
   :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`.
 
@@ -131,7 +139,7 @@ Additional configuration keys ``tls_roots_password``,
 Every new key is equally available as a ``Sender`` / ``Sender.from_conf`` /
 ``Sender.from_env`` keyword argument (``max_datagram_size``,
 ``multicast_ttl``, ``tls_roots_password``, ``retry_max_backoff``,
-``qwp_ws_progress`` and ``qwp_ws_error_handler``).
+``qwp_ws_progress`` and ``error_handler``).
 
 The pooled :class:`QuestDB <questdb.QuestDB>` handle exposes :meth:`QuestDB.sender <questdb.QuestDB.sender>`, returning
 a context-managed row sender for row-at-a-time QWP/WebSocket ingestion.
@@ -139,7 +147,37 @@ Row builders, whole-dataframe ingestion, and queries share one
 ``questdb.connect("ws::...")`` configuration without exposing separate row
 and column sender pools. The pooled sender's ``dataframe()`` routes to the
 same direct columnar path as :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, borrowing a direct
-connection from the pool for that call only.
+connection from the pool for that call only (prefer calling
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` directly).
+
+Store-and-forward delivery
+**************************
+
+Pooled row senders publish into a local store-and-forward queue: ``flush()``
+returns on local acceptance and a background runner delivers the frames,
+reconnecting and replaying across transient failures within the
+``reconnect_*`` budget. With the opt-in ``sf_dir`` directory the queue is
+disk-backed per sender slot and unacknowledged frames are replayed after a
+client restart (``sender_id`` names the slots; ``sf_max_bytes`` /
+``sf_max_total_bytes`` / ``sf_append_deadline_millis`` /
+``close_flush_timeout_millis`` bound it — see the configuration reference).
+``flush(wait=True)`` / ``wait()`` observe the server acknowledgement;
+``request_durable_ack=on`` upgrades acknowledgements to durable ones on
+servers that support them.
+
+Server rejections are pushed to the ``error_handler`` callable
+passed to :func:`questdb.connect` (one :class:`questdb.SenderError` per
+rejection, on a dedicated dispatcher thread; totals via
+:attr:`QuestDB.error_events_delivered <questdb.QuestDB.error_events_delivered>` /
+:attr:`QuestDB.error_events_dropped <questdb.QuestDB.error_events_dropped>`). Without a handler every
+rejection is logged through the ``questdb`` logger, so rejections are
+never silent. ``PooledSender.flush(wait=True)`` / ``wait()`` are pure ack
+barriers scoped to the lease's own publications: only a terminal
+connection failure raises there.
+
+Query connections take their own keys — result-set ``compression``
+(Zstandard) and the mid-query ``failover_*`` / ``target`` policy — all
+documented in the configuration reference.
 
 Query Egress
 ************
@@ -243,8 +281,8 @@ cannot be expressed on the QWP columnar path) and the
 ``ArrowUnsupportedColumnKind``, ``ArrowIngest``, ``FailoverRetry``,
 ``ConnectTimeout``, ``FailoverWouldDuplicate``, ``Cancelled``,
 ``BatchTooLarge`` and ``StoreResendRequired``.
-:class:`QuestDBError <questdb.QuestDBError>` gains a ``qwp_ws_error`` property exposing the
-structured :class:`QwpWsError <questdb.QwpWsError>` view on a server-side QWP/WebSocket
+:class:`QuestDBError <questdb.QuestDBError>` gains a ``rejection`` property exposing the
+structured :class:`SenderError <questdb.SenderError>` view on a server-side QWP/WebSocket
 rejection, plus an ``in_doubt`` property indicating that failed ingress input
 may already have been delivered and must not be blindly replayed without an
 appropriate table-level deduplication guarantee.
@@ -434,7 +472,7 @@ This release does not introduce new APIs, instead enhancing the sender/buffer's
             'trade_executions',
             symbols={
                 'product': 'VOD.L',
-                'parent_order': '65d1ba36-390e-49a2-93e3-a05ef004b5ff'
+                'parent_order': '65d1ba36-390e-49a2-93e3-a05ef004b5ff',
                 'side': 'buy'},
             columns={
                 'order_sent': TimestampNanos(1759246702031355012)},
@@ -448,7 +486,7 @@ continue using the ``TIMESTAMP`` column, even when nanoseconds are specified in
 the client.
 
 This is a breaking change because it introduces new breaking timestamp
-`column auto-creation <https://questdb.com/docs/reference/api/ilp/overview/#table-and-column-auto-creation>`
+`column auto-creation <https://questdb.com/docs/reference/api/ilp/overview/#table-and-column-auto-creation>`_
 behaviour. For full details and upgrade advice, see the
 `nanosecond PR on GitHub <https://github.com/questdb/py-questdb-client/pull/113>`_.
 
@@ -876,7 +914,7 @@ Errata
 * In previous releases the documentation for the ``from_datetime()`` methods of
   the ``TimestampNanos`` and ``TimestampMicros`` types recommended calling
   ``datetime.datetime.utcnow()`` to get the current timestamp. This is incorrect
-  as it will (confusinly) return object with the local timezone instead of UTC.
+  as it will (confusingly) return an object with the local timezone instead of UTC.
   This documentation has been corrected and now recommends calling
   ``datetime.datetime.now(tz=datetime.timezone.utc)`` or (more efficiently) the
   new ``TimestampNanos.now()`` and ``TimestampMicros.now()`` methods.

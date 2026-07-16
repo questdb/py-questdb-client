@@ -35,17 +35,17 @@ __all__ = [
     'ConnectionEventKind',
     'PooledReader',
     'PooledSender',
+    'Protocol',
+    'QueryResult',
     'QuestDB',
     'QuestDBError',
     'QuestDBErrorCode',
     'QuestDBServerRejectionError',
-    'Protocol',
-    'QueryResult',
-    'Sender',
-    'QwpWsError',
-    'QwpWsErrorCategory',
-    'QwpWsErrorPolicy',
     'QwpWsProgress',
+    'Sender',
+    'SenderError',
+    'SenderErrorCategory',
+    'SenderErrorPolicy',
     'SenderTransaction',
     'ServerInfo',
     'ServerRole',
@@ -215,10 +215,10 @@ class QuestDBErrorCode(Enum):
 
 class QuestDBError(Exception):
     """An error whilst using the QuestDB client."""
-    def __init__(self, code, msg, qwp_ws_error=None, *, in_doubt=False):
+    def __init__(self, code, msg, sender_error=None, *, in_doubt=False):
         super().__init__(msg)
         self._code = code
-        self._qwp_ws_error = qwp_ws_error
+        self._sender_error = sender_error
         self._in_doubt = bool(in_doubt)
 
     @property
@@ -237,14 +237,14 @@ class QuestDBError(Exception):
         return self._in_doubt
 
     @property
-    def qwp_ws_error(self):
+    def sender_error(self):
         """
         Return the structured QWP/WebSocket diagnostic, if this error carries
         one from a QWP/WebSocket sender failure.
         """
-        if self._qwp_ws_error is not None:
-            self._qwp_ws_error = _qwp_ws_error_from_raw(self._qwp_ws_error)
-        return self._qwp_ws_error
+        if self._sender_error is not None:
+            self._sender_error = _sender_error_from_raw(self._sender_error)
+        return self._sender_error
 
 
 class QuestDBServerRejectionError(QuestDBError):
@@ -252,7 +252,7 @@ class QuestDBServerRejectionError(QuestDBError):
     A terminal QWP/WebSocket server rejection.
 
     The structured server payload is available through
-    :attr:`QuestDBError.qwp_ws_error`.
+    :attr:`QuestDBError.sender_error`.
     """
 
 
@@ -388,7 +388,7 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         raise ValueError('Internal error converting error code.')
 
 
-cdef inline object c_qwp_ws_error_view_to_raw(
+cdef inline object c_sender_error_view_to_raw(
         line_sender_qwpws_error_view view):
     cdef object message
     if view.message == NULL:
@@ -407,7 +407,7 @@ cdef inline object c_qwp_ws_error_view_to_raw(
 
 
 cdef inline object c_err_to_fields(questdb_error* err):
-    """Construct a ``SenderError`` from a C error, which will be freed."""
+    """Extract ``QuestDBError`` fields from a C error, which will be freed."""
     if err == NULL:
         return (
             QuestDBErrorCode.SocketError,
@@ -422,19 +422,19 @@ cdef inline object c_err_to_fields(questdb_error* err):
     cdef bint in_doubt = questdb_error_in_doubt(err)
     cdef object py_msg
     cdef object py_code
-    cdef object py_qwp_ws_error = None
+    cdef object py_sender_error = None
     try:
         py_code = c_err_code_to_py(code)
         py_msg = PyUnicode_FromStringAndSize(c_msg, <Py_ssize_t>c_len)
         if line_sender_error_qwpws_get_view(err, &qwp_ws_view):
-            py_qwp_ws_error = c_qwp_ws_error_view_to_raw(qwp_ws_view)
-        return (py_code, py_msg, py_qwp_ws_error, in_doubt)
+            py_sender_error = c_sender_error_view_to_raw(qwp_ws_view)
+        return (py_code, py_msg, py_sender_error, in_doubt)
     finally:
         questdb_error_free(err)
 
 
 cdef inline object c_err_to_py(line_sender_error* err):
-    """Construct an ``QuestDBError`` from a C error, which will be freed."""
+    """Construct a ``QuestDBError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(
@@ -443,7 +443,7 @@ cdef inline object c_err_to_py(line_sender_error* err):
 
 
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
-    """Construct an ``QuestDBError`` from a C error, which will be freed."""
+    """Construct a ``QuestDBError`` from a C error, which will be freed."""
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(
@@ -640,15 +640,19 @@ cdef object _as_utc_aware(cp_datetime dt):
     global _NAIVE_DATETIME_WARNED
     if dt.tzinfo is not None:
         return dt
+    if dt != dt:
+        raise ValueError('NaT is not a valid timestamp.')
     if not _NAIVE_DATETIME_WARNED:
         _NAIVE_DATETIME_WARNED = True
+        # cdef frames and this module's def entry points are invisible to
+        # the warnings stack walker, so level 1 is already the user's call.
         warnings.warn(
             'Naive datetime interpreted as UTC (questdb 4.x used local '
             'time). If you meant "now", use TimestampNanos.now() or '
             'datetime.now(timezone.utc); pass timezone-aware datetimes '
             'to silence this warning.',
             UserWarning,
-            stacklevel=3)
+            stacklevel=1)
     return dt.replace(tzinfo=datetime.timezone.utc)
 
 
@@ -2045,7 +2049,7 @@ class QwpWsProgress(TaggedEnum):
     Manual = ('manual', LINE_SENDER_QWPWS_PROGRESS_MANUAL)
 
 
-class QwpWsErrorCategory(TaggedEnum):
+class SenderErrorCategory(TaggedEnum):
     """
     Category of a structured QWP/WebSocket diagnostic.
     """
@@ -2063,7 +2067,7 @@ class QwpWsErrorCategory(TaggedEnum):
     Unknown = ('unknown', LINE_SENDER_QWPWS_ERROR_UNKNOWN)
 
 
-class QwpWsErrorPolicy(TaggedEnum):
+class SenderErrorPolicy(TaggedEnum):
     """
     Applied policy for a structured QWP/WebSocket diagnostic.
     """
@@ -2075,10 +2079,10 @@ class QwpWsErrorPolicy(TaggedEnum):
 
 
 @dataclass(frozen=True)
-class QwpWsError:
+class SenderError:
     """Structured QWP/WebSocket server diagnostic."""
-    category: QwpWsErrorCategory
-    applied_policy: QwpWsErrorPolicy
+    category: SenderErrorCategory
+    applied_policy: SenderErrorPolicy
     status: Optional[int]
     message: str
     message_sequence: Optional[int]
@@ -2138,37 +2142,50 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len)
 
 
+_DISPATCH_THREAD = threading.local()
+
+
+cdef void _connection_event_dispatch(
+        void* user_data,
+        const questdb_connection_event* event) noexcept with gil:
+    _DISPATCH_THREAD.active = True
+    try:
+        listener = <object>user_data
+        kind = ConnectionEventKind.Connected
+        for entry in ConnectionEventKind:
+            if entry.c_value == <int>event.kind:
+                kind = entry
+                break
+        listener(ConnectionEvent(
+            kind=kind,
+            host=_conn_event_str(event.host, event.host_len),
+            port=_conn_event_str(event.port, event.port_len),
+            previous_host=_conn_event_str(
+                event.previous_host, event.previous_host_len),
+            previous_port=_conn_event_str(
+                event.previous_port, event.previous_port_len),
+            attempt_number=event.attempt_number
+                if event.has_attempt else None,
+            cause_code=c_err_code_to_py(event.cause_code)
+                if event.has_cause else None,
+            cause_msg=_conn_event_str(event.cause_msg, event.cause_msg_len)
+                if event.has_cause else None,
+            timestamp_millis=event.timestamp_millis))
+    except BaseException:
+        logging.getLogger("questdb").exception(
+            "connection event listener failed")
+    finally:
+        _DISPATCH_THREAD.active = False
+
+
 cdef void _connection_event_trampoline(
         void* user_data,
         const questdb_connection_event* event) noexcept nogil:
+    # No object locals here: the finalizing early return must not touch
+    # the GIL, which a Cython epilogue with object cleanup would.
     if qdb_py_is_finalizing():
         return
-    with gil:
-        try:
-            listener = <object>user_data
-            kind = ConnectionEventKind.Connected
-            for entry in ConnectionEventKind:
-                if entry.c_value == <int>event.kind:
-                    kind = entry
-                    break
-            listener(ConnectionEvent(
-                kind=kind,
-                host=_conn_event_str(event.host, event.host_len),
-                port=_conn_event_str(event.port, event.port_len),
-                previous_host=_conn_event_str(
-                    event.previous_host, event.previous_host_len),
-                previous_port=_conn_event_str(
-                    event.previous_port, event.previous_port_len),
-                attempt_number=event.attempt_number
-                    if event.has_attempt else None,
-                cause_code=c_err_code_to_py(event.cause_code)
-                    if event.has_cause else None,
-                cause_msg=_conn_event_str(event.cause_msg, event.cause_msg_len)
-                    if event.has_cause else None,
-                timestamp_millis=event.timestamp_millis))
-        except BaseException:
-            logging.getLogger("questdb").exception(
-                "connection event listener failed")
+    _connection_event_dispatch(user_data, event)
 
 
 class ServerRole(TaggedEnum):
@@ -2211,8 +2228,8 @@ class ServerInfo:
     zone_id: Optional[str]
 
 
-def _qwp_ws_error_from_raw(raw):
-    if raw is None or isinstance(raw, QwpWsError):
+def _sender_error_from_raw(raw):
+    if raw is None or isinstance(raw, SenderError):
         return raw
 
     (
@@ -2225,19 +2242,19 @@ def _qwp_ws_error_from_raw(raw):
         to_fsn,
     ) = raw
 
-    py_category = QwpWsErrorCategory.Unknown
-    for entry in QwpWsErrorCategory:
+    py_category = SenderErrorCategory.Unknown
+    for entry in SenderErrorCategory:
         if entry.c_value == category:
             py_category = entry
             break
 
-    py_policy = QwpWsErrorPolicy.Terminal
-    for entry in QwpWsErrorPolicy:
+    py_policy = SenderErrorPolicy.Terminal
+    for entry in SenderErrorPolicy:
         if entry.c_value == applied_policy:
             py_policy = entry
             break
 
-    return QwpWsError(
+    return SenderError(
         py_category,
         py_policy,
         status,
@@ -2247,10 +2264,10 @@ def _qwp_ws_error_from_raw(raw):
         to_fsn)
 
 
-def _default_qwp_ws_error_handler(error):
+def _default_error_handler(error):
     level = (
         logging.ERROR
-        if error.applied_policy is QwpWsErrorPolicy.Terminal
+        if error.applied_policy is SenderErrorPolicy.Terminal
         else logging.WARNING)
     logging.getLogger("questdb").log(
         level,
@@ -2265,19 +2282,29 @@ def _default_qwp_ws_error_handler(error):
         error.message)
 
 
-cdef void _qwp_ws_error_trampoline(
+cdef void _sender_error_dispatch(
+        void* user_data,
+        const line_sender_qwpws_error_view* view) noexcept with gil:
+    _DISPATCH_THREAD.active = True
+    try:
+        handler = <object>user_data
+        handler(_sender_error_from_raw(
+            c_sender_error_view_to_raw(view[0])))
+    except BaseException:
+        logging.getLogger("questdb").exception(
+            "QWP/WebSocket error handler failed")
+    finally:
+        _DISPATCH_THREAD.active = False
+
+
+cdef void _sender_error_trampoline(
         void* user_data,
         const line_sender_qwpws_error_view* view) noexcept nogil:
+    # No object locals here: the finalizing early return must not touch
+    # the GIL, which a Cython epilogue with object cleanup would.
     if qdb_py_is_finalizing():
         return
-    with gil:
-        try:
-            handler = <object>user_data
-            handler(_qwp_ws_error_from_raw(
-                c_qwp_ws_error_view_to_raw(view[0])))
-        except BaseException:
-            logging.getLogger("questdb").exception(
-                "QWP/WebSocket error handler failed")
+    _sender_error_dispatch(user_data, view)
 
 
 class TlsCa(TaggedEnum):
@@ -2653,14 +2680,14 @@ cdef object _dataframe_columnar_plan_failures(
                     'v1 only supports NumPy datetime64[ns/us], '
                     'tz-aware datetime64/timestamp[pyarrow], or '
                     'object-dtype datetime timestamp field columns.'))
-            elif col.setup.source == col_source_t.col_source_dt64ns_numpy:
+            elif (col.setup.source == col_source_t.col_source_dt64ns_numpy
+                    and _PYARROW is None):
                 # NaT in a datetime64[ns] field is INT64_MIN nanoseconds;
                 # the zero-copy ns->micros wire conversion would corrupt
-                # that null sentinel into a bogus 1677 timestamp. When
-                # pyarrow is available, _dataframe_columnar_promote_cols
-                # re-exports the column through Arrow (NULLs intact) before
-                # validation, so this branch is reachable only without
-                # pyarrow.
+                # that null sentinel into a bogus 1677 timestamp. With
+                # pyarrow, _dataframe_columnar_promote_cols already
+                # re-exported any NaT-carrying column through Arrow (and
+                # imported pyarrow doing so), leaving nothing to reject.
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
                 if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
                     failures.append(_dataframe_columnar_col_failure(
@@ -2773,7 +2800,16 @@ cdef object _dataframe_columnar_plan_failures(
                         'v1 designated timestamp columns cannot contain '
                         'timestamps before the Unix epoch.'))
         elif col.setup.target == col_target_t.col_target_column_decimal:
-            if col.setup.source not in (
+            if col.setup.source == col_source_t.col_source_decimal_pyobj:
+                # _dataframe_columnar_promote_cols re-exports these through
+                # Arrow; reaching this branch means pyarrow is unavailable.
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'object-dtype Decimal columns require pyarrow on the '
+                    'columnar path; install pyarrow, or back the column '
+                    'with an Arrow decimal type.'))
+            elif col.setup.source not in (
                     col_source_t.col_source_decimal32_arrow,
                     col_source_t.col_source_decimal64_arrow,
                     col_source_t.col_source_decimal128_arrow,
@@ -2782,8 +2818,7 @@ cdef object _dataframe_columnar_plan_failures(
                     df,
                     col,
                     'v1 only supports Arrow-backed decimal columns '
-                    '(pyarrow decimal32/64/128/256); object-dtype Decimal '
-                    'columns are not supported on the columnar path.'))
+                    '(pyarrow decimal32/64/128/256).'))
         elif col.setup.target in (
                 col_target_t.col_target_column_i8,
                 col_target_t.col_target_column_i16,
@@ -2863,7 +2898,13 @@ cdef object _dataframe_columnar_col_from_pandas(object df, col_t* col):
     # Re-export a pandas column as a pyarrow Array: pyarrow infers the
     # Arrow type (decimal width/scale, timestamp unit, ...) and carries a
     # validity bitmap for nulls, which the Rust Arrow importer then encodes.
-    return _PYARROW.Array.from_pandas(df.iloc[:, col.setup.orig_index])
+    try:
+        return _PYARROW.Array.from_pandas(df.iloc[:, col.setup.orig_index])
+    except (TypeError, ValueError) as e:
+        col_name = df.columns[col.setup.orig_index]
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad column {col_name!r}: {e}') from e
 
 
 cdef void_int _dataframe_columnar_promote_cols(
@@ -2887,10 +2928,13 @@ cdef void_int _dataframe_columnar_promote_cols(
             _dataframe_require_pyarrow()
             arrow_array = _dataframe_columnar_ndarray_col_to_arrow(df, col)
         elif col.setup.source == col_source_t.col_source_decimal_pyobj:
-            _dataframe_require_pyarrow()
+            if not _dataframe_try_import_pyarrow():
+                continue
             arrow_array = _dataframe_columnar_col_from_pandas(df, col)
         elif (col.setup.target == col_target_t.col_target_column_ts
                 and col.setup.source == col_source_t.col_source_dt64ns_numpy
+                and _dataframe_columnar_has_single_contiguous_chunk(
+                    col, plan.row_count)
                 and _dataframe_columnar_i64_has_nat(
                     <const int64_t*>col.setup.chunks.chunks[0].buffers[1],
                     plan.row_count)):
@@ -5823,6 +5867,7 @@ cdef bint _is_batch_too_large_error(object exc):
         or 'batch too large' in msg)
 
 
+@cython.no_gc_clear
 cdef class QuestDB:
     """
     Handle to a QuestDB deployment over QWP/WebSocket.
@@ -5839,7 +5884,7 @@ cdef class QuestDB:
     cdef size_t _active_uses
     cdef bint _closing
     cdef object _connection_listener
-    cdef object _qwp_ws_error_handler
+    cdef object _error_handler
 
     def __cinit__(self):
         self._db = NULL
@@ -5848,7 +5893,7 @@ cdef class QuestDB:
         self._active_uses = 0
         self._closing = False
         self._connection_listener = None
-        self._qwp_ws_error_handler = None
+        self._error_handler = None
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
@@ -5881,8 +5926,8 @@ cdef class QuestDB:
             *,
             connection_listener=None,
             connection_event_inbox_capacity: int = 0,
-            qwp_ws_error_handler=None,
-            qwp_ws_error_inbox_capacity: int = 0):
+            error_handler=None,
+            error_event_inbox_capacity: int = 0):
         """
         Construct a handle from a QWP/WebSocket configuration string.
 
@@ -5912,20 +5957,20 @@ cdef class QuestDB:
         :attr:`connection_events_dropped` /
         :attr:`connection_events_delivered`.
 
-        ``qwp_ws_error_handler``, when set, is a callable receiving one
-        :class:`QwpWsError` per server rejection recorded by any of the
+        ``error_handler``, when set, is a callable receiving one
+        :class:`SenderError` per server rejection recorded by any of the
         pool's store-and-forward connections — including rejections for
         rows published through a :class:`PooledSender` that was already
         closed. It runs on its own dedicated dispatcher thread fed by a
-        bounded inbox (``qwp_ws_error_inbox_capacity``; ``0`` selects the
+        bounded inbox (``error_event_inbox_capacity``; ``0`` selects the
         default of 64, overflow drops the oldest event). Exceptions it
         raises are logged and swallowed. Without a handler every rejection
         is logged through the ``questdb`` logger instead — ``ERROR`` for
         terminal rejections, ``WARNING`` for retriable ones (the affected
         rows are replayed, not lost) — so rejections are never silent.
         Delivered/dropped totals are available via
-        :attr:`rejection_events_delivered` /
-        :attr:`rejection_events_dropped`. Use the handler for
+        :attr:`error_events_delivered` /
+        :attr:`error_events_dropped`. Use the handler for
         dead-lettering, alerting, and metrics; terminal failures also
         surface as :class:`QuestDBError` from the sender calls themselves.
         """
@@ -5957,11 +6002,11 @@ cdef class QuestDB:
                 raise TypeError(
                     '"connection_listener" must be callable or None, '
                     f'not {_fqn(type(connection_listener))}')
-            if qwp_ws_error_handler is not None and not callable(
-                    qwp_ws_error_handler):
+            if error_handler is not None and not callable(
+                    error_handler):
                 raise TypeError(
-                    '"qwp_ws_error_handler" must be callable or None, '
-                    f'not {_fqn(type(qwp_ws_error_handler))}')
+                    '"error_handler" must be callable or None, '
+                    f'not {_fqn(type(error_handler))}')
             str_to_utf8(b, <PyObject*>conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
@@ -5974,13 +6019,13 @@ cdef class QuestDB:
             # A rejection handler is always installed (defaulting to the
             # `questdb` logger) because the native default logs through the
             # Rust `log` facade, which is not bridged into Python logging.
-            if qwp_ws_error_handler is None:
-                qwp_ws_error_handler = _default_qwp_ws_error_handler
-            db._qwp_ws_error_handler = qwp_ws_error_handler
+            if error_handler is None:
+                error_handler = _default_error_handler
+            db._error_handler = error_handler
             # Convert to C integers while still holding the GIL: a bad
             # value must raise here, not inside the nogil region below.
             c_event_inbox_capacity = connection_event_inbox_capacity
-            c_error_inbox_capacity = qwp_ws_error_inbox_capacity
+            c_error_inbox_capacity = error_event_inbox_capacity
             _ensure_doesnt_have_gil(&gs)
             db._db = questdb_db_connect_with_handlers(
                 c_conf.buf,
@@ -5988,8 +6033,8 @@ cdef class QuestDB:
                 connection_event_cb,
                 connection_listener_data,
                 c_event_inbox_capacity,
-                <line_sender_qwpws_error_cb>_qwp_ws_error_trampoline,
-                <void*>db._qwp_ws_error_handler,
+                _sender_error_trampoline,
+                <void*>db._error_handler,
                 c_error_inbox_capacity,
                 &err)
             _ensure_has_gil(&gs)
@@ -5997,7 +6042,7 @@ cdef class QuestDB:
                 # A failed handler-aware connect fences its dispatchers before
                 # returning, so the callback targets are now safe to release.
                 db._connection_listener = None
-                db._qwp_ws_error_handler = None
+                db._error_handler = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
             return db
@@ -6086,7 +6131,7 @@ cdef class QuestDB:
         (including the first chunk, which commits eagerly on a fresh
         connection) unless the table has ``DEDUP UPSERT KEYS``. Server-side
         rejections (e.g. a schema mismatch) surface as a plain
-        :class:`QuestDBError`; the structured ``qwp_ws_error`` diagnostic is
+        :class:`QuestDBError`; the structured ``rejection`` diagnostic is
         attached only by the store-and-forward senders.
 
         ``df`` accepts any of:
@@ -6136,10 +6181,12 @@ cdef class QuestDB:
         - **Timestamp**: NumPy ``datetime64`` units accepted by pandas and
           ``pa.timestamp`` with unit ``s``, ``ms``, ``us``, or ``ns``
           (tz-aware accepted on Arrow-backed columns in the Rust Arrow route).
-          Null timestamps (``NaT`` / ``None``) and values before the Unix
-          epoch are supported on every timestamp column type; a
-          ``datetime64[ns]`` field carrying ``NaT`` is re-exported through
-          Arrow so its ``INT64_MIN`` null sentinel is preserved.
+          Timestamp *field* columns accept null timestamps (``NaT`` /
+          ``None``) and values before the Unix epoch; a ``datetime64[ns]``
+          field carrying ``NaT`` is re-exported through Arrow so its
+          ``INT64_MIN`` null sentinel is preserved (this needs pyarrow).
+          The *designated* timestamp column (``at=``) must be non-null
+          and at or after the epoch.
         - **Decimal**: Arrow-backed ``pa.decimal{32,64,128,256}`` columns
           (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18), or
           object-dtype columns of ``decimal.Decimal`` (re-exported through
@@ -6349,9 +6396,6 @@ cdef class QuestDB:
         try:
             reader_handle = _borrow_reader_from_pool(db)
             info = _snapshot_server_info(reader_handle)
-            # No cursor was opened, so the reader is pristine: return it
-            # to the pool instead of the default drop-on-dealloc.
-            reader_handle._must_close = False
             reader_handle._close()
         finally:
             self._end_db_use()
@@ -6382,24 +6426,24 @@ cdef class QuestDB:
             self._end_db_use()
 
     @property
-    def rejection_events_delivered(self) -> int:
+    def error_events_delivered(self) -> int:
         """
-        Total server rejections delivered to the ``qwp_ws_error_handler``
+        Total server rejections delivered to the ``error_handler``
         (or to the default logging handler when none was registered).
         """
-        cdef questdb_db* db = self._begin_db_use('rejection_events_delivered')
+        cdef questdb_db* db = self._begin_db_use('error_events_delivered')
         try:
             return questdb_db_rejection_events_delivered(db)
         finally:
             self._end_db_use()
 
     @property
-    def rejection_events_dropped(self) -> int:
+    def error_events_dropped(self) -> int:
         """
         Total server rejections discarded by the handler inbox's
         drop-oldest policy.
         """
-        cdef questdb_db* db = self._begin_db_use('rejection_events_dropped')
+        cdef questdb_db* db = self._begin_db_use('error_events_dropped')
         try:
             return questdb_db_rejection_events_dropped(db)
         finally:
@@ -6437,8 +6481,11 @@ cdef class QuestDB:
         try:
             db = self._db
             if db == NULL:
-                while self._closing:
-                    self._state_cond.wait()
+                # A dispatcher-thread caller must not wait here: the
+                # in-flight closer joins this very thread.
+                if not getattr(_DISPATCH_THREAD, 'active', False):
+                    while self._closing:
+                        self._state_cond.wait()
                 return
             self._db = NULL
             self._conf_str = None
@@ -6481,6 +6528,7 @@ cdef class QuestDB:
             _ensure_has_gil(&gs)
 
 
+@cython.no_gc_clear
 cdef class Sender:
     """
     Ingest data into QuestDB.
@@ -6496,7 +6544,7 @@ cdef class Sender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
-    cdef object _qwp_ws_error_handler
+    cdef object _error_handler
     cdef object _connection_listener
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
@@ -6536,7 +6584,7 @@ cdef class Sender:
             object multicast_ttl,
             object protocol_version,
             object qwp_ws_progress,
-            object qwp_ws_error_handler,
+            object error_handler,
             object connection_listener,
             object connection_event_inbox_capacity,
             object init_buf_size,
@@ -6632,24 +6680,24 @@ cdef class Sender:
                     self._opts, c_qwp_ws_progress, &err):
                 raise c_err_to_py(err)
 
-        if qwp_ws_error_handler is not None and not callable(qwp_ws_error_handler):
+        if error_handler is not None and not callable(error_handler):
             raise TypeError(
-                '"qwp_ws_error_handler" must be callable or None, '
-                f'not {_fqn(type(qwp_ws_error_handler))}')
-        if qwp_ws_error_handler is not None and not _is_qwp_ws_protocol(self._c_protocol):
+                '"error_handler" must be callable or None, '
+                f'not {_fqn(type(error_handler))}')
+        if error_handler is not None and not _is_qwp_ws_protocol(self._c_protocol):
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'qwp_ws_error_handler is only supported for QWP/WebSocket senders.')
+                'error_handler is only supported for QWP/WebSocket senders.')
         if _is_qwp_ws_protocol(self._c_protocol):
-            if qwp_ws_error_handler is None:
-                qwp_ws_error_handler = _default_qwp_ws_error_handler
-            self._qwp_ws_error_handler = qwp_ws_error_handler
+            if error_handler is None:
+                error_handler = _default_error_handler
+            self._error_handler = error_handler
             if not line_sender_opts_qwpws_error_handler(
                     self._opts,
-                    <line_sender_qwpws_error_cb>_qwp_ws_error_trampoline,
-                    <void*>self._qwp_ws_error_handler,
+                    _sender_error_trampoline,
+                    <void*>self._error_handler,
                     &err):
-                self._qwp_ws_error_handler = None
+                self._error_handler = None
                 raise c_err_to_py(err)
 
         if connection_listener is not None and not callable(
@@ -6670,7 +6718,7 @@ cdef class Sender:
             self._connection_listener = connection_listener
             if not line_sender_opts_connection_event_handler(
                     self._opts,
-                    <questdb_connection_event_cb>_connection_event_trampoline,
+                    _connection_event_trampoline,
                     <void*>self._connection_listener,
                     <size_t>(connection_event_inbox_capacity or 0),
                     &err):
@@ -6866,7 +6914,7 @@ cdef class Sender:
         self._opts = NULL
         self._impl = NULL
         self._buffer = None
-        self._qwp_ws_error_handler = None
+        self._error_handler = None
         self._connection_listener = None
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
@@ -6904,7 +6952,7 @@ cdef class Sender:
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
-            object qwp_ws_error_handler=None,
+            object error_handler=None,
             object connection_listener=None,
             object connection_event_inbox_capacity=0,
             object protocol_version=None,  # Default auto
@@ -6963,7 +7011,7 @@ cdef class Sender:
                 multicast_ttl,
                 protocol_version,
                 qwp_ws_progress,
-                qwp_ws_error_handler,
+                error_handler,
                 connection_listener,
                 connection_event_inbox_capacity,
                 init_buf_size,
@@ -6998,7 +7046,7 @@ cdef class Sender:
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
-            object qwp_ws_error_handler=None,
+            object error_handler=None,
             object connection_listener=None,
             object connection_event_inbox_capacity=0,
             object protocol_version=None,  # Default auto
@@ -7140,7 +7188,7 @@ cdef class Sender:
                 params.get('multicast_ttl'),
                 params.get('protocol_version'),
                 params.get('qwp_ws_progress'),
-                qwp_ws_error_handler,
+                error_handler,
                 connection_listener,
                 connection_event_inbox_capacity,
                 params.get('init_buf_size'),
@@ -7176,7 +7224,7 @@ cdef class Sender:
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
             object qwp_ws_progress=None,  # Default background for QWP/WebSocket
-            object qwp_ws_error_handler=None,
+            object error_handler=None,
             object connection_listener=None,
             object connection_event_inbox_capacity=0,
             object protocol_version=None,  # Default auto
@@ -7224,7 +7272,7 @@ cdef class Sender:
             max_datagram_size=max_datagram_size,
             multicast_ttl=multicast_ttl,
             qwp_ws_progress=qwp_ws_progress,
-            qwp_ws_error_handler=qwp_ws_error_handler,
+            error_handler=error_handler,
             connection_listener=connection_listener,
             connection_event_inbox_capacity=connection_event_inbox_capacity,
             protocol_version=protocol_version,
@@ -7633,8 +7681,8 @@ cdef class Sender:
         With QWP/WebSocket, this publishes the buffer into the local sender
         queue and returns before the server necessarily ACKs the frame. Later
         terminal diagnostics fail subsequent sender calls and are available as
-        :attr:`QuestDBError.qwp_ws_error`. Server diagnostics are also
-        available through :func:`Sender.poll_qwp_ws_error`.
+        :attr:`QuestDBError.sender_error`. Server diagnostics are also
+        available through :func:`Sender.poll_error`.
 
         :param clear: If ``True``, the flushed buffer is cleared (default).
             If ``False``, the flushed buffer is left in the internal buffer.
@@ -7909,7 +7957,7 @@ cdef class Sender:
             raise c_err_to_py(err)
         return bool(progressed)
 
-    def poll_qwp_ws_error(self):
+    def poll_error(self):
         """
         Poll the next structured QWP/WebSocket diagnostic.
         """
@@ -7917,25 +7965,25 @@ cdef class Sender:
         cdef line_sender_qwpws_error* qwp_err = NULL
         cdef line_sender_qwpws_error_view view
 
-        self._check_qwp_ws('poll_qwp_ws_error')
+        self._check_qwp_ws('poll_error')
         if not line_sender_qwpws_poll_error(self._impl, &qwp_err, &err):
             raise c_err_to_py(err)
         if qwp_err == NULL:
             return None
         try:
             view = line_sender_qwpws_error_get_view(qwp_err)
-            return _qwp_ws_error_from_raw(c_qwp_ws_error_view_to_raw(view))
+            return _sender_error_from_raw(c_sender_error_view_to_raw(view))
         finally:
             line_sender_qwpws_error_free(qwp_err)
 
-    def qwp_ws_errors_dropped(self):
+    def error_events_dropped(self):
         """
         Number of QWP/WebSocket diagnostics dropped from the bounded ring.
         """
         cdef line_sender_error* err = NULL
         cdef uint64_t dropped = 0
 
-        self._check_qwp_ws('qwp_ws_errors_dropped')
+        self._check_qwp_ws('error_events_dropped')
         if not line_sender_qwpws_errors_dropped(self._impl, &dropped, &err):
             raise c_err_to_py(err)
         return dropped
@@ -7992,7 +8040,7 @@ cdef class Sender:
             line_sender_opts_free(qwp_ws_opts)
             _ensure_has_gil(&gs)
         self._buffer = None
-        self._qwp_ws_error_handler = None
+        self._error_handler = None
         self._connection_listener = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
@@ -8035,6 +8083,7 @@ cdef class Sender:
         free(self._last_flush_ms)
 
 
+@cython.no_gc_clear
 cdef class PooledSender:
     """
     A row-building sender borrowed from a :class:`QuestDB` pool.
@@ -8043,9 +8092,11 @@ cdef class PooledSender:
     native sender to the pool. Rows publish into an ordered,
     store-and-forward-covered QWP stream over one pooled connection.
 
-    The surface is deliberately small: ``row()``, ``flush()``, ``wait()``
-    and ``close()``. ``len(sender)`` is the number of buffered rows.
-    DataFrame bulk loads go through :meth:`QuestDB.dataframe`.
+    The surface is deliberately small: ``row()``, ``dataframe()``,
+    ``flush()``, ``wait()`` and ``close()``. ``len(sender)`` is the
+    number of buffered rows. Prefer :meth:`QuestDB.dataframe` for bulk
+    loads; the lease's own ``dataframe()`` is a convenience that routes
+    to the same direct columnar path.
     """
     cdef qwp_sender* _qwp
     cdef questdb_db* _db
@@ -8214,7 +8265,7 @@ cdef class PooledSender:
         Pass ``wait=True`` to wait for the server's OK acknowledgement of
         everything published through this lease. The wait is a pure ack
         barrier: only a terminal connection failure raises. Server
-        rejections are delivered to the pool's ``qwp_ws_error_handler``
+        rejections are delivered to the pool's ``error_handler``
         (default: the ``questdb`` logger) instead; retriable ones are
         replayed by the store-and-forward queue.
         """
@@ -8229,7 +8280,7 @@ cdef class PooledSender:
 
         The wait is a pure ack barrier: only a terminal connection failure
         raises. Server rejections are delivered to the pool's
-        ``qwp_ws_error_handler`` (default: the ``questdb`` logger) instead.
+        ``error_handler`` (default: the ``questdb`` logger) instead.
 
         ``timeout_millis`` is a no-progress timeout; ``0`` waits indefinitely.
         """
@@ -8249,7 +8300,7 @@ cdef class PooledSender:
         is returned. ``wait=True`` additionally waits for an OK ack before
         returning the sender to the pool; without it, a later server
         rejection of this lease's rows is reported through the pool's
-        ``qwp_ws_error_handler`` (default: the ``questdb`` logger).
+        ``error_handler`` (default: the ``questdb`` logger).
         """
         with self._lock:
             try:
@@ -8267,6 +8318,7 @@ cdef class PooledSender:
                 self._release_locked()
 
 
+@cython.no_gc_clear
 cdef class PooledReader:
     """
     A reader lease borrowed from a :class:`QuestDB` pool.
@@ -8405,5 +8457,3 @@ cdef class PooledReader:
         if self._lock is not None:
             with self._lock:
                 self._release_locked()
-
-

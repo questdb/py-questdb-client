@@ -81,17 +81,17 @@ questdb
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.QwpWsError
+.. autoclass:: questdb.SenderError
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.QwpWsErrorCategory
+.. autoclass:: questdb.SenderErrorCategory
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: questdb.QwpWsErrorPolicy
+.. autoclass:: questdb.SenderErrorPolicy
    :members:
    :undoc-members:
    :show-inheritance:

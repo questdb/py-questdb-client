@@ -9,7 +9,7 @@
     including ingesting data from Pandas dataframes.
 
     ```
-    python3 -m pip install -U questdb
+    python3 -m pip install -U questdb pandas
     ```
   addr:
     host: localhost

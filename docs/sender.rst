@@ -150,7 +150,8 @@ Here is an example of sending a row with two symbols and two regular columns:
             columns={
                 'price': 2615.54,
                 'amount': 0.00044},
-            at=datetime.datetime(2021, 1, 1, 12, 0, 0))
+            at=datetime.datetime(
+                2021, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc))
 
 Decimal Columns
 ---------------
@@ -351,8 +352,8 @@ Error Reporting
 transports, use HTTP.**
 
 Over QWP/WebSocket every server rejection is delivered as a structured
-:class:`QwpWsError <questdb.QwpWsError>` — pushed to the pool's
-``qwp_ws_error_handler`` (or logged through the ``questdb`` logger by
+:class:`SenderError <questdb.SenderError>` — pushed to the pool's
+``error_handler`` (or logged through the ``questdb`` logger by
 default), while terminal rejections also raise
 :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`
 from the affected sender. See :ref:`sender_qwp_ws`.
@@ -860,15 +861,15 @@ it durably applies them, so the client can confirm delivery.
   connection.
 
 * **Server diagnostics.** Per-frame server feedback is delivered to the
-  ``qwp_ws_error_handler`` callback, or polled via
-  :func:`Sender.poll_qwp_ws_error <questdb.Sender.poll_qwp_ws_error>` as :class:`QwpWsError <questdb.QwpWsError>` values
-  (:func:`Sender.qwp_ws_errors_dropped <questdb.Sender.qwp_ws_errors_dropped>` reports how many were dropped when no
+  ``error_handler`` callback, or polled via
+  :func:`Sender.poll_error <questdb.Sender.poll_error>` as :class:`SenderError <questdb.SenderError>` values
+  (:func:`Sender.error_events_dropped <questdb.Sender.error_events_dropped>` reports how many were dropped when no
   handler kept up). A diagnostic with a terminal policy halts the sender: the next
   sender call raises :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`. The handler must
   not call back into the same sender, must be cheap and non-blocking, and —
   under ``qwp_ws_progress=background`` — may run on a background thread.
   The pooled :class:`QuestDB <questdb.QuestDB>` handle delivers the same
-  diagnostics through the ``qwp_ws_error_handler`` passed to
+  diagnostics through the ``error_handler`` passed to
   :func:`questdb.connect`, on a dedicated dispatcher thread.
 
 * **Draining on close.** :func:`Sender.close_drain <questdb.Sender.close_drain>` waits for outstanding

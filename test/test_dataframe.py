@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True
@@ -2994,6 +2995,65 @@ class TestPandasProtocolVersionV2(TestPandasBase.TestPandas):
 class TestPandasProtocolVersionV3(TestPandasBase.TestPandas):
     name = 'protocol version 3'
     version = 3
+
+
+class TestNaTScalarDatetime(unittest.TestCase):
+    def test_from_datetime_nat_raises_value_error(self):
+        for cls in (qi.TimestampNanos, qi.TimestampMicros):
+            with self.assertRaisesRegex(
+                    ValueError, 'NaT is not a valid timestamp'):
+                cls.from_datetime(pd.NaT)
+
+
+class TestColumnarPlanWithoutPyarrow(unittest.TestCase):
+    """The columnar planner's pyarrow-optional fallbacks, exercised in a
+    subprocess with the pyarrow import blocked."""
+
+    _SCRIPT = """
+import sys
+
+
+class _BlockPyarrow:
+    def find_spec(self, name, path=None, target=None):
+        if name == 'pyarrow' or name.startswith('pyarrow.'):
+            raise ImportError('pyarrow blocked for this test')
+
+
+sys.meta_path.insert(0, _BlockPyarrow())
+import pandas as pd
+from decimal import Decimal
+import questdb._client as qi
+
+df = pd.DataFrame({
+    'ts': pd.Series([pd.Timestamp('2024-01-01')], dtype='datetime64[us]'),
+    'vts': pd.Series([pd.NaT], dtype='datetime64[ns]'),
+})
+plan = qi._debug_dataframe_columnar_plan(df, table_name='t', at='ts')
+assert not plan['supported'], plan
+reasons = ' '.join(f['reason'] for f in plan['failures'])
+assert 'without pyarrow' in reasons, plan
+
+df = pd.DataFrame({
+    'ts': pd.Series([pd.Timestamp('2024-01-01')], dtype='datetime64[us]'),
+    'amt': pd.Series([Decimal('1.5')], dtype=object),
+})
+plan = qi._debug_dataframe_columnar_plan(df, table_name='t', at='ts')
+assert not plan['supported'], plan
+reasons = ' '.join(f['reason'] for f in plan['failures'])
+assert 'require pyarrow' in reasons, plan
+print('OK')
+"""
+
+    def test_planner_rejects_pyarrow_dependent_columns(self):
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        result = subprocess.run(
+            [sys.executable, '-c', self._SCRIPT],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK', result.stdout)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import sys
-import subprocess
 
 sys.dont_write_bytecode = True
 import os
@@ -104,9 +103,14 @@ class TestManifest(unittest.TestCase):
             import yaml
         except ImportError:
             self.skipTest('Python version does not support yaml')
-        examples_manifest_file = pathlib.Path(__file__).parent.parent / 'examples.manifest.yaml'
-        with open(examples_manifest_file, 'r') as f:
-            yaml.safe_load(f)
+        repo_root = pathlib.Path(__file__).parent.parent
+        with open(repo_root / 'examples.manifest.yaml', 'r') as f:
+            manifest = yaml.safe_load(f)
+        for entry in manifest:
+            self.assertTrue(
+                (repo_root / entry['path']).is_file(),
+                f"manifest entry {entry['name']!r} points at a missing "
+                f"file: {entry['path']}")
 
 
 class TestQwpWebSocketApi(unittest.TestCase):
@@ -177,8 +181,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QuestDBErrorCode.SocketError,
             'sender halted',
             (
-                qi.QwpWsErrorCategory.ParseError.c_value,
-                qi.QwpWsErrorPolicy.Terminal.c_value,
+                qi.SenderErrorCategory.ParseError.c_value,
+                qi.SenderErrorPolicy.Terminal.c_value,
                 2,
                 'bad line',
                 44,
@@ -186,16 +190,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 6,
             ))
 
-        diagnostic = err.qwp_ws_error
+        diagnostic = err.sender_error
 
-        self.assertEqual(diagnostic.category, qi.QwpWsErrorCategory.ParseError)
-        self.assertEqual(diagnostic.applied_policy, qi.QwpWsErrorPolicy.Terminal)
+        self.assertEqual(diagnostic.category, qi.SenderErrorCategory.ParseError)
+        self.assertEqual(diagnostic.applied_policy, qi.SenderErrorPolicy.Terminal)
         self.assertEqual(diagnostic.status, 2)
         self.assertEqual(diagnostic.message, 'bad line')
         self.assertEqual(diagnostic.message_sequence, 44)
         self.assertEqual(diagnostic.from_fsn, 5)
         self.assertEqual(diagnostic.to_fsn, 6)
-        self.assertIs(err.qwp_ws_error, diagnostic)
+        self.assertIs(err.sender_error, diagnostic)
         self.assertFalse(err.in_doubt)
 
     def test_ingress_error_can_report_delivery_unknown(self):
@@ -211,8 +215,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QuestDBErrorCode.ServerRejection,
             'sender halted',
             (
-                qi.QwpWsErrorCategory.ParseError.c_value,
-                qi.QwpWsErrorPolicy.Terminal.c_value,
+                qi.SenderErrorCategory.ParseError.c_value,
+                qi.SenderErrorPolicy.Terminal.c_value,
                 2,
                 'bad line',
                 44,
@@ -222,7 +226,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         self.assertIsInstance(err, qi.QuestDBError)
         self.assertEqual(err.code, qi.QuestDBErrorCode.ServerRejection)
-        self.assertEqual(err.qwp_ws_error.category, qi.QwpWsErrorCategory.ParseError)
+        self.assertEqual(err.sender_error.category, qi.SenderErrorCategory.ParseError)
 
     def test_python_only_error_codes_do_not_overlap_ffi_codes(self):
         # The error model is unified: every reader/query code (Cancelled,
@@ -428,21 +432,58 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, 'sender_pool_max'):
             questdb.connect(
                 'ws::addr=localhost:9000;', sender_pool_max=4)
+        with self.assertRaisesRegex(TypeError, 'tls'):
+            questdb.connect('ws::addr=localhost:9000;', tls=True)
+        with self.assertRaisesRegex(TypeError, 'port'):
+            questdb.connect('ws::addr=localhost:9000;', port=9009)
+        with self.assertRaisesRegex(TypeError, 'port, tls'):
+            questdb.connect(
+                'ws::addr=localhost:9000;', tls=False, port=9000)
+
+    def test_module_connect_conf_building(self):
+        import questdb
+        self.assertEqual(questdb._conf_value(True), 'on')
+        self.assertEqual(questdb._conf_value(False), 'off')
+        self.assertEqual(questdb._conf_value('a;b'), 'a;;b')
+        self.assertEqual(questdb._conf_value(4), '4')
+
+        built = []
+
+        class _Capture:
+            @staticmethod
+            def from_conf(conf_str, **kwargs):
+                built.append(conf_str)
+                return None
+
+        with mock.patch.object(questdb, 'QuestDB', _Capture):
+            questdb.connect(host='localhost')
+            questdb.connect(host='localhost', port=9009, tls=True)
+            questdb.connect(host='::1', port=1)
+            questdb.connect(host='[::1]', port=1)
+            questdb.connect(
+                host='h', password='p;w', sender_pool_max=2, tls=False)
+        self.assertEqual(built, [
+            'ws::addr=localhost:9000;',
+            'wss::addr=localhost:9009;',
+            'ws::addr=[::1]:1;',
+            'ws::addr=[::1]:1;',
+            'ws::addr=h:9000;password=p;;w;sender_pool_max=2;',
+        ])
 
     def test_from_conf_rejects_non_callable_error_handler(self):
         with self.assertRaisesRegex(
-                TypeError, '"qwp_ws_error_handler" must be callable'):
+                TypeError, '"error_handler" must be callable'):
             qi.QuestDB.from_conf(
-                'ws::addr=127.0.0.1:1;', qwp_ws_error_handler=42)
+                'ws::addr=127.0.0.1:1;', error_handler=42)
 
     def test_from_conf_rejects_bad_inbox_capacities(self):
         # Regression: these conversions must raise while holding the GIL
         # instead of crashing in the no-GIL connect region.
         for kwargs in (
                 {'connection_event_inbox_capacity': -1},
-                {'qwp_ws_error_inbox_capacity': -1},
+                {'error_event_inbox_capacity': -1},
                 {'connection_event_inbox_capacity': 'lots'},
-                {'qwp_ws_error_inbox_capacity': None}):
+                {'error_event_inbox_capacity': None}):
             with self.assertRaises((TypeError, OverflowError)):
                 qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;', **kwargs)
 
@@ -462,7 +503,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_reap=manual;'
                 'close_flush_timeout_millis=0;')
             with qi.QuestDB.from_conf(
-                    conf, qwp_ws_error_handler=on_rejection) as client:
+                    conf, error_handler=on_rejection) as client:
                 with client.sender() as sender:
                     sender.row(
                         'events', columns={'value': 1},
@@ -472,15 +513,15 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     delivered.wait(5),
                     'the rejection must reach the handler')
                 deadline = time.monotonic() + 5
-                while client.rejection_events_delivered < 1:
+                while client.error_events_delivered < 1:
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(0.01)
-                self.assertEqual(client.rejection_events_dropped, 0)
+                self.assertEqual(client.error_events_dropped, 0)
 
         error = rejections[0]
-        self.assertIsInstance(error, qi.QwpWsError)
-        self.assertIs(error.category, qi.QwpWsErrorCategory.SchemaMismatch)
-        self.assertIs(error.applied_policy, qi.QwpWsErrorPolicy.Terminal)
+        self.assertIsInstance(error, qi.SenderError)
+        self.assertIs(error.category, qi.SenderErrorCategory.SchemaMismatch)
+        self.assertIs(error.applied_policy, qi.SenderErrorPolicy.Terminal)
         self.assertEqual(error.message, 'mock rejection')
 
     def test_pool_rejection_default_handler_logs(self):
@@ -499,12 +540,80 @@ class TestQwpWebSocketApi(unittest.TestCase):
                             at=qi.ServerTimestamp)
                         sender.flush()
                     deadline = time.monotonic() + 5
-                    while client.rejection_events_delivered < 1:
+                    while client.error_events_delivered < 1:
                         self.assertLess(time.monotonic(), deadline)
                         time.sleep(0.01)
         self.assertTrue(
             any('server rejection' in line for line in logs.output),
             logs.output)
+
+    def test_pool_rejection_handler_exception_is_logged(self):
+        delivered = threading.Event()
+
+        def on_rejection(error):
+            delivered.set()
+            raise RuntimeError('handler boom')
+
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'close_flush_timeout_millis=0;')
+            with self.assertLogs('questdb', level='ERROR') as logs:
+                with qi.QuestDB.from_conf(
+                        conf, error_handler=on_rejection) as client:
+                    with client.sender() as sender:
+                        sender.row(
+                            'events', columns={'value': 1},
+                            at=qi.ServerTimestamp)
+                        sender.flush()
+                    self.assertTrue(
+                        delivered.wait(5),
+                        'the rejection must reach the handler')
+                    deadline = time.monotonic() + 5
+                    while client.error_events_delivered < 1:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+        self.assertTrue(
+            any('error handler failed' in line for line in logs.output),
+            logs.output)
+
+    def test_close_from_rejection_handler_does_not_deadlock(self):
+        received = threading.Event()
+        handler_done = threading.Event()
+
+        def on_rejection(error):
+            received.set()
+            # Give the main thread time to enter close() and block on
+            # joining this dispatcher thread before closing from here.
+            time.sleep(0.2)
+            client.close()
+            handler_done.set()
+
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'close_flush_timeout_millis=0;')
+            client = qi.QuestDB.from_conf(
+                conf, error_handler=on_rejection)
+            with client.sender() as sender:
+                sender.row(
+                    'events', columns={'value': 1},
+                    at=qi.ServerTimestamp)
+                sender.flush()
+            self.assertTrue(received.wait(5))
+            closer = threading.Thread(target=client.close)
+            closer.start()
+            closer.join(10)
+            self.assertFalse(
+                closer.is_alive(),
+                'close() must not deadlock against the handler thread')
+            self.assertTrue(handler_done.wait(5))
 
     def test_client_sender_publishes_rows_without_dataframe_surface(self):
         with QwpAckServer() as server:
@@ -522,7 +631,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                             'establish', 'transaction', 'new_buffer',
                             'published_fsn', 'acked_fsn', 'await_acked_fsn',
                             'flush_and_get_fsn', 'drive_once',
-                            'poll_qwp_ws_error', 'close_drain',
+                            'poll_error', 'close_drain',
                             'protocol_version', 'auto_flush'):
                         self.assertFalse(hasattr(sender, name), name)
                     sender.row(
@@ -1058,7 +1167,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.Protocol.Ws,
             '127.0.0.1',
             9000,
-            qwp_ws_error_handler=lambda error: None)
+            error_handler=lambda error: None)
         try:
             self.assertIsInstance(sender, qi.Sender)
         finally:
@@ -1072,7 +1181,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 qi.Protocol.Udp,
                 '127.0.0.1',
                 9009,
-                qwp_ws_error_handler=lambda error: None)
+                error_handler=lambda error: None)
 
     def test_qwpws_fsn_helpers_reject_non_websocket_sender_even_when_empty(self):
         sender = qi.Sender(
@@ -2508,8 +2617,6 @@ class TestTimestampNanos(TestBases.Timestamp):
         self.assertEqual(len(emitted), 1)
         self.assertIn('interpreted as UTC', str(emitted[0].message))
         self.assertIn('If you meant "now"', str(emitted[0].message))
-
-
 
     def test_from_datetime_out_of_int64_range(self):
         utc = datetime.timezone.utc

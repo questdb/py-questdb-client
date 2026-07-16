@@ -25,7 +25,7 @@ Queries
 
 The following example runs DDL through ``query()``, binds positional
 parameters, streams a large result batch by batch, and leases one reader
-connection for a run of queries with a warm ``SYMBOL`` dictionary.
+connection for a run of queries.
 
 .. literalinclude:: ../examples/connect_query.py
    :language: python
@@ -37,8 +37,7 @@ DataFrame bulk load and reader leases
 
 The following example bulk-loads a pandas ``DataFrame`` through
 :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, then leases one reader
-connection with ``db.reader()`` and runs two queries on it, reusing the
-``SYMBOL`` dictionary across them.
+connection with ``db.reader()`` and runs two queries on it.
 
 .. literalinclude:: ../examples/connect_dataframe.py
    :language: python

@@ -9,4 +9,4 @@ Changelog
    :depth: 1
 
 .. include:: ../CHANGELOG.rst
-   :start-line: 7
+   :start-line: 5

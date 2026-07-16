@@ -33,9 +33,7 @@ def example(host: str = 'localhost', port: int = 9000):
                     total += len(batch)
             print('rows streamed:', total)
 
-            # Lease one reader connection for a run of queries;
-            # reset_symbol_dict=False keeps the SYMBOL dictionary warm
-            # because every query shares the connection.
+            # Lease one reader connection for a run of queries.
             with db.reader() as r:
                 latest = r.query(
                     'SELECT * FROM trades LIMIT -5').to_pandas()

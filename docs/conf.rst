@@ -210,7 +210,7 @@ walking the ``addr`` server list.
 * ``error_inbox_capacity`` - ``int >= 16``: Per-connection capacity of the
   server-rejection diagnostic ring (oldest entries are dropped on
   overflow, counted by
-  :func:`Sender.qwp_ws_errors_dropped <questdb.Sender.qwp_ws_errors_dropped>`).
+  :func:`Sender.error_events_dropped <questdb.Sender.error_events_dropped>`).
 
   Default: 256.
 

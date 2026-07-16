@@ -21,7 +21,7 @@ Where did my QWP server rejection go?
 
 Over QWP/WebSocket a server rejection (schema mismatch, parse error, ...)
 can arrive after ``flush()`` already returned. Every rejection is pushed to
-the ``qwp_ws_error_handler`` passed to :func:`questdb.connect`; without one
+the ``error_handler`` passed to :func:`questdb.connect`; without one
 it is logged through the ``questdb`` Python logger — ``ERROR`` for terminal
 rejections, ``WARNING`` for retriable ones (the queue replays those). Make
 sure Python logging is configured to show the ``questdb`` logger, or

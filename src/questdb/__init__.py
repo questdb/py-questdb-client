@@ -2,7 +2,7 @@ __version__ = '5.0.0'
 
 import sys as _sys
 from types import ModuleType as _ModuleType
-from typing import Optional as _Optional, Union as _Union
+from typing import Callable as _Callable, Optional as _Optional, Union as _Union
 
 from questdb import _client
 from questdb._client import (
@@ -16,11 +16,11 @@ from questdb._client import (
     QuestDBError,
     QuestDBErrorCode,
     QuestDBServerRejectionError,
-    QwpWsError,
-    QwpWsErrorCategory,
-    QwpWsErrorPolicy,
     QwpWsProgress,
     Sender,
+    SenderError,
+    SenderErrorCategory,
+    SenderErrorPolicy,
     SenderTransaction,
     ServerInfo,
     ServerRole,
@@ -43,11 +43,11 @@ __all__ = [
     'QuestDBError',
     'QuestDBErrorCode',
     'QuestDBServerRejectionError',
-    'QwpWsError',
-    'QwpWsErrorCategory',
-    'QwpWsErrorPolicy',
     'QwpWsProgress',
     'Sender',
+    'SenderError',
+    'SenderErrorCategory',
+    'SenderErrorPolicy',
     'SenderTransaction',
     'ServerInfo',
     'ServerRole',
@@ -73,12 +73,14 @@ def connect(
         conf_str: _Optional[str] = None,
         *,
         host: _Optional[str] = None,
-        port: _Union[int, str] = 9000,
-        tls: bool = False,
-        connection_listener=None,
+        port: _Union[int, str, None] = None,
+        tls: _Optional[bool] = None,
+        connection_listener: _Optional[
+            _Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
-        qwp_ws_error_handler=None,
-        qwp_ws_error_inbox_capacity: int = 0,
+        error_handler: _Optional[
+            _Callable[[SenderError], None]] = None,
+        error_event_inbox_capacity: int = 0,
         **params) -> QuestDB:
     """
     Connect to a QuestDB deployment and return a :class:`QuestDB` handle.
@@ -101,8 +103,8 @@ def connect(
     list every cluster node in a single ``addr`` server list.
 
     ``connection_listener`` receives one :class:`ConnectionEvent` per
-    connection-state transition; ``qwp_ws_error_handler`` receives one
-    :class:`QwpWsError` per server rejection (without it rejections are
+    connection-state transition; ``error_handler`` receives one
+    :class:`SenderError` per server rejection (without it rejections are
     logged through the ``questdb`` logger). Each runs on its own
     dispatcher thread; see :meth:`QuestDB.from_conf` for details.
 
@@ -125,14 +127,20 @@ def connect(
             'connect() takes either a configuration string or a host= '
             'keyword (with optional port=, tls= and further settings), '
             'but not both.')
-    if conf_str is not None and params:
-        unexpected = ', '.join(sorted(params))
-        raise TypeError(
-            'connect() only accepts additional settings keywords '
-            f'({unexpected}) together with host=, not with a '
-            'configuration string; add them to the string instead.')
-    if conf_str is None:
-        settings = [('addr', f'{host}:{port}')]
+    if conf_str is not None:
+        given = [name for name, value
+                 in (('port', port), ('tls', tls)) if value is not None]
+        given.extend(sorted(params))
+        if given:
+            raise TypeError(
+                'connect() only accepts endpoint and settings keywords '
+                f'({", ".join(given)}) together with host=, not with a '
+                'configuration string; add them to the string instead.')
+    else:
+        host = str(host)
+        if ':' in host and not host.startswith('['):
+            host = f'[{host}]'
+        settings = [('addr', f'{host}:{port if port is not None else 9000}')]
         settings.extend(params.items())
         conf_str = ('wss::' if tls else 'ws::') + ''.join(
             f'{key}={_conf_value(value)};' for key, value in settings)
@@ -140,8 +148,8 @@ def connect(
         conf_str,
         connection_listener=connection_listener,
         connection_event_inbox_capacity=connection_event_inbox_capacity,
-        qwp_ws_error_handler=qwp_ws_error_handler,
-        qwp_ws_error_inbox_capacity=qwp_ws_error_inbox_capacity)
+        error_handler=error_handler,
+        error_event_inbox_capacity=error_event_inbox_capacity)
 
 
 class _QuestdbModule(_ModuleType):

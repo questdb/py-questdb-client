@@ -1183,6 +1183,7 @@ cdef ssize_t _dataframe_resolve_at(
     cdef object dtype
     cdef PandasCol pandas_col
     cdef TimestampNanos at_nanos
+    cdef int64_t at_value
     cdef int at_source
     if at is None:
         at_value_out[0] = _AT_IS_SERVER_NOW
@@ -1192,11 +1193,12 @@ cdef ssize_t _dataframe_resolve_at(
         at_value_out[0] = at_nanos._value
         return -1
     elif isinstance(at, cp_datetime):
-        if datetime_to_micros(at) < 0:
+        at_value = datetime_to_nanos(at)
+        if at_value < 0:
             raise ValueError(
                 'Bad argument `at`: Cannot use a datetime before the ' +
                 'Unix epoch (1970-01-01 00:00:00).')
-        at_value_out[0] = datetime_to_nanos(at)
+        at_value_out[0] = at_value
         return -1
     elif isinstance(at, str):
         _dataframe_get_loc(df, at, 'at', &col_index)

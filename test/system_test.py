@@ -171,11 +171,11 @@ class TestWithDatabase(unittest.TestCase):
             sock.bind(('127.0.0.1', 0))
             return sock.getsockname()[1]
 
-    def _retry_poll_qwp_ws_error(self, sender, timeout_sec=10):
+    def _retry_poll_error(self, sender, timeout_sec=10):
         import time as _time
         deadline = _time.monotonic() + timeout_sec
         while _time.monotonic() < deadline:
-            diagnostic = sender.poll_qwp_ws_error()
+            diagnostic = sender.poll_error()
             if diagnostic is not None:
                 return diagnostic
             _time.sleep(0.05)
@@ -509,14 +509,14 @@ class TestWithDatabase(unittest.TestCase):
                 with self.assertRaises(
                         qi.QuestDBServerRejectionError) as raised:
                     sender.await_acked_fsn(final_fsn, 30000)
-                diagnostic = raised.exception.qwp_ws_error
+                diagnostic = raised.exception.sender_error
                 self.assertIsNotNone(diagnostic)
                 self.assertEqual(
                     diagnostic.category,
-                    qi.QwpWsErrorCategory.SchemaMismatch)
+                    qi.SenderErrorCategory.SchemaMismatch)
                 self.assertEqual(
                     diagnostic.applied_policy,
-                    qi.QwpWsErrorPolicy.Terminal)
+                    qi.SenderErrorPolicy.Terminal)
                 self.assertEqual(diagnostic.status, 0x03)
                 self.assertEqual(diagnostic.from_fsn, rejected_fsn)
                 self.assertEqual(diagnostic.to_fsn, rejected_fsn)
@@ -550,7 +550,7 @@ class TestWithDatabase(unittest.TestCase):
                     sf_dir,
                     reconnect_max_duration_millis=30000,
                     close_flush_timeout_millis=30000),
-                qwp_ws_error_handler=captured.append)
+                error_handler=captured.append)
             try:
                 sender.establish()
                 sender.row(
@@ -571,14 +571,14 @@ class TestWithDatabase(unittest.TestCase):
                 with self.assertRaises(
                         qi.QuestDBServerRejectionError) as raised:
                     sender.await_acked_fsn(final_fsn, 30000)
-                diagnostic = raised.exception.qwp_ws_error
+                diagnostic = raised.exception.sender_error
                 self.assertIsNotNone(diagnostic)
                 self.assertEqual(
                     diagnostic.category,
-                    qi.QwpWsErrorCategory.SchemaMismatch)
+                    qi.SenderErrorCategory.SchemaMismatch)
                 self.assertEqual(
                     diagnostic.applied_policy,
-                    qi.QwpWsErrorPolicy.Terminal)
+                    qi.SenderErrorPolicy.Terminal)
                 self.assertEqual(diagnostic.status, 0x03)
                 self.assertEqual(diagnostic.from_fsn, rejected_fsn)
                 self.assertEqual(diagnostic.to_fsn, rejected_fsn)
@@ -587,7 +587,7 @@ class TestWithDatabase(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertTrue(
                     captured,
-                    'qwp_ws_error_handler was never invoked for the '
+                    'error_handler was never invoked for the '
                     'terminal rejection')
                 callback_diagnostic = captured[0]
                 self.assertEqual(
@@ -640,7 +640,7 @@ class TestWithDatabase(unittest.TestCase):
                     sf_dir,
                     reconnect_max_duration_millis=30000,
                     close_flush_timeout_millis=30000),
-                qwp_ws_error_handler=raising_handler)
+                error_handler=raising_handler)
             try:
                 sender.establish()
                 sender.row(
@@ -660,7 +660,7 @@ class TestWithDatabase(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertTrue(
                     invoked,
-                    'raising qwp_ws_error_handler was never invoked')
+                    'raising error_handler was never invoked')
             finally:
                 sender.close(False)
 
@@ -774,8 +774,8 @@ class TestWithDatabase(unittest.TestCase):
 
                 self.assertIsNotNone(last_fsn)
                 self.assertTrue(sender.await_acked_fsn(last_fsn, 30000))
-                self.assertIsNone(sender.poll_qwp_ws_error())
-                self.assertEqual(sender.qwp_ws_errors_dropped(), 0)
+                self.assertIsNone(sender.poll_error())
+                self.assertEqual(sender.error_events_dropped(), 0)
                 sender.close_drain()
             finally:
                 sender.close(False)

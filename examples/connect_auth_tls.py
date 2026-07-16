@@ -39,7 +39,7 @@ def example():
                 # published on this lease.
                 sender.flush(wait=True)
 
-            print('events delivered:', db.connection_events_delivered())
+            print('events delivered:', db.connection_events_delivered)
 
     except QuestDBError as e:
         sys.stderr.write(

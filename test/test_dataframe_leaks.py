@@ -217,6 +217,33 @@ class TestPyobjColumnarLeak(unittest.TestCase):
 
                 self._assert_stable(work, warmup=150, measure=1800)
 
+    @unittest.skipUnless(pa is not None, 'pyarrow not installed')
+    def test_promoted_columnar_path_no_leak(self):
+        """Guards ``_dataframe_columnar_promote_cols``: the pybuf chunk
+        release + Arrow re-export for object-Decimal and NaT-carrying
+        ``datetime64[ns]`` field columns must not leak native buffers."""
+        from decimal import Decimal
+        from qwp_ws_ack_server import QwpAckServer
+        n = self.ROWS
+        df = pd.DataFrame({
+            'ts': pd.Series(pd.to_datetime(np.arange(n), unit='s')),
+            'dec': pd.Series(
+                [None if i % 7 == 0 else Decimal(i) / 100
+                 for i in range(n)], dtype=object),
+            'vts': pd.Series(
+                [pd.NaT if i % 5 == 0 else pd.Timestamp(i, unit='s')
+                 for i in range(n)], dtype='datetime64[ns]'),
+        })
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    client.dataframe(
+                        df, table_name='t', at='ts', symbols=False)
+
+                self._assert_stable(work, warmup=150, measure=1800)
+
 
 if __name__ == '__main__':
     unittest.main()

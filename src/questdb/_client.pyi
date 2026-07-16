@@ -27,17 +27,17 @@ __all__ = [
     "ConnectionEventKind",
     "PooledReader",
     "PooledSender",
+    "Protocol",
+    "QueryResult",
     "QuestDB",
     "QuestDBError",
     "QuestDBErrorCode",
     "QuestDBServerRejectionError",
-    "Protocol",
-    "QueryResult",
-    "Sender",
-    "QwpWsError",
-    "QwpWsErrorCategory",
-    "QwpWsErrorPolicy",
     "QwpWsProgress",
+    "Sender",
+    "SenderError",
+    "SenderErrorCategory",
+    "SenderErrorPolicy",
     "SenderTransaction",
     "ServerInfo",
     "ServerRole",
@@ -119,7 +119,7 @@ class QuestDBError(Exception):
         """
 
     @property
-    def qwp_ws_error(self) -> Optional["QwpWsError"]:
+    def sender_error(self) -> Optional["SenderError"]:
         """
         Return the structured QWP/WebSocket diagnostic, if this error carries
         one from a QWP/WebSocket sender failure.
@@ -131,7 +131,7 @@ class QuestDBServerRejectionError(QuestDBError):
     A terminal QWP/WebSocket server rejection.
 
     The structured server payload is available through
-    :attr:`QuestDBError.qwp_ws_error`.
+    :attr:`QuestDBError.sender_error`.
     """
 
 
@@ -892,7 +892,7 @@ class QwpWsProgress(TaggedEnum):
     Background = ...
     Manual = ...
 
-class QwpWsErrorCategory(TaggedEnum):
+class SenderErrorCategory(TaggedEnum):
     """
     Category of a structured QWP/WebSocket diagnostic.
     """
@@ -906,7 +906,7 @@ class QwpWsErrorCategory(TaggedEnum):
     ProtocolViolation = ...
     Unknown = ...
 
-class QwpWsErrorPolicy(TaggedEnum):
+class SenderErrorPolicy(TaggedEnum):
     """
     Applied policy for a structured QWP/WebSocket diagnostic.
     """
@@ -916,13 +916,13 @@ class QwpWsErrorPolicy(TaggedEnum):
     Terminal = ...
 
 @dataclass(frozen=True)
-class QwpWsError:
+class SenderError:
     """
     Structured QWP/WebSocket diagnostic.
     """
 
-    category: QwpWsErrorCategory
-    applied_policy: QwpWsErrorPolicy
+    category: SenderErrorCategory
+    applied_policy: SenderErrorPolicy
     status: Optional[int]
     message: str
     message_sequence: Optional[int]
@@ -1011,19 +1011,19 @@ class PooledSender:
         """Publish buffered rows; ``wait=True`` waits for the server OK ack
         of everything published through this lease. The wait is a pure ack
         barrier — only a terminal connection failure raises; server
-        rejections go to the pool's ``qwp_ws_error_handler`` (default:
+        rejections go to the pool's ``error_handler`` (default:
         the ``questdb`` logger)."""
 
     def wait(self, timeout_millis: int = 0) -> PooledSender:
         """Wait for everything published through this lease to receive an
         OK ack; returns immediately if the lease published nothing. Only a
         terminal connection failure raises; server rejections go to the
-        pool's ``qwp_ws_error_handler``."""
+        pool's ``error_handler``."""
 
     def close(self, flush: bool = True, wait: bool = False) -> None:
         """Return this sender to its pool. Idempotent. Without
         ``wait=True`` a later server rejection of this lease's rows is
-        reported through the pool's ``qwp_ws_error_handler``."""
+        reported through the pool's ``error_handler``."""
 
     def __exit__(self, exc_type, exc_val, exc_tb): ...
 
@@ -1087,8 +1087,8 @@ class QuestDB:
         *,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
-        qwp_ws_error_handler: Optional[Callable[[QwpWsError], None]] = None,
-        qwp_ws_error_inbox_capacity: int = 0,
+        error_handler: Optional[Callable[[SenderError], None]] = None,
+        error_event_inbox_capacity: int = 0,
     ) -> QuestDB:
         """
         Construct a handle from a QWP/WebSocket configuration string.
@@ -1098,7 +1098,7 @@ class QuestDB:
         ``connection_listener`` receives one :class:`ConnectionEvent` per
         connection-state transition, on a dedicated dispatcher thread.
 
-        ``qwp_ws_error_handler`` receives one :class:`QwpWsError` per
+        ``error_handler`` receives one :class:`SenderError` per
         server rejection recorded by any of the pool's connections —
         including rejections for rows published through an
         already-closed :class:`PooledSender` — on its own dispatcher
@@ -1190,12 +1190,12 @@ class QuestDB:
         """Events delivered to the connection listener."""
 
     @property
-    def rejection_events_delivered(self) -> int:
-        """Server rejections delivered to the ``qwp_ws_error_handler``
+    def error_events_delivered(self) -> int:
+        """Server rejections delivered to the ``error_handler``
         (or to the default logging handler when none was registered)."""
 
     @property
-    def rejection_events_dropped(self) -> int:
+    def error_events_dropped(self) -> int:
         """Server rejections discarded by the handler inbox's drop-oldest
         policy."""
 
@@ -1324,7 +1324,7 @@ class Sender:
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
-        qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
+        error_handler: Optional[Callable[["SenderError"], None]] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         protocol_version=None,
@@ -1358,7 +1358,7 @@ class Sender:
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
-        qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
+        error_handler: Optional[Callable[["SenderError"], None]] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         protocol_version=None,
@@ -1402,7 +1402,7 @@ class Sender:
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
-        qwp_ws_error_handler: Optional[Callable[["QwpWsError"], None]] = None,
+        error_handler: Optional[Callable[["SenderError"], None]] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         protocol_version=None,
@@ -1626,8 +1626,8 @@ class Sender:
         With QWP/WebSocket, this publishes the buffer into the local sender
         queue and returns before the server necessarily ACKs the frame. Later
         terminal diagnostics fail subsequent sender calls and are available as
-        :attr:`QuestDBError.qwp_ws_error`. Server diagnostics are also
-        available through :func:`Sender.poll_qwp_ws_error`.
+        :attr:`QuestDBError.sender_error`. Server diagnostics are also
+        available through :func:`Sender.poll_error`.
 
         :param clear: If ``True``, the flushed buffer is cleared (default).
             If ``False``, the flushed buffer is left in the internal buffer.
@@ -1677,12 +1677,12 @@ class Sender:
         Drive one QWP/WebSocket progress step for manual progress senders.
         """
 
-    def poll_qwp_ws_error(self) -> Optional[QwpWsError]:
+    def poll_error(self) -> Optional[SenderError]:
         """
         Poll the next structured QWP/WebSocket diagnostic.
         """
 
-    def qwp_ws_errors_dropped(self) -> int:
+    def error_events_dropped(self) -> int:
         """
         Number of QWP/WebSocket diagnostics dropped from the bounded ring.
         """
@@ -1729,5 +1729,3 @@ class Sender:
 
         This is implemented by calling :func:`Sender.close`.
         """
-
-
