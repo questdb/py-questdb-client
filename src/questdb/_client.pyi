@@ -51,7 +51,7 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union, overload
 
 import numpy as np
 import pandas as pd
@@ -1012,6 +1012,49 @@ class _PooledSender:
     def __exit__(self, exc_type, exc_val, exc_tb): ...
 
 
+class _PooledQuery:
+    """
+    A query lease borrowed from a :class:`QuestDB` pool.
+
+    The read-side twin of :meth:`QuestDB.sender`: obtain a lease with
+    ``QuestDB.query()`` (no arguments); it holds one pooled reader
+    connection for its lifetime and runs queries on it sequentially via
+    :meth:`query`. ``close()`` (or leaving the ``with`` block) releases
+    the connection: back to the pool if the last query was drained
+    cleanly, dropped otherwise.
+
+    Queries are strictly sequential — fully drain (or close) each
+    :class:`QueryResult` before the next :meth:`query` call. Closing a
+    result before draining it tears down the lease's connection, after
+    which the lease is terminal: close it and obtain a fresh one. Use
+    one lease per thread, on the thread that created it.
+    """
+
+    def __enter__(self) -> _PooledQuery: ...
+
+    def query(
+        self,
+        sql: str,
+        binds: Optional[Union[list, tuple]] = None,
+        *,
+        reset_symbol_dict: bool = True,
+    ) -> QueryResult:
+        """
+        Execute a SQL query on the lease's connection and return a
+        :class:`QueryResult`.
+
+        Arguments behave exactly as on :meth:`QuestDB.query`, except the
+        query runs on the reader this lease holds instead of a per-call
+        pool borrow. ``reset_symbol_dict=False`` reuses the connection's
+        SYMBOL dictionary built up by the lease's earlier queries.
+        """
+
+    def close(self) -> None:
+        """Release the lease's reader connection. Idempotent."""
+
+    def __exit__(self, exc_type, exc_val, exc_tb): ...
+
+
 class QuestDB:
     """
     Handle to a QuestDB deployment over QWP/WebSocket.
@@ -1078,6 +1121,7 @@ class QuestDB:
           exporters, wrapped into a one-batch ``pa.Table``).
         """
 
+    @overload
     def query(
         self,
         sql: str,
@@ -1095,6 +1139,14 @@ class QuestDB:
         ``to_pandas()``. Set ``False`` to keep the dictionary warm across
         repeated identical queries. No-op against servers that predate the
         capability.
+        """
+
+    @overload
+    def query(self) -> _PooledQuery:
+        """
+        Borrow a :class:`_PooledQuery` lease holding one pooled reader
+        connection, for running several queries in a row on that same
+        connection (``with db.query() as q: q.query(sql)``).
         """
 
     def server_info(self) -> ServerInfo:
@@ -1128,6 +1180,12 @@ class QueryResult:
     """
     Result of :meth:`QuestDB.query`. Single-use: each materialisation
     method consumes the underlying cursor.
+
+    Consumption rule: fully drain the result, use it as a context
+    manager (``with db.query(...) as result:``), or call :meth:`close`.
+    A partially-consumed result cannot return its connection to the
+    pool. Call :meth:`cancel` first if the server should stop
+    streaming.
 
     SYMBOL columns: :meth:`to_polars` / :meth:`to_pandas` build the
     Categorical directly, interning the connection dictionary once;
@@ -1184,7 +1242,10 @@ class QueryResult:
         """Ask the server to stop streaming. Idempotent."""
 
     def close(self) -> None:
-        """Release the cursor and reader. Idempotent."""
+        """Release the cursor and reader. Idempotent. The pooled
+        connection is released immediately: returned to the pool only
+        if the stream already reached its clean end, dropped
+        otherwise."""
 
     def __enter__(self) -> QueryResult: ...
 

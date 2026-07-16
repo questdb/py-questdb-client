@@ -929,8 +929,11 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
 (``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
 ``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
-Each result is consumed once; call :func:`QueryResult.cancel` to ask the server
-to stop streaming and :func:`QueryResult.close` to release resources.
+Each result is consumed once. Fully drain it, use it as a context manager
+(``with db.query(...) as result:``), or call :func:`QueryResult.close`. A
+partially-consumed result cannot return its connection to the pool — closing
+it drops the connection and the pool refills on demand. Call
+:func:`QueryResult.cancel` first if the server should stop streaming.
 
 ``SYMBOL`` columns: ``to_polars`` / ``to_pandas`` build the categorical directly
 (connection dictionary interned once, no per-row remap). ``to_arrow`` /
@@ -940,6 +943,26 @@ which a generic consumer reconciles. So when the target is a polars / pandas
 frame, the dedicated methods avoid the re-reconciliation that
 ``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
+
+For several queries in a row, call :meth:`QuestDB.query` with no arguments to
+take a **query lease** — the read-side twin of :meth:`QuestDB.sender`. The
+lease borrows one reader connection from the pool for its lifetime and runs
+queries on it sequentially with the same verb::
+
+    with db.query() as q:
+        r1 = q.query('SELECT * FROM t1').to_pandas()
+        r2 = q.query('SELECT * FROM t2',
+                     reset_symbol_dict=False).to_pandas()
+
+Each query skips the per-call pool round-trip, and because they share one
+connection, ``reset_symbol_dict=False`` on follow-up queries keeps the
+connection's ``SYMBOL`` dictionary warm across them. Queries on a lease are
+strictly sequential: fully drain (or close) each :class:`QueryResult` before
+the next ``q.query()`` call. Closing a result before draining it tears down
+the lease's connection, after which the lease is terminal — close it and take
+a fresh one. A lease has thread affinity: use one lease per thread, on the
+thread that created it (threads sharing a :class:`QuestDB` handle each take
+their own lease).
 
 The same :class:`QuestDB` can ingest dataframes through the pooled columnar QWP
 path with :meth:`QuestDB.dataframe`. Dataframe ingestion always uses the direct

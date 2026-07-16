@@ -6115,10 +6115,10 @@ cdef class QuestDB:
 
     def query(
             self,
-            str sql,
+            str sql=None,
             object binds=None,
             *,
-            bint reset_symbol_dict=True) -> QueryResult:
+            bint reset_symbol_dict=True):
         """
         Execute a SQL query and return a :class:`QueryResult`.
 
@@ -6129,7 +6129,23 @@ cdef class QuestDB:
         closed (a poisoned connection is dropped instead). Auth / TLS
         settings apply to both directions.
 
+        Called without arguments, ``query()`` instead returns a
+        :class:`_PooledQuery` lease that borrows one reader connection
+        from the pool and runs several queries on it sequentially:
+
+        .. code-block:: python
+
+            with db.query() as q:
+                r1 = q.query('SELECT * FROM t1').to_pandas()
+                r2 = q.query(
+                    'SELECT * FROM t2',
+                    reset_symbol_dict=False).to_pandas()
+
+        ``binds`` and ``reset_symbol_dict`` belong on the lease's own
+        :meth:`_PooledQuery.query` in that form.
+
         :param sql: SQL text to execute. Forwarded verbatim to QuestDB.
+            Omit (``None``) to obtain a :class:`_PooledQuery` lease.
 
         :param binds: Positional bind parameters matching the ``$1``..``$N``
             placeholders in ``sql``, as a list or tuple. Always prefer binds
@@ -6167,7 +6183,8 @@ cdef class QuestDB:
         :return: A :class:`QueryResult`. Materialise it via
             ``to_pandas()``, ``to_arrow()``, ``iter_arrow()``,
             ``iter_pandas()``, or the ``__arrow_c_stream__`` PyCapsule
-            protocol.
+            protocol. When ``sql`` is omitted, a :class:`_PooledQuery`
+            lease instead.
 
         Sentinel-value collisions in the result frame round-trip QuestDB's
         contract: ``INT64_MIN`` in a LONG column, NaN in DOUBLE / FLOAT,
@@ -6184,7 +6201,27 @@ cdef class QuestDB:
         # column_sender/db.rs` for the pool's structure.
         cdef _ReaderHandle reader_handle
         cdef _CursorHandle cursor_handle
+        cdef _PooledQuery lease
         cdef questdb_db* db
+        cdef bint db_use = False
+        if sql is None:
+            if binds is not None or not reset_symbol_dict:
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'query() without sql returns a query lease; pass '
+                    '"binds" and "reset_symbol_dict" to the lease\'s own '
+                    'query() instead.')
+            db = self._begin_db_use('query')
+            db_use = True
+            try:
+                reader_handle = _borrow_reader_from_pool(db)
+                lease = _PooledQuery.__new__(_PooledQuery)
+                lease._attach(self, reader_handle)
+                db_use = False
+                return lease
+            finally:
+                if db_use:
+                    self._end_db_use()
         if binds is not None and not isinstance(binds, (list, tuple)):
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
@@ -8089,6 +8126,147 @@ cdef class _PooledSender:
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
         self.close(exc_type is None, False)
+
+    def __dealloc__(self):
+        if self._lock is not None:
+            with self._lock:
+                self._release_locked()
+
+
+cdef class _PooledQuery:
+    """
+    A query lease borrowed from a :class:`QuestDB` pool.
+
+    The read-side twin of :meth:`QuestDB.sender`: obtain a lease with
+    ``QuestDB.query()`` (no arguments); it holds one pooled reader
+    connection for its lifetime and runs queries on it sequentially via
+    :meth:`query`. ``close()`` (or leaving the ``with`` block) releases
+    the connection: back to the pool if the last query was drained
+    cleanly, dropped otherwise.
+
+    Queries are strictly sequential — one result at a time. Fully drain
+    (or ``close()``) each :class:`QueryResult` before calling
+    :meth:`query` again; running the next query while the previous
+    result is still open raises ``QuestDBError``. Closing a result
+    before draining it tears down the lease's connection (the server
+    may still be streaming into it), after which the lease is terminal:
+    ``close()`` it and obtain a fresh one with ``QuestDB.query()``.
+
+    Because every query shares one connection, passing
+    ``reset_symbol_dict=False`` to follow-up queries keeps the
+    connection's SYMBOL dictionary warm across them instead of
+    resetting it per query.
+
+    The lease counts as an active use of the :class:`QuestDB` handle
+    (``QuestDB.close()`` waits for it) and has thread affinity: use one
+    lease per thread, on the thread that created it.
+    """
+    cdef QuestDB _handle
+    cdef _ReaderHandle _reader
+    cdef _CursorHandle _last_cursor
+    cdef object _lock
+
+    def __cinit__(self):
+        self._handle = None
+        self._reader = None
+        self._last_cursor = None
+        self._lock = threading.RLock()
+
+    cdef void _attach(
+            self,
+            QuestDB handle,
+            _ReaderHandle reader) noexcept:
+        self._handle = handle
+        self._reader = reader
+
+    cdef void_int _check_open(self, str method) except -1:
+        if self._reader is None:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{method}() can't be called: the query lease is closed.")
+
+    cdef void _release_locked(self) except *:
+        cdef _ReaderHandle reader = self._reader
+        cdef _CursorHandle last = self._last_cursor
+        cdef QuestDB handle = self._handle
+        if reader is None:
+            return
+        self._reader = None
+        self._last_cursor = None
+        self._handle = None
+        if last is not None:
+            last._free()
+        reader._close()
+        if handle is not None:
+            handle._end_db_use()
+
+    def __enter__(self):
+        with self._lock:
+            self._check_open('__enter__')
+        return self
+
+    def query(
+            self,
+            str sql,
+            object binds=None,
+            *,
+            bint reset_symbol_dict=True) -> QueryResult:
+        """
+        Execute a SQL query on the lease's connection and return a
+        :class:`QueryResult`.
+
+        ``sql``, ``binds`` and ``reset_symbol_dict`` behave exactly as
+        on :meth:`QuestDB.query`, except the query runs on the reader
+        this lease holds instead of a per-call pool borrow. The
+        previous query's result must be fully drained (or closed)
+        first; ``reset_symbol_dict=False`` reuses the connection's
+        SYMBOL dictionary built up by the lease's earlier queries.
+        """
+        cdef _CursorHandle cursor_handle
+        cdef _CursorHandle last
+        if binds is not None and not isinstance(binds, (list, tuple)):
+            raise TypeError(
+                '"binds" must be a list or tuple of positional bind '
+                f'parameters (or None), not {_fqn(type(binds))}')
+        with self._lock:
+            self._check_open('query')
+            last = self._last_cursor
+            if last is not None:
+                if last._cursor != NULL:
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall,
+                        'the previous QueryResult is still open: drain '
+                        'it fully or close() it before running the next '
+                        'query on this lease.')
+                if self._reader._must_close:
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall,
+                        "the lease's connection is terminal: the "
+                        'previous query was not drained to its clean '
+                        'end, so its transport was torn down. close() '
+                        'this lease and obtain a new one with '
+                        'QuestDB.query().')
+            self._reader._must_close = True
+            cursor_handle = _execute_query(
+                self._reader, sql, binds, reset_symbol_dict)
+            cursor_handle._owns_reader = False
+            self._last_cursor = cursor_handle
+        return QueryResult(cursor_handle)
+
+    def close(self):
+        """
+        Release the lease's reader connection. Idempotent.
+
+        A still-open (undrained) last result is freed first, which
+        tears down the connection; a cleanly-drained connection is
+        returned to the pool, any other is dropped and the pool refills
+        on demand.
+        """
+        with self._lock:
+            self._release_locked()
+
+    def __exit__(self, exc_type, _exc_val, _exc_tb):
+        self.close()
 
     def __dealloc__(self):
         if self._lock is not None:

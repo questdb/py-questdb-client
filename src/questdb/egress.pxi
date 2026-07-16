@@ -28,7 +28,10 @@ cdef inline object _reader_err_to_py(questdb_error* err):
 cdef class _ReaderHandle:
     """Owns a ``reader*``.
 
-    On dealloc the reader either returns to its pool or is dropped,
+    ``_close()`` runs eagerly when the owning ``_CursorHandle`` is
+    freed (clean drain, ``QueryResult.close()``, or consumer
+    teardown); ``__dealloc__`` is the idempotent backstop. On close
+    the reader either returns to its pool or is dropped,
     depending on the ``reader``'s own ownership tag (set when it
     was constructed — see ``ReaderOwnership`` in the Rust FFI):
 
@@ -43,7 +46,7 @@ cdef class _ReaderHandle:
     hold a raw ``questdb_db*`` pointer here: the reader struct
     holds an ``Arc<DbInner>`` internally, so the pool stays alive
     even if the user's ``QuestDB.close()`` ran after ``query()``
-    returned but before the reader dealloced.
+    returned but before the reader closed.
 
     ``_must_close`` defaults to ``True``: only the generator's
     clean-drain path (or code that explicitly knows the cursor
@@ -79,7 +82,21 @@ cdef class _ReaderHandle:
 
 
 cdef class _CursorHandle:
-    """Owns a ``reader_cursor*`` + back-ref to its reader. Freed on dealloc.
+    """Owns a ``reader_cursor*`` + back-ref to its reader.
+
+    ``_free()`` releases both: the cursor is freed and the reader
+    closed (returned to its pool or dropped) in the same locked
+    section. The drain / close / consumer-teardown paths call it
+    eagerly; ``__dealloc__`` is the backstop.
+
+    ``_owns_reader`` selects who releases the reader. The one-shot
+    ``QuestDB.query(sql)`` path leaves it ``True``: the cursor is the
+    reader's sole owner, so ``_free()`` closes the reader eagerly. A
+    ``_PooledQuery`` lease sets it ``False``: the lease keeps its
+    reader across queries, so ``_free()`` releases only the cursor and
+    drops the back-reference. The clean-drain paths clear
+    ``_reader_ref._must_close`` *before* calling ``_free()``, so the
+    lease still observes whether the stream reached its terminal.
 
     ``_reset_seq`` counts mid-query failover resets. The
     ``_failover_reset_trampoline`` installed on the materialise-whole
@@ -93,12 +110,14 @@ cdef class _CursorHandle:
     """
     cdef reader_cursor* _cursor
     cdef _ReaderHandle _reader_ref
+    cdef bint _owns_reader
     cdef object _lock
     cdef int _reset_seq
 
     def __cinit__(self):
         self._cursor = NULL
         self._reader_ref = None
+        self._owns_reader = True
         self._lock = threading.Lock()
         self._reset_seq = 0
 
@@ -114,6 +133,10 @@ cdef class _CursorHandle:
                 reader_cursor_free(self._cursor)
                 _ensure_has_gil(&gs)
                 self._cursor = NULL
+            if self._reader_ref is not None:
+                if self._owns_reader:
+                    self._reader_ref._close()
+                self._reader_ref = None
 
     def __dealloc__(self):
         self._free()
@@ -2117,6 +2140,10 @@ def _debug_egress_pool_stats(client):
         c._end_db_use()
 
 
+cdef bint _cursor_handle_is_live(_CursorHandle h):
+    return h is not None and h._cursor != NULL
+
+
 class QueryResult:
     """Result of ``QuestDB.query(sql)``.
 
@@ -2125,6 +2152,12 @@ class QueryResult:
     ``iter_pandas``, or the ``__arrow_c_stream__`` PyCapsule protocol)
     consumes the underlying cursor; the second consumption raises
     ``QuestDBError``.
+
+    **Consumption rule**: fully drain the result, use it as a context
+    manager (``with db.query(...) as result:``), or call :meth:`close`.
+    A partially-consumed result cannot return its connection to the
+    pool. Call :meth:`cancel` first if the server should stop
+    streaming.
 
     **Thread affinity**: the underlying cursor is bound to the thread that
     created it (via ``QuestDB.query``). Create, consume, ``cancel``,
@@ -2392,8 +2425,11 @@ class QueryResult:
     def close(self):
         """Release the cursor + reader. Idempotent.
 
-        Does not send a cancellation frame; use :meth:`cancel` first if
-        you need the server to stop work. After ``close``, any
+        Releases the pooled connection immediately: it returns to the
+        pool only if the stream already reached its clean end;
+        otherwise the connection is dropped and the pool refills on
+        demand. Does not send a cancellation frame; use :meth:`cancel`
+        first if you need the server to stop work. After ``close``, any
         previously-returned iterator that hasn't been exhausted will
         fail on its next pump with
         ``QuestDBErrorCode.InvalidApiCall``.
@@ -2411,3 +2447,18 @@ class QueryResult:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
+
+    def __del__(self):
+        try:
+            if not _cursor_handle_is_live(self._cursor_handle):
+                return
+            warnings.warn(
+                'QueryResult was neither drained nor closed; its '
+                'pooled connection is being released by the garbage '
+                'collector. Use `with db.query(...)` or call '
+                '`close()`.',
+                ResourceWarning,
+                stacklevel=2)
+            self.close()
+        except Exception:
+            pass

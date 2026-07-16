@@ -3216,6 +3216,267 @@ class TestEgressPool(unittest.TestCase):
             self.assertEqual((in_use, idle), (0, 1))
 
     # ------------------------------------------------------------------
+    # Deterministic release — close() / abandonment lifecycle
+    # ------------------------------------------------------------------
+
+    def test_close_after_partial_consume_releases_reader_without_gc(self):
+        """``QueryResult.close()`` releases the pooled reader on the
+        spot: ``in_use`` is back to baseline immediately after the
+        ``with`` block, with no ``gc.collect()`` and while an
+        unfinished iterator still holds the cursor handle alive. The
+        mid-stream reader is dropped, not recycled (``cursor_active``
+        was still set), so ``idle`` stays 0.
+        """
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query(
+                    f'SELECT x FROM {table} ORDER BY x') as result:
+                it = result.iter_arrow()
+                next(it)
+                in_use, _ = qi._debug_egress_pool_stats(client)
+                self.assertEqual(in_use, 1)
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                (in_use, idle), (0, 0),
+                f'close() did not release the reader immediately; '
+                f'got in_use={in_use}, idle={idle}')
+            del it
+
+    def test_gc_abandoned_result_warns_and_releases(self):
+        """A never-consumed ``QueryResult`` abandoned inside a
+        reference cycle holds its reader until the garbage collector
+        runs; the ``__del__`` backstop then emits a ``ResourceWarning``
+        and releases the reader. The cycle keeps refcounting from
+        cleaning it up early, so this observes the true GC-timed path.
+        """
+        import gc
+        import warnings
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            result._cycle = result
+            in_use, _ = qi._debug_egress_pool_stats(client)
+            self.assertEqual(in_use, 1)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+                in_use, _ = qi._debug_egress_pool_stats(client)
+                self.assertEqual(
+                    in_use, 1,
+                    'the cycle should defer release until gc runs')
+                gc.collect()
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                (in_use, idle), (0, 0),
+                f'gc backstop did not release the reader; '
+                f'got in_use={in_use}, idle={idle}')
+            resource_warnings = [
+                w for w in caught
+                if issubclass(w.category, ResourceWarning)]
+            self.assertEqual(
+                len(resource_warnings), 1,
+                f'expected one ResourceWarning; got {caught!r}')
+            self.assertIn(
+                'neither drained nor closed',
+                str(resource_warnings[0].message))
+
+    def test_abandoned_iterator_releases_reader_on_del(self):
+        """Abandoning a partially-consumed stream releases the reader
+        as soon as the iterator and result are dropped — no
+        ``gc.collect()`` needed — and emits no ``ResourceWarning``
+        (the cursor was handed off to the iterator, which released it
+        deterministically on finalisation).
+        """
+        import gc
+        import warnings
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            it = result.iter_arrow()
+            next(it)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del it
+                del result
+                in_use, idle = qi._debug_egress_pool_stats(client)
+                self.assertEqual(
+                    (in_use, idle), (0, 0),
+                    f'expected immediate release on iterator del; '
+                    f'got in_use={in_use}, idle={idle}')
+                gc.collect()
+            self.assertEqual(
+                [w for w in caught
+                 if issubclass(w.category, ResourceWarning)],
+                [])
+
+    def test_drained_result_does_not_warn_at_del(self):
+        """A fully-drained ``QueryResult`` has nothing left to release:
+        deleting it emits no ``ResourceWarning`` and the reader was
+        already returned to the pool by the drain.
+        """
+        import gc
+        import warnings
+        table = self._seed_table(n_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            result = client.query(f'SELECT count() FROM {table}')
+            result.to_arrow()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+                gc.collect()
+            self.assertEqual(
+                [w for w in caught
+                 if issubclass(w.category, ResourceWarning)],
+                [])
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual((in_use, idle), (0, 1))
+
+    # ------------------------------------------------------------------
+    # Query lease — QuestDB.query() with no arguments (_PooledQuery)
+    # ------------------------------------------------------------------
+
+    def test_query_lease_runs_sequential_queries_on_one_reader(self):
+        """Two queries through one lease reuse a single borrowed reader:
+        ``in_use`` stays 1 between them (no per-query pool round-trip)
+        and drops to 0 after ``close()``, which returns the cleanly-
+        drained reader to the idle list.
+        """
+        table = self._seed_table(n_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            lease = client.query()
+            try:
+                in_use, _ = qi._debug_egress_pool_stats(client)
+                self.assertEqual(in_use, 1)
+                first = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(first.column(0).to_pylist(), [3])
+                in_use, idle = qi._debug_egress_pool_stats(client)
+                self.assertEqual(
+                    (in_use, idle), (1, 0),
+                    f'lease must hold its reader between queries; '
+                    f'got in_use={in_use}, idle={idle}')
+                second = lease.query(
+                    f'SELECT x FROM {table} ORDER BY x').to_arrow()
+                self.assertEqual(
+                    second.column('x').to_pylist(), [0, 1, 2])
+                in_use, _ = qi._debug_egress_pool_stats(client)
+                self.assertEqual(in_use, 1)
+            finally:
+                lease.close()
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                (in_use, idle), (0, 1),
+                f'close() must return the drained reader to the pool; '
+                f'got in_use={in_use}, idle={idle}')
+
+    def test_query_lease_reset_symbol_dict_false(self):
+        """A follow-up lease query with ``reset_symbol_dict=False``
+        keeps the connection's SYMBOL dictionary warm and still
+        resolves symbol values correctly.
+        """
+        table = 't_egress_pool_' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, sym SYMBOL, x LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        self.qdb_plain.http_sql_query(
+            f"INSERT INTO {table} VALUES "
+            f"('2024-01-01T00:00:00Z', 'a', 0),"
+            f"('2024-01-01T00:00:01Z', 'b', 1),"
+            f"('2024-01-01T00:00:02Z', 'a', 2)")
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        self.addCleanup(lambda: self._drop_quietly(table))
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query() as lease:
+                first = lease.query(
+                    f'SELECT sym, x FROM {table} ORDER BY x').to_pandas()
+                self.assertEqual(list(first['sym']), ['a', 'b', 'a'])
+                second = lease.query(
+                    f'SELECT sym, x FROM {table} ORDER BY x',
+                    reset_symbol_dict=False).to_pandas()
+                self.assertEqual(list(second['sym']), ['a', 'b', 'a'])
+                self.assertEqual(list(second['x']), [0, 1, 2])
+
+    def test_query_lease_rejects_query_while_result_undrained(self):
+        """One live result at a time: a second ``q.query()`` while the
+        first result's cursor is still streaming raises
+        ``InvalidApiCall``. Draining the first result unblocks the
+        lease.
+        """
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                it = result.iter_arrow()
+                next(it)
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        'still open') as cm:
+                    lease.query(f'SELECT count() FROM {table}')
+                self.assertEqual(
+                    cm.exception.code,
+                    qi.QuestDBErrorCode.InvalidApiCall)
+                list(it)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+
+    def test_query_lease_terminal_after_undrained_close(self):
+        """Closing a result before its clean end tears down the lease's
+        transport (Rust ``Cursor::Drop``): the next ``q.query()``
+        raises ``InvalidApiCall``, ``close()`` drops the reader instead
+        of recycling it, and the pool refills on demand.
+        """
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            lease = client.query()
+            result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+            it = result.iter_arrow()
+            next(it)
+            result.close()
+            del it
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    'terminal') as cm:
+                lease.query(f'SELECT count() FROM {table}')
+            self.assertEqual(
+                cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+            lease.close()
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                (in_use, idle), (0, 0),
+                f'mid-stream reader must be dropped, not recycled; '
+                f'got in_use={in_use}, idle={idle}')
+            fresh = client.query(f'SELECT count() FROM {table}').to_arrow()
+            self.assertEqual(fresh.column(0).to_pylist(), [64])
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual((in_use, idle), (0, 1))
+
+    def test_query_lease_with_block_releases_and_close_is_prompt(self):
+        """Leaving the lease's ``with`` block releases the reader and
+        the active-use it held on the handle, so a subsequent
+        ``QuestDB.close()`` returns promptly instead of looping on the
+        5s outstanding-lease warning.
+        """
+        table = self._seed_table(n_rows=3)
+        client = qi.QuestDB.from_conf(self._conf())
+        try:
+            with client.query() as lease:
+                r = lease.query(f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(r.column(0).to_pylist(), [3])
+                in_use, _ = qi._debug_egress_pool_stats(client)
+                self.assertEqual(in_use, 1)
+            in_use, idle = qi._debug_egress_pool_stats(client)
+            self.assertEqual((in_use, idle), (0, 1))
+            start = time.monotonic()
+            client.close()
+            self.assertLess(
+                time.monotonic() - start, 5.0,
+                'close() blocked as if a lease were still outstanding')
+        finally:
+            client.close()
+
+    # ------------------------------------------------------------------
     # query_pool_max — the InvalidApiCall("pool exhausted") error path
     # ------------------------------------------------------------------
 

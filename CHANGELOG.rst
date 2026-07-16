@@ -165,6 +165,17 @@ after which above-minimum idle connections are reaped) and ``pool_reap``
 reaps idle connections, or the application calls :meth:`QuestDB.reap_idle`
 on its own cadence).
 
+- Closing or abandoning a :class:`QueryResult` now releases its pooled
+  connection immediately instead of at garbage collection; abandoning a
+  result without closing it emits a ``ResourceWarning``.
+
+- Calling :meth:`QuestDB.query` with no arguments returns a query lease
+  (the read-side twin of :meth:`QuestDB.sender`) that borrows one pooled
+  reader connection for its lifetime and runs queries on it sequentially —
+  ``with db.query() as q: q.query(sql)`` — optionally keeping the
+  connection's SYMBOL dictionary warm across queries via
+  ``reset_symbol_dict=False``.
+
 Columnar DataFrame Ingestion
 ****************************
 

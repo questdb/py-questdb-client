@@ -343,6 +343,47 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         TypeError, '"binds" must be a list or tuple'):
                     client.query('SELECT $1', bad)
 
+    def test_query_lease_noarg_validation(self):
+        # The no-arg lease form rejects per-query arguments before any
+        # reader is borrowed, so no server is needed (pools connect
+        # lazily).
+        with qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;') as client:
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    'without sql returns a query lease') as cm:
+                client.query(binds=[1])
+            self.assertEqual(
+                cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    'without sql returns a query lease'):
+                client.query(reset_symbol_dict=False)
+
+    def test_closed_client_rejects_query_lease(self):
+        client = qi.QuestDB.__new__(qi.QuestDB)
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                "query\\(\\) can't be called: QuestDB is closed"):
+            client.query()
+
+    def test_unattached_query_lease_surface(self):
+        # A live lease needs a real reader borrow (no offline fixture
+        # serves the QWP read endpoint), but the class itself and its
+        # closed-state behaviour are constructible offline.
+        lease = qi._PooledQuery.__new__(qi._PooledQuery)
+        lease.close()
+        lease.close()
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                "query\\(\\) can't be called: the query lease is closed"):
+            lease.query('SELECT 1')
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                "__enter__\\(\\) can't be called: "
+                "the query lease is closed"):
+            with lease:
+                pass
+
     def test_module_connect_factory(self):
         import questdb
         with QwpAckServer() as server:
@@ -2577,6 +2618,52 @@ class TestIngressShim(unittest.TestCase):
             self.assertEqual(ingress.WARN_HIGH_RECONNECTS, original)
         finally:
             qi.WARN_HIGH_RECONNECTS = original
+
+
+class TestQueryResultFinalizer(unittest.TestCase):
+    """Offline checks for the ``QueryResult.__del__`` backstop. A live
+    cursor needs a real server, so the warning-emission path is pinned
+    in ``system_test.py``; here we pin that the finalizer stays silent
+    when there is nothing to release and never raises."""
+
+    def _no_resource_warnings(self, caught):
+        self.assertEqual(
+            [w for w in caught
+             if issubclass(w.category, ResourceWarning)],
+            [])
+
+    def test_closed_result_does_not_warn_at_del(self):
+        import gc
+        result = qi.QueryResult(qi._CursorHandle())
+        result.close()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            del result
+            gc.collect()
+        self._no_resource_warnings(caught)
+
+    def test_dead_cursor_result_does_not_warn_at_del(self):
+        import gc
+        result = qi.QueryResult(qi._CursorHandle())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            del result
+            gc.collect()
+        self._no_resource_warnings(caught)
+
+    def test_del_swallows_finalizer_errors(self):
+        import gc
+        result = qi.QueryResult(qi._CursorHandle())
+        del result._cursor_handle
+        unraisable = []
+        original_hook = sys.unraisablehook
+        sys.unraisablehook = lambda args: unraisable.append(args)
+        try:
+            del result
+            gc.collect()
+        finally:
+            sys.unraisablehook = original_hook
+        self.assertEqual(unraisable, [])
 
 
 class TestBufferConstruction(unittest.TestCase):
