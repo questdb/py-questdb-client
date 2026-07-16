@@ -40,7 +40,6 @@ __all__ = [
     'IngressErrorCode',
     'Protocol',
     'Sender',
-    'SenderTransaction',
     'ServerTimestamp',
     'ServerTimestampType',
     'TimestampMicros',

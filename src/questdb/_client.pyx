@@ -2411,28 +2411,6 @@ cdef bint _dataframe_columnar_i64_has_negative(
     return False
 
 
-cdef int _dataframe_columnar_ts_field_scan(
-        ArrowArray* arr,
-        const int64_t* data,
-        size_t row_count) noexcept nogil:
-    # 0: ok, 1: NaT in a non-null row, 2: pre-epoch value in a non-null row.
-    # Null rows (cleared validity bit) carry an undefined physical value and
-    # are skipped; the column is sent with its validity bitmap.
-    cdef size_t row_index
-    cdef const uint8_t* validity = NULL
-    if arr.null_count != 0:
-        validity = <const uint8_t*>arr.buffers[0]
-    for row_index in range(row_count):
-        if validity != NULL and not (
-                validity[row_index >> 3] & (<uint8_t>1 << (row_index & 7))):
-            continue
-        if data[row_index] == _NAT:
-            return 1
-        if data[row_index] < 0:
-            return 2
-    return 0
-
-
 cdef const column_sender_validity* _dataframe_columnar_validity(
         ArrowArray* arr,
         size_t row_offset,
@@ -2563,7 +2541,6 @@ cdef object _dataframe_columnar_plan_failures(
     cdef size_t field_count = 0
     cdef col_t* col
     cdef const int64_t* ts_data
-    cdef int ts_scan
 
     if (plan.col_count == 0) or (plan.row_count == 0):
         return failures
@@ -2654,21 +2631,21 @@ cdef object _dataframe_columnar_plan_failures(
                     'v1 only supports NumPy datetime64[ns/us], '
                     'tz-aware datetime64/timestamp[pyarrow], or '
                     'object-dtype datetime timestamp field columns.'))
-            elif col.setup.source != col_source_t.col_source_datetime_pyobj:
+            elif col.setup.source == col_source_t.col_source_dt64ns_numpy:
+                # NaT in a datetime64[ns] field is INT64_MIN nanoseconds;
+                # the ns->micros wire conversion turns that null sentinel
+                # into a bogus 1677 timestamp instead of NULL. Reject it —
+                # datetime64[us], object-dtype, and Arrow-backed timestamp
+                # columns all encode NULL correctly. Pre-epoch and every
+                # non-null value are fine on all of these paths.
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
-                ts_scan = _dataframe_columnar_ts_field_scan(
-                    &col.setup.chunks.chunks[0], ts_data, plan.row_count)
-                if ts_scan == 1:
+                if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
                     failures.append(_dataframe_columnar_col_failure(
                         df,
                         col,
-                        'v1 timestamp field columns cannot contain NaT.'))
-                elif ts_scan == 2:
-                    failures.append(_dataframe_columnar_col_failure(
-                        df,
-                        col,
-                        'v1 timestamp field columns cannot contain '
-                        'timestamps before the Unix epoch.'))
+                        'v1 datetime64[ns] timestamp field columns cannot '
+                        'contain NaT; use datetime64[us] or an object-dtype '
+                        'datetime column for NULL timestamps.'))
         elif col.setup.target == col_target_t.col_target_column_str:
             if col.setup.source == col_source_t.col_source_str_pyobj:
                 # PyObject sources are validated by the pre-build phase
@@ -2771,6 +2748,18 @@ cdef object _dataframe_columnar_plan_failures(
                         col,
                         'v1 designated timestamp columns cannot contain '
                         'timestamps before the Unix epoch.'))
+        elif col.setup.target == col_target_t.col_target_column_decimal:
+            if col.setup.source not in (
+                    col_source_t.col_source_decimal32_arrow,
+                    col_source_t.col_source_decimal64_arrow,
+                    col_source_t.col_source_decimal128_arrow,
+                    col_source_t.col_source_decimal256_arrow):
+                failures.append(_dataframe_columnar_col_failure(
+                    df,
+                    col,
+                    'v1 only supports Arrow-backed decimal columns '
+                    '(pyarrow decimal32/64/128/256); object-dtype Decimal '
+                    'columns are not supported on the columnar path.'))
         elif col.setup.target in (
                 col_target_t.col_target_column_i8,
                 col_target_t.col_target_column_i16,
@@ -3949,6 +3938,10 @@ cdef void_int _dataframe_columnar_append_field(
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
         return 0
+    elif col.setup.target == col_target_t.col_target_column_decimal:
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
     else:
         raise RuntimeError('Unsupported columnar field target.')
 
@@ -4199,7 +4192,8 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
                 col_target_t.col_target_column_binary,
-                col_target_t.col_target_column_arrow):
+                col_target_t.col_target_column_arrow,
+                col_target_t.col_target_column_decimal):
             if plan.pyobj_built != NULL:
                 prebuilt = plan.pyobj_built[col_index]
             else:
@@ -6053,8 +6047,11 @@ cdef class QuestDB:
         - **Timestamp**: NumPy ``datetime64`` units accepted by pandas and
           ``pa.timestamp`` with unit ``s``, ``ms``, ``us``, or ``ns``
           (tz-aware accepted on Arrow-backed columns in the Rust Arrow route).
-          QuestDB ``TIMESTAMP`` columns cannot contain nulls/NaT or values
-          before the Unix epoch.
+          Null timestamps (``NaT`` / ``None``) and values before the Unix
+          epoch are supported on ``datetime64[us]``, object-dtype, and
+          Arrow-backed columns; a ``datetime64[ns]`` column cannot carry
+          ``NaT`` (its ``INT64_MIN`` sentinel is corrupted by the ns->us
+          conversion — use ``datetime64[us]`` or object dtype for nulls).
         - **Decimal**: Arrow-backed ``pa.decimal{32,64,128,256}`` columns
           (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18). Plain
           object-dtype columns of ``decimal.Decimal`` are not accepted on the
@@ -6160,8 +6157,10 @@ cdef class QuestDB:
             - ``int`` → LONG (must fit signed 64-bit)
             - ``float`` → DOUBLE
             - ``str`` → VARCHAR
-            - ``datetime.datetime`` → TIMESTAMP (microseconds; naive values
-              are interpreted per the same rules as ingestion)
+            - ``datetime.datetime`` → TIMESTAMP (microseconds; a naive value
+              is read as local time, matching scalar ``at=`` / ``row()`` —
+              unlike naive DataFrame timestamp columns, which are UTC. Pass a
+              tz-aware datetime to avoid ambiguity)
             - :class:`TimestampMicros` → TIMESTAMP
             - :class:`TimestampNanos` → TIMESTAMP_NS
             - ``uuid.UUID`` → UUID
@@ -8248,7 +8247,6 @@ cdef class _PooledQuery:
                         'end, so its transport was torn down. close() '
                         'this lease and obtain a new one with '
                         'QuestDB.query().')
-            self._reader._must_close = True
             cursor_handle = _execute_query(
                 self._reader, sql, binds, reset_symbol_dict)
             cursor_handle._owns_reader = False

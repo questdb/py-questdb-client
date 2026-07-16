@@ -509,6 +509,11 @@ cdef _CursorHandle _execute_query(
     reader_query_on_failover_reset(
         query, _failover_reset_trampoline, <void*>&handle._reset_seq)
 
+    # Mark the reader unrecyclable only once we cross the network boundary:
+    # a client-side failure above (bad SQL/bind) leaves the reader clean, so
+    # a pooled lease must not drop a healthy connection over it.
+    reader_handle._must_close = True
+
     with nogil:
         cursor = reader_query_execute(&query, &err)
 
@@ -895,6 +900,8 @@ cdef void _qs_release(ArrowArrayStream* stream) noexcept with gil:
     prod = <_QueryStreamProducer>stream.private_data
     stream.private_data = NULL
     stream.release = NULL
+    if prod.cursor_handle is not None:
+        prod.cursor_handle._free()
     try:
         Py_DECREF(prod)
     except BaseException:

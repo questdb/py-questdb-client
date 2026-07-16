@@ -5,7 +5,7 @@ import os
 
 from questdb import *
 
-autodoc_mock_imports = ["_cython"]
+autodoc_mock_imports = ["questdb._client"]
 autodoc_type_aliases = {
     'datetime': 'datetime.datetime',
 }

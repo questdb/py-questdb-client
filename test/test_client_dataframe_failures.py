@@ -301,6 +301,7 @@ class TestClientDataframeArgValidation(unittest.TestCase):
         self.assertEqual(
             raised.exception.code, qi.QuestDBErrorCode.InvalidUtf8)
 
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_mixed_dtype_ndarray_object_column_raises_array_error(self):
         with self._client() as client:
             with self.assertRaises(qi.QuestDBError) as raised:

@@ -3452,6 +3452,41 @@ class TestEgressPool(unittest.TestCase):
             in_use, idle = qi._debug_egress_pool_stats(client)
             self.assertEqual((in_use, idle), (0, 1))
 
+    def test_query_lease_survives_client_side_bind_error(self):
+        """A client-side bind failure (unsupported Python type) raises
+        before any network round-trip, so it must not mark the lease's
+        healthy connection terminal: the next valid query still succeeds.
+        """
+        table = self._seed_table(n_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query() as lease:
+                first = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(first.column(0).to_pylist(), [3])
+                with self.assertRaises(TypeError):
+                    lease.query(
+                        f'SELECT x FROM {table} WHERE x > $1', [object()])
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+
+    def test_query_lease_arrow_c_stream_frees_cursor_for_reuse(self):
+        """Consuming a lease result to end-of-stream through the native
+        Arrow C stream (``__arrow_c_stream__``) must free its cursor, so
+        the next query on the lease is accepted rather than rejected as
+        'still open'.
+        """
+        import pyarrow as pa
+        table = self._seed_table(n_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                got = pa.table(result)
+                self.assertEqual(got.column('x').to_pylist(), [0, 1, 2])
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+
     def test_query_lease_with_block_releases_and_close_is_prompt(self):
         """Leaving the lease's ``with`` block releases the reader and
         the active-use it held on the handle, so a subsequent
@@ -3744,6 +3779,81 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got.column(0).to_pylist(), [0])
 
     # ---------- happy-path round-trips ----------
+
+    def test_mixed_numpy_and_arrow_decimal_round_trip(self):
+        """An Arrow-backed decimal column sharing a frame with a plain
+        numpy column forces the manual columnar planner; the decimal
+        must still ingest via the Arrow importer rather than be rejected
+        as an unsupported column type.
+        """
+        import pyarrow as pa
+        self._require_qwp_ws()
+        if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
+            self.skipTest('old server does not support decimal')
+        table = self._table()
+        self._create_table(table, 'x LONG, amt DECIMAL(18,2)')
+        ts = pa.array(
+            [1700000000_000000 + i * 1_000_000 for i in range(3)],
+            type=pa.timestamp('us', tz='UTC'))
+        df = pd.DataFrame({
+            'ts': pd.array(ts, dtype=pd.ArrowDtype(ts.type)),
+            'x': np.array([1, 2, 3], dtype=np.int64),
+            'amt': pd.array(
+                [decimal.Decimal('1.50'),
+                 decimal.Decimal('-2.25'),
+                 decimal.Decimal('3.75')],
+                dtype=pd.ArrowDtype(pa.decimal128(18, 2))),
+        })
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT x, amt FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(got.column('x').to_pylist(), [1, 2, 3])
+        self.assertEqual(
+            got.column('amt').to_pylist(),
+            [decimal.Decimal('1.50'),
+             decimal.Decimal('-2.25'),
+             decimal.Decimal('3.75')])
+
+    def test_timestamp_field_null_and_pre_epoch(self):
+        """TIMESTAMP *field* columns: datetime64[us] NaT ingests as NULL,
+        and pre-epoch values (both us and ns) ingest correctly. Only
+        datetime64[ns] NaT is rejected -- the ns->micros conversion would
+        turn the INT64_MIN null sentinel into a bogus 1677 timestamp.
+        """
+        import datetime as _dt
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'vts TIMESTAMP')
+        at = np.array(
+            ['2024-01-01T00:00:00', '2024-01-01T00:00:01',
+             '2024-01-01T00:00:02'], dtype='datetime64[us]')
+        df = pd.DataFrame({
+            'ts': at,
+            'vts': np.array(
+                ['1960-01-01', 'NaT', '2024-01-03'], dtype='datetime64[us]'),
+        })
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT vts FROM {table} ORDER BY ts').to_arrow()
+        utc = _dt.timezone.utc
+        vals = got.column('vts').to_pylist()
+        self.assertEqual(vals[0], _dt.datetime(1960, 1, 1, tzinfo=utc))
+        self.assertIsNone(vals[1])
+        self.assertEqual(vals[2], _dt.datetime(2024, 1, 3, tzinfo=utc))
+        df_ns = pd.DataFrame({
+            'ts': at,
+            'vts': np.array(
+                ['2024-01-01', 'NaT', '2024-01-03'], dtype='datetime64[ns]'),
+        })
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with self.assertRaisesRegex(qi.QuestDBError, 'NaT'):
+                client.dataframe(df_ns, table_name=self._table(), at='ts')
 
     def test_int8_round_trip(self):
         """pa.int8 → BYTE wire → server stores as BYTE → egress

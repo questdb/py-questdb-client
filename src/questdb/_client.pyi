@@ -1094,7 +1094,7 @@ class QuestDB:
         table_name: Optional[str] = None,
         table_name_col: Union[None, int, str] = None,
         symbols: Union[str, bool, List[int], List[str]] = "auto",
-        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
+        at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
         schema_overrides: Optional[Dict[str, object]] = None,
     ) -> QuestDB:
