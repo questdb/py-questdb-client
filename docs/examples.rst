@@ -32,12 +32,12 @@ connection for a run of queries with a warm ``SYMBOL`` dictionary.
 
 .. _connect_dataframe_example:
 
-DataFrame bulk load and query leases
-------------------------------------
+DataFrame bulk load and reader leases
+-------------------------------------
 
 The following example bulk-loads a pandas ``DataFrame`` through
 :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, then leases one reader
-connection with ``db.query()`` and runs two queries on it, reusing the
+connection with ``db.reader()`` and runs two queries on it, reusing the
 ``SYMBOL`` dictionary across them.
 
 .. literalinclude:: ../examples/connect_dataframe.py

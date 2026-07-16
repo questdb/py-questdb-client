@@ -3332,7 +3332,7 @@ class TestEgressPool(unittest.TestCase):
             self.assertEqual((in_use, idle), (0, 1))
 
     # ------------------------------------------------------------------
-    # Query lease — QuestDB.query() with no arguments (_PooledQuery)
+    # Reader lease — QuestDB.reader() (PooledReader)
     # ------------------------------------------------------------------
 
     def test_query_lease_runs_sequential_queries_on_one_reader(self):
@@ -3343,7 +3343,7 @@ class TestEgressPool(unittest.TestCase):
         """
         table = self._seed_table(n_rows=3)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            lease = client.query()
+            lease = client.reader()
             try:
                 in_use, _ = qi._debug_egress_pool_stats(client)
                 self.assertEqual(in_use, 1)
@@ -3387,7 +3387,7 @@ class TestEgressPool(unittest.TestCase):
         self.qdb_plain.retry_check_table(table, min_rows=3)
         self.addCleanup(lambda: self._drop_quietly(table))
         with qi.QuestDB.from_conf(self._conf()) as client:
-            with client.query() as lease:
+            with client.reader() as lease:
                 first = lease.query(
                     f'SELECT sym, x FROM {table} ORDER BY x').to_pandas()
                 self.assertEqual(list(first['sym']), ['a', 'b', 'a'])
@@ -3398,14 +3398,14 @@ class TestEgressPool(unittest.TestCase):
                 self.assertEqual(list(second['x']), [0, 1, 2])
 
     def test_query_lease_rejects_query_while_result_undrained(self):
-        """One live result at a time: a second ``q.query()`` while the
+        """One live result at a time: a second ``lease.query()`` while the
         first result's cursor is still streaming raises
         ``InvalidApiCall``. Draining the first result unblocks the
         lease.
         """
         table = self._seed_table(n_rows=64)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            with client.query() as lease:
+            with client.reader() as lease:
                 result = lease.query(f'SELECT x FROM {table} ORDER BY x')
                 it = result.iter_arrow()
                 next(it)
@@ -3423,13 +3423,13 @@ class TestEgressPool(unittest.TestCase):
 
     def test_query_lease_terminal_after_undrained_close(self):
         """Closing a result before its clean end tears down the lease's
-        transport (Rust ``Cursor::Drop``): the next ``q.query()``
+        transport (Rust ``Cursor::Drop``): the next ``lease.query()``
         raises ``InvalidApiCall``, ``close()`` drops the reader instead
         of recycling it, and the pool refills on demand.
         """
         table = self._seed_table(n_rows=64)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            lease = client.query()
+            lease = client.reader()
             result = lease.query(f'SELECT x FROM {table} ORDER BY x')
             it = result.iter_arrow()
             next(it)
@@ -3459,7 +3459,7 @@ class TestEgressPool(unittest.TestCase):
         """
         table = self._seed_table(n_rows=3)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            with client.query() as lease:
+            with client.reader() as lease:
                 first = lease.query(
                     f'SELECT count() FROM {table}').to_arrow()
                 self.assertEqual(first.column(0).to_pylist(), [3])
@@ -3479,7 +3479,7 @@ class TestEgressPool(unittest.TestCase):
         import pyarrow as pa
         table = self._seed_table(n_rows=3)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            with client.query() as lease:
+            with client.reader() as lease:
                 result = lease.query(f'SELECT x FROM {table} ORDER BY x')
                 got = pa.table(result)
                 self.assertEqual(got.column('x').to_pylist(), [0, 1, 2])
@@ -3496,7 +3496,7 @@ class TestEgressPool(unittest.TestCase):
         table = self._seed_table(n_rows=3)
         client = qi.QuestDB.from_conf(self._conf())
         try:
-            with client.query() as lease:
+            with client.reader() as lease:
                 r = lease.query(f'SELECT count() FROM {table}').to_arrow()
                 self.assertEqual(r.column(0).to_pylist(), [3])
                 in_use, _ = qi._debug_egress_pool_stats(client)
@@ -5581,7 +5581,7 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
     """Reader connect-time role/auth failover, ported from Java's
     ``QwpQueryClientMultiHostFailoverTest``. The pool opens lazily, so the
     connect walk -- and any role/auth error -- surfaces on the first borrow
-    (``QuestDB.query()``), not at ``QuestDB.from_conf``. These run against
+    (``QuestDB.query()`` / ``QuestDB.reader()``), not at ``QuestDB.from_conf``. These run against
     in-process fakes only and need no QuestDB instance."""
 
     def _server(self, status_code, role_header=None):

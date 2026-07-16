@@ -27,7 +27,7 @@ def example(host: str = 'localhost', port: int = 9000):
             # sequentially. `reset_symbol_dict=False` keeps the SYMBOL
             # dictionary warm across queries because they share the
             # connection.
-            with db.query() as q:
+            with db.reader() as q:
                 recent = q.query('SELECT * FROM trades LIMIT 5').to_pandas()
                 print(recent)
 

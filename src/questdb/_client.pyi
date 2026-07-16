@@ -25,7 +25,7 @@
 __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
-    "PooledQuery",
+    "PooledReader",
     "PooledSender",
     "QuestDB",
     "QuestDBError",
@@ -53,7 +53,7 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union, overload
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -945,7 +945,7 @@ class TlsCa(TaggedEnum):
     WebpkiAndOsRoots = ...
     PemFile = ...
 
-class _PooledSender:
+class PooledSender:
     """
     A row-building sender borrowed from a :class:`QuestDB` pool.
 
@@ -957,7 +957,7 @@ class _PooledSender:
     borrowing a direct connection from the pool for that call.
     """
 
-    def __enter__(self) -> _PooledSender: ...
+    def __enter__(self) -> PooledSender: ...
 
     def row(
         self,
@@ -982,7 +982,7 @@ class _PooledSender:
             ]
         ] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
-    ) -> _PooledSender:
+    ) -> PooledSender:
         """Append one row to this sender's QWP buffer."""
 
     def dataframe(
@@ -995,7 +995,7 @@ class _PooledSender:
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
         schema_overrides: Optional[Dict[str, object]] = None,
-    ) -> _PooledSender:
+    ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
         from the pool for this call. No ordering relationship with rows
@@ -1005,10 +1005,10 @@ class _PooledSender:
     def __len__(self) -> int:
         """Number of buffered (unpublished) rows."""
 
-    def flush(self, *, wait: bool = False) -> _PooledSender:
+    def flush(self, *, wait: bool = False) -> PooledSender:
         """Publish buffered rows; optionally wait for the server OK ack."""
 
-    def wait(self, timeout_millis: int = 0) -> _PooledSender:
+    def wait(self, timeout_millis: int = 0) -> PooledSender:
         """Wait for all publications on this lease to receive an OK ack."""
 
     def close(self, flush: bool = True, wait: bool = False) -> None:
@@ -1017,16 +1017,16 @@ class _PooledSender:
     def __exit__(self, exc_type, exc_val, exc_tb): ...
 
 
-class _PooledQuery:
+class PooledReader:
     """
-    A query lease borrowed from a :class:`QuestDB` pool.
+    A reader lease borrowed from a :class:`QuestDB` pool.
 
     The read-side twin of :meth:`QuestDB.sender`: obtain a lease with
-    ``QuestDB.query()`` (no arguments); it holds one pooled reader
-    connection for its lifetime and runs queries on it sequentially via
-    :meth:`query`. ``close()`` (or leaving the ``with`` block) releases
-    the connection: back to the pool if the last query was drained
-    cleanly, dropped otherwise.
+    :meth:`QuestDB.reader`; it holds one pooled reader connection for
+    its lifetime and runs queries on it sequentially via :meth:`query`.
+    ``close()`` (or leaving the ``with`` block) releases the
+    connection: back to the pool if the last query was drained cleanly,
+    dropped otherwise.
 
     Queries are strictly sequential — fully drain (or close) each
     :class:`QueryResult` before the next :meth:`query` call. Closing a
@@ -1035,7 +1035,7 @@ class _PooledQuery:
     one lease per thread, on the thread that created it.
     """
 
-    def __enter__(self) -> _PooledQuery: ...
+    def __enter__(self) -> PooledReader: ...
 
     def query(
         self,
@@ -1065,8 +1065,9 @@ class QuestDB:
     Handle to a QuestDB deployment over QWP/WebSocket.
 
     Owns the connection pool; lends row-building senders via
-    :meth:`sender`, bulk-loads DataFrames via :meth:`dataframe`, and runs
-    queries via :meth:`query`. Construct with :func:`questdb.connect`.
+    :meth:`sender`, bulk-loads DataFrames via :meth:`dataframe`, runs
+    queries via :meth:`query`, and lends reader leases via
+    :meth:`reader`. Construct with :func:`questdb.connect`.
     """
 
     @staticmethod
@@ -1087,7 +1088,7 @@ class QuestDB:
 
     def __enter__(self) -> QuestDB: ...
 
-    def sender(self) -> _PooledSender:
+    def sender(self) -> PooledSender:
         """Borrow a context-managed row-building :class:`Sender` from the pool."""
 
     def dataframe(
@@ -1126,7 +1127,6 @@ class QuestDB:
           exporters, wrapped into a one-batch ``pa.Table``).
         """
 
-    @overload
     def query(
         self,
         sql: str,
@@ -1146,12 +1146,11 @@ class QuestDB:
         capability.
         """
 
-    @overload
-    def query(self) -> _PooledQuery:
+    def reader(self) -> PooledReader:
         """
-        Borrow a :class:`_PooledQuery` lease holding one pooled reader
+        Borrow a :class:`PooledReader` lease holding one pooled reader
         connection, for running several queries in a row on that same
-        connection (``with db.query() as q: q.query(sql)``).
+        connection (``with db.reader() as r: r.query(sql)``).
         """
 
     def server_info(self) -> ServerInfo:
@@ -1700,5 +1699,3 @@ class Sender:
         """
 
 
-PooledSender = _PooledSender
-PooledQuery = _PooledQuery

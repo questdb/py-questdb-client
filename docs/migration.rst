@@ -15,8 +15,11 @@ The QWP/WebSocket API has one connection-owning root, the :class:`QuestDB
   must not assume the ``Sender`` class — use the exported
   :class:`questdb.PooledSender` instead);
 * :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` bulk-loads a whole
-  DataFrame through the direct columnar path; and
-* :meth:`QuestDB.query <questdb.QuestDB.query>` executes queries.
+  DataFrame through the direct columnar path;
+* :meth:`QuestDB.query <questdb.QuestDB.query>` executes queries; and
+* :meth:`QuestDB.reader <questdb.QuestDB.reader>` lends a pooled
+  :class:`questdb.PooledReader` for running several queries on one
+  connection.
 
 Existing row code can move from a standalone ``Sender`` to a pooled one:
 

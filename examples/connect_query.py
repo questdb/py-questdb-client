@@ -36,10 +36,10 @@ def example(host: str = 'localhost', port: int = 9000):
             # Lease one reader connection for a run of queries;
             # reset_symbol_dict=False keeps the SYMBOL dictionary warm
             # because every query shares the connection.
-            with db.query() as q:
-                latest = q.query(
+            with db.reader() as r:
+                latest = r.query(
                     'SELECT * FROM trades LIMIT -5').to_pandas()
-                per_symbol = q.query(
+                per_symbol = r.query(
                     'SELECT symbol, count() FROM trades',
                     reset_symbol_dict=False).to_pandas()
             print(latest)

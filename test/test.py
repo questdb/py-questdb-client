@@ -168,11 +168,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(ServerRole, qi.ServerRole)
 
     def test_pooled_lease_types_exported_from_package(self):
-        from questdb import PooledQuery, PooledSender
+        from questdb import PooledReader, PooledSender
         self.assertIs(PooledSender, qi.PooledSender)
-        self.assertIs(PooledQuery, qi.PooledQuery)
-        self.assertIs(PooledSender, qi._PooledSender)
-        self.assertIs(PooledQuery, qi._PooledQuery)
+        self.assertIs(PooledReader, qi.PooledReader)
 
     def test_ingress_error_can_carry_qwpws_diagnostic(self):
         err = qi.QuestDBError(
@@ -351,44 +349,38 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         TypeError, '"binds" must be a list or tuple'):
                     client.query('SELECT $1', bad)
 
-    def test_query_lease_noarg_validation(self):
-        # The no-arg lease form rejects per-query arguments before any
-        # reader is borrowed, so no server is needed (pools connect
-        # lazily).
+    def test_query_requires_sql(self):
+        # Rejected before any reader is borrowed, so no server is needed
+        # (pools connect lazily).
         with qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;') as client:
+            with self.assertRaises(TypeError):
+                client.query()
             with self.assertRaisesRegex(
-                    qi.QuestDBError,
-                    'without sql returns a query lease') as cm:
-                client.query(binds=[1])
-            self.assertEqual(
-                cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
-            with self.assertRaisesRegex(
-                    qi.QuestDBError,
-                    'without sql returns a query lease'):
-                client.query(reset_symbol_dict=False)
+                    TypeError, 'lease a PooledReader with reader()'):
+                client.query(None)
 
-    def test_closed_client_rejects_query_lease(self):
+    def test_closed_client_rejects_reader_lease(self):
         client = qi.QuestDB.__new__(qi.QuestDB)
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "query\\(\\) can't be called: QuestDB is closed"):
-            client.query()
+                "reader\\(\\) can't be called: QuestDB is closed"):
+            client.reader()
 
-    def test_unattached_query_lease_surface(self):
+    def test_unattached_reader_lease_surface(self):
         # A live lease needs a real reader borrow (no offline fixture
         # serves the QWP read endpoint), but the class itself and its
         # closed-state behaviour are constructible offline.
-        lease = qi._PooledQuery.__new__(qi._PooledQuery)
+        lease = qi.PooledReader.__new__(qi.PooledReader)
         lease.close()
         lease.close()
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                "query\\(\\) can't be called: the query lease is closed"):
+                "query\\(\\) can't be called: the reader lease is closed"):
             lease.query('SELECT 1')
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 "__enter__\\(\\) can't be called: "
-                "the query lease is closed"):
+                "the reader lease is closed"):
             with lease:
                 pass
 
@@ -410,6 +402,33 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 1)
 
+    def test_module_connect_keyword_form(self):
+        import questdb
+        with QwpAckServer() as server:
+            with questdb.connect(
+                    host='127.0.0.1',
+                    port=server.port,
+                    sender_pool_min=1,
+                    sender_pool_max=1,
+                    pool_reap='manual') as db:
+                with db.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 1)
+
+    def test_module_connect_argument_validation(self):
+        import questdb
+        with self.assertRaisesRegex(TypeError, 'but not both'):
+            questdb.connect('ws::addr=localhost:9000;', host='localhost')
+        with self.assertRaisesRegex(TypeError, 'but not both'):
+            questdb.connect()
+        with self.assertRaisesRegex(TypeError, 'sender_pool_max'):
+            questdb.connect(
+                'ws::addr=localhost:9000;', sender_pool_max=4)
+
     def test_client_sender_publishes_rows_without_dataframe_surface(self):
         with QwpAckServer() as server:
             conf = (
@@ -419,7 +438,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'pool_reap=manual;')
             with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
-                    self.assertIsInstance(sender, qi._PooledSender)
+                    self.assertIsInstance(sender, qi.PooledSender)
                     self.assertNotIsInstance(sender, qi.Sender)
                     self.assertTrue(callable(sender.dataframe))
                     for name in (

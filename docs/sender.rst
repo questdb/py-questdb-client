@@ -943,21 +943,21 @@ frame, the dedicated methods avoid the re-reconciliation that
 ``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
-For several queries in a row, call :meth:`QuestDB.query` with no arguments to
-take a **query lease** — the read-side twin of :meth:`QuestDB.sender`. The
+For several queries in a row, call :meth:`QuestDB.reader` to take a
+**reader lease** — the read-side twin of :meth:`QuestDB.sender`. The
 lease borrows one reader connection from the pool for its lifetime and runs
-queries on it sequentially with the same verb::
+queries on it sequentially::
 
-    with db.query() as q:
-        r1 = q.query('SELECT * FROM t1').to_pandas()
-        r2 = q.query('SELECT * FROM t2',
+    with db.reader() as r:
+        r1 = r.query('SELECT * FROM t1').to_pandas()
+        r2 = r.query('SELECT * FROM t2',
                      reset_symbol_dict=False).to_pandas()
 
 Each query skips the per-call pool round-trip, and because they share one
 connection, ``reset_symbol_dict=False`` on follow-up queries keeps the
 connection's ``SYMBOL`` dictionary warm across them. Queries on a lease are
 strictly sequential: fully drain (or close) each :class:`QueryResult` before
-the next ``q.query()`` call. Closing a result before draining it tears down
+the next ``r.query()`` call. Closing a result before draining it tears down
 the lease's connection, after which the lease is terminal — close it and take
 a fresh one. A lease has thread affinity: use one lease per thread, on the
 thread that created it (threads sharing a :class:`QuestDB` handle each take
