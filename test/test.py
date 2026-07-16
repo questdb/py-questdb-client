@@ -2346,7 +2346,9 @@ class TestBases:
                     datetime.datetime(1969, 12, 31, tzinfo=utc))
 
             dt_naive = datetime.datetime(2022, 1, 1, 12, 0, 0, 0)
-            ts3 = self.timestamp_cls.from_datetime(dt_naive)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', UserWarning)
+                ts3 = self.timestamp_cls.from_datetime(dt_naive)
             self.assertEqual(ts3.value, 1641038400000000000 // self.ns_scale)
 
         def test_now(self):
@@ -2423,6 +2425,24 @@ class TestTimestampNanos(TestBases.Timestamp):
             'print("rejected")\n')
         env = dict(os.environ)
         env['QUESTDB_NAIVE_DATETIME'] = 'error'
+        proc = subprocess.run(
+            [sys.executable, '-c', code],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('rejected', proc.stdout)
+
+    def test_naive_datetime_invalid_policy(self):
+        code = (
+            'import datetime\n'
+            'from questdb._client import TimestampNanos\n'
+            'try:\n'
+            '    TimestampNanos.from_datetime(datetime.datetime(2026, 1, 1))\n'
+            '    raise SystemExit("no raise")\n'
+            'except ValueError as e:\n'
+            '    assert "Invalid QUESTDB_NAIVE_DATETIME" in str(e), e\n'
+            'print("rejected")\n')
+        env = dict(os.environ)
+        env['QUESTDB_NAIVE_DATETIME'] = 'local'
         proc = subprocess.run(
             [sys.executable, '-c', code],
             env=env, capture_output=True, text=True)
