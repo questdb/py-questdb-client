@@ -95,7 +95,7 @@ include "dataframe.pxi"
 include "egress.pxi"
 
 from enum import Enum
-from typing import List, Dict, Union, Any, Optional, Iterable
+from typing import List, Dict, Union, Any, Optional
 from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString)
@@ -627,30 +627,36 @@ cdef void_int str_to_column_name_copy(
         raise c_err_to_py(err)
 
 
+cdef object _UTC_EPOCH = datetime.datetime(
+    1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
 cdef int64_t datetime_to_micros(cp_datetime dt):
     """
     Convert a :class:`datetime.datetime` to microseconds since the epoch.
+
+    Naive datetimes are interpreted as local time.
     """
+    cdef object aware = dt if dt.tzinfo is not None else dt.astimezone()
+    cdef object delta = aware - _UTC_EPOCH
     return (
-        <int64_t>floor(dt.timestamp()) *
-        <int64_t>(1000000) +
-        <int64_t>(dt.microsecond))
+        <int64_t>delta.days * <int64_t>86_400_000_000 +
+        <int64_t>delta.seconds * <int64_t>1_000_000 +
+        <int64_t>delta.microseconds)
 
 
 cdef int64_t datetime_to_nanos(cp_datetime dt):
     """
     Convert a `datetime.datetime` to nanoseconds since the epoch.
     """
-    cdef double seconds = floor(dt.timestamp())
-    if seconds >= 9223372036.0 or seconds < -9223372036.0:
+    cdef int64_t micros = datetime_to_micros(dt)
+    if (micros >= <int64_t>9_223_372_036_000_000 or
+            micros < <int64_t>-9_223_372_036_000_000):
         raise ValueError(
             'datetime is out of range for a nanosecond timestamp: '
             'must be between 1677-09-21T00:12:44Z and '
             '2262-04-11T23:47:16Z.')
-    return (
-        <int64_t>seconds *
-        <int64_t>(1000000000) +
-        <int64_t>(dt.microsecond * 1000))
+    return micros * 1000
 
 
 class ServerTimestampType:
@@ -738,7 +744,7 @@ cdef class TimestampMicros:
         return self._value
 
     def __repr__(self):
-        return f'TimestampMicros.({self._value})'
+        return f'TimestampMicros({self._value})'
 
 
 cdef class TimestampNanos:
@@ -1027,6 +1033,10 @@ cdef class Buffer:
             protocol_version: int,
             init_buf_size: int=65536,
             max_name_len: int=127):
+        if self._impl != NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'Buffer is already initialized.')
         if protocol_version not in range(1, 4):
             raise QuestDBError(
                 QuestDBErrorCode.ProtocolVersionError,
@@ -2106,31 +2116,35 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
 
 cdef void _connection_event_trampoline(
         void* user_data,
-        const questdb_connection_event* event) noexcept with gil:
-    cdef object listener = <object>user_data
-    kind = ConnectionEventKind.Connected
-    for entry in ConnectionEventKind:
-        if entry.c_value == <int>event.kind:
-            kind = entry
-            break
-    try:
-        listener(ConnectionEvent(
-            kind=kind,
-            host=_conn_event_str(event.host, event.host_len),
-            port=_conn_event_str(event.port, event.port_len),
-            previous_host=_conn_event_str(
-                event.previous_host, event.previous_host_len),
-            previous_port=_conn_event_str(
-                event.previous_port, event.previous_port_len),
-            attempt_number=event.attempt_number if event.has_attempt else None,
-            cause_code=c_err_code_to_py(event.cause_code)
-                if event.has_cause else None,
-            cause_msg=_conn_event_str(event.cause_msg, event.cause_msg_len)
-                if event.has_cause else None,
-            timestamp_millis=event.timestamp_millis))
-    except BaseException:
-        logging.getLogger("questdb").exception(
-            "connection event listener failed")
+        const questdb_connection_event* event) noexcept nogil:
+    if qdb_py_is_finalizing():
+        return
+    with gil:
+        try:
+            listener = <object>user_data
+            kind = ConnectionEventKind.Connected
+            for entry in ConnectionEventKind:
+                if entry.c_value == <int>event.kind:
+                    kind = entry
+                    break
+            listener(ConnectionEvent(
+                kind=kind,
+                host=_conn_event_str(event.host, event.host_len),
+                port=_conn_event_str(event.port, event.port_len),
+                previous_host=_conn_event_str(
+                    event.previous_host, event.previous_host_len),
+                previous_port=_conn_event_str(
+                    event.previous_port, event.previous_port_len),
+                attempt_number=event.attempt_number
+                    if event.has_attempt else None,
+                cause_code=c_err_code_to_py(event.cause_code)
+                    if event.has_cause else None,
+                cause_msg=_conn_event_str(event.cause_msg, event.cause_msg_len)
+                    if event.has_cause else None,
+                timestamp_millis=event.timestamp_millis))
+        except BaseException:
+            logging.getLogger("questdb").exception(
+                "connection event listener failed")
 
 
 class ServerRole(TaggedEnum):
@@ -2229,13 +2243,17 @@ def _default_qwp_ws_error_handler(error):
 
 cdef void _qwp_ws_error_trampoline(
         void* user_data,
-        const line_sender_qwpws_error_view* view) noexcept with gil:
-    cdef object handler = <object>user_data
-    try:
-        handler(_qwp_ws_error_from_raw(c_qwp_ws_error_view_to_raw(view[0])))
-    except BaseException:
-        logging.getLogger("questdb").exception(
-            "QWP/WebSocket error handler failed")
+        const line_sender_qwpws_error_view* view) noexcept nogil:
+    if qdb_py_is_finalizing():
+        return
+    with gil:
+        try:
+            handler = <object>user_data
+            handler(_qwp_ws_error_from_raw(
+                c_qwp_ws_error_view_to_raw(view[0])))
+        except BaseException:
+            logging.getLogger("questdb").exception(
+                "QWP/WebSocket error handler failed")
 
 
 class TlsCa(TaggedEnum):
@@ -2532,24 +2550,6 @@ cdef object _dataframe_columnar_plan_normalizations(
         object df,
         dataframe_plan_t* plan):
     cdef list normalizations = []
-    cdef size_t col_index
-    cdef col_t* col
-
-    for col_index in range(plan.col_count):
-        col = &plan.cols.d[col_index]
-        if col.setup.large_string_cast_to_utf8:
-            # Cast is performed for the row-path planner-shared with
-            # this columnar path; the columnar emitter would handle
-            # `U` natively, but the planner produced `u` by the time
-            # it reaches us. Reported for symmetry with the support
-            # report's existing schema.
-            normalizations.append({
-                'column': df.columns[col.setup.orig_index],
-                'target': _TARGET_NAMES[col.setup.target],
-                'source_code': <int>col.setup.source,
-                'action': 'arrow_large_string_cast_to_utf8',
-                'copy_expected': True,
-            })
     return normalizations
 
 
@@ -2644,14 +2644,15 @@ cdef object _dataframe_columnar_plan_failures(
                     col_source_t.col_source_dt64ns_numpy,
                     col_source_t.col_source_dt64us_numpy,
                     col_source_t.col_source_dt64ns_tz_arrow,
-                    col_source_t.col_source_dt64us_tz_arrow):
+                    col_source_t.col_source_dt64us_tz_arrow,
+                    col_source_t.col_source_datetime_pyobj):
                 failures.append(_dataframe_columnar_col_failure(
                     df,
                     col,
-                    'v1 only supports NumPy datetime64[ns/us] or '
-                    'tz-aware datetime64/timestamp[pyarrow] '
-                    'timestamp field columns.'))
-            else:
+                    'v1 only supports NumPy datetime64[ns/us], '
+                    'tz-aware datetime64/timestamp[pyarrow], or '
+                    'object-dtype datetime timestamp field columns.'))
+            elif col.setup.source != col_source_t.col_source_datetime_pyobj:
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
                 ts_scan = _dataframe_columnar_ts_field_scan(
                     &col.setup.chunks.chunks[0], ts_data, plan.row_count)
@@ -2828,7 +2829,7 @@ cdef object _dataframe_columnar_ndarray_col_to_arrow(object df, col_t* col):
         arr = <PyArrayObject*>cell
         if PyArray_TYPE(arr) != NPY_DOUBLE:
             raise QuestDBError(
-                QuestDBErrorCode.ArrayWriteToBufferError,
+                QuestDBErrorCode.ArrayError,
                 f'Bad column {col_name!r}: Only float64 numpy arrays are '
                 f'supported, got dtype: {cell.dtype}')
         if PyArray_NDIM(arr) > 1:
@@ -2896,8 +2897,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
     """
     Walk a PyObject column once and produce Arrow-Utf8-shaped buffers
     (int32 offsets + uint8 bytes + LSB-packed validity). Encoding uses
-    Python's str.encode('utf-8') so any valid Python str produces valid
-    UTF-8.
+    CPython's `PyUnicode_AsUTF8AndSize`, which rejects lone surrogates,
+    so every emitted buffer is valid UTF-8.
     """
     cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
     if b == NULL:
@@ -3453,30 +3454,42 @@ cdef void_int _dataframe_columnar_prebuild_pyobj(
 
     for i in range(plan.col_count):
         col = &plan.cols.d[i]
-        if col.setup.source == col_source_t.col_source_str_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_str_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
-        elif col.setup.source == col_source_t.col_source_int_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_int_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
-        elif col.setup.source == col_source_t.col_source_float_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_float_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
-        elif col.setup.source == col_source_t.col_source_bool_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_bool_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
-        elif col.setup.source == col_source_t.col_source_uuid_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_uuid_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
-        elif col.setup.source == col_source_t.col_source_ipv4_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_ipv4_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
-        elif col.setup.source == col_source_t.col_source_datetime_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_datetime_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
-        elif col.setup.source == col_source_t.col_source_bytes_pyobj:
-            plan.pyobj_built[i] = _dataframe_columnar_build_bytes_pyobj(
-                col, plan.row_count, df.columns[col.setup.orig_index])
+        if not _is_pyobj_source(col.setup.source):
+            continue
+        col_name = df.columns[col.setup.orig_index]
+        try:
+            if col.setup.source == col_source_t.col_source_str_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_str_pyobj(
+                    col, plan.row_count, col_name)
+            elif col.setup.source == col_source_t.col_source_int_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_int_pyobj(
+                    col, plan.row_count, col_name)
+            elif col.setup.source == col_source_t.col_source_float_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_float_pyobj(
+                    col, plan.row_count, col_name)
+            elif col.setup.source == col_source_t.col_source_bool_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_bool_pyobj(
+                    col, plan.row_count, col_name)
+            elif col.setup.source == col_source_t.col_source_uuid_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_uuid_pyobj(
+                    col, plan.row_count, col_name)
+            elif col.setup.source == col_source_t.col_source_ipv4_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_ipv4_pyobj(
+                    col, plan.row_count, col_name)
+            elif col.setup.source == col_source_t.col_source_datetime_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_datetime_pyobj(
+                    col, plan.row_count, col_name)
+            elif col.setup.source == col_source_t.col_source_bytes_pyobj:
+                plan.pyobj_built[i] = _dataframe_columnar_build_bytes_pyobj(
+                    col, plan.row_count, col_name)
+        except OverflowError as oe:
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {col_name!r}: {oe}') from oe
+        except UnicodeEncodeError as ue:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidUtf8,
+                f'Bad column {col_name!r}: {ue}') from ue
 
 
 cdef void_int _dataframe_columnar_append_pyobj_str(
@@ -4341,6 +4354,10 @@ cdef int _arrow_flush_once(
         ok = direct_column_sender_flush_arrow_batch_at_column(
             conn, table, array, schema, ts_column[0],
             overrides, overrides_len, err)
+    elif at_scalar_set:
+        ok = direct_column_sender_flush_arrow_batch_at_scalar_nanos(
+            conn, table, array, schema, at_scalar_nanos,
+            overrides, overrides_len, err)
     else:
         ok = direct_column_sender_flush_arrow_batch_at_now(
             conn, table, array, schema,
@@ -4713,9 +4730,9 @@ cdef bint _try_import_polars():
         import polars
     except ImportError:
         return False
-    _POLARS = polars
     _POLARS_DATAFRAME_T = polars.DataFrame
     _POLARS_LAZYFRAME_T = polars.LazyFrame
+    _POLARS = polars
     return True
 
 
@@ -5304,6 +5321,8 @@ cdef void _direct_conn_close(
             questdb_db_drop_direct_column_sender(src.db, conn)
         else:
             questdb_db_return_direct_column_sender(src.db, conn)
+    elif force_drop:
+        questdb_db_drop_direct_column_sender(NULL, conn)
     else:
         direct_column_sender_free(conn)
 
@@ -5479,7 +5498,8 @@ cdef bint _dataframe_client_try_capsule_path(
     finally:
         _ensure_has_gil(&gs)
         if conn != NULL:
-            _direct_conn_close(src, conn, force_drop_conn)
+            with nogil:
+                _direct_conn_close(src, conn, force_drop_conn)
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
         if c_overrides != NULL:
@@ -5574,7 +5594,8 @@ cdef void_int _dataframe_numpy_publish(
     finally:
         _ensure_has_gil(&gs)
         if conn != NULL:
-            _direct_conn_close(src, conn, force_drop_conn)
+            with nogil:
+                _direct_conn_close(src, conn, force_drop_conn)
         if chunk != NULL:
             column_sender_chunk_free(chunk)
         # The plan is rebuilt on each failover attempt; release this
@@ -5604,16 +5625,28 @@ cdef void_int _direct_dataframe_run(
         schema_overrides)
     if max_rows_per_batch <= 0:
         raise ValueError('max_rows_per_batch must be >= 1.')
-    if isinstance(at, datetime.datetime) and at.timestamp() < 0:
-        raise ValueError(
-            'Bad argument `at`: Cannot use a datetime before the '
-            'Unix epoch (1970-01-01 00:00:00).')
+    if isinstance(at, datetime.datetime):
+        if at != at:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
+                'Bad argument `at`: NaT is not a valid timestamp.')
+        try:
+            at_timestamp = at.timestamp()
+        except ValueError as ve:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidTimestamp,
+                f'Bad argument `at`: {ve}') from ve
+        if at_timestamp < 0:
+            raise ValueError(
+                'Bad argument `at`: Cannot use a datetime before the '
+                'Unix epoch (1970-01-01 00:00:00).')
     if not isinstance(
             at,
             (str, ServerTimestampType, TimestampNanos,
              datetime.datetime)) and not (
             isinstance(at, int) and not isinstance(at, bool)):
-        raise UnsupportedDataFrameShapeError(
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidTimestamp,
             'dataframe() requires `at` to be the designated timestamp '
             'column (by name or index), a fixed timestamp shared by every '
             'row (TimestampNanos / datetime), or the explicit '
@@ -5743,8 +5776,7 @@ cdef bint _is_batch_too_large_error(object exc):
     msg = str(exc).lower()
     return (
         ('row_count' in msg and ('exceeds' in msg or 'too large' in msg))
-        or 'batch too large' in msg
-        or ('value_data' in msg and 'exceeds' in msg))
+        or 'batch too large' in msg)
 
 
 cdef class QuestDB:
@@ -5760,6 +5792,7 @@ cdef class QuestDB:
     cdef object _conf_str
     cdef object _state_cond
     cdef size_t _active_uses
+    cdef bint _closing
     cdef object _connection_listener
 
     def __cinit__(self):
@@ -5767,6 +5800,7 @@ cdef class QuestDB:
         self._conf_str = None
         self._state_cond = threading.Condition(threading.RLock())
         self._active_uses = 0
+        self._closing = False
         self._connection_listener = None
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
@@ -6247,18 +6281,35 @@ cdef class QuestDB:
         try:
             db = self._db
             if db == NULL:
+                while self._closing:
+                    self._state_cond.wait()
                 return
             self._db = NULL
             self._conf_str = None
+            self._closing = True
             while self._active_uses != 0:
-                self._state_cond.wait()
+                if (not self._state_cond.wait(timeout=5.0)
+                        and self._active_uses != 0):
+                    warnings.warn(
+                        'QuestDB.close() is waiting for '
+                        f'{self._active_uses} outstanding lease(s) to be '
+                        'released.',
+                        UserWarning)
         finally:
             self._state_cond.release()
-        _ensure_doesnt_have_gil(&gs)
-        # `questdb_db_close` drains both the writer and reader free
-        # lists in one shot (see `db.rs::DbInner::Drop`).
-        questdb_db_close(db)
-        _ensure_has_gil(&gs)
+        try:
+            _ensure_doesnt_have_gil(&gs)
+            # `questdb_db_close` drains both the writer and reader free
+            # lists in one shot (see `db.rs::DbInner::Drop`).
+            questdb_db_close(db)
+        finally:
+            _ensure_has_gil(&gs)
+            self._state_cond.acquire()
+            try:
+                self._closing = False
+                self._state_cond.notify_all()
+            finally:
+                self._state_cond.release()
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
         self.close()
@@ -6439,7 +6490,7 @@ cdef class Sender:
             self._qwp_ws_error_handler = qwp_ws_error_handler
             if not line_sender_opts_qwpws_error_handler(
                     self._opts,
-                    _qwp_ws_error_trampoline,
+                    <line_sender_qwpws_error_cb>_qwp_ws_error_trampoline,
                     <void*>self._qwp_ws_error_handler,
                     &err):
                 self._qwp_ws_error_handler = None
@@ -6463,7 +6514,7 @@ cdef class Sender:
             self._connection_listener = connection_listener
             if not line_sender_opts_connection_event_handler(
                     self._opts,
-                    _connection_event_trampoline,
+                    <questdb_connection_event_cb>_connection_event_trampoline,
                     <void*>self._connection_listener,
                     <size_t>(connection_event_inbox_capacity or 0),
                     &err):
@@ -6708,7 +6759,13 @@ cdef class Sender:
         cdef str port_str
         cdef line_sender_protocol c_protocol
         cdef line_sender_utf8 c_port
-        cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        cdef qdb_pystr_buf* b
+        if (self._opts != NULL or self._impl != NULL or
+                self._last_flush_ms != NULL):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'Sender is already initialized.')
+        b = qdb_pystr_buf_new()
         try:
             protocol = Protocol.parse(protocol)
             c_protocol = protocol.c_value
@@ -7144,6 +7201,7 @@ cdef class Sender:
         """
         cdef line_sender_error* err = NULL
         cdef PyThreadState * gs = NULL
+        cdef line_sender* failed_impl = NULL
         if self._opts == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -7162,8 +7220,11 @@ cdef class Sender:
             try:
                 self._buffer = self._new_buffer_for_sender()
             except:
-                line_sender_close(self._impl)
+                failed_impl = self._impl
                 self._impl = NULL
+                _ensure_doesnt_have_gil(&gs)
+                line_sender_close(failed_impl)
+                _ensure_has_gil(&gs)
                 raise
 
         line_sender_opts_free(self._opts)
@@ -7761,17 +7822,20 @@ cdef class Sender:
 
     cdef _close(self):
         cdef PyThreadState* gs = NULL
-        self._buffer = None
-        line_sender_opts_free(self._opts)
+        cdef line_sender* impl = self._impl
+        cdef line_sender_opts* opts = self._opts
+        cdef line_sender_opts* qwp_ws_opts = self._qwp_ws_opts
+        self._impl = NULL
         self._opts = NULL
-        if self._qwp_ws_opts != NULL:
-            line_sender_opts_free(self._qwp_ws_opts)
-            self._qwp_ws_opts = NULL
-        if self._impl != NULL:
+        self._qwp_ws_opts = NULL
+        if impl != NULL or opts != NULL or qwp_ws_opts != NULL:
             _ensure_doesnt_have_gil(&gs)
-            line_sender_close(self._impl)
+            if impl != NULL:
+                line_sender_close(impl)
+            line_sender_opts_free(opts)
+            line_sender_opts_free(qwp_ws_opts)
             _ensure_has_gil(&gs)
-            self._impl = NULL
+        self._buffer = None
         self._qwp_ws_error_handler = None
         self._connection_listener = None
         if self._slot_id != -1:
@@ -7895,7 +7959,7 @@ cdef class _PooledSender:
             raise c_err_to_py(err)
         qdb_pystr_buf_clear(self._buffer._b)
 
-    cdef void _release_locked(self) noexcept:
+    cdef void _release_locked(self) except *:
         cdef qwp_sender* sender = self._qwp
         cdef questdb_db* db = self._db
         cdef QuestDB handle = self._handle
@@ -7905,12 +7969,12 @@ cdef class _PooledSender:
         self._qwp = NULL
         self._db = NULL
         self._buffer = None
+        self._handle = None
         _ensure_doesnt_have_gil(&gs)
         questdb_db_return_sender(db, sender)
         _ensure_has_gil(&gs)
         if handle is not None:
             handle._end_db_use()
-        self._handle = None
 
     def __enter__(self):
         with self._lock:

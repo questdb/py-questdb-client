@@ -3,8 +3,9 @@
 # `QueryResult` exposes the Arrow PyCapsule Interface
 # (`__arrow_c_stream__`) directly off the Rust cursor, so polars /
 # duckdb / pandas 3.0 / any Arrow-native consumer can read query
-# results without pyarrow. `to_arrow`, `to_pandas`, `iter_arrow`,
-# `iter_pandas` are convenience wrappers that lazy-import pyarrow.
+# results without pyarrow. `to_pandas` / `iter_pandas` default to a
+# pyarrow-free native numpy path; `to_arrow` / `iter_arrow` /
+# `to_polars` / `iter_polars` lazy-import pyarrow.
 
 cimport numpy as cnp
 
@@ -502,23 +503,33 @@ cdef _CursorHandle _execute_query(
     return handle
 
 
-cdef size_t _arrow_metadata_byte_len(const char* md) noexcept:
+cdef enum:
+    _ARROW_METADATA_CLONE_CAP = 1 << 20
+
+
+cdef size_t _arrow_metadata_byte_len(const char* md, size_t max_len) noexcept:
     cdef int32_t n
     cdef int32_t klen
     cdef int32_t vlen
     cdef size_t pos
     cdef int32_t i
+    if max_len < sizeof(int32_t):
+        return 0
     memcpy(&n, md, sizeof(int32_t))
     pos = sizeof(int32_t)
     if n <= 0:
         return pos
     for i in range(n):
+        if max_len - pos < sizeof(int32_t):
+            return pos
         memcpy(&klen, md + pos, sizeof(int32_t))
-        if klen < 0:
+        if klen < 0 or <size_t>klen > max_len - pos - sizeof(int32_t):
             return pos
         pos += sizeof(int32_t) + <size_t>klen
+        if max_len - pos < sizeof(int32_t):
+            return pos
         memcpy(&vlen, md + pos, sizeof(int32_t))
-        if vlen < 0:
+        if vlen < 0 or <size_t>vlen > max_len - pos - sizeof(int32_t):
             return pos
         pos += sizeof(int32_t) + <size_t>vlen
     return pos
@@ -575,7 +586,8 @@ cdef int _arrow_schema_deep_clone(const ArrowSchema* src, ArrowSchema* dst) noex
             return -1
         memcpy(<void*>dst.name, src.name, name_len + 1)
     if src.metadata != NULL:
-        metadata_len = _arrow_metadata_byte_len(src.metadata)
+        metadata_len = _arrow_metadata_byte_len(
+            src.metadata, _ARROW_METADATA_CLONE_CAP)
         dst.metadata = <const char*>malloc(metadata_len)
         if dst.metadata == NULL:
             _arrow_schema_clone_release(dst)
@@ -667,6 +679,20 @@ cdef void _qs_set_error(_QueryStreamProducer prod, const char* msg, size_t msg_l
 
 
 cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
+    cdef bytes full
+    try:
+        return _qs_pull_impl(prod)
+    except BaseException as e:
+        try:
+            full = ('arrow batch pull failed: ' + repr(e)).encode('utf-8')
+            _qs_set_error(prod, full, <size_t>len(full))
+        except:
+            _qs_set_error(prod, b'arrow batch pull failed', 23)
+        prod.exhausted = True
+        return -1
+
+
+cdef int _qs_pull_impl(_QueryStreamProducer prod):
     cdef reader_cursor* cursor
     cdef ArrowArray local_array
     cdef ArrowSchema local_schema
@@ -773,16 +799,20 @@ cdef int _qs_get_schema(ArrowArrayStream* stream, ArrowSchema* out) noexcept wit
     if stream == NULL or stream.private_data == NULL:
         return 22  # EINVAL
     prod = <_QueryStreamProducer>stream.private_data
-    if not prod.has_cached_schema:
-        if _qs_pull(prod) != 0:
-            return 5  # EIO
-    if not prod.has_cached_schema:
-        if _qs_install_empty_struct_schema(prod) != 0:
+    try:
+        if not prod.has_cached_schema:
+            if _qs_pull(prod) != 0:
+                return 5  # EIO
+        if not prod.has_cached_schema:
+            if _qs_install_empty_struct_schema(prod) != 0:
+                return 12  # ENOMEM
+        if _arrow_schema_deep_clone(&prod.cached_schema, out) != 0:
+            _qs_set_error(prod, b'failed to clone ArrowSchema', 27)
             return 12  # ENOMEM
-    if _arrow_schema_deep_clone(&prod.cached_schema, out) != 0:
-        _qs_set_error(prod, b'failed to clone ArrowSchema', 27)
-        return 12  # ENOMEM
-    return 0
+        return 0
+    except BaseException:
+        _qs_set_error(prod, b'arrow schema fetch failed', 25)
+        return 5  # EIO
 
 
 cdef int _qs_install_empty_struct_schema(_QueryStreamProducer prod) noexcept:
@@ -808,24 +838,31 @@ cdef int _qs_get_next(ArrowArrayStream* stream, ArrowArray* out) noexcept with g
     if stream == NULL or stream.private_data == NULL:
         return 22  # EINVAL
     prod = <_QueryStreamProducer>stream.private_data
-    if not prod.has_cached_array:
-        if _qs_pull(prod) != 0:
-            return 5  # EIO
-    if prod.has_cached_array:
-        memcpy(out, &prod.cached_array, sizeof(ArrowArray))
-        memset(&prod.cached_array, 0, sizeof(ArrowArray))
-        prod.has_cached_array = False
-        prod.delivered = True
+    try:
+        if not prod.has_cached_array:
+            if _qs_pull(prod) != 0:
+                return 5  # EIO
+        if prod.has_cached_array:
+            memcpy(out, &prod.cached_array, sizeof(ArrowArray))
+            memset(&prod.cached_array, 0, sizeof(ArrowArray))
+            prod.has_cached_array = False
+            prod.delivered = True
+            return 0
         return 0
-    return 0
+    except BaseException:
+        _qs_set_error(prod, b'arrow batch fetch failed', 24)
+        return 5  # EIO
 
 
 cdef const char* _qs_get_last_error(ArrowArrayStream* stream) noexcept with gil:
     cdef _QueryStreamProducer prod
     if stream == NULL or stream.private_data == NULL:
         return NULL
-    prod = <_QueryStreamProducer>stream.private_data
-    return <const char*>prod.last_error
+    try:
+        prod = <_QueryStreamProducer>stream.private_data
+        return <const char*>prod.last_error
+    except BaseException:
+        return NULL
 
 
 cdef void _qs_release(ArrowArrayStream* stream) noexcept with gil:
@@ -835,7 +872,10 @@ cdef void _qs_release(ArrowArrayStream* stream) noexcept with gil:
     prod = <_QueryStreamProducer>stream.private_data
     stream.private_data = NULL
     stream.release = NULL
-    Py_DECREF(prod)
+    try:
+        Py_DECREF(prod)
+    except BaseException:
+        pass
 
 
 cdef void _qs_capsule_destructor(object capsule) noexcept:
@@ -1256,6 +1296,7 @@ cdef object _numpy_uuid_chunk(
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
+    cdef size_t stride
     cdef uint64_t lo
     cdef uint64_t hi
     cdef cnp.ndarray out
@@ -1271,11 +1312,12 @@ cdef object _numpy_uuid_chunk(
             'uuid column has {} rows but no values buffer'.format(row_count))
     validity = cd.validity
     values = <const uint8_t*>cd.values
+    stride = cd.value_stride if cd.value_stride != 0 else 16
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
-        memcpy(&lo, values + r * 16, 8)
-        memcpy(&hi, values + r * 16 + 8, 8)
+        memcpy(&lo, values + r * stride, 8)
+        memcpy(&hi, values + r * stride + 8, 8)
         _obj_chunk_set(out, r, _uuid.UUID(int=((<object>hi) << 64) | (<object>lo)))
     return out
 
@@ -1290,6 +1332,7 @@ cdef object _numpy_long256_chunk(
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
+    cdef size_t stride
     cdef cnp.ndarray out
     _reader_check(
         reader_batch_column_data(batch, col_idx, &cd, &err), &err,
@@ -1303,11 +1346,12 @@ cdef object _numpy_long256_chunk(
             'long256 column has {} rows but no values buffer'.format(row_count))
     validity = cd.validity
     values = <const uint8_t*>cd.values
+    stride = cd.value_stride if cd.value_stride != 0 else 32
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
         _obj_chunk_set(out, r, int.from_bytes(
-            PyBytes_FromStringAndSize(<const char*>(values + r * 32), 32),
+            PyBytes_FromStringAndSize(<const char*>(values + r * stride), 32),
             'little', signed=False))
     return out
 
@@ -1387,6 +1431,16 @@ cdef object _numpy_array_chunk(
         raise QuestDBError(
             QuestDBErrorCode.ServerFlushError,
             'array column has {} rows but no offset tables'.format(row_count))
+    if ad.data == NULL and ad.data_len > 0:
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
+            'array column has {} data bytes but no data buffer'.format(
+                ad.data_len))
+    if ad.shapes == NULL and ad.shapes_len > 0:
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
+            'array column has {} shape entries but no shapes buffer'.format(
+                ad.shapes_len))
     validity = ad.validity
     data = ad.data
     data_offsets = ad.data_offsets
@@ -2081,8 +2135,10 @@ class QueryResult:
     ``__arrow_c_stream__`` is native — the cursor's record batches are
     exposed directly through the Arrow C Data Interface, so polars /
     duckdb / pandas 3.0 / any Arrow-native consumer can read query
-    results without pyarrow installed. ``to_arrow`` / ``to_pandas`` /
-    ``iter_arrow`` / ``iter_pandas`` are convenience wrappers that
+    results without pyarrow installed. ``to_pandas`` / ``iter_pandas``
+    are also pyarrow-free by default (a native numpy path); they only
+    need pyarrow when ``dtype_backend`` / ``types_mapper`` is passed.
+    ``to_arrow`` / ``iter_arrow`` / ``to_polars`` / ``iter_polars``
     do require pyarrow.
 
     **SYMBOL columns**: ``to_polars`` / ``to_pandas`` build the Categorical
@@ -2099,7 +2155,7 @@ class QueryResult:
         with db.query('SELECT * FROM trades WHERE ts > $1',
                       [datetime.datetime(2026, 7, 1)]) as result:
             df = polars.from_arrow(result)              # no pyarrow
-            # df = result.to_pandas()                   # pyarrow required
+            # df = result.to_pandas()                   # no pyarrow
             # table = pa.table(result)                  # pyarrow required
     """
 
@@ -2127,6 +2183,12 @@ class QueryResult:
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
         (e.g. ``polars.from_arrow``) reconciles them.
+
+        The returned stream wraps the query cursor, which has thread
+        affinity in the underlying FFI: consume it from one thread at a
+        time, preferably the thread that ran the query. Cross-thread
+        consumption is currently serialised by an internal lock, but the
+        FFI contract does not guarantee that indefinitely.
         """
         if requested_schema is not None:
             raise NotImplementedError(

@@ -216,6 +216,8 @@ class ServerTimestampType:
 
 ServerTimestamp: ServerTimestampType
 
+VERSION: str
+
 WARN_HIGH_RECONNECTS: bool
 
 
@@ -944,9 +946,10 @@ class _PooledSender:
 
     Obtain a lease with :meth:`QuestDB.sender`; ``close()`` returns the
     native sender to the pool. The surface is deliberately small:
-    ``row()``, ``flush()``, ``wait()`` and ``close()``; ``len(sender)``
-    is the number of buffered rows. ``dataframe()`` raises: DataFrame
-    bulk loads go through :meth:`QuestDB.dataframe`.
+    ``row()``, ``dataframe()``, ``flush()``, ``wait()`` and ``close()``;
+    ``len(sender)`` is the number of buffered rows. ``dataframe()``
+    routes to the same direct columnar path as :meth:`QuestDB.dataframe`,
+    borrowing a direct connection from the pool for that call.
     """
 
     def __enter__(self) -> _PooledSender: ...
@@ -1219,8 +1222,8 @@ class Sender:
         request_timeout=None,
         auto_flush: bool = True,
         auto_flush_rows: Optional[int] = None,
-        auto_flush_bytes: bool = False,
-        auto_flush_interval: int = 1000,
+        auto_flush_bytes: Union[int, bool, None] = None,
+        auto_flush_interval: Union[int, timedelta, bool] = 1000,
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
@@ -1253,8 +1256,8 @@ class Sender:
         request_timeout=None,
         auto_flush: bool = True,
         auto_flush_rows: Optional[int] = None,
-        auto_flush_bytes: bool = False,
-        auto_flush_interval: int = 1000,
+        auto_flush_bytes: Union[int, bool, None] = None,
+        auto_flush_interval: Union[int, timedelta, bool] = 1000,
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,
@@ -1297,8 +1300,8 @@ class Sender:
         request_timeout=None,
         auto_flush: bool = True,
         auto_flush_rows: Optional[int] = None,
-        auto_flush_bytes: bool = False,
-        auto_flush_interval: int = 1000,
+        auto_flush_bytes: Union[int, bool, None] = None,
+        auto_flush_interval: Union[int, timedelta, bool] = 1000,
         max_datagram_size: Optional[int] = None,
         multicast_ttl: Optional[int] = None,
         qwp_ws_progress: Optional[QwpWsProgress] = None,

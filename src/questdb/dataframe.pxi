@@ -603,7 +603,6 @@ cdef struct col_setup_t:
     col_source_t source
     meta_target_t meta_target
     col_target_t target
-    bint large_string_cast_to_utf8
     bint has_override
     column_sender_numpy_dtype override_dtype
     uint8_t override_geohash_bits
@@ -833,25 +832,25 @@ cdef object _dataframe_may_import_deps():
             'to use the `.dataframe()` method. ' +
             'See: https://py-questdb-client.readthedocs.io/' +
             'en/latest/installation.html.') from ie
-    _NUMPY = numpy
-    _NUMPY_BOOL = type(_NUMPY.dtype('bool'))
-    _NUMPY_UINT8 = type(_NUMPY.dtype('uint8'))
-    _NUMPY_INT8 = type(_NUMPY.dtype('int8'))
-    _NUMPY_UINT16 = type(_NUMPY.dtype('uint16'))
-    _NUMPY_INT16 = type(_NUMPY.dtype('int16'))
-    _NUMPY_UINT32 = type(_NUMPY.dtype('uint32'))
-    _NUMPY_INT32 = type(_NUMPY.dtype('int32'))
-    _NUMPY_UINT64 = type(_NUMPY.dtype('uint64'))
-    _NUMPY_INT64 = type(_NUMPY.dtype('int64'))
-    _NUMPY_FLOAT32 = type(_NUMPY.dtype('float32'))
-    _NUMPY_FLOAT64 = type(_NUMPY.dtype('float64'))
-    _NUMPY_DATETIME64 = type(_NUMPY.dtype('datetime64[ns]'))
-    _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
+    _NUMPY_BOOL = type(numpy.dtype('bool'))
+    _NUMPY_UINT8 = type(numpy.dtype('uint8'))
+    _NUMPY_INT8 = type(numpy.dtype('int8'))
+    _NUMPY_UINT16 = type(numpy.dtype('uint16'))
+    _NUMPY_INT16 = type(numpy.dtype('int16'))
+    _NUMPY_UINT32 = type(numpy.dtype('uint32'))
+    _NUMPY_INT32 = type(numpy.dtype('int32'))
+    _NUMPY_UINT64 = type(numpy.dtype('uint64'))
+    _NUMPY_INT64 = type(numpy.dtype('int64'))
+    _NUMPY_FLOAT32 = type(numpy.dtype('float32'))
+    _NUMPY_FLOAT64 = type(numpy.dtype('float64'))
+    _NUMPY_DATETIME64 = type(numpy.dtype('datetime64[ns]'))
+    _NUMPY_OBJECT = type(numpy.dtype('object'))
     _PANDAS = pandas
     _PANDAS_NA = pandas.NA
     _PANDAS_NAT = pandas.NaT
     _EPOCH_AWARE_UTC = datetime.datetime(
         1970, 1, 1, tzinfo=datetime.timezone.utc)
+    _NUMPY = numpy
 
 
 cdef object _dataframe_require_pyarrow():
@@ -1316,13 +1315,6 @@ cdef const char* _ARROW_FMT_UTF8_STRING = 'u'
 cdef const char* _ARROW_FMT_LRG_UTF8_STRING = 'U'
 
 
-cdef void_int _dataframe_string_series_as_arrow(
-        PandasCol pandas_col, col_t* col) except -1:
-    _dataframe_export_arrow_chunks(
-        _dataframe_series_to_arrow_chunks(pandas_col),
-        col)
-
-
 cdef void_int _dataframe_category_series_as_arrow(
         PandasCol pandas_col, col_t* col) except -1:
     cdef const char* format
@@ -1357,12 +1349,12 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     cdef bint is_decimal_col = False
     _dataframe_require_pyarrow()
     if arrowtype.id == _PYARROW.lib.Type_STRING:
-        _dataframe_string_series_as_arrow(pandas_col, col)
+        _dataframe_series_as_arrow(pandas_col, col)
         col.setup.source = col_source_t.col_source_str_utf8_arrow
         col.scale = 0
         return 0
     elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
-        _dataframe_string_series_as_arrow(pandas_col, col)
+        _dataframe_series_as_arrow(pandas_col, col)
         col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
         col.scale = 0
         return 0
@@ -1599,7 +1591,7 @@ cdef void_int _dataframe_resolve_source_and_buffers(
         _dataframe_series_as_arrow(pandas_col, col)
     elif isinstance(dtype, _PANDAS.StringDtype):
         if dtype.storage == 'pyarrow':
-            _dataframe_string_series_as_arrow(pandas_col, col)
+            _dataframe_series_as_arrow(pandas_col, col)
             if strncmp(col.setup.arrow_schema.format, _ARROW_FMT_UTF8_STRING, 1) == 0:
                 col.setup.source = col_source_t.col_source_str_utf8_arrow
             elif strncmp(col.setup.arrow_schema.format, _ARROW_FMT_LRG_UTF8_STRING, 1) == 0:
@@ -1660,6 +1652,10 @@ cdef void_int _dataframe_resolve_target(
 cdef void _dataframe_init_cursor(col_t* col) noexcept nogil:
     col.cursor.chunk = col.setup.chunks.chunks
     col.cursor.chunk_index = 0
+    while ((col.cursor.chunk_index < col.setup.chunks.n_chunks) and
+            (col.cursor.chunk.length == 0)):
+        col.cursor.chunk_index += 1
+        col.cursor.chunk += 1
     col.cursor.offset = col.cursor.chunk.offset
     col.cursor.dictionary_large_offsets = (
         col.setup.arrow_schema.dictionary != NULL and
@@ -1857,8 +1853,6 @@ def _debug_dataframe_plan(
                     col.name.len),
                 'source_code': <int>col.setup.source,
                 'dispatch_code': <int>col.dispatch_code,
-                'large_string_cast_to_utf8': bool(
-                    col.setup.large_string_cast_to_utf8),
             })
         if plan.at_value == _AT_IS_SERVER_NOW:
             at_value = 'server_now'
@@ -2785,7 +2779,7 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
     if arr_type != NPY_DOUBLE:
         arr_descr = cnp.PyArray_DescrFromType(arr_type)
         raise QuestDBError(
-            QuestDBErrorCode.ArrayWriteToBufferError,
+            QuestDBErrorCode.ArrayError,
             f'Only float64 numpy arrays are supported, got dtype: {arr_descr}')
     cdef:
         size_t rank = PyArray_NDIM(arr)
@@ -3166,30 +3160,16 @@ cdef void_int _dataframe_serialize_cell(
 
 
 cdef void _dataframe_col_advance(col_t* col) noexcept nogil:
-    # Branchless version of:
-    #     cdef bint new_chunk = cursor.offset == \
-    #         <size_t>(cursor.chunk.offset + cursor.chunk.length)
-    #     if new_chunk == 0:
-    #         cursor.chunk_index += 1
-    #         cursor.chunk += 1  # pointer advance
-    #
-    #     if new_chunk:
-    #         cursor.offset = cursor.chunk.offset
-    #     else:
-    #         cursor.offset += 1
-    #
-    # (Checked with Godbolt, GCC -O3 code was rather "jumpy")
     cdef col_cursor_t* cursor = &col.cursor
-    cdef size_t new_chunk  # disguised bint. Either 0 or 1.
     cursor.offset += 1
-    new_chunk = cursor.offset == <size_t>(cursor.chunk.offset + cursor.chunk.length)
-    cursor.chunk_index += new_chunk
-    cursor.chunk += new_chunk
-    # Note: We get away with this because we've allocated one extra blank chunk.
-    # This ensures that accessing `cursor.chunk.offset` doesn't segfault.
-    cursor.offset = (
-        (new_chunk * cursor.chunk.offset) +
-        ((not new_chunk) * cursor.offset))
+    # Note: We get away with accessing `cursor.chunk.offset` past the last
+    # chunk because we've allocated one extra blank chunk.
+    while ((cursor.chunk_index < col.setup.chunks.n_chunks) and
+            (cursor.offset ==
+                <size_t>(cursor.chunk.offset + cursor.chunk.length))):
+        cursor.chunk_index += 1
+        cursor.chunk += 1
+        cursor.offset = cursor.chunk.offset
 
 
 cdef void_int _dataframe_handle_auto_flush(
@@ -3221,6 +3201,8 @@ cdef void_int _dataframe_handle_auto_flush(
         _ensure_has_gil(gs)
 
     if not flush_ok:
+        if not marker_ok:
+            line_sender_error_free(marker_err)
         raise c_err_to_py_fmt(flush_err, _FLUSH_FMT)
 
     # The flush error takes precedence over the marker error.

@@ -12,6 +12,7 @@ from types import ModuleType as _ModuleType
 
 from questdb import _client
 from questdb._client import (
+    VERSION,
     Buffer,
     Protocol,
     QuestDBError,
@@ -29,6 +30,10 @@ from questdb._client import (
 IngressError = QuestDBError
 IngressErrorCode = QuestDBErrorCode
 
+# ``VERSION``, ``TaggedEnum``, ``QuestDBError`` and ``QuestDBErrorCode`` are
+# importable module attributes (as in 4.x) but are deliberately kept out of
+# ``__all__`` so that ``from questdb.ingress import *`` matches the 4.x
+# star-import surface.
 __all__ = [
     'Buffer',
     'IngressError',

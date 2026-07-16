@@ -5,6 +5,8 @@ from types import ModuleType as _ModuleType
 
 from questdb import _client
 from questdb._client import (
+    ConnectionEvent,
+    ConnectionEventKind,
     Protocol,
     QueryResult,
     QuestDB,
@@ -17,6 +19,8 @@ from questdb._client import (
     QwpWsProgress,
     Sender,
     SenderTransaction,
+    ServerInfo,
+    ServerRole,
     ServerTimestamp,
     ServerTimestampType,
     TimestampMicros,
@@ -26,6 +30,8 @@ from questdb._client import (
 )
 
 __all__ = [
+    'ConnectionEvent',
+    'ConnectionEventKind',
     'Protocol',
     'QueryResult',
     'QuestDB',
@@ -38,6 +44,8 @@ __all__ = [
     'QwpWsProgress',
     'Sender',
     'SenderTransaction',
+    'ServerInfo',
+    'ServerRole',
     'ServerTimestamp',
     'ServerTimestampType',
     'TimestampMicros',

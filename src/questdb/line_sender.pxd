@@ -140,7 +140,7 @@ cdef extern from "questdb/ingress/line_sender.h":
     ctypedef void (*line_sender_qwpws_error_cb)(
         void* user_data,
         const line_sender_qwpws_error_view* event
-        ) noexcept with gil
+        ) noexcept nogil
 
     questdb_error_code questdb_error_get_code(
         const questdb_error* error
@@ -849,7 +849,7 @@ cdef extern from "questdb/ingress/column_sender.h":
     ctypedef void (*questdb_connection_event_cb)(
         void* user_data,
         const questdb_connection_event* event
-        ) noexcept with gil
+        ) noexcept nogil
 
     questdb_db* questdb_db_connect_with_event_handler(
         const char* conf,
