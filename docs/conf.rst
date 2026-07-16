@@ -34,15 +34,19 @@ The format of the configuration string is::
 
 The valid protocols are:
 
-* ``tcp``: ILP/TCP
-* ``tcps``: ILP/TCP with TLS
+* ``ws``: QWP/WebSocket (QuestWire Protocol) — **recommended**
+* ``wss``: QWP/WebSocket with TLS — **recommended**
 * ``http``: ILP/HTTP
 * ``https``: ILP/HTTP with TLS
-* ``udp``: QWP/UDP (QuestWire Protocol over UDP)
-* ``ws``: QWP/WebSocket
-* ``wss``: QWP/WebSocket with TLS
+* ``tcp``: ILP/TCP
+* ``tcps``: ILP/TCP with TLS
+* ``udp``: QWP/UDP
 
-If you're unsure which protocol to use, see :ref:`sender_which_protocol`.
+``ws`` / ``wss`` configure the :class:`QuestDB <questdb.QuestDB>` handle via
+:func:`questdb.connect` and the standalone
+:class:`Sender <questdb.Sender>` alike; the other protocols are
+:class:`Sender <questdb.Sender>`-only. If you're unsure which protocol to
+use, see :ref:`sender_which_protocol`.
 
 Only the ``addr=host:port`` key is mandatory. It specifies the hostname and port
 of the QuestDB server.
