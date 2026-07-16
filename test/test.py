@@ -429,6 +429,72 @@ class TestQwpWebSocketApi(unittest.TestCase):
             questdb.connect(
                 'ws::addr=localhost:9000;', sender_pool_max=4)
 
+    def test_from_conf_rejects_non_callable_error_handler(self):
+        with self.assertRaisesRegex(
+                TypeError, '"qwp_ws_error_handler" must be callable'):
+            qi.QuestDB.from_conf(
+                'ws::addr=127.0.0.1:1;', qwp_ws_error_handler=42)
+
+    def test_pool_rejection_handler_receives_server_rejection(self):
+        rejections = []
+        delivered = threading.Event()
+
+        def on_rejection(error):
+            rejections.append(error)
+            delivered.set()
+
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'close_flush_timeout_millis=0;')
+            with qi.QuestDB.from_conf(
+                    conf, qwp_ws_error_handler=on_rejection) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    sender.flush()
+                self.assertTrue(
+                    delivered.wait(5),
+                    'the rejection must reach the handler')
+                deadline = time.monotonic() + 5
+                while client.rejection_events_delivered < 1:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                self.assertEqual(client.rejection_events_dropped, 0)
+
+        error = rejections[0]
+        self.assertIsInstance(error, qi.QwpWsError)
+        self.assertIs(error.category, qi.QwpWsErrorCategory.SchemaMismatch)
+        self.assertIs(error.applied_policy, qi.QwpWsErrorPolicy.Terminal)
+        self.assertEqual(error.message, 'mock rejection')
+
+    def test_pool_rejection_default_handler_logs(self):
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'close_flush_timeout_millis=0;')
+            with self.assertLogs('questdb', level='ERROR') as logs:
+                with qi.QuestDB.from_conf(conf) as client:
+                    with client.sender() as sender:
+                        sender.row(
+                            'events', columns={'value': 1},
+                            at=qi.ServerTimestamp)
+                        sender.flush()
+                    deadline = time.monotonic() + 5
+                    while client.rejection_events_delivered < 1:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+        self.assertTrue(
+            any('server rejection' in line for line in logs.output),
+            logs.output)
+
     def test_client_sender_publishes_rows_without_dataframe_surface(self):
         with QwpAckServer() as server:
             conf = (

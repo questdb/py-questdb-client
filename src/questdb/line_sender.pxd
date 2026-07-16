@@ -860,11 +860,31 @@ cdef extern from "questdb/ingress/column_sender.h":
         questdb_error** err_out
         ) noexcept nogil
 
+    questdb_db* questdb_db_connect_with_handlers(
+        const char* conf,
+        size_t conf_len,
+        questdb_connection_event_cb event_callback,
+        void* event_user_data,
+        size_t event_inbox_capacity,
+        line_sender_qwpws_error_cb rejection_callback,
+        void* rejection_user_data,
+        size_t rejection_inbox_capacity,
+        questdb_error** err_out
+        ) noexcept nogil
+
     uint64_t questdb_db_connection_events_dropped(
         const questdb_db* db
         ) noexcept nogil
 
     uint64_t questdb_db_connection_events_delivered(
+        const questdb_db* db
+        ) noexcept nogil
+
+    uint64_t questdb_db_rejection_events_delivered(
+        const questdb_db* db
+        ) noexcept nogil
+
+    uint64_t questdb_db_rejection_events_dropped(
         const questdb_db* db
         ) noexcept nogil
 

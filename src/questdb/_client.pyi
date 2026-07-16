@@ -1006,13 +1006,22 @@ class PooledSender:
         """Number of buffered (unpublished) rows."""
 
     def flush(self, *, wait: bool = False) -> PooledSender:
-        """Publish buffered rows; optionally wait for the server OK ack."""
+        """Publish buffered rows; ``wait=True`` waits for the server OK ack
+        of everything published through this lease. The wait is a pure ack
+        barrier — only a terminal connection failure raises; server
+        rejections go to the pool's ``qwp_ws_error_handler`` (default:
+        the ``questdb`` logger)."""
 
     def wait(self, timeout_millis: int = 0) -> PooledSender:
-        """Wait for all publications on this lease to receive an OK ack."""
+        """Wait for everything published through this lease to receive an
+        OK ack; returns immediately if the lease published nothing. Only a
+        terminal connection failure raises; server rejections go to the
+        pool's ``qwp_ws_error_handler``."""
 
     def close(self, flush: bool = True, wait: bool = False) -> None:
-        """Return this sender to its pool. Idempotent."""
+        """Return this sender to its pool. Idempotent. Without
+        ``wait=True`` a later server rejection of this lease's rows is
+        reported through the pool's ``qwp_ws_error_handler``."""
 
     def __exit__(self, exc_type, exc_val, exc_tb): ...
 
@@ -1076,6 +1085,8 @@ class QuestDB:
         *,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
+        qwp_ws_error_handler: Optional[Callable[[QwpWsError], None]] = None,
+        qwp_ws_error_inbox_capacity: int = 0,
     ) -> QuestDB:
         """
         Construct a handle from a QWP/WebSocket configuration string.
@@ -1084,6 +1095,15 @@ class QuestDB:
 
         ``connection_listener`` receives one :class:`ConnectionEvent` per
         connection-state transition, on a dedicated dispatcher thread.
+
+        ``qwp_ws_error_handler`` receives one :class:`QwpWsError` per
+        server rejection recorded by any of the pool's connections —
+        including rejections for rows published through an
+        already-closed :class:`PooledSender` — on its own dispatcher
+        thread. Without it every rejection is logged through the
+        ``questdb`` logger (``ERROR`` for terminal rejections,
+        ``WARNING`` for retriable ones, which are replayed), so
+        rejections are never silent.
         """
 
     def __enter__(self) -> QuestDB: ...
@@ -1166,6 +1186,16 @@ class QuestDB:
     @property
     def connection_events_delivered(self) -> int:
         """Events delivered to the connection listener."""
+
+    @property
+    def rejection_events_delivered(self) -> int:
+        """Server rejections delivered to the ``qwp_ws_error_handler``
+        (or to the default logging handler when none was registered)."""
+
+    @property
+    def rejection_events_dropped(self) -> int:
+        """Server rejections discarded by the handler inbox's drop-oldest
+        policy."""
 
     def reap_idle(self) -> int:
         """

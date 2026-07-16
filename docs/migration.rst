@@ -40,8 +40,15 @@ Existing row code can move from a standalone ``Sender`` to a pooled one:
 
 The pooled sender publishes into the store-and-forward QWP path. A plain
 ``flush()`` returns after local acceptance; ``flush(wait=True)`` also waits
-for the server's OK acknowledgement. To ingest concurrently, borrow one
-sender per thread.
+for the server's OK acknowledgement of everything published through the
+lease. The wait is a pure ack barrier — only a terminal connection failure
+raises. Server rejections are pushed to the pool's ``qwp_ws_error_handler``
+(a :func:`questdb.connect` keyword; one :class:`questdb.QwpWsError` per
+rejection, on a dedicated dispatcher thread). Without a handler every
+rejection is logged through the ``questdb`` logger — ``ERROR`` for terminal
+rejections, ``WARNING`` for retriable ones, which the queue replays — so
+rejections are never silent. To ingest concurrently, borrow one sender per
+thread.
 
 DataFrame bulk loads over QWP/WebSocket
 =======================================

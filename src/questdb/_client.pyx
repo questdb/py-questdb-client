@@ -5839,6 +5839,7 @@ cdef class QuestDB:
     cdef size_t _active_uses
     cdef bint _closing
     cdef object _connection_listener
+    cdef object _qwp_ws_error_handler
 
     def __cinit__(self):
         self._db = NULL
@@ -5847,6 +5848,7 @@ cdef class QuestDB:
         self._active_uses = 0
         self._closing = False
         self._connection_listener = None
+        self._qwp_ws_error_handler = None
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
@@ -5878,15 +5880,16 @@ cdef class QuestDB:
             str conf_str,
             *,
             connection_listener=None,
-            connection_event_inbox_capacity: int = 0):
+            connection_event_inbox_capacity: int = 0,
+            qwp_ws_error_handler=None,
+            qwp_ws_error_inbox_capacity: int = 0):
         """
         Construct a handle from a QWP/WebSocket configuration string.
 
         Prefer the :func:`questdb.connect` module-level factory.
 
-        The underlying connection pool is opened by `questdb_db_connect`, or
-        `questdb_db_connect_with_event_handler` when a connection listener is
-        supplied.
+        The underlying connection pool is opened by
+        `questdb_db_connect_with_handlers`.
         Dataframe ingestion always uses the direct (non-store-and-forward)
         QWP/WebSocket column sender, independent of ``sf_dir``. On a transient
         connection failure the frame is re-sent from the caller's DataFrame
@@ -5908,6 +5911,23 @@ cdef class QuestDB:
         logged and swallowed. Dropped/delivered totals are available via
         :attr:`connection_events_dropped` /
         :attr:`connection_events_delivered`.
+
+        ``qwp_ws_error_handler``, when set, is a callable receiving one
+        :class:`QwpWsError` per server rejection recorded by any of the
+        pool's store-and-forward connections — including rejections for
+        rows published through a :class:`PooledSender` that was already
+        closed. It runs on its own dedicated dispatcher thread fed by a
+        bounded inbox (``qwp_ws_error_inbox_capacity``; ``0`` selects the
+        default of 64, overflow drops the oldest event). Exceptions it
+        raises are logged and swallowed. Without a handler every rejection
+        is logged through the ``questdb`` logger instead — ``ERROR`` for
+        terminal rejections, ``WARNING`` for retriable ones (the affected
+        rows are replayed, not lost) — so rejections are never silent.
+        Delivered/dropped totals are available via
+        :attr:`rejection_events_delivered` /
+        :attr:`rejection_events_dropped`. Use the handler for
+        dead-lettering, alerting, and metrics; terminal failures also
+        surface as :class:`QuestDBError` from the sender calls themselves.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
@@ -5917,6 +5937,7 @@ cdef class QuestDB:
         cdef QuestDB db = QuestDB.__new__(QuestDB)
         cdef PyThreadState* gs = NULL
         cdef void* connection_listener_data = NULL
+        cdef questdb_connection_event_cb connection_event_cb = NULL
         try:
             protocol, params = parse_conf_str(b, conf_str)
             if protocol not in (Protocol.Ws, Protocol.Wss):
@@ -5934,6 +5955,11 @@ cdef class QuestDB:
                 raise TypeError(
                     '"connection_listener" must be callable or None, '
                     f'not {_fqn(type(connection_listener))}')
+            if qwp_ws_error_handler is not None and not callable(
+                    qwp_ws_error_handler):
+                raise TypeError(
+                    '"qwp_ws_error_handler" must be callable or None, '
+                    f'not {_fqn(type(qwp_ws_error_handler))}')
             str_to_utf8(b, <PyObject*>conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
@@ -5942,22 +5968,30 @@ cdef class QuestDB:
                 # close() has stopped and joined the dispatcher.
                 db._connection_listener = connection_listener
                 connection_listener_data = <void*>db._connection_listener
+                connection_event_cb = _connection_event_trampoline
+            # A rejection handler is always installed (defaulting to the
+            # `questdb` logger) because the native default logs through the
+            # Rust `log` facade, which is not bridged into Python logging.
+            if qwp_ws_error_handler is None:
+                qwp_ws_error_handler = _default_qwp_ws_error_handler
+            db._qwp_ws_error_handler = qwp_ws_error_handler
             _ensure_doesnt_have_gil(&gs)
-            if connection_listener_data == NULL:
-                db._db = questdb_db_connect(c_conf.buf, c_conf.len, &err)
-            else:
-                db._db = questdb_db_connect_with_event_handler(
-                    c_conf.buf,
-                    c_conf.len,
-                    _connection_event_trampoline,
-                    connection_listener_data,
-                    <size_t>connection_event_inbox_capacity,
-                    &err)
+            db._db = questdb_db_connect_with_handlers(
+                c_conf.buf,
+                c_conf.len,
+                connection_event_cb,
+                connection_listener_data,
+                <size_t>connection_event_inbox_capacity,
+                <line_sender_qwpws_error_cb>_qwp_ws_error_trampoline,
+                <void*>db._qwp_ws_error_handler,
+                <size_t>qwp_ws_error_inbox_capacity,
+                &err)
             _ensure_has_gil(&gs)
             if db._db == NULL:
-                # A failed listener-aware connect fences its dispatcher before
-                # returning, so the callback target is now safe to release.
+                # A failed handler-aware connect fences its dispatchers before
+                # returning, so the callback targets are now safe to release.
                 db._connection_listener = None
+                db._qwp_ws_error_handler = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
             return db
@@ -6338,6 +6372,30 @@ cdef class QuestDB:
         cdef questdb_db* db = self._begin_db_use('connection_events_delivered')
         try:
             return questdb_db_connection_events_delivered(db)
+        finally:
+            self._end_db_use()
+
+    @property
+    def rejection_events_delivered(self) -> int:
+        """
+        Total server rejections delivered to the ``qwp_ws_error_handler``
+        (or to the default logging handler when none was registered).
+        """
+        cdef questdb_db* db = self._begin_db_use('rejection_events_delivered')
+        try:
+            return questdb_db_rejection_events_delivered(db)
+        finally:
+            self._end_db_use()
+
+    @property
+    def rejection_events_dropped(self) -> int:
+        """
+        Total server rejections discarded by the handler inbox's
+        drop-oldest policy.
+        """
+        cdef questdb_db* db = self._begin_db_use('rejection_events_dropped')
+        try:
+            return questdb_db_rejection_events_dropped(db)
         finally:
             self._end_db_use()
 
@@ -8146,7 +8204,12 @@ cdef class PooledSender:
         Publish and clear buffered rows.
 
         By default this returns after local store-and-forward acceptance.
-        Pass ``wait=True`` to wait for the server's OK acknowledgement.
+        Pass ``wait=True`` to wait for the server's OK acknowledgement of
+        everything published through this lease. The wait is a pure ack
+        barrier: only a terminal connection failure raises. Server
+        rejections are delivered to the pool's ``qwp_ws_error_handler``
+        (default: the ``questdb`` logger) instead; retriable ones are
+        replayed by the store-and-forward queue.
         """
         with self._lock:
             self._flush_locked(wait)
@@ -8154,7 +8217,12 @@ cdef class PooledSender:
 
     def wait(self, timeout_millis: int=0):
         """
-        Wait for every publication on this sender to receive an OK ack.
+        Wait for everything published through this lease to receive an OK
+        ack; returns immediately if this lease published nothing.
+
+        The wait is a pure ack barrier: only a terminal connection failure
+        raises. Server rejections are delivered to the pool's
+        ``qwp_ws_error_handler`` (default: the ``questdb`` logger) instead.
 
         ``timeout_millis`` is a no-progress timeout; ``0`` waits indefinitely.
         """
@@ -8169,8 +8237,12 @@ cdef class PooledSender:
         """
         Return this sender to its pool. Idempotent.
 
-        Pending rows are published by default. ``wait=True`` additionally
-        waits for an OK ack before returning the sender to the pool.
+        Pending rows are published by default; delivery is owned by the
+        store-and-forward queue, which keeps delivering after the sender
+        is returned. ``wait=True`` additionally waits for an OK ack before
+        returning the sender to the pool; without it, a later server
+        rejection of this lease's rows is reported through the pool's
+        ``qwp_ws_error_handler`` (default: the ``questdb`` logger).
         """
         with self._lock:
             try:

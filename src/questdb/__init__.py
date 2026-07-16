@@ -77,6 +77,8 @@ def connect(
         tls: bool = False,
         connection_listener=None,
         connection_event_inbox_capacity: int = 0,
+        qwp_ws_error_handler=None,
+        qwp_ws_error_inbox_capacity: int = 0,
         **params) -> QuestDB:
     """
     Connect to a QuestDB deployment and return a :class:`QuestDB` handle.
@@ -97,6 +99,12 @@ def connect(
     (``username='u'``, ``sender_pool_max=4``, ...; booleans map to
     ``on``/``off``). One configuration addresses the whole deployment;
     list every cluster node in a single ``addr`` server list.
+
+    ``connection_listener`` receives one :class:`ConnectionEvent` per
+    connection-state transition; ``qwp_ws_error_handler`` receives one
+    :class:`QwpWsError` per server rejection (without it rejections are
+    logged through the ``questdb`` logger). Each runs on its own
+    dispatcher thread; see :meth:`QuestDB.from_conf` for details.
 
     .. code-block:: python
 
@@ -131,7 +139,9 @@ def connect(
     return QuestDB.from_conf(
         conf_str,
         connection_listener=connection_listener,
-        connection_event_inbox_capacity=connection_event_inbox_capacity)
+        connection_event_inbox_capacity=connection_event_inbox_capacity,
+        qwp_ws_error_handler=qwp_ws_error_handler,
+        qwp_ws_error_inbox_capacity=qwp_ws_error_inbox_capacity)
 
 
 class _QuestdbModule(_ModuleType):

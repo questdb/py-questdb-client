@@ -21,16 +21,29 @@ Breaking changes
 - The QWP/WebSocket entry point is :func:`questdb.connect`, returning a
   :class:`QuestDB` handle. The handle lends
   row-building senders (:meth:`QuestDB.sender`), bulk-loads DataFrames
-  (:meth:`QuestDB.dataframe`) and runs queries (:meth:`QuestDB.query`).
+  (:meth:`QuestDB.dataframe`), runs queries (:meth:`QuestDB.query`) and
+  lends reader leases (:meth:`QuestDB.reader`). Besides the configuration
+  string, :func:`questdb.connect` also accepts the equivalent keywords
+  (``host=``, ``port=``, ``tls=`` plus any further settings).
 - The sender borrowed from the pool is a lean pooled row sender: it
   exposes ``row()``, ``dataframe()``, ``flush()``, ``wait()`` and
   ``close()``, and is not a ``Sender`` subclass — the standalone-only API
   such as ``establish()`` or FSN tracking simply does not exist on it. One
   concurrency rule applies everywhere: borrow one sender per thread.
   The lease types are exported as :class:`questdb.PooledSender` and
-  :class:`questdb.PooledQuery` for ``isinstance`` checks and type
+  :class:`questdb.PooledReader` for ``isinstance`` checks and type
   annotations; instances are only ever constructed by
-  :meth:`QuestDB.sender` and :meth:`QuestDB.query`.
+  :meth:`QuestDB.sender` and :meth:`QuestDB.reader`.
+- Server rejections observed by the pool's store-and-forward connections
+  are pushed to the ``qwp_ws_error_handler`` callable passed to
+  :func:`questdb.connect` (one :class:`questdb.QwpWsError` per rejection,
+  on a dedicated dispatcher thread; totals via
+  :attr:`QuestDB.rejection_events_delivered` /
+  :attr:`QuestDB.rejection_events_dropped`). Without a handler every
+  rejection is logged through the ``questdb`` logger, so rejections are
+  never silent. ``PooledSender.flush(wait=True)`` / ``wait()`` are pure
+  ack barriers scoped to the lease's own publications: only a terminal
+  connection failure raises there.
 - ``Buffer`` is no longer part of the top-level API. Buffers are managed
   internally by senders; for concurrent serialization borrow more senders.
   Legacy explicit-buffer code keeps working through the ``questdb.ingress``
@@ -176,10 +189,10 @@ on its own cadence).
   connection immediately instead of at garbage collection; abandoning a
   result without closing it emits a ``ResourceWarning``.
 
-- Calling :meth:`QuestDB.query` with no arguments returns a query lease
+- :meth:`QuestDB.reader` returns a reader lease
   (the read-side twin of :meth:`QuestDB.sender`) that borrows one pooled
   reader connection for its lifetime and runs queries on it sequentially —
-  ``with db.query() as q: q.query(sql)`` — optionally keeping the
+  ``with db.reader() as r: r.query(sql)`` — optionally keeping the
   connection's SYMBOL dictionary warm across queries via
   ``reset_symbol_dict=False``.
 

@@ -14,7 +14,8 @@ QWP_FLAG_DEFER_COMMIT = 0x01
 class QwpAckServer:
     def __init__(self, *, host="127.0.0.1", ack_delay_s=0.0,
                  close_plan=None, max_batch_size=0,
-                 defer_aware_acks=False, record_payloads=False):
+                 defer_aware_acks=False, record_payloads=False,
+                 error_status=None, error_message=b"mock rejection"):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -31,6 +32,10 @@ class QwpAckServer:
 
         `record_payloads`: when True, retain each binary frame's full
         payload bytes (exposed as `binary_payloads` in `snapshot()`).
+
+        `error_status`: when set (a QWP status byte, e.g. 0x03 for
+        schema-mismatch), every binary frame is answered with an error
+        response carrying that status instead of an OK ack.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
@@ -38,6 +43,8 @@ class QwpAckServer:
         self.max_batch_size = max_batch_size
         self.defer_aware_acks = defer_aware_acks
         self.record_payloads = record_payloads
+        self.error_status = error_status
+        self.error_message = error_message
         self.port = None
         self._sock = None
         self._stop = threading.Event()
@@ -220,8 +227,11 @@ class QwpAckServer:
                     time.sleep(self.ack_delay_s)
                 seq = next_seq
                 next_seq += 1
-                if not (self.defer_aware_acks
-                        and _is_deferred_qwp_frame(payload)):
+                if self.error_status is not None:
+                    _write_qwp_error(
+                        conn, seq, self.error_status, self.error_message)
+                elif not (self.defer_aware_acks
+                          and _is_deferred_qwp_frame(payload)):
                     # Cumulative: one OK for `seq` also completes every
                     # deferred frame held back before it.
                     _write_qwp_ok(conn, seq)
@@ -361,4 +371,12 @@ def _write_qwp_ok(conn, wire_seq):
     payload = bytearray([QWP_STATUS_OK])
     payload.extend(struct.pack("<Q", wire_seq))
     payload.extend(struct.pack("<H", 0))
+    _write_frame(conn, 0x2, payload)
+
+
+def _write_qwp_error(conn, wire_seq, status, message):
+    payload = bytearray([status])
+    payload.extend(struct.pack("<Q", wire_seq))
+    payload.extend(struct.pack("<H", len(message)))
+    payload.extend(message)
     _write_frame(conn, 0x2, payload)
