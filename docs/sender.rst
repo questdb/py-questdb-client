@@ -130,16 +130,15 @@ categorical data (identifiers). Internally, symbols are deduplicated and
 stored as integers.
 
 When sending data, you can specify a column as a symbol by using the
-``symbols`` parameter of the ``row`` or ``dataframe`` methods.
+``symbols`` parameter of the ``row`` or ``dataframe`` methods. String values
+passed through the ``columns`` parameter are stored as ``VARCHAR`` instead —
+use that for one-off strings that should not be interned.
 
-Alternatively, if a column is expected to hold a collection of one-off strings,
-you can use the ``strings`` parameter.
-
-Here is an example of sending a row with a symbol and a string:
+Here is an example of sending a row with two symbols and two regular columns:
 
 .. code-block:: python
 
-    from questdb import Sender, TimestampNanos
+    from questdb import Sender
     import datetime
 
     conf = 'http::addr=localhost:9000;'
@@ -150,7 +149,7 @@ Here is an example of sending a row with a symbol and a string:
                 'symbol': 'ETH-USD', 'side': 'sell'},
             columns={
                 'price': 2615.54,
-                'amount': 0.00044}
+                'amount': 0.00044},
             at=datetime.datetime(2021, 1, 1, 12, 0, 0))
 
 Decimal Columns
@@ -219,7 +218,7 @@ The ``at`` parameter of the ``row`` and ``dataframe`` methods is used to specify
 the `designated timestamp <https://questdb.com/docs/concept/designated-timestamp/>`_
 of the rows. The designated timestamp column determines the order in which data
 is stored as rows and is used for
-`partitioning <https://questdb.com/docs/concept/partitions/>`.
+`partitioning <https://questdb.com/docs/concept/partitions/>`_.
 
 Set by client
 ~~~~~~~~~~~~~
@@ -310,7 +309,7 @@ send any pending data immediately.
             at=TimestampNanos.now())
         sender.flush()
 
-Note that the last `sender.flush()` is entirely optional as flushing
+Note that the last ``sender.flush()`` is entirely optional as flushing
 also happens at the end of the ``with`` block.
 
 .. _sender_auto_flush:
@@ -327,13 +326,13 @@ Auto-flushing is triggered when:
 
 * and the buffer either:
 
-    * Reaches 75'000 rows (for HTTP) or 600 rows (for TCP).
+    * Reaches 75,000 rows (for HTTP) or 600 rows (for TCP and QWP/UDP).
 
     * Hasn't been flushed for 1 second (there are no timers).
 
-Here is an example :ref:`configuration string <sender_conf>` that auto-flushes
-sets up a sender to flush every 10 rows and disables
-the interval-based auto-flushing logic.
+Here is an example :ref:`configuration string <sender_conf>` that sets up a
+sender to flush every 10 rows and disables the interval-based auto-flushing
+logic.
 
 ``http::addr=localhost:9000;auto_flush_rows=10;auto_flush_interval=off;``
 
@@ -348,17 +347,25 @@ See the :ref:`sender_conf_auto_flush` section for more details. and note that
 Error Reporting
 ===============
 
-**TL;DR: Use HTTP for better error reporting**
+**TL;DR: QWP/WebSocket has the richest error reporting; among the legacy ILP
+transports, use HTTP.**
 
-The sender will do its best to check for errors before sending data to the
-server.
+Over QWP/WebSocket every server rejection is delivered as a structured
+:class:`QwpWsError <questdb.QwpWsError>` — pushed to the pool's
+``qwp_ws_error_handler`` (or logged through the ``questdb`` logger by
+default), while terminal rejections also raise
+:class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`
+from the affected sender. See :ref:`sender_qwp_ws`.
+
+For the legacy ILP transports, the sender will do its best to check for
+errors before sending data to the server.
 
 When using the HTTP protocol, the server will send back an error message if
 the data is invalid or if there is a problem with the server. This will be
 raised as an :class:`QuestDBError <questdb.QuestDBError>` exception.
 
 The HTTP layer will also attempt retries, configurable via the
-:ref:`retry_timeout <sender_conf_request>` parameter.`
+:ref:`retry_timeout <sender_conf_request>` parameter.
 
 When using the TCP protocol errors are *not* sent back from the server and
 must be searched for in the logs. See the :ref:`troubleshooting-flushing`
@@ -378,24 +385,25 @@ rows as a single transaction.
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
-        with sender.transaction('weather_sensor') as txn:
+        with sender.transaction('trades') as txn:
             txn.row(
-                'trades',
                 symbols={'symbol': 'ETH-USD', 'side': 'sell'},
                 columns={'price': 2615.54, 'amount': 0.00044},
                 at=TimestampNanos.now())
             txn.row(
-                'trades',
                 symbols={'symbol': 'BTC-USD', 'side': 'sell'},
                 columns={'price': 39269.98, 'amount': 0.001},
                 at=TimestampNanos.now())
+
+The table name is set once on the transaction; ``txn.row()`` takes no table
+argument.
 
 If auto-flushing is enabled, any pending data will be flushed before the
 transaction is started.
 
 Auto-flushing is disabled during the scope of the transaction.
 
-The transaction is automatically completed a the end
+The transaction is automatically completed at the end
 of the ``with`` block.
 
 * If the there are no errors, the transaction is committed and sent to the
@@ -404,12 +412,12 @@ of the ``with`` block.
 * If an exception is raised with the block, the transaction is rolled back and
   the exception is propagated.
 
-You can also terminate a transaction explicity by calling the
+You can also terminate a transaction explicitly by calling the
 :func:`commit <questdb.SenderTransaction.commit>` or the
 :func:`rollback <questdb.SenderTransaction.rollback>` methods.
 
 While transactions that span multiple tables are not supported by QuestDB, you
-can reuse the same sender for mutliple tables.
+can reuse the same sender for multiple tables.
 
 You can also create parallel transactions by creating multiple sender objects
 across multiple threads.
@@ -467,17 +475,20 @@ Always specify your own timestamps using the ``at`` parameter.
 If you use the ``ServerTimestamp`` option, QuestDB will not be able to
 deduplicate rows, should you ever need to send them again.
 
-Instead, if you don't have an a timestamp immediately available, use
+Instead, if you don't have a timestamp immediately available, use
 ``TimestampNanos.now()`` to set the timestamp to the current time.
 
 This is lighter-weight than using a fully-fledged ``datetime.datetime`` object.
 
-Prefer ILP/HTTP
----------------
+Prefer QWP/WebSocket
+--------------------
 
-Use the ILP/HTTP protocol instead of ILP/TCP for better error reporting and
-transaction control. Use QWP/UDP only when you need fire-and-forget,
-lowest-latency ingestion and can tolerate potential data loss.
+New code should use QWP/WebSocket through :func:`questdb.connect`: it
+combines acknowledged delivery, structured server rejections, queries, and
+connection pooling. Among the legacy ILP transports, prefer ILP/HTTP over
+ILP/TCP for better error reporting and transaction control. Use QWP/UDP only
+when you need fire-and-forget, lowest-latency ingestion and can tolerate
+potential data loss.
 
 .. _sender_tips_connection_reuse:
 
@@ -522,7 +533,7 @@ If you need better performance:
 * Tune for larger batches of rows. Tweak the auto-flush settings, or
   call :func:`Sender.flush <questdb.Sender.flush>` less frequently.
 
-* Use the :func:`Sender.dataframe <questdb.Sender.dataframe>` method To
+* Use the :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` method to
   send dataframes instead of appending rows one by one.
 
 * Try multi-threading: The ``Sender`` logic is designed to release the Python
@@ -648,7 +659,7 @@ sender objects in parallel.
         for future in futures:
             future.result()
 
-For maxium performance you should also cache the sender objects and reuse them
+For maximum performance you should also cache the sender objects and reuse them
 across multiple requests, since internally they maintain a connection pool.
 
 Sender Lifetime Control
@@ -667,7 +678,7 @@ control the lifetime of the sender object.
     # ...
     sender.close()
 
-The :func:`establish <questdb.Sender.establish>` method is needs to be
+The :func:`establish <questdb.Sender.establish>` method needs to be
 called exactly once, but the :func:`close <questdb.Sender.close>` method
 is idempotent and can be called multiple times.
 
@@ -819,8 +830,59 @@ Which protocol?
 The sender supports ``tcp``, ``tcps``, ``http``, ``https``, ``udp``,
 ``ws``, and ``wss`` protocols.
 
-**You should prefer to use ILP/HTTP in most cases as it provides better
-feedback on errors and transaction control.**
+**New code should prefer QWP/WebSocket (``ws`` / ``wss``) through**
+:func:`questdb.connect` **: acknowledged delivery, structured server
+rejections, queries and connection pooling in one handle. Among the legacy
+ILP transports, prefer ILP/HTTP for better error feedback and transaction
+control.**
+
+.. _sender_qwp_ws:
+
+QWP/WebSocket
+-------------
+
+QWP/WebSocket (``ws``, or ``wss`` for TLS) is an acknowledged streaming
+transport. Each flush publishes a frame identified by a monotonically
+increasing **frame sequence number (FSN)**; the server acknowledges frames as
+it durably applies them, so the client can confirm delivery.
+
+* **Confirming delivery.** :func:`Sender.flush_and_get_fsn` flushes and returns
+  the FSN of the published frame; :func:`Sender.flush_and_keep_and_get_fsn`
+  does the same without clearing the buffer. :func:`Sender.await_acked_fsn`
+  blocks until a given FSN is acknowledged (or a timeout elapses), and
+  :func:`Sender.acked_fsn` / :func:`Sender.published_fsn` report progress
+  without blocking.
+
+* **Progress modes.** With the default ``qwp_ws_progress=background``,
+  acknowledgements are progressed on a background thread. With
+  ``qwp_ws_progress=manual``, the application must call
+  :func:`Sender.drive_once` (or one of the flush/await methods) to pump the
+  connection.
+
+* **Server diagnostics.** Per-frame server feedback is delivered to the
+  ``qwp_ws_error_handler`` callback, or polled via
+  :func:`Sender.poll_qwp_ws_error` as :class:`QwpWsError` values
+  (:func:`Sender.qwp_ws_errors_dropped` reports how many were dropped when no
+  handler kept up). A diagnostic with a terminal policy halts the sender: the next
+  sender call raises :class:`QuestDBServerRejectionError`. The handler must
+  not call back into the same sender, must be cheap and non-blocking, and —
+  under ``qwp_ws_progress=background`` — may run on a background thread.
+  The pooled :class:`QuestDB <questdb.QuestDB>` handle delivers the same
+  diagnostics through the ``qwp_ws_error_handler`` passed to
+  :func:`questdb.connect`, on a dedicated dispatcher thread.
+
+* **Draining on close.** :func:`Sender.close_drain` waits for outstanding
+  frames to be acknowledged before closing.
+
+* **DataFrame bulk loads.** A standalone ws/wss ``Sender.dataframe()`` does
+  not serialize into the sender's row stream: it opens (and closes) its own
+  poolless direct columnar connection per call, built from the sender's own
+  configuration (carrying its auth/TLS), and commits before returning. It
+  has no ordering relationship with rows buffered via ``row()`` and does
+  not flush them. Per-call connection setup is not free — batch your frames
+  accordingly, or use :func:`questdb.connect` / :class:`QuestDB
+  <questdb.QuestDB>` for repeated loads (its ``dataframe()`` borrows a
+  pooled direct connection instead).
 
 .. _sender_qwp_udp:
 
@@ -856,50 +918,53 @@ Key differences from ILP:
 * **No protocol version.** QWP has its own versioning. The ``protocol_version``
   parameter and property are not applicable and will raise an error.
 
-.. _sender_qwp_ws:
+.. _sender_ilp_http_tcp:
 
-QWP/WebSocket
--------------
+ILP/HTTP and ILP/TCP
+--------------------
 
-QWP/WebSocket (``ws``, or ``wss`` for TLS) is an acknowledged streaming
-transport. Each flush publishes a frame identified by a monotonically
-increasing **frame sequence number (FSN)**; the server acknowledges frames as
-it durably applies them, so the client can confirm delivery.
+ILP/HTTP is available from:
 
-* **Confirming delivery.** :func:`Sender.flush_and_get_fsn` flushes and returns
-  the FSN of the published frame; :func:`Sender.flush_and_keep_and_get_fsn`
-  does the same without clearing the buffer. :func:`Sender.await_acked_fsn`
-  blocks until a given FSN is acknowledged (or a timeout elapses), and
-  :func:`Sender.acked_fsn` / :func:`Sender.published_fsn` report progress
-  without blocking.
+* QuestDB 7.3.10 and later.
+* QuestDB Enterprise 1.2.7 and later.
 
-* **Progress modes.** With the default ``qwp_ws_progress=background``,
-  acknowledgements are progressed on a background thread. With
-  ``qwp_ws_progress=manual``, the application must call
-  :func:`Sender.drive_once` (or one of the flush/await methods) to pump the
-  connection.
+ILP/HTTP also supports :ref:`protocol version <sender_protocol_version>`
+auto-detection.
 
-* **Server diagnostics.** Per-frame server feedback is delivered to the
-  ``qwp_ws_error_handler`` callback, or polled via
-  :func:`Sender.poll_qwp_ws_error` as :class:`QwpWsError` values
-  (:func:`Sender.qwp_ws_errors_dropped` reports how many were dropped when no
-  handler kept up). A diagnostic with a ``halt`` policy is terminal: the next
-  sender call raises :class:`QuestDBServerRejectionError`. The handler must
-  not call back into the same sender, must be cheap and non-blocking, and —
-  under ``qwp_ws_progress=background`` — may run on a background thread.
++----------------+--------------------------------------------------------------+
+| Protocol       | Protocol version auto-detection                              |
++================+==============================================================+
+| ILP/HTTP       | **Yes**: The client will communicate with the server using   |
+|                | the latest version supported by both client and the server.  |
++----------------+--------------------------------------------------------------+
+| ILP/TCP        | **No**: You need to                                          |
+|                | :ref:`configure <sender_conf_protocol_version>`              |
+|                | ``protocol_version=N`` to match a version supported by       |
+|                | the server.                                                  |
++----------------+--------------------------------------------------------------+
+| QWP/UDP        | **N/A**: QWP uses its own wire format. The                   |
+|                | ``protocol_version`` setting is not applicable.              |
++----------------+--------------------------------------------------------------+
 
-* **Draining on close.** :func:`Sender.close_drain` waits for outstanding
-  frames to be acknowledged before closing.
+.. note::
 
-* **DataFrame bulk loads.** A standalone ws/wss ``Sender.dataframe()`` does
-  not serialize into the sender's row stream: it opens (and closes) its own
-  poolless direct columnar connection per call, built from the sender's own
-  configuration (carrying its auth/TLS), and commits before returning. It
-  has no ordering relationship with rows buffered via ``row()`` and does
-  not flush them. Per-call connection setup is not free — batch your frames
-  accordingly, or use :func:`questdb.connect` / :class:`QuestDB
-  <questdb.QuestDB>` for repeated loads (its ``dataframe()`` borrows a
-  pooled direct connection instead).
+    The client will disable features that require a newer
+    protocol version than the one used to communicate with the server.
+
+
+Since TCP does not block for a response it is useful for high-throughput
+scenarios in higher latency networks or on older versions of QuestDB which do
+not support ILP/HTTP quite yet.
+
+It should be noted that you can achieve equivalent or better performance to TCP
+with HTTP by :ref:`using multiple sender objects in parallel <sender_http_performance>`.
+
+Either way, you can easily switch between the two protocols by changing:
+
+* The ``<protocol>`` part of the :ref:`configuration string <sender_conf>`.
+
+* The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000,
+  QWP/UDP default is 9007).
 
 .. _query_egress:
 
@@ -973,48 +1038,4 @@ in doubt, or an intermediate commit checkpoint on a large frame has already
 landed, the error surfaces immediately and a committed prefix may remain in the
 table. Retrying an in-doubt operation can duplicate rows unless the table has
 appropriate ``DEDUP UPSERT KEYS``.
-
-ILP/HTTP is available from:
-
-* QuestDB 7.3.10 and later.
-* QuestDB Enterprise 1.2.7 and later.
-
-ILP/HTTP Also supports :ref:`protocol version <sender_protocol_version>`
-auto-detection.
-
-+----------------+--------------------------------------------------------------+
-| Protocol       | Protocol version auto-detection                              |
-+================+==============================================================+
-| ILP/HTTP       | **Yes**: The client will communcate to the server using the  |
-|                | latest version supported by both client and the server.      |
-+----------------+--------------------------------------------------------------+
-| ILP/TCP        | **No**: You need to                                          |
-|                | :ref:`configure <sender_conf_protocol_version>`              |
-|                | ``protocol_version=N`` to to match a version supported by    |
-|                | the server.                                                  |
-+----------------+--------------------------------------------------------------+
-| QWP/UDP        | **N/A**: QWP uses its own wire format. The                   |
-|                | ``protocol_version`` setting is not applicable.              |
-+----------------+--------------------------------------------------------------+
-
-.. note::
-
-    The client will disable features that require a newer
-    protocol versions than the one used to communicate with the server.
-
-
-Since TCP does not block for a response it is useful for high-throughput
-scenarios in higher latency networks or on older versions of QuestDB which do
-not support ILP/HTTP quite yet.
-
-It should be noted that you can achieve equivalent or better performance to TCP
-with HTTP by :ref:`using multiple sender objects in parallel <sender_http_performance>`.
-
-Either way, you can easily switch between the two protocols by changing:
-
-* The ``<protocol>`` part of the :ref:`configuration string <sender_conf>`.
-
-* The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000,
-  QWP/UDP default is 9007).
-
 * Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.

@@ -43,8 +43,7 @@ The most common way to insert data is from a Pandas dataframe.
         'price': [2615.54, 39269.98],
         'amount': [0.00044, 0.001],
 
-        # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
-        # Note that requires QuestDB server >= 9.0.0 for array support
+        # NumPy float64 arrays require QuestDB server >= 9.0.0.
         'ord_book_bids': [
             np.array([2615.54, 2618.63]),
             np.array([39269.98, 39270.00])
@@ -83,12 +82,14 @@ You can also send individual rows. This only requires a more minimal installatio
             sender.flush(wait=True)
 
 
-To connect via the `older TCP protocol <https://py-questdb-client.readthedocs.io/en/latest/sender.html#ilp-tcp-or-ilp-http>`_, set the
+To connect via the `older TCP protocol <https://py-questdb-client.readthedocs.io/en/latest/sender.html#which-protocol>`_, set the
 `configuration string <https://py-questdb-client.readthedocs.io/en/latest/conf.html>`_ to:
 
 .. code-block:: python
 
-    conf = f'tcp::addr=localhost:9009;'
+    from questdb import Sender
+
+    conf = 'tcp::addr=localhost:9009;'
     with Sender.from_conf(conf) as sender:
         ...
 

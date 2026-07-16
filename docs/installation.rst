@@ -5,10 +5,9 @@ Installation
 Dependency
 ==========
 
-The Python QuestDB client does not have any additional run-time dependencies and
-will run on any version of Python >= 3.10 on most platforms and architectures.
-
-From version 3.0.0, this library depends on ``numpy>=1.21.0``.
+The Python QuestDB client runs on any version of Python >= 3.10 on most
+platforms and architectures. Its only required run-time dependency is
+``numpy>=1.21.0``.
 
 Optional Dependencies
 ---------------------
@@ -76,3 +75,7 @@ With a QuestDB server running locally, you can verify a full round trip
        count
     0      1
     >>> db.close()
+
+``flush(wait=True)`` confirms the server accepted the row, but query
+visibility follows asynchronously once the WAL is applied — if the count
+reads ``0``, re-run the query.

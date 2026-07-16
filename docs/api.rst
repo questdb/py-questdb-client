@@ -16,6 +16,16 @@ questdb
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.PooledSender
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.PooledReader
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: questdb.Sender
    :members:
    :undoc-members:

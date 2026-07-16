@@ -4,8 +4,17 @@
 Configuration
 =============
 
-When constructing a :ref:`sender <sender>` you can pass a configuration string
-to the :func:`Sender.from_conf <questdb.Sender.from_conf>` method.
+Configuration strings configure both the QWP/WebSocket
+:class:`QuestDB <questdb.QuestDB>` handle and the legacy standalone
+:class:`Sender <questdb.Sender>`:
+
+.. code-block:: python
+
+    import questdb
+
+    conf = "ws::addr=localhost:9000;username=admin;password=quest;"
+    with questdb.connect(conf) as db:
+        ...
 
 .. code-block:: python
 
@@ -143,7 +152,169 @@ the Java client's configuration.
   queues used by the pooled ingestion senders. DataFrame ingestion
   (:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` and the
   ``dataframe()`` method on pooled and standalone ws senders) always uses
-  the direct column path and is independent of ``sf_dir``.
+  the direct column path and is independent of ``sf_dir``. See
+  :ref:`sender_conf_sf` for the queue's own settings.
+
+.. _sender_conf_reconnect:
+
+Reconnect and delivery (QWP/WebSocket)
+======================================
+
+Row senders publish frames into a local store-and-forward queue; a
+background runner delivers them and reconnects on transient failures,
+walking the ``addr`` server list.
+
+* ``reconnect_max_duration_millis`` - ``int``: Total reconnect/failover
+  budget after a connection loss. Authentication and protocol-version
+  failures are terminal and are not retried.
+
+  Default: 300000 (5 minutes).
+
+* ``reconnect_initial_backoff_millis`` - ``int``: First reconnect delay;
+  subsequent attempts back off exponentially with jitter.
+
+  Default: 100.
+
+* ``reconnect_max_backoff_millis`` - ``int``: Reconnect delay ceiling.
+
+  Default: 5000.
+
+* ``connect_timeout`` - ``int``: Per-attempt TCP/TLS/upgrade connect
+  deadline in milliseconds. Unset, the operating system's TCP deadline
+  applies (background drainers use a finite internal fallback).
+
+* ``close_flush_timeout_millis`` - ``int``: Best-effort drain window when a
+  connection is retired or the handle closes. An in-memory queue that
+  cannot drain within it loses its remaining tail; a disk-backed queue
+  (``sf_dir``) keeps it for restart replay.
+
+  Default: 5000.
+
+* ``request_durable_ack`` - ``'on'`` | ``'off'``: Negotiate durable
+  acknowledgements: the server acknowledges frames only once they are
+  durably stored (e.g. uploaded to object storage on Enterprise
+  deployments). A server without the capability rejects the first
+  operation.
+
+  Default: ``'off'``.
+
+* ``durable_ack_keepalive_interval_millis`` - ``int``: Keepalive ping
+  cadence while waiting for durable acknowledgements.
+
+  Default: 200.
+
+* ``error_inbox_capacity`` - ``int >= 16``: Per-connection capacity of the
+  server-rejection diagnostic ring (oldest entries are dropped on
+  overflow, counted by
+  :func:`Sender.qwp_ws_errors_dropped <questdb.Sender.qwp_ws_errors_dropped>`).
+
+  Default: 256.
+
+.. _sender_conf_sf:
+
+Store-and-forward queue (QWP/WebSocket)
+=======================================
+
+* ``sender_id`` - ``str``: Base identity for disk store-and-forward slots
+  (``<sf_dir>/<sender_id>-ingest-<index>``). Give each handle sharing an
+  ``sf_dir`` a distinct ``sender_id`` so restart replay reopens the right
+  slots.
+
+  Default: ``'default'``.
+
+* ``sf_max_bytes`` - ``int``: Segment and single-payload size cap for the
+  store-and-forward queue.
+
+  Default: 4194304 (4 MiB).
+
+* ``sf_max_total_bytes`` - ``int``: Total queue budget per sender
+  connection. When producers outrun the server past this budget,
+  publication waits up to ``sf_append_deadline_millis`` for ack-driven
+  space, then raises.
+
+  Default: 134217728 (128 MiB) in memory; 10737418240 (10 GiB) with
+  ``sf_dir``.
+
+* ``sf_append_deadline_millis`` - ``int``: Maximum no-progress wait for
+  queue space before publication fails.
+
+  Default: 30000.
+
+* ``drain_orphans`` - ``'on'`` | ``'off'``: Also adopt and replay unowned
+  disk slots left in ``sf_dir`` by senders with *other* ``sender_id``
+  bases. The pool always recovers its own managed slots on restart.
+
+  Default: ``'off'``.
+
+* ``max_background_drainers`` - ``int``: Concurrency cap for background
+  slot recovery drains.
+
+  Default: 4.
+
+.. _sender_conf_egress:
+
+Query egress (QWP/WebSocket)
+============================
+
+These keys shape :meth:`QuestDB.query <questdb.QuestDB.query>` /
+:meth:`QuestDB.reader <questdb.QuestDB.reader>` connections.
+
+* ``compression`` - ``'raw'`` | ``'zstd'`` | ``'auto'``: Result-set
+  compression. ``auto`` accepts Zstandard when the server supports it;
+  decompression is transparent.
+
+  Default: ``'raw'``.
+
+* ``compression_level`` - ``int (1-22)``: Zstandard level advertised to the
+  server (which clamps to its supported range). Ignored with
+  ``compression=raw``.
+
+  Default: 1.
+
+* ``target`` - ``'any'`` | ``'primary'`` | ``'replica'``: Cluster role the
+  reader connections must land on.
+
+  Default: ``'any'``.
+
+* ``failover`` - ``'on'`` | ``'off'``: Permit mid-query failover to another
+  endpoint of the ``addr`` list.
+
+  Default: ``'on'``.
+
+* ``failover_max_attempts`` - ``int``: Total execute attempts per query,
+  including the first.
+
+  Default: 8.
+
+* ``failover_max_duration_ms`` - ``int``: Overall failover budget per
+  query; ``0`` means unbounded.
+
+  Default: 30000.
+
+* ``failover_backoff_initial_ms`` - ``int``: First retry delay; ``0``
+  disables sleeping between attempts.
+
+  Default: 50.
+
+* ``failover_backoff_max_ms`` - ``int``: Retry-delay ceiling.
+
+  Default: 1000.
+
+Advanced QWP tuning
+===================
+
+Rarely needed; the defaults suit most deployments.
+
+* ``max_in_flight`` - ``int``: Published-but-unacknowledged frame window
+  per connection. Default: 128.
+
+* ``max_frame_rejections`` - ``int``: Consecutive no-progress rejections of
+  the same frame before the client stops retrying it and turns terminal.
+  Default: 4.
+
+* ``poison_min_escalation_window_millis`` - ``int``: Minimum wall-clock
+  window over which those rejections must spread before escalation.
+  Default: 5000.
 
 .. _sender_conf_auth:
 
@@ -190,9 +361,9 @@ on how to enable this feature in the server.
 
 Open source QuestDB does not offer TLS support out of the box, but you can
 still use TLS by setting up a proxy in front of QuestDB, such as
-`HAProxy <https://www.haproxy.org/>`.
+`HAProxy <https://www.haproxy.org/>`_.
 
-* ``tls_ca`` - The remote server's certificate authority verification mechamism.
+* ``tls_ca`` - The remote server's certificate authority verification mechanism.
 
   * ``'webpki_roots'``: Use the
     `webpki-roots <https://crates.io/crates/webpki-roots>`_ Rust crate to

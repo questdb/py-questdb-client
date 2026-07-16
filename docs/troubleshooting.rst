@@ -7,6 +7,28 @@ Common issues
 
 You may be experiencing one of the issues below.
 
+Rows accepted over QWP but not visible to queries
+-------------------------------------------------
+
+``flush(wait=True)`` (and :meth:`QuestDB.dataframe
+<questdb.QuestDB.dataframe>`) confirm the server *accepted* the rows; query
+visibility follows once the WAL is applied, which is asynchronous. Poll for
+the condition you need with a bounded timeout instead of asserting
+immediately after the flush.
+
+Where did my QWP server rejection go?
+-------------------------------------
+
+Over QWP/WebSocket a server rejection (schema mismatch, parse error, ...)
+can arrive after ``flush()`` already returned. Every rejection is pushed to
+the ``qwp_ws_error_handler`` passed to :func:`questdb.connect`; without one
+it is logged through the ``questdb`` Python logger — ``ERROR`` for terminal
+rejections, ``WARNING`` for retriable ones (the queue replays those). Make
+sure Python logging is configured to show the ``questdb`` logger, or
+register a handler. Terminal rejections additionally raise
+:class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`
+from the next call on the affected sender.
+
 Production-optimized QuestDB configuration
 ------------------------------------------
 
@@ -142,7 +164,7 @@ Alternatively, if you're constructing buffers explicitly:
 
 
 Note that to handle out-of-order messages efficiently, the QuestDB server will
-delay appling changes it receives over ILP after a configurable
+delay applying changes it receives over ILP after a configurable
 `commit lag <https://questdb.com/docs/guides/out-of-order-commit-lag>`_.
 
 Due to this commit lag, the line that caused the error may not be the last line.
