@@ -19,10 +19,10 @@ Breaking changes
   ``VERSION``, ...) with a single import-time ``DeprecationWarning``; new
   code imports from ``questdb``.
 - The QWP/WebSocket entry point is :func:`questdb.connect`, returning a
-  :class:`QuestDB` handle. The handle lends
-  row-building senders (:meth:`QuestDB.sender`), bulk-loads DataFrames
-  (:meth:`QuestDB.dataframe`), runs queries (:meth:`QuestDB.query`) and
-  lends reader leases (:meth:`QuestDB.reader`). Besides the configuration
+  :class:`QuestDB <questdb.QuestDB>` handle. The handle lends
+  row-building senders (:meth:`QuestDB.sender <questdb.QuestDB.sender>`), bulk-loads DataFrames
+  (:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`), runs queries (:meth:`QuestDB.query <questdb.QuestDB.query>`) and
+  lends reader leases (:meth:`QuestDB.reader <questdb.QuestDB.reader>`). Besides the configuration
   string, :func:`questdb.connect` also accepts the equivalent keywords
   (``host=``, ``port=``, ``tls=`` plus any further settings).
 - The sender borrowed from the pool is a lean pooled row sender: it
@@ -33,13 +33,13 @@ Breaking changes
   The lease types are exported as :class:`questdb.PooledSender` and
   :class:`questdb.PooledReader` for ``isinstance`` checks and type
   annotations; instances are only ever constructed by
-  :meth:`QuestDB.sender` and :meth:`QuestDB.reader`.
+  :meth:`QuestDB.sender <questdb.QuestDB.sender>` and :meth:`QuestDB.reader <questdb.QuestDB.reader>`.
 - Server rejections observed by the pool's store-and-forward connections
   are pushed to the ``qwp_ws_error_handler`` callable passed to
   :func:`questdb.connect` (one :class:`questdb.QwpWsError` per rejection,
   on a dedicated dispatcher thread; totals via
-  :attr:`QuestDB.rejection_events_delivered` /
-  :attr:`QuestDB.rejection_events_dropped`). Without a handler every
+  :attr:`QuestDB.rejection_events_delivered <questdb.QuestDB.rejection_events_delivered>` /
+  :attr:`QuestDB.rejection_events_dropped <questdb.QuestDB.rejection_events_dropped>`). Without a handler every
   rejection is logged through the ``questdb`` logger, so rejections are
   never silent. ``PooledSender.flush(wait=True)`` / ``wait()`` are pure
   ack barriers scoped to the lease's own publications: only a terminal
@@ -51,10 +51,10 @@ Breaking changes
 - Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
   path — a database operation, independent of ``sf_dir``, committed on
   return, with precise ``in_doubt`` failure semantics. Available as
-  :meth:`QuestDB.dataframe` on the handle, as ``dataframe()`` on a pooled
-  sender from :meth:`QuestDB.sender` (which borrows a direct connection from
+  :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` on the handle, as ``dataframe()`` on a pooled
+  sender from :meth:`QuestDB.sender <questdb.QuestDB.sender>` (which borrows a direct connection from
   the pool for that call), and as ``dataframe()`` on any standalone
-  :class:`Sender` (which opens a poolless direct connection from the sender's
+  :class:`Sender <questdb.Sender>` (which opens a poolless direct connection from the sender's
   own configuration for that call, carrying its auth/TLS regardless of how
   the sender was built). In all cases the direct load has no ordering
   relationship with rows buffered via ``row()`` and does not flush them.
@@ -62,11 +62,11 @@ Breaking changes
   supported and is no longer deprecated (over UDP it serializes row by row
   into fire-and-forget datagrams, with the same delivery caveats as
   ``row()``).
-- ``IngressError`` is renamed to :class:`QuestDBError` and
-  ``IngressErrorCode`` to :class:`QuestDBErrorCode` (the names now also cover
+- ``IngressError`` is renamed to :class:`QuestDBError <questdb.QuestDBError>` and
+  ``IngressErrorCode`` to :class:`QuestDBErrorCode <questdb.QuestDBErrorCode>` (the names now also cover
   the query egress path, which raises the same types).
 - The error model is unified across ingestion and queries. Query/reader
-  failures now surface their own :class:`QuestDBErrorCode` members
+  failures now surface their own :class:`QuestDBErrorCode <questdb.QuestDBErrorCode>` members
   (``HandshakeError``, ``UnsupportedServer``, ``ProtocolError``,
   ``InvalidBind``, ``ServerSchemaMismatch``, ``ServerParseError``,
   ``ServerInternalError``, ``ServerSecurityError``, ``LimitExceeded``,
@@ -79,7 +79,7 @@ Breaking changes
   by member identity, e.g. ``err.code is QuestDBErrorCode.BadDataFrame`` —
   that is the stable contract, not the integer value.
 - Catching errors from the ``questdb.ingress`` shim is broader than in 4.x:
-  ``IngressError`` is an alias of the unified :class:`QuestDBError`, so
+  ``IngressError`` is an alias of the unified :class:`QuestDBError <questdb.QuestDBError>`, so
   ``except IngressError`` now also catches query, pool and egress failures
   raised through the same handle.
 - Pre-epoch ``datetime`` values passed as scalars (``at=`` or ``row()``
@@ -87,7 +87,7 @@ Breaking changes
   epoch timestamp. 4.1.0 truncated toward zero, encoding pre-epoch instants
   with a fractional second one second too high; such values now serialize
   lower than before, at the correct instant.
-- :meth:`TimestampNanos.from_datetime` now raises ``ValueError`` for
+- :meth:`TimestampNanos.from_datetime <questdb.TimestampNanos.from_datetime>` now raises ``ValueError`` for
   datetimes outside the signed 64-bit nanosecond range (1677-09-21 to
   2262-04-11 UTC); 4.x silently overflowed.
 - Millisecond-duration parameters given as a negative sub-second
@@ -121,10 +121,10 @@ ILP transports.
   ``published_fsn``, ``acked_fsn``, ``await_acked_fsn``, ``drive_once``,
   ``poll_qwp_ws_error``, ``qwp_ws_errors_dropped`` and ``close_drain``.
   Server diagnostics are reported through a ``qwp_ws_error_handler``
-  callback or polled as :class:`QwpWsError` values (classified by the
-  :class:`QwpWsErrorCategory`, :class:`QwpWsErrorPolicy` and
-  :class:`QwpWsProgress` enums); terminal server rejections raise
-  :class:`QuestDBServerRejectionError`.
+  callback or polled as :class:`QwpWsError <questdb.QwpWsError>` values (classified by the
+  :class:`QwpWsErrorCategory <questdb.QwpWsErrorCategory>`, :class:`QwpWsErrorPolicy <questdb.QwpWsErrorPolicy>` and
+  :class:`QwpWsProgress <questdb.QwpWsProgress>` enums); terminal server rejections raise
+  :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`.
 
 Additional configuration keys ``tls_roots_password``,
 ``retry_max_backoff_millis`` and ``qwp_ws_progress`` are also accepted.
@@ -133,24 +133,24 @@ Every new key is equally available as a ``Sender`` / ``Sender.from_conf`` /
 ``multicast_ttl``, ``tls_roots_password``, ``retry_max_backoff``,
 ``qwp_ws_progress`` and ``qwp_ws_error_handler``).
 
-The pooled :class:`QuestDB` handle exposes :meth:`QuestDB.sender`, returning
+The pooled :class:`QuestDB <questdb.QuestDB>` handle exposes :meth:`QuestDB.sender <questdb.QuestDB.sender>`, returning
 a context-managed row sender for row-at-a-time QWP/WebSocket ingestion.
 Row builders, whole-dataframe ingestion, and queries share one
 ``questdb.connect("ws::...")`` configuration without exposing separate row
 and column sender pools. The pooled sender's ``dataframe()`` routes to the
-same direct columnar path as :meth:`QuestDB.dataframe`, borrowing a direct
+same direct columnar path as :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, borrowing a direct
 connection from the pool for that call only.
 
 Query Egress
 ************
 
-Adds :meth:`QuestDB.query`, returning a
-:class:`QueryResult` that streams rows as Arrow record batches over the
+Adds :meth:`QuestDB.query <questdb.QuestDB.query>`, returning a
+:class:`QueryResult <questdb.QueryResult>` that streams rows as Arrow record batches over the
 QWP/WebSocket read endpoint. Queries take positional bind parameters
 matching ``$1``..``$N`` placeholders —
 ``db.query('SELECT * FROM trades WHERE ts > $1 AND sym = $2', [ts, 'BTC-USD'])``
 — covering ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
-``datetime.datetime``, :class:`TimestampMicros`, :class:`TimestampNanos`
+``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`, :class:`TimestampNanos <questdb.TimestampNanos>`
 and ``uuid.UUID``; always prefer binds over interpolating values into the
 SQL text. Results can be consumed via ``to_arrow``,
 ``to_pandas``, ``to_polars``, ``iter_arrow``, ``iter_pandas``,
@@ -169,12 +169,12 @@ straight from the QWP column buffers: a nullable integer column becomes a
 pandas nullable ``Int*`` when it contains nulls and plain numpy otherwise,
 ``double`` stays numpy with ``NaN``, ``TIMESTAMP`` → ``datetime64``, and
 the QuestDB column kinds are recorded in ``df.attrs['questdb']`` for a type
-round-trip through :meth:`QuestDB.dataframe`. Pass
+round-trip through :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. Pass
 ``dtype_backend="pyarrow"`` / ``"numpy_nullable"`` (or ``types_mapper=``)
 to select the pyarrow-backed conversion instead.
 
-:class:`QuestDB` is a context manager and exposes :meth:`QuestDB.close` and
-:meth:`QuestDB.reap_idle` for pooled-connection lifecycle management.
+:class:`QuestDB <questdb.QuestDB>` is a context manager and exposes :meth:`QuestDB.close <questdb.QuestDB.close>` and
+:meth:`QuestDB.reap_idle <questdb.QuestDB.reap_idle>` for pooled-connection lifecycle management.
 Pool sizing follows the Java client's configuration keys:
 ``sender_pool_min`` / ``sender_pool_max`` (ingestion, defaults 1/4),
 ``query_pool_min`` / ``query_pool_max`` (readers, defaults 1/4),
@@ -182,15 +182,15 @@ Pool sizing follows the Java client's configuration keys:
 before failing; ``0`` fails fast), ``idle_timeout_ms`` (default 60000 —
 after which above-minimum idle connections are reaped) and ``pool_reap``
 (``auto`` | ``manual``, default ``auto`` — whether a background thread
-reaps idle connections, or the application calls :meth:`QuestDB.reap_idle`
+reaps idle connections, or the application calls :meth:`QuestDB.reap_idle <questdb.QuestDB.reap_idle>`
 on its own cadence).
 
-- Closing or abandoning a :class:`QueryResult` now releases its pooled
+- Closing or abandoning a :class:`QueryResult <questdb.QueryResult>` now releases its pooled
   connection immediately instead of at garbage collection; abandoning a
   result without closing it emits a ``ResourceWarning``.
 
-- :meth:`QuestDB.reader` returns a reader lease
-  (the read-side twin of :meth:`QuestDB.sender`) that borrows one pooled
+- :meth:`QuestDB.reader <questdb.QuestDB.reader>` returns a reader lease
+  (the read-side twin of :meth:`QuestDB.sender <questdb.QuestDB.sender>`) that borrows one pooled
   reader connection for its lifetime and runs queries on it sequentially —
   ``with db.reader() as r: r.query(sql)`` — optionally keeping the
   connection's SYMBOL dictionary warm across queries via
@@ -199,13 +199,13 @@ on its own cadence).
 Columnar DataFrame Ingestion
 ****************************
 
-Adds :meth:`QuestDB.dataframe`, ingesting pandas / polars / pyarrow and
+Adds :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, ingesting pandas / polars / pyarrow and
 any Arrow C Data Interface object over QWP/WebSocket. A
 ``schema_overrides`` keyword reclassifies columns as ``symbol``,
 ``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
 ('geohash', 20)}``); it requires fully Arrow-backed input — on input that
 falls back to the NumPy planner it raises
-:class:`UnsupportedDataFrameShapeError` rather than being silently
+:class:`UnsupportedDataFrameShapeError <questdb.UnsupportedDataFrameShapeError>` rather than being silently
 ignored. A ``max_rows_per_batch`` keyword (default 16384) bounds the
 rows sent per columnar batch.
 
@@ -213,7 +213,7 @@ The designated-timestamp argument ``at`` is the timestamp column itself,
 given by name (``str``) or position (``int``), a fixed
 ``TimestampNanos`` / ``datetime`` shared by every row, or the explicit
 ``ServerTimestamp`` sentinel. A frame
-produced by :meth:`QueryResult.to_pandas` round-trips back to the same
+produced by :meth:`QueryResult.to_pandas <questdb.QueryResult.to_pandas>` round-trips back to the same
 QuestDB column types automatically: the kinds recorded in
 ``df.attrs['questdb']`` and pandas nullable extension dtypes are honoured.
 
@@ -221,30 +221,30 @@ Connection Observability
 ************************
 
 A ``connection_listener`` callable (accepted by :func:`questdb.connect`,
-:meth:`QuestDB.from_conf` and the ``Sender`` constructors, alongside a
+:meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>` and the ``Sender`` constructors, alongside a
 ``connection_event_inbox_capacity`` bound) receives one
-:class:`ConnectionEvent` per connection-state transition — initial
+:class:`ConnectionEvent <questdb.ConnectionEvent>` per connection-state transition — initial
 connect, per-endpoint attempt failures, failover, terminal auth
-rejection — classified by :class:`ConnectionEventKind`. The listener
+rejection — classified by :class:`ConnectionEventKind <questdb.ConnectionEventKind>`. The listener
 runs on a dedicated dispatcher thread fed by a bounded drop-oldest
 inbox; delivery totals are exposed as ``connection_events_delivered`` /
-``connection_events_dropped`` on both :class:`QuestDB` and
-:class:`Sender`. :meth:`QuestDB.server_info` snapshots the server's
-``SERVER_INFO`` handshake as a :class:`ServerInfo` (role as
-:class:`ServerRole`, failover epoch, capabilities and cluster / node /
+``connection_events_dropped`` on both :class:`QuestDB <questdb.QuestDB>` and
+:class:`Sender <questdb.Sender>`. :meth:`QuestDB.server_info <questdb.QuestDB.server_info>` snapshots the server's
+``SERVER_INFO`` handshake as a :class:`ServerInfo <questdb.ServerInfo>` (role as
+:class:`ServerRole <questdb.ServerRole>`, failover epoch, capabilities and cluster / node /
 zone ids).
 
 Errors
 ******
 
-Adds :class:`UnsupportedDataFrameShapeError` (raised when a DataFrame
+Adds :class:`UnsupportedDataFrameShapeError <questdb.UnsupportedDataFrameShapeError>` (raised when a DataFrame
 cannot be expressed on the QWP columnar path) and the
-:class:`QuestDBErrorCode` members ``ServerRejection``, ``RoleMismatch``,
+:class:`QuestDBErrorCode <questdb.QuestDBErrorCode>` members ``ServerRejection``, ``RoleMismatch``,
 ``ArrowUnsupportedColumnKind``, ``ArrowIngest``, ``FailoverRetry``,
 ``ConnectTimeout``, ``FailoverWouldDuplicate``, ``Cancelled``,
 ``BatchTooLarge`` and ``StoreResendRequired``.
-:class:`QuestDBError` gains a ``qwp_ws_error`` property exposing the
-structured :class:`QwpWsError` view on a server-side QWP/WebSocket
+:class:`QuestDBError <questdb.QuestDBError>` gains a ``qwp_ws_error`` property exposing the
+structured :class:`QwpWsError <questdb.QwpWsError>` view on a server-side QWP/WebSocket
 rejection, plus an ``in_doubt`` property indicating that failed ingress input
 may already have been delivered and must not be blindly replayed without an
 appropriate table-level deduplication guarantee.

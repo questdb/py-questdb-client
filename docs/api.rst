@@ -130,5 +130,18 @@ questdb
     :annotation:
     :no-value:
 
+.. autoclass:: questdb._client.TaggedEnum
+   :members:
+   :show-inheritance:
+
 .. autodata:: questdb.WARN_HIGH_RECONNECTS
     :annotation:
+
+questdb.ingress (legacy)
+========================
+
+The deprecated 4.x compatibility shim. New code imports from ``questdb``.
+
+.. autoclass:: questdb.ingress.Buffer
+   :members:
+   :undoc-members:

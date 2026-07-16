@@ -1030,7 +1030,7 @@ cdef class SenderTransaction:
 
 cdef class Buffer:
     """
-    Internal row-serialization buffer, managed by :class:`Sender`.
+    Internal row-serialization buffer, managed by :class:`Sender <questdb.Sender>`.
 
     Kept importable as ``questdb.ingress.Buffer`` for legacy ILP/HTTP and
     ILP/TCP code that constructs buffers explicitly and flushes them via
@@ -1528,7 +1528,7 @@ cdef class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        Also see the :func:`Sender.dataframe` method if you're
+        Also see the :func:`Sender.dataframe <questdb.Sender.dataframe>` method if you're
         not using the buffer explicitly. It supports the same parameters
         and also supports auto-flushing.
 
@@ -1539,7 +1539,7 @@ cdef class Buffer:
 
         Adding a dataframe can trigger auto-flushing behaviour,
         even between rows of the same dataframe. To avoid this, you can
-        use HTTP and transactions (see :func:`Sender.transaction`).
+        use HTTP and transactions (see :func:`Sender.transaction <questdb.Sender.transaction>`).
 
         :param df: The pandas DataFrame to serialize to the buffer.
         :type df: pandas.DataFrame
@@ -1782,7 +1782,7 @@ cdef class Buffer:
         value appears at the 3rd row for a ``bool`` column, neither the 3rd nor
         the preceding rows are added to the buffer.
 
-        **Note**: This differs from the :func:`Sender.dataframe` method, which
+        **Note**: This differs from the :func:`Sender.dataframe <questdb.Sender.dataframe>` method, which
         modifies this guarantee due to its ``auto_flush`` logic.
 
         **Performance Considerations**
@@ -7462,7 +7462,7 @@ cdef class Sender:
         This may be sent automatically depending on the ``auto_flush`` setting
         in the constructor.
 
-        Refer to the :func:`Buffer.row` documentation for details on arguments.
+        Refer to the :func:`Buffer.row <questdb.ingress.Buffer.row>` documentation for details on arguments.
 
         **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
         """

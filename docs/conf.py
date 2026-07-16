@@ -81,6 +81,15 @@ intersphinx_mapping = {
     "pandas": ("https://pandas.pydata.org/pandas-docs/stable/", None),
 }
 
+# Bare names Cython renders into autodoc signatures; they cannot be
+# qualified at the source and would otherwise trip nitpick mode.
+nitpick_ignore = [
+    ("py:class", "Decimal"),
+    ("py:class", "datetime"),
+    ("py:class", "np.ndarray"),
+    ("py:class", "pd.DataFrame"),
+]
+
 # def do_not_skip_dunder_members(_app, _what, name, _obj, would_skip, _options):
 #     if name in ('__init__', '__call__', '__str__', '__enter__', '__exit__'):
 #         return False

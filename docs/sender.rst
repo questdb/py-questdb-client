@@ -846,32 +846,32 @@ transport. Each flush publishes a frame identified by a monotonically
 increasing **frame sequence number (FSN)**; the server acknowledges frames as
 it durably applies them, so the client can confirm delivery.
 
-* **Confirming delivery.** :func:`Sender.flush_and_get_fsn` flushes and returns
-  the FSN of the published frame; :func:`Sender.flush_and_keep_and_get_fsn`
-  does the same without clearing the buffer. :func:`Sender.await_acked_fsn`
+* **Confirming delivery.** :func:`Sender.flush_and_get_fsn <questdb.Sender.flush_and_get_fsn>` flushes and returns
+  the FSN of the published frame; :func:`Sender.flush_and_keep_and_get_fsn <questdb.Sender.flush_and_keep_and_get_fsn>`
+  does the same without clearing the buffer. :func:`Sender.await_acked_fsn <questdb.Sender.await_acked_fsn>`
   blocks until a given FSN is acknowledged (or a timeout elapses), and
-  :func:`Sender.acked_fsn` / :func:`Sender.published_fsn` report progress
+  :func:`Sender.acked_fsn <questdb.Sender.acked_fsn>` / :func:`Sender.published_fsn <questdb.Sender.published_fsn>` report progress
   without blocking.
 
 * **Progress modes.** With the default ``qwp_ws_progress=background``,
   acknowledgements are progressed on a background thread. With
   ``qwp_ws_progress=manual``, the application must call
-  :func:`Sender.drive_once` (or one of the flush/await methods) to pump the
+  :func:`Sender.drive_once <questdb.Sender.drive_once>` (or one of the flush/await methods) to pump the
   connection.
 
 * **Server diagnostics.** Per-frame server feedback is delivered to the
   ``qwp_ws_error_handler`` callback, or polled via
-  :func:`Sender.poll_qwp_ws_error` as :class:`QwpWsError` values
-  (:func:`Sender.qwp_ws_errors_dropped` reports how many were dropped when no
+  :func:`Sender.poll_qwp_ws_error <questdb.Sender.poll_qwp_ws_error>` as :class:`QwpWsError <questdb.QwpWsError>` values
+  (:func:`Sender.qwp_ws_errors_dropped <questdb.Sender.qwp_ws_errors_dropped>` reports how many were dropped when no
   handler kept up). A diagnostic with a terminal policy halts the sender: the next
-  sender call raises :class:`QuestDBServerRejectionError`. The handler must
+  sender call raises :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`. The handler must
   not call back into the same sender, must be cheap and non-blocking, and —
   under ``qwp_ws_progress=background`` — may run on a background thread.
   The pooled :class:`QuestDB <questdb.QuestDB>` handle delivers the same
   diagnostics through the ``qwp_ws_error_handler`` passed to
   :func:`questdb.connect`, on a dedicated dispatcher thread.
 
-* **Draining on close.** :func:`Sender.close_drain` waits for outstanding
+* **Draining on close.** :func:`Sender.close_drain <questdb.Sender.close_drain>` waits for outstanding
   frames to be acknowledged before closing.
 
 * **DataFrame bulk loads.** A standalone ws/wss ``Sender.dataframe()`` does
@@ -912,7 +912,7 @@ Key differences from ILP:
   datagram's worth of data. Rows and interval thresholds work the same as ILP.
 
 * **Datagram size limit.** A single row that exceeds ``max_datagram_size`` will
-  raise :class:`QuestDBError` at flush time. Configure ``max_datagram_size`` via
+  raise :class:`QuestDBError <questdb.QuestDBError>` at flush time. Configure ``max_datagram_size`` via
   the constructor or :ref:`configuration string <sender_conf>`.
 
 * **No protocol version.** QWP has its own versioning. The ``protocol_version``
@@ -971,8 +971,8 @@ Either way, you can easily switch between the two protocols by changing:
 Querying data
 =============
 
-:class:`QuestDB` reads query results back over the QWP/WebSocket read endpoint.
-:meth:`QuestDB.query` returns a single-use :class:`QueryResult` that streams rows
+:class:`QuestDB <questdb.QuestDB>` reads query results back over the QWP/WebSocket read endpoint.
+:meth:`QuestDB.query <questdb.QuestDB.query>` returns a single-use :class:`QueryResult <questdb.QueryResult>` that streams rows
 as Arrow record batches::
 
     with questdb.connect('ws::addr=localhost:9000;') as db:
@@ -986,7 +986,7 @@ types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
 ``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`,
 :class:`TimestampNanos <questdb.TimestampNanos>`, and ``uuid.UUID``.
 
-A :class:`QueryResult` can be materialised with ``to_arrow`` / ``to_pandas`` or
+A :class:`QueryResult <questdb.QueryResult>` can be materialised with ``to_arrow`` / ``to_pandas`` or
 streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
@@ -994,10 +994,10 @@ are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
 (``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
 ``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
 Each result is consumed once. Fully drain it, use it as a context manager
-(``with db.query(...) as result:``), or call :func:`QueryResult.close`. A
+(``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing
 it drops the connection and the pool refills on demand. Call
-:func:`QueryResult.cancel` first if the server should stop streaming.
+:func:`QueryResult.cancel <questdb.QueryResult.cancel>` first if the server should stop streaming.
 
 ``SYMBOL`` columns: ``to_polars`` / ``to_pandas`` build the categorical directly
 (connection dictionary interned once, no per-row remap). ``to_arrow`` /
@@ -1008,8 +1008,8 @@ frame, the dedicated methods avoid the re-reconciliation that
 ``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
-For several queries in a row, call :meth:`QuestDB.reader` to take a
-**reader lease** — the read-side twin of :meth:`QuestDB.sender`. The
+For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a
+**reader lease** — the read-side twin of :meth:`QuestDB.sender <questdb.QuestDB.sender>`. The
 lease borrows one reader connection from the pool for its lifetime and runs
 queries on it sequentially::
 
@@ -1021,15 +1021,15 @@ queries on it sequentially::
 Each query skips the per-call pool round-trip, and because they share one
 connection, ``reset_symbol_dict=False`` on follow-up queries keeps the
 connection's ``SYMBOL`` dictionary warm across them. Queries on a lease are
-strictly sequential: fully drain (or close) each :class:`QueryResult` before
+strictly sequential: fully drain (or close) each :class:`QueryResult <questdb.QueryResult>` before
 the next ``r.query()`` call. Closing a result before draining it tears down
 the lease's connection, after which the lease is terminal — close it and take
 a fresh one. A lease has thread affinity: use one lease per thread, on the
-thread that created it (threads sharing a :class:`QuestDB` handle each take
+thread that created it (threads sharing a :class:`QuestDB <questdb.QuestDB>` handle each take
 their own lease).
 
-The same :class:`QuestDB` can ingest dataframes through the pooled columnar QWP
-path with :meth:`QuestDB.dataframe`. Dataframe ingestion always uses the direct
+The same :class:`QuestDB <questdb.QuestDB>` can ingest dataframes through the pooled columnar QWP
+path with :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. Dataframe ingestion always uses the direct
 (non-store-and-forward) column sender, independent of ``sf_dir``, and returns
 once the whole frame is committed (``AckLevel::Ok``). On a transient connection
 failure the frame is re-sent from the caller's DataFrame only when the failed
