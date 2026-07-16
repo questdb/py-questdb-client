@@ -867,6 +867,18 @@ cdef object _dataframe_require_pyarrow():
     _PYARROW = pyarrow
 
 
+cdef bint _dataframe_try_import_pyarrow():
+    global _PYARROW
+    if _PYARROW is not None:
+        return True
+    try:
+        import pyarrow
+    except ImportError:
+        return False
+    _PYARROW = pyarrow
+    return True
+
+
 def _debug_dataframe_pyarrow_loaded():
     """Internal: True iff `.dataframe()` has lazily imported pyarrow in
     this process. Intended for tests that verify a code path stayed

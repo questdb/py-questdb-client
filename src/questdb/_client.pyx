@@ -2676,19 +2676,21 @@ cdef object _dataframe_columnar_plan_failures(
                     'object-dtype datetime timestamp field columns.'))
             elif col.setup.source == col_source_t.col_source_dt64ns_numpy:
                 # NaT in a datetime64[ns] field is INT64_MIN nanoseconds;
-                # the ns->micros wire conversion turns that null sentinel
-                # into a bogus 1677 timestamp instead of NULL. Reject it —
-                # datetime64[us], object-dtype, and Arrow-backed timestamp
-                # columns all encode NULL correctly. Pre-epoch and every
-                # non-null value are fine on all of these paths.
+                # the zero-copy ns->micros wire conversion would corrupt
+                # that null sentinel into a bogus 1677 timestamp. When
+                # pyarrow is available, _dataframe_columnar_promote_cols
+                # re-exports the column through Arrow (NULLs intact) before
+                # validation, so this branch is reachable only without
+                # pyarrow.
                 ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
                 if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
                     failures.append(_dataframe_columnar_col_failure(
                         df,
                         col,
                         'v1 datetime64[ns] timestamp field columns cannot '
-                        'contain NaT; use datetime64[us] or an object-dtype '
-                        'datetime column for NULL timestamps.'))
+                        'contain NaT without pyarrow; install pyarrow, or '
+                        'use datetime64[us] or an object-dtype datetime '
+                        'column for NULL timestamps.'))
         elif col.setup.target == col_target_t.col_target_column_str:
             if col.setup.source == col_source_t.col_source_str_pyobj:
                 # PyObject sources are validated by the pre-build phase
@@ -2913,7 +2915,8 @@ cdef void_int _dataframe_columnar_promote_cols(
                 and _dataframe_columnar_i64_has_nat(
                     <const int64_t*>col.setup.chunks.chunks[0].buffers[1],
                     plan.row_count)):
-            _dataframe_require_pyarrow()
+            if not _dataframe_try_import_pyarrow():
+                continue
             arrow_array = _dataframe_columnar_col_from_pandas(df, col)
         else:
             continue
@@ -4530,6 +4533,7 @@ def _debug_dataframe_columnar_plan(
             at,
             &plan,
             _FIELD_TARGETS_QWP)
+        _dataframe_columnar_promote_cols(df, &plan)
         failures = _dataframe_columnar_plan_failures(df, &plan)
         return {
             'supported': not bool(failures),
@@ -4721,6 +4725,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                 if (plan.col_count == 0) or (plan.row_count == 0):
                     continue
 
+                _dataframe_columnar_promote_cols(df, &plan)
                 _dataframe_columnar_validate_plan(df, &plan)
                 _dataframe_columnar_prebuild_pyobj(df, &plan)
                 rows_per_chunk = _dataframe_columnar_rows_per_chunk(

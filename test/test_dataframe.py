@@ -692,6 +692,23 @@ class TestPandasBase:
             self.assertTrue(any('cannot contain NaT' in reason
                                 for reason in reasons))
 
+        def test_debug_dataframe_columnar_plan_promotes_ns_nat_field(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[us]'),
+                'vts': pd.Series(
+                    [pd.Timestamp('1960-01-01'), pd.NaT],
+                    dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='tbl1', at='ts')
+
+            self.assertTrue(plan['supported'], plan['failures'])
+            self.assertEqual(plan['failures'], [])
+
         def test_debug_dataframe_columnar_plan_accepts_v1_mixed_fast_paths(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
