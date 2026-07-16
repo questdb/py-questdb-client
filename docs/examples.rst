@@ -5,6 +5,32 @@ Examples
 Basics
 ======
 
+.. _connect_example:
+
+connect() quick start
+---------------------
+
+The following example leases a pooled sender from a
+:class:`QuestDB <questdb.QuestDB>` handle, writes a row over QWP/WebSocket,
+waits for the server acknowledgement, then runs a bind-parameter query into
+pandas.
+
+.. literalinclude:: ../examples/connect_basic.py
+   :language: python
+
+.. _connect_dataframe_example:
+
+DataFrame bulk load and query leases
+------------------------------------
+
+The following example bulk-loads a pandas ``DataFrame`` through
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, then leases one reader
+connection with ``db.query()`` and runs two queries on it, reusing the
+``SYMBOL`` dictionary across them.
+
+.. literalinclude:: ../examples/connect_dataframe.py
+   :language: python
+
 .. _qwp_udp_example:
 
 QWP over UDP
@@ -50,7 +76,7 @@ The connection is made via HTTPS and uses token based authentication.
 
 The data is sent at the end of the ``with`` block.
 
-.. literalinclude:: ../examples/http.py
+.. literalinclude:: ../examples/http_basic.py
    :language: python
 
 
@@ -158,7 +184,7 @@ First, create the table with ``DECIMAL`` columns:
 
 Then insert data using Python decimals:
 
-.. literalinclude:: ../examples/decimal.py
+.. literalinclude:: ../examples/decimal_basic.py
    :language: python
 
 For better performance with DataFrames, use PyArrow decimal types:

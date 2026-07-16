@@ -11,6 +11,38 @@
     ```
     python3 -m pip install -U questdb
     ```
+- name: qwpws
+  lang: python
+  path: examples/connect_basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  addr:
+    host: localhost
+    port: 9000
+- name: qwpws-dataframe
+  lang: python
+  path: examples/connect_dataframe.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb pandas
+    ```
+  addr:
+    host: localhost
+    port: 9000
 - name: qwpudp
   lang: python
   path: examples/qwp_udp.py
