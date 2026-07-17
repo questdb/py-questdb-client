@@ -148,9 +148,14 @@ def connect(
         for key in params:
             if not key.isidentifier():
                 raise TypeError(f'invalid settings keyword {key!r}')
-        if not host.startswith('[') and host.count(':') >= 2:
+        if host.startswith('['):
+            if not host.endswith(']'):
+                raise ValueError(
+                    f'"host" must not include a port ({host!r}); pass the '
+                    'port via port= instead.')
+        elif host.count(':') >= 2:
             host = f'[{host}]'
-        elif ':' in host and not host.startswith('['):
+        elif ':' in host:
             raise ValueError(
                 f'"host" must not include a port ({host!r}); pass the port '
                 'via port= instead.')

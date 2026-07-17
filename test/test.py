@@ -454,6 +454,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
             questdb.connect(host='localhost', **{'a;b': 'x'})
         with self.assertRaisesRegex(ValueError, 'must not include a port'):
             questdb.connect(host='localhost:9000')
+        with self.assertRaisesRegex(ValueError, 'must not include a port'):
+            questdb.connect(host='[::1]:9000')
 
     def test_module_connect_conf_building(self):
         import questdb

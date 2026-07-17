@@ -6035,9 +6035,11 @@ cdef class QuestDB:
         surface as :class:`QuestDBError` from the sender calls themselves.
 
         When a handler or listener closes over the returned handle, call
-        :meth:`close` explicitly (or use ``with``): a handle abandoned to
-        the garbage collector while callbacks are still firing is pinned
-        alive until closed, so it leaks rather than being collected.
+        :meth:`close` explicitly (or use ``with``): until closed, such a
+        handle is pinned alive rather than collected, so an abandoned one
+        leaks instead of crashing. The pin is dropped at interpreter
+        shutdown, so an unclosed self-referential handle can still crash
+        during finalization.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
@@ -6557,6 +6559,7 @@ cdef class QuestDB:
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
+        cdef bint closed = False
         with self._state_cond:
             db = self._db
             if db == NULL:
@@ -6574,26 +6577,32 @@ cdef class QuestDB:
                                 UserWarning)
                 return
             self._db = NULL
-            self._conf_str = None
             self._closing = True
-            while self._active_uses != 0:
-                if (not self._state_cond.wait(timeout=5.0)
-                        and self._active_uses != 0):
-                    warnings.warn(
-                        'QuestDB.close() is waiting for '
-                        f'{self._active_uses} outstanding lease(s) to be '
-                        'released.',
-                        UserWarning)
         try:
+            with self._state_cond:
+                while self._active_uses != 0:
+                    if (not self._state_cond.wait(timeout=5.0)
+                            and self._active_uses != 0):
+                        warnings.warn(
+                            'QuestDB.close() is waiting for '
+                            f'{self._active_uses} outstanding lease(s) to be '
+                            'released.',
+                            UserWarning)
             _ensure_doesnt_have_gil(&gs)
             # `questdb_db_close` drains both the writer and reader free
             # lists in one shot (see `db.rs::DbInner::Drop`).
             questdb_db_close(db)
+            closed = True
         finally:
             _ensure_has_gil(&gs)
-            _release_callback_refs(self._cb_refs_key)
-            self._cb_refs_key = 0
+            if closed:
+                _release_callback_refs(self._cb_refs_key)
+                self._cb_refs_key = 0
             with self._state_cond:
+                if closed:
+                    self._conf_str = None
+                else:
+                    self._db = db
                 self._closing = False
                 self._state_cond.notify_all()
 
