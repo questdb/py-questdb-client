@@ -148,8 +148,12 @@ def connect(
         for key in params:
             if not key.isidentifier():
                 raise TypeError(f'invalid settings keyword {key!r}')
-        if ':' in host and not host.startswith('['):
+        if not host.startswith('[') and host.count(':') >= 2:
             host = f'[{host}]'
+        elif ':' in host and not host.startswith('['):
+            raise ValueError(
+                f'"host" must not include a port ({host!r}); pass the port '
+                'via port= instead.')
         settings = [('addr', f'{host}:{port if port is not None else 9000}')]
         settings.extend(params.items())
         conf_str = ('wss::' if tls else 'ws::') + ''.join(

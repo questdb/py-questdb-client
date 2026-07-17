@@ -62,6 +62,12 @@ except ImportError:
 from test_client_capsule_path import (
     TestCapsulePathPyArrow,
     TestCapsulePathPolars,
+    TestServerTimestampAt,
+    TestScalarAt,
+    TestNdarrayArrayColumns,
+    TestServerInfoLive,
+    TestConnectionEvents,
+    TestSenderConnectionEvents,
     TestSchemaOverrides,
     TestPyArrowRecordBatchDirect,
     TestSchemaOverridesPandas,
@@ -442,6 +448,12 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, 'port, tls'):
             questdb.connect(
                 'ws::addr=localhost:9000;', tls=False, port=9000)
+        with self.assertRaisesRegex(TypeError, '"host" must be a str'):
+            questdb.connect(host=123)
+        with self.assertRaisesRegex(TypeError, 'invalid settings keyword'):
+            questdb.connect(host='localhost', **{'a;b': 'x'})
+        with self.assertRaisesRegex(ValueError, 'must not include a port'):
+            questdb.connect(host='localhost:9000')
 
     def test_module_connect_conf_building(self):
         import questdb
@@ -513,6 +525,32 @@ class TestQwpWebSocketApi(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 2)
+
+    def test_pooled_sender_await_acked_fsn_validates_timeout(self):
+        # Regression: timeout_millis must be validated and converted while
+        # holding the GIL; converting it inside the no-GIL wait region
+        # crashes the interpreter on overflow or a non-int.
+        with QwpAckServer(ack_delay_s=0.2) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    fsn = sender.flush_and_get_fsn()
+                    with self.assertRaises(OverflowError):
+                        sender.await_acked_fsn(fsn, 2 ** 64)
+                    with self.assertRaises(TypeError):
+                        sender.await_acked_fsn(fsn, 1.5)
+                    with self.assertRaises(TypeError):
+                        sender.await_acked_fsn(fsn, True)
+                    with self.assertRaises(ValueError):
+                        sender.await_acked_fsn(fsn, -1)
+                    self.assertTrue(sender.await_acked_fsn(fsn, 10_000))
 
     def test_pooled_sender_poll_error_is_lease_scoped(self):
         with QwpAckServer(error_status=0x09) as server:  # retriable

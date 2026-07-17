@@ -950,11 +950,15 @@ class PooledSender:
     A row-building sender borrowed from a :class:`QuestDB` pool.
 
     Obtain a lease with :meth:`QuestDB.sender`; ``close()`` returns the
-    native sender to the pool. The surface is deliberately small:
-    ``row()``, ``dataframe()``, ``flush()``, ``wait()`` and ``close()``;
-    ``len(sender)`` is the number of buffered rows. ``dataframe()``
-    routes to the same direct columnar path as :meth:`QuestDB.dataframe`,
-    borrowing a direct connection from the pool for that call.
+    native sender to the pool. Rows go through ``row()``, ``dataframe()``,
+    ``flush()``, ``wait()`` and ``close()``; ``len(sender)`` is the number
+    of buffered rows. Frame-level delivery tracking is available through
+    :meth:`flush_and_get_fsn`, :meth:`flush_and_keep_and_get_fsn`,
+    :meth:`published_fsn`, :meth:`acked_fsn` and :meth:`await_acked_fsn`,
+    and per-lease server diagnostics through :meth:`poll_error` and
+    :meth:`error_events_dropped`. ``dataframe()`` routes to the same
+    direct columnar path as :meth:`QuestDB.dataframe`, borrowing a direct
+    connection from the pool for that call.
     """
 
     def __enter__(self) -> PooledSender: ...
@@ -1030,7 +1034,7 @@ class PooledSender:
         """Highest FSN published locally on the lease's connection."""
 
     def acked_fsn(self) -> Optional[int]:
-        """Highest FSN acknowledged on the lease's connection."""
+        """Highest FSN completed on the lease's connection by ACK or drop-and-continue rejection."""
 
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """Wait until the ack watermark reaches ``fsn``; ``False`` on
@@ -1142,7 +1146,7 @@ class QuestDB:
     def __enter__(self) -> QuestDB: ...
 
     def sender(self) -> PooledSender:
-        """Borrow a context-managed row-building :class:`Sender` from the pool."""
+        """Borrow a context-managed row-building :class:`PooledSender` from the pool."""
 
     def dataframe(
         self,
@@ -1719,7 +1723,7 @@ class Sender:
         drop-and-continue rejection.
         """
 
-    def await_acked_fsn(self, fsn: int, timeout_millis: int) -> bool:
+    def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """
         Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
         """

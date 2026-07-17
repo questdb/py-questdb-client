@@ -2145,6 +2145,24 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
 _DISPATCH_THREAD = threading.local()
 
 
+# Module-level strong root for callback targets registered with the native
+# dispatchers. It keeps each handler/listener function object reachable from a
+# GC root for as long as its dispatchers can still fire, so the cycle collector
+# never clears a live callback's internals (which would crash the interpreter
+# when a dispatch calls it). A handle abandoned in a reference cycle through its
+# own callback therefore leaks rather than crashing; explicit close() removes
+# the entry once the dispatchers are joined and lets the cycle collect.
+_LIVE_CALLBACK_REFS = {}
+
+
+cdef _retain_callback_refs(object owner, object error_handler, object listener):
+    _LIVE_CALLBACK_REFS[id(owner)] = (error_handler, listener)
+
+
+cdef _release_callback_refs(object owner):
+    _LIVE_CALLBACK_REFS.pop(id(owner), None)
+
+
 cdef list _dispatch_target_stack():
     stack = getattr(_DISPATCH_THREAD, 'targets', None)
     if stack is None:
@@ -5896,9 +5914,9 @@ cdef bint _is_batch_too_large_error(object exc):
 
 
 # no_gc_clear keeps tp_clear from nulling fields the native dispatchers
-# still target. Cycle collection stays possible only because the handler
-# attributes are assigned exclusively at construction; adding a setter
-# would create uncollectable cycles through leases.
+# still target. The callback targets are additionally pinned in
+# _LIVE_CALLBACK_REFS until the dispatchers are joined, so the cycle collector
+# cannot clear a live handler even when the handle is reached only through it.
 @cython.no_gc_clear
 cdef class QuestDB:
     """
@@ -6008,9 +6026,8 @@ cdef class QuestDB:
 
         When a handler or listener closes over the returned handle, call
         :meth:`close` explicitly (or use ``with``): a handle abandoned to
-        the garbage collector while callbacks are still firing may have
-        its callback's internals cleared by the cycle collector before
-        the dispatchers are joined, crashing the process.
+        the garbage collector while callbacks are still firing is pinned
+        alive until closed, so it leaks rather than being collected.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
@@ -6083,6 +6100,8 @@ cdef class QuestDB:
                 db._error_handler = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
+            _retain_callback_refs(
+                db, db._error_handler, db._connection_listener)
             return db
         finally:
             _ensure_has_gil(&gs)
@@ -6528,8 +6547,7 @@ cdef class QuestDB:
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
-        self._state_cond.acquire()
-        try:
+        with self._state_cond:
             db = self._db
             if db == NULL:
                 # A caller dispatching for this handle must not wait here:
@@ -6537,7 +6555,13 @@ cdef class QuestDB:
                 if not _on_dispatch_thread_for(
                         self._error_handler, self._connection_listener):
                     while self._closing:
-                        self._state_cond.wait()
+                        if (not self._state_cond.wait(timeout=5.0)
+                                and self._closing):
+                            warnings.warn(
+                                'QuestDB.close() is still waiting for a '
+                                'concurrent close() on another thread to '
+                                'finish.',
+                                UserWarning)
                 return
             self._db = NULL
             self._conf_str = None
@@ -6550,8 +6574,6 @@ cdef class QuestDB:
                         f'{self._active_uses} outstanding lease(s) to be '
                         'released.',
                         UserWarning)
-        finally:
-            self._state_cond.release()
         try:
             _ensure_doesnt_have_gil(&gs)
             # `questdb_db_close` drains both the writer and reader free
@@ -6559,12 +6581,10 @@ cdef class QuestDB:
             questdb_db_close(db)
         finally:
             _ensure_has_gil(&gs)
-            self._state_cond.acquire()
-            try:
+            _release_callback_refs(self)
+            with self._state_cond:
                 self._closing = False
                 self._state_cond.notify_all()
-            finally:
-                self._state_cond.release()
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
         self.close()
@@ -6578,6 +6598,7 @@ cdef class QuestDB:
             _ensure_doesnt_have_gil(&gs)
             questdb_db_close(db)
             _ensure_has_gil(&gs)
+        _release_callback_refs(self)
 
 
 @cython.no_gc_clear
@@ -7493,6 +7514,9 @@ cdef class Sender:
         line_sender_opts_free(self._opts)
         self._opts = NULL
 
+        _retain_callback_refs(
+            self, self._error_handler, self._connection_listener)
+
         # Request callbacks when rows are complete.
         self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
         self._last_flush_ms[0] = line_sender_now_micros() // 1000
@@ -7941,7 +7965,7 @@ cdef class Sender:
             return fsn.value
         return None
 
-    def await_acked_fsn(self, fsn, timeout_millis):
+    def await_acked_fsn(self, fsn, timeout_millis: int=0):
         """
         Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
 
@@ -7987,14 +8011,14 @@ cdef class Sender:
             &err)
         _ensure_has_gil(&gs)
         if not ok:
-            if line_sender_error_get_code(err) == \
+            if line_sender_error_get_code(err) != \
                     line_sender_error_failover_retry:
-                line_sender_error_free(err)
-                return False
-            raise c_err_to_py(err)
+                raise c_err_to_py(err)
+            line_sender_error_free(err)
+            err = NULL
 
-        # Re-read the watermark now that the wait has drained in-flight frames.
-        err = NULL
+        # Re-read the watermark: the wait either drained ``fsn`` or expired
+        # with no progress; the current ack level is the answer.
         if not line_sender_qwpws_acked_fsn(self._impl, &acked, &err):
             raise c_err_to_py(err)
         return bool(acked.has_value and acked.value >= c_fsn)
@@ -8098,6 +8122,7 @@ cdef class Sender:
             line_sender_opts_free(opts)
             line_sender_opts_free(qwp_ws_opts)
             _ensure_has_gil(&gs)
+        _release_callback_refs(self)
         self._buffer = None
         self._error_handler = None
         self._connection_listener = None
@@ -8151,11 +8176,16 @@ cdef class PooledSender:
     native sender to the pool. Rows publish into an ordered,
     store-and-forward-covered QWP stream over one pooled connection.
 
-    The surface is deliberately small: ``row()``, ``dataframe()``,
-    ``flush()``, ``wait()`` and ``close()``. ``len(sender)`` is the
-    number of buffered rows. Prefer :meth:`QuestDB.dataframe` for bulk
-    loads; the lease's own ``dataframe()`` is a convenience that routes
-    to the same direct columnar path.
+    Rows go through ``row()``, ``dataframe()``, ``flush()``, ``wait()``
+    and ``close()``; ``len(sender)`` is the number of buffered rows.
+    Frame-level delivery tracking is available through
+    :meth:`flush_and_get_fsn`, :meth:`flush_and_keep_and_get_fsn`,
+    :meth:`published_fsn`, :meth:`acked_fsn` and
+    :meth:`await_acked_fsn`, and per-lease server diagnostics through
+    :meth:`poll_error` and :meth:`error_events_dropped`. Prefer
+    :meth:`QuestDB.dataframe` for bulk loads; the lease's own
+    ``dataframe()`` is a convenience that routes to the same direct
+    columnar path.
     """
     cdef qwp_sender* _qwp
     cdef questdb_db* _db
@@ -8450,8 +8480,10 @@ cdef class PooledSender:
 
     def acked_fsn(self):
         """
-        Highest FSN acknowledged on the lease's pooled connection, or
-        ``None`` if no frame has been acknowledged yet.
+        Highest FSN completed on the lease's pooled connection by ACK or
+        drop-and-continue rejection, or ``None`` if no frame has completed
+        yet. A completed frame is not necessarily applied: a rejected frame
+        the queue drops to make progress also advances this watermark.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_qwpws_fsn fsn
@@ -8467,21 +8499,25 @@ cdef class PooledSender:
         returned by :meth:`flush_and_get_fsn` on this lease).
 
         Returns ``True`` once ``fsn`` is acknowledged, or ``False`` if the
-        no-progress timeout elapsed first (``0`` waits indefinitely). Only
-        a terminal connection failure raises.
+        no-progress timeout elapsed before ``fsn`` was acknowledged (``0``
+        waits indefinitely). Only a terminal connection failure raises.
         """
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
         cdef uint64_t c_fsn
+        cdef uint64_t c_timeout_millis
         cdef line_sender_qwpws_fsn acked
         cdef bint ok = False
         if not isinstance(fsn, int) or isinstance(fsn, bool):
             raise TypeError('"fsn" must be a non-negative int.')
         if fsn < 0:
             raise ValueError('"fsn" must be a non-negative int.')
+        if not isinstance(timeout_millis, int) or isinstance(timeout_millis, bool):
+            raise TypeError('"timeout_millis" must be a non-negative int.')
         if timeout_millis < 0:
-            raise ValueError('timeout_millis must be non-negative.')
+            raise ValueError('"timeout_millis" must be a non-negative int.')
         c_fsn = fsn
+        c_timeout_millis = timeout_millis
         with self._lock:
             self._check_open('await_acked_fsn')
             if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
@@ -8489,22 +8525,22 @@ cdef class PooledSender:
             if acked.has_value and acked.value >= c_fsn:
                 return True
             # The barrier drains every frame published so far (a superset
-            # of ``fsn``); a no-progress expiry surfaces as FailoverRetry
-            # and maps to the ``False`` return.
+            # of ``fsn``); a no-progress expiry surfaces as FailoverRetry.
             _ensure_doesnt_have_gil(&gs)
             ok = qwp_sender_wait(
                 self._qwp,
                 qwpws_ack_level.qwpws_ack_level_ok,
-                <uint64_t>timeout_millis,
+                c_timeout_millis,
                 &err)
             _ensure_has_gil(&gs)
             if not ok:
-                if line_sender_error_get_code(err) == \
+                if line_sender_error_get_code(err) != \
                         line_sender_error_failover_retry:
-                    line_sender_error_free(err)
-                    return False
-                raise c_err_to_py(err)
-            err = NULL
+                    raise c_err_to_py(err)
+                line_sender_error_free(err)
+                err = NULL
+            # Re-read the watermark: the wait either drained ``fsn`` or
+            # expired with no progress; the current ack level is the answer.
             if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
                 raise c_err_to_py(err)
             return bool(acked.has_value and acked.value >= c_fsn)
