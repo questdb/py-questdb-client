@@ -7,9 +7,9 @@ This is the official Python client library for `QuestDB <https://questdb.com>`_.
 This client library implements the QuestDB Wire Protocol (QWP) over WebSocket
 for pooled ingestion and queries — the deployment-level ``questdb.connect()``
 API. A connection-level ``Sender`` (one sender = one connection) covers the
-point-to-point transports: QuestDB's variant of the
+legacy ILP transports — QuestDB's variant of the
 `InfluxDB Line Protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_
-(ILP) over HTTP and TCP — including HTTP transactions — plus QWP over UDP.
+over HTTP and TCP, including HTTP transactions — plus QWP over UDP.
 
 This implementation supports `authentication
 <https://py-questdb-client.readthedocs.io/en/latest/conf.html#authentication>`_

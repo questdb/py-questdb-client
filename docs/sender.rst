@@ -46,8 +46,7 @@ publishes pending rows when it returns the lease to the pool.
 Two API layers
 --------------
 
-The package has two complementary API layers. They are two abstraction
-levels, not an old and a new API:
+The package has two API layers:
 
 * **Deployment level** — :func:`questdb.connect` returns a
   :class:`QuestDB <questdb.QuestDB>` handle that addresses a whole
@@ -57,18 +56,12 @@ levels, not an old and a new API:
   ``server_info()``).
 
 * **Connection level** — the standalone :class:`Sender <questdb.Sender>`
-  drives exactly one connection (one sender = one connection). It carries
-  the point-to-point capabilities that live below the handle abstraction:
-  :ref:`ILP/HTTP transactions <sender_transaction>` (transactions are
-  HTTP-only), fire-and-forget :ref:`QWP/UDP datagrams <sender_qwp_udp>`,
-  ILP/TCP, and :ref:`manual control of a single ws connection
-  <sender_qwp_ws>` (progress driving, explicit buffers and draining).
-
-The QuestDB documentation calls ILP over HTTP/TCP the *legacy ILP*
-transports: that names the protocol generation — QWP is the current one —
-not the API layer. The connection-level ``Sender`` is a permanent, fully
-supported surface, and it also speaks current-generation QWP over UDP and
-WebSocket.
+  drives exactly one connection (one sender = one connection). It covers
+  the legacy ILP transports (HTTP/TCP) — including
+  :ref:`ILP/HTTP transactions <sender_transaction>`, which are HTTP-only —
+  fire-and-forget :ref:`QWP/UDP datagrams <sender_qwp_udp>`, and
+  :ref:`manual control of a single ws connection <sender_qwp_ws>`
+  (progress driving, explicit buffers and draining).
 
 Default to the deployment level; drop down only when you need a
 connection-level capability:
@@ -413,8 +406,8 @@ See the :ref:`sender_conf_auto_flush` section for more details. and note that
 Error Reporting
 ===============
 
-**TL;DR: QWP/WebSocket has the richest error reporting; if you drop to the
-connection-level ILP transports, use HTTP.**
+**TL;DR: QWP/WebSocket has the richest error reporting; among the legacy
+ILP transports, use HTTP.**
 
 Over QWP/WebSocket every server rejection is delivered as a structured
 :class:`SenderError <questdb.SenderError>` — pushed to the pool's
@@ -423,7 +416,7 @@ default), while terminal rejections also raise
 :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`
 from the affected sender. See :ref:`sender_qwp_ws`.
 
-For the ILP transports (HTTP/TCP), the sender will do its best to check for
+For the legacy ILP transports, the sender will do its best to check for
 errors before sending data to the server.
 
 When using the HTTP protocol, the server will send back an error message if
@@ -556,7 +549,7 @@ combines acknowledged delivery, structured server rejections, queries, and
 connection pooling in one handle. Drop to the connection-level
 :class:`Sender <questdb.Sender>` when you need one of its point-to-point
 capabilities (see :ref:`sender_api_layers`): ILP/HTTP for transactions and
-the best error reporting among the ILP transports, QWP/UDP for
+the best error reporting among the legacy ILP transports, QWP/UDP for
 fire-and-forget, lowest-latency ingestion that can tolerate potential data
 loss, or ILP/TCP for servers that predate ILP/HTTP support.
 
@@ -925,8 +918,8 @@ over QWP/WebSocket (``ws`` / ``wss``) for acknowledged delivery, structured
 server rejections, queries and connection pooling in one handle. The other
 protocols belong to the connection-level standalone
 :class:`Sender <questdb.Sender>` (see :ref:`sender_api_layers`); among the
-ILP transports, prefer ILP/HTTP for better error feedback and transaction
-control.
+legacy ILP transports, prefer ILP/HTTP for better error feedback and
+transaction control.
 
 .. _sender_qwp_ws:
 

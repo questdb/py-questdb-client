@@ -154,7 +154,7 @@ carry width and scale in the column type:
 .. note::
 
     Over ``ws::`` / ``wss::`` decimal support is negotiated automatically.
-    On the ILP transports, HTTP/HTTPS auto-negotiates
+    On the legacy ILP transports, HTTP/HTTPS auto-negotiates
     :ref:`protocol version 3 <sender_conf_protocol_version>` while TCP/TCPS
     must configure it explicitly:
     ``tcp::addr=localhost:9009;protocol_version=3;``.
@@ -183,8 +183,8 @@ Connection-level transports
 The examples below use the standalone :class:`Sender <questdb.Sender>` —
 the connection-level API, where one sender drives exactly one connection.
 This layer carries the point-to-point capabilities the deployment-level
-handle does not: QWP/UDP datagrams, ILP over HTTP and TCP, and HTTP
-transactions. See :ref:`sender_api_layers`.
+handle does not: QWP/UDP datagrams, the legacy ILP transports (HTTP/TCP),
+and HTTP transactions. See :ref:`sender_api_layers`.
 
 .. _qwp_udp_example:
 
@@ -199,7 +199,7 @@ default listener port is ``9007``.
 .. literalinclude:: ../examples/qwp_udp.py
    :language: python
 
-ILP over HTTP and TCP
+Legacy ILP (HTTP/TCP)
 ---------------------
 
 InfluxDB Line Protocol ingestion is fully supported through the standalone
@@ -246,6 +246,6 @@ and also uses TLS.
 .. literalinclude:: ../examples/tcp_auth_tls.py
    :language: python
 
-Further connection-level examples — ECDSA auth (``tcp_auth.py``) and
+Further legacy ILP examples — ECDSA auth (``tcp_auth.py``) and
 configuration loading (``http_from_conf.py``) — live in the repository's
 `examples directory <https://github.com/questdb/py-questdb-client/tree/main/examples>`_.
