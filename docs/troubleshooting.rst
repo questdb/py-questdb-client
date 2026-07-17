@@ -134,31 +134,36 @@ Logging outgoing messages
 To understand what data was sent to the server, you may log outgoing messages
 from Python.
 
+Over the text-based ILP transports, ``bytes(sender)`` exposes the pending
+payload (QWP transports encode at flush time, so it is empty there).
 Here's an example if you append rows to the ``Sender`` object:
 
 .. code-block:: python
 
+    import logging
     import textwrap
 
     with Sender.from_conf(...) as sender:
         # sender.row(...)
         # sender.row(...)
         # ...
-        pending = str(sender)
+        pending = bytes(sender).decode('utf-8', errors='replace')
         logging.info('About to flush:\n%s', textwrap.indent(pending, '    '))
         sender.flush()
 
-Alternatively, if you're constructing buffers explicitly:
+Alternatively, if you're constructing buffers explicitly through the
+legacy ``questdb.ingress`` shim:
 
 .. code-block:: python
 
+    import logging
     import textwrap
 
     buffer = sender.new_buffer()
     # buffer.row(...)
     # buffer.row(...)
     # ...
-    pending = str(buffer)
+    pending = bytes(buffer).decode('utf-8', errors='replace')
     logging.info('About to flush:\n%s', textwrap.indent(pending, '    '))
     sender.flush(buffer)
 

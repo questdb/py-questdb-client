@@ -511,13 +511,31 @@ potential data loss.
 
 .. _sender_tips_connection_reuse:
 
-Reuse Sender Objects
---------------------
+Reuse the connection-owning object
+----------------------------------
 
-Create longer-lived sender objects, as these are not automatically pooled.
+Over QWP/WebSocket the long-lived object is the :class:`QuestDB
+<questdb.QuestDB>` handle: create one per process and share it across
+threads — it owns the connection pools. Sender leases are cheap by design:
+borrow one per unit of work (one per thread), flush, and leave the ``with``
+block so the pooled connection is returned.
 
-Instead of creating a new sender object for every request, create a single
-sender object and reuse it across multiple requests.
+.. code-block:: python
+
+    import questdb
+
+    db = questdb.connect('ws::addr=localhost:9000;')  # long-lived
+
+    def handle_batch(rows):
+        # Short-lived lease over a pooled, already-open connection.
+        with db.sender() as sender:
+            for table, symbols, columns, at in rows:
+                sender.row(table, symbols=symbols, columns=columns, at=at)
+            sender.flush(wait=True)
+
+With the legacy ILP transports there is no pool: create longer-lived
+standalone ``Sender`` objects and reuse them across requests instead of
+constructing one per request.
 
 .. code-block:: python
 
