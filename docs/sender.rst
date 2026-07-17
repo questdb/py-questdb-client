@@ -42,12 +42,13 @@ The pooled sender holds an internal QWP buffer. A successful ``with`` block
 publishes pending rows when it returns the lease to the pool.
 
 The standalone :class:`Sender <questdb.Sender>` remains available as the
-lower-level multi-transport API for ILP over HTTP/TCP, QWP/UDP, and
-QWP/WebSocket. Its ``dataframe()`` method is fully supported on every
-transport; over ``ws::`` / ``wss::`` it opens (and closes) its own direct
-columnar connection per call, so batch accordingly or use
-:func:`questdb.connect` for repeated loads. See the :doc:`5.0 migration
-guide <migration>`.
+lower-level API for the legacy ILP transports (HTTP/TCP) and QWP/UDP. Over
+``ws::`` / ``wss::``, use :func:`questdb.connect` and ``db.sender()``
+instead — the standalone ws sender exists only for frame-level control
+(FSN receipts, manual progress; see :ref:`sender_qwp_ws`) that the pooled
+lease deliberately does not expose, and its ``dataframe()`` opens a fresh
+direct connection per call. See the :doc:`5.0 migration guide
+<migration>`.
 
 You can read more on :ref:`sender_preparing_data` and :ref:`sender_flushing`.
 
@@ -881,7 +882,12 @@ QWP/WebSocket
 -------------
 
 QWP/WebSocket (``ws``, or ``wss`` for TLS) is an acknowledged streaming
-transport. Each flush publishes a frame identified by a monotonically
+transport. For general ingestion use :func:`questdb.connect` and
+``db.sender()`` — the pooled path described throughout this guide. A
+*standalone* ``Sender.from_conf('ws::...')`` exists for frame-level
+control that the pooled lease deliberately omits, described below.
+
+Each flush publishes a frame identified by a monotonically
 increasing **frame sequence number (FSN)**; the server acknowledges frames as
 it durably applies them, so the client can confirm delivery.
 
