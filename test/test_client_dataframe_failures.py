@@ -64,6 +64,26 @@ def _table(n, str_len=0):
 @unittest.skipIf(pa is None, 'pyarrow not installed')
 class TestClientDataframeDirectFailures(unittest.TestCase):
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_mixed_decimal_object_column_raises_bad_dataframe(self):
+        from decimal import Decimal
+        df = pd.DataFrame({
+            'ts': pd.Series(
+                [pd.Timestamp('2024-01-01'), pd.Timestamp('2024-01-02')],
+                dtype='datetime64[us]'),
+            'amt': pd.Series([Decimal('1.5'), 'oops'], dtype=object),
+        })
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, 'Bad column') as raised:
+                    client.dataframe(df, table_name='t_mixed', at='ts')
+                self.assertIs(
+                    raised.exception.code,
+                    qi.QuestDBErrorCode.BadDataFrame)
+            stats = server.snapshot()
+        self.assertEqual(stats['binary_frames'], 0)
+
     def test_empty_unknown_length_stream_sends_nothing(self):
         schema = pa.schema([
             ('ts', pa.timestamp('us', tz='UTC')),

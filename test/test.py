@@ -38,6 +38,7 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
         TestWithDatabase,
         TestEgressWithDatabase,
         TestEgressPool,
+        TestEgressLeaks,
         TestColumnIngressNarrowTypes,
         TestColumnIngressFailover,
         TestEgressFailover,
@@ -88,6 +89,8 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV1
     from test_dataframe import TestPandasProtocolVersionV2
     from test_dataframe import TestPandasProtocolVersionV3
+    from test_dataframe import TestNaTScalarDatetime
+    from test_dataframe import TestColumnarPlanWithoutPyarrow
 elif pd is None:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
@@ -669,13 +672,107 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     at=qi.ServerTimestamp)
                 sender.flush()
             self.assertTrue(received.wait(5))
-            closer = threading.Thread(target=client.close)
+            closer = threading.Thread(target=client.close, daemon=True)
             closer.start()
             closer.join(10)
             self.assertFalse(
                 closer.is_alive(),
                 'close() must not deadlock against the handler thread')
             self.assertTrue(handler_done.wait(5))
+
+    def test_close_from_rejection_handler_as_primary_closer(self):
+        handler_done = threading.Event()
+
+        def on_rejection(error):
+            client.close()
+            handler_done.set()
+
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'close_flush_timeout_millis=0;')
+            client = qi.QuestDB.from_conf(
+                conf, error_handler=on_rejection)
+            with client.sender() as sender:
+                sender.row(
+                    'events', columns={'value': 1},
+                    at=qi.ServerTimestamp)
+                sender.flush()
+            self.assertTrue(
+                handler_done.wait(10),
+                'the handler must be able to run close() itself')
+            client.close()
+            with self.assertRaises(qi.QuestDBError):
+                client.sender()
+
+    def test_close_from_connection_listener_does_not_deadlock(self):
+        connected = threading.Event()
+        start_close = threading.Event()
+        listener_done = threading.Event()
+
+        def on_event(event):
+            connected.set()
+            if not start_close.wait(10):
+                return
+            # Give the main thread time to enter close() and block on
+            # joining this dispatcher thread before closing from here.
+            time.sleep(0.2)
+            client.close()
+            listener_done.set()
+
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;')
+            client = qi.QuestDB.from_conf(
+                conf, connection_listener=on_event)
+            with client.sender() as sender:
+                sender.row(
+                    'events', columns={'value': 1},
+                    at=qi.ServerTimestamp)
+                sender.flush(wait=True)
+            self.assertTrue(connected.wait(5))
+            start_close.set()
+            closer = threading.Thread(target=client.close, daemon=True)
+            closer.start()
+            closer.join(10)
+            self.assertFalse(
+                closer.is_alive(),
+                'close() must not deadlock against the listener thread')
+            self.assertTrue(listener_done.wait(5))
+
+    def test_connection_listener_exception_is_logged(self):
+        delivered = threading.Event()
+
+        def on_event(event):
+            delivered.set()
+            raise RuntimeError('listener boom')
+
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;')
+            with self.assertLogs('questdb', level='ERROR') as logs:
+                with qi.QuestDB.from_conf(
+                        conf, connection_listener=on_event) as client:
+                    with client.sender() as sender:
+                        sender.row(
+                            'events', columns={'value': 1},
+                            at=qi.ServerTimestamp)
+                        sender.flush(wait=True)
+                    self.assertTrue(
+                        delivered.wait(5),
+                        'the connection event must reach the listener')
+        self.assertTrue(
+            any('listener failed' in line for line in logs.output),
+            logs.output)
 
     def test_error_event_inbox_overflow_drops_oldest(self):
         """With the handler blocked and a 1-slot inbox, a continuous
@@ -684,6 +781,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
         Status 0x0C (not-writable) maps to the RetriableOther policy,
         which replays the frame with no backoff — every replay is
         rejected again, so events flow while the handler is blocked.
+        The stream is bounded by the native max_frame_rejections
+        default (4 strikes, then a terminal event): one event more than
+        the 3 a drop needs, so a lower default would starve this test.
         """
         release = threading.Event()
         first_delivered = threading.Event()
@@ -727,11 +827,42 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 finally:
                     release.set()
 
+    def test_standalone_sender_error_ring_overflow_counts_drops(self):
+        """A standalone ws sender's per-connection diagnostic ring
+        (``error_inbox_capacity``, minimum 16) must evict oldest un-polled
+        diagnostics and count them once a rejection storm outruns polling.
+        Status 0x0C replays each frame up to 4 strikes before its terminal
+        event, so 8 frames yield well over 16 diagnostics."""
+        with QwpAckServer(error_status=0x0C) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'error_inbox_capacity=16;'
+                'close_flush_timeout_millis=0;'
+                'reconnect_max_duration_millis=30000;')
+            sender = qi.Sender.from_conf(conf)
+            try:
+                sender.establish()
+                for i in range(8):
+                    sender.row(
+                        'events', columns={'value': i},
+                        at=qi.ServerTimestamp)
+                    sender.flush()
+                deadline = time.monotonic() + 15
+                while sender.error_events_dropped() < 1:
+                    self.assertLess(
+                        time.monotonic(), deadline,
+                        'ring overflow must count dropped diagnostics')
+                    time.sleep(0.01)
+            finally:
+                sender.close(False)
+
     def test_sender_pool_concurrent_borrow_flush(self):
         """Deterministic multi-thread exerciser for the sender pool:
         8 threads share a 2-connection pool while another thread reaps
         concurrently. Every flush must land exactly one frame and the
-        pool accounting must let close() finish promptly."""
+        pool accounting must let close() finish promptly. The client is
+        closed only once every thread is proven finished, so a wedged
+        worker fails the test instead of hanging close()."""
         n_threads = 8
         iterations = 25
         errors = []
@@ -745,43 +876,45 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'sender_pool_max=2;'
                 'pool_reap=manual;'
                 'acquire_timeout_ms=30000;')
-            with qi.QuestDB.from_conf(conf) as client:
-                def worker(thread_index):
-                    try:
-                        barrier.wait(30)
-                        for i in range(iterations):
-                            with client.sender() as sender:
-                                sender.row(
-                                    'events',
-                                    columns={'t': thread_index, 'i': i},
-                                    at=qi.ServerTimestamp)
-                                sender.flush(wait=True)
-                    except BaseException as e:
-                        errors.append(e)
+            client = qi.QuestDB.from_conf(conf)
 
-                def reaper():
-                    while not reap_stop.is_set():
-                        client.reap_idle()
-                        time.sleep(0.005)
+            def worker(thread_index):
+                try:
+                    barrier.wait(30)
+                    for i in range(iterations):
+                        with client.sender() as sender:
+                            sender.row(
+                                'events',
+                                columns={'t': thread_index, 'i': i},
+                                at=qi.ServerTimestamp)
+                            sender.flush(wait=True)
+                except BaseException as e:
+                    errors.append(e)
 
-                threads = [
-                    threading.Thread(target=worker, args=(t,))
-                    for t in range(n_threads)]
-                reap_thread = threading.Thread(target=reaper)
-                for thread in threads:
-                    thread.start()
-                reap_thread.start()
-                for thread in threads:
-                    thread.join(90)
-                reap_stop.set()
-                reap_thread.join(10)
-                self.assertFalse(
-                    any(t.is_alive() for t in threads + [reap_thread]),
-                    'worker or reaper thread did not finish')
-                self.assertEqual(errors, [])
-                self.assertEqual(
-                    server.wait_binary_frames_settled(),
-                    n_threads * iterations)
+            def reaper():
+                while not reap_stop.is_set():
+                    client.reap_idle()
+                    time.sleep(0.005)
+
+            threads = [
+                threading.Thread(target=worker, args=(t,), daemon=True)
+                for t in range(n_threads)]
+            reap_thread = threading.Thread(target=reaper, daemon=True)
+            for thread in threads:
+                thread.start()
+            reap_thread.start()
+            for thread in threads:
+                thread.join(90)
+            reap_stop.set()
+            reap_thread.join(10)
+            self.assertFalse(
+                any(t.is_alive() for t in threads + [reap_thread]),
+                'worker or reaper thread did not finish')
+            self.assertEqual(errors, [])
+            client.close()
+            self.assertEqual(
+                server.wait_binary_frames_settled(),
+                n_threads * iterations)
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
 

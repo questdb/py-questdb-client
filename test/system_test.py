@@ -3137,6 +3137,19 @@ class TestEgressPool(unittest.TestCase):
                 f'expected 1 idle reader cached across 5 queries; '
                 f'got in_use={in_use}, idle={idle}')
 
+    def test_server_info_recycles_pooled_reader(self):
+        """server_info() borrows a pristine reader (no cursor, no wire
+        traffic) and must return it to the pool, not drop it."""
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            for _ in range(3):
+                self.assertIsNotNone(client.server_info())
+                in_use, idle = qi._debug_egress_pool_stats(client)
+                self.assertEqual(in_use, 0)
+                self.assertEqual(
+                    idle, 1,
+                    'server_info() must recycle its pristine reader; '
+                    f'got in_use={in_use}, idle={idle}')
+
     # ------------------------------------------------------------------
     # Arc<DbInner> lifeline — silent UAF if it regresses
     # ------------------------------------------------------------------
@@ -3721,6 +3734,10 @@ class TestEgressLeaks(unittest.TestCase):
             import psutil  # noqa: F401
         except ImportError:
             self.skipTest('psutil not installed')
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('pyarrow not installed')
 
     def _conf(self, **extra):
         conf = (f'ws::addr={self.qdb_plain.host}:'

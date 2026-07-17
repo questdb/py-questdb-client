@@ -200,6 +200,7 @@ class QwpAckServer:
             except (ssl.SSLError, OSError):
                 with self._lock:
                     self.tls_handshake_failures += 1
+                    self.finished_count += 1
                 try:
                     conn.close()
                 except OSError:

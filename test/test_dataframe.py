@@ -3004,6 +3004,19 @@ class TestNaTScalarDatetime(unittest.TestCase):
                     ValueError, 'NaT is not a valid timestamp'):
                 cls.from_datetime(pd.NaT)
 
+    def test_row_at_nat_raises_value_error(self):
+        buf = qi.Buffer(protocol_version=2)
+        with self.assertRaisesRegex(
+                ValueError, 'NaT is not a valid timestamp'):
+            buf.row('t', columns={'x': 1}, at=pd.NaT)
+
+    def test_dataframe_at_nat_raises(self):
+        buf = qi.Buffer(protocol_version=2)
+        df = pd.DataFrame({'x': [1]})
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'NaT is not a valid timestamp'):
+            buf.dataframe(df, table_name='t', at=pd.NaT)
+
 
 class TestColumnarPlanWithoutPyarrow(unittest.TestCase):
     """The columnar planner's pyarrow-optional fallbacks, exercised in a
