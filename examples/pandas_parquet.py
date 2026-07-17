@@ -1,5 +1,4 @@
 import questdb
-from questdb import Sender
 import pandas as pd
 
 
@@ -35,12 +34,11 @@ def example(host: str = 'localhost', port: int = 9000):
     filename = write_parquet_file()
 
     df = pd.read_parquet(filename)
-    with Sender.from_conf(f"http::addr={host}:{port};") as sender:
-        # Ingress: publish a Pandas DataFrame into QuestDB.
-        # Note: Table name is looked up from the dataframe's index name.
-        sender.dataframe(df, at='ts')
-
     with questdb.connect(f"ws::addr={host}:{port};") as db:
+        # Ingress: bulk-load a Pandas DataFrame into QuestDB.
+        # Note: Table name is looked up from the dataframe's index name.
+        db.dataframe(df, at='ts')
+
         # Egress: query QuestDB and materialise the result as Pandas.
         with db.query(
                 "SELECT x AS charger_id, "

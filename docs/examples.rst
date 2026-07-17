@@ -76,14 +76,12 @@ For details on all options, see the
 The next example shows some more advanced features inserting data from Pandas
 and running a generated query into Pandas.
 
-* The data is sent to multiple tables.
-
-* It uses the ``pd.Categorical`` type to determine the table to insert and also
-  uses it for the sensor name.
+* The data is sent to multiple tables: the columnar path loads one table
+  per call, so the frame is split by its table-naming ``pd.Categorical``
+  column and each group is bulk-loaded with its own
+  :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` call.
 
 * Columns of type ``pd.Categorical`` are sent as ``SYMBOL`` types.
-
-* The ``at`` parameter is specified using a column index: -1 is the last column.
 
 .. literalinclude:: ../examples/pandas_advanced.py
    :language: python

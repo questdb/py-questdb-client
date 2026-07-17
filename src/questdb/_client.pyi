@@ -1132,6 +1132,11 @@ class QuestDB:
         or the explicit ``ServerTimestamp`` sentinel to let the server
         assign each row's timestamp on arrival.
 
+        The columnar path loads one table per call: a fixed ``table_name``
+        is required and ``table_name_col`` raises
+        :class:`UnsupportedDataFrameShapeError` — split multi-table frames
+        (e.g. ``df.groupby(col)``) and load each group.
+
         ``df`` accepts any of:
 
         - **pandas** ``pandas.DataFrame`` (NumPy-backed columns route

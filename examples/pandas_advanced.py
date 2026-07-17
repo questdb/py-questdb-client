@@ -1,5 +1,5 @@
 import questdb
-from questdb import Sender, QuestDBError
+from questdb import QuestDBError
 
 import sys
 import pandas as pd
@@ -19,15 +19,17 @@ def example(host: str = 'localhost', port: int = 9000):
                 pd.Timestamp('2022-08-06 07:35:23.189062'),
                 pd.Timestamp('2022-08-06 07:35:23.189062')]})
     try:
-        with Sender.from_conf(f"http::addr={host}:{port};") as sender:
-            # Ingress: publish a Pandas DataFrame into QuestDB.
-            sender.dataframe(
-                df,
-                table_name_col='metric',  # Table name from 'metric' column.
-                symbols='auto',  # Category columns as SYMBOL. (Default)
-                at=-1)  # Last column contains the designated timestamps.
-
         with questdb.connect(f"ws::addr={host}:{port};") as db:
+            # Ingress: one DataFrame destined for multiple tables.
+            # The columnar path loads one table per call, so split by the
+            # table-naming column and bulk-load each group.
+            for metric, group in df.groupby('metric', observed=True):
+                db.dataframe(
+                    group.drop(columns=['metric']),
+                    table_name=str(metric),
+                    symbols='auto',  # Category columns as SYMBOL. (Default)
+                    at='ts')
+
             # Egress: query QuestDB and materialise the result as Pandas.
             with db.query(
                     "SELECT x AS sample_id, "

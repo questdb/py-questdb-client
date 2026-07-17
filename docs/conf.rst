@@ -466,7 +466,7 @@ Consider the following example:
 
     from questdb import Sender, TimestampNanos
     import time
-    conf = "http::addr=localhost:9009;auto_flush_interval=1000;"
+    conf = "http::addr=localhost:9000;auto_flush_interval=1000;"
     with Sender.from_conf(conf) as sender:
         # row 1
         sender.row('table1', columns={'val': 1}, at=TimestampNanos.now())

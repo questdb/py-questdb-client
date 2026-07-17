@@ -170,13 +170,16 @@ Unlike other column types, ``DECIMAL`` columns cannot be auto-created and must b
 and :ref:`troubleshooting guide <troubleshooting-flushing>` for more details.
 
 To send decimal values, use Python's :class:`decimal.Decimal` type in the
-``row`` method or pandas DataFrames:
+``row`` method or DataFrames (decimal support is negotiated automatically
+over ``ws`` / ``wss``):
 
 .. code-block:: python
 
     from decimal import Decimal
-    from questdb import Sender, TimestampNanos
+
     import pandas as pd
+    import questdb
+    from questdb import TimestampNanos
 
     # CREATE TABLE prices (
     #     symbol SYMBOL,
@@ -184,32 +187,38 @@ To send decimal values, use Python's :class:`decimal.Decimal` type in the
     #     timestamp TIMESTAMP_NS
     # ) TIMESTAMP(timestamp) PARTITION BY DAY;
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'prices',
-            symbols={'symbol': 'BTC-USD'},
-            columns={'price': Decimal('50123.456789')},
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.sender() as sender:
+            sender.row(
+                'prices',
+                symbols={'symbol': 'BTC-USD'},
+                columns={'price': Decimal('50123.456789')},
+                at=TimestampNanos.now())
+            sender.flush(wait=True)
+
+        db.dataframe(
+            pd.DataFrame({
+                # Categorical (or string[pyarrow]) columns can be sent as
+                # SYMBOL on the columnar path.
+                'symbol': pd.Categorical(['BTC-USD', 'ETH-USD']),
+                'price': [Decimal('50123.456789'), Decimal('2615.123456')],
+            }),
+            table_name='prices',
+            symbols=['symbol'],
             at=TimestampNanos.now())
-        
-        df = pd.DataFrame({
-            'symbol': ['BTC-USD', 'ETH-USD'],
-            'price': [Decimal('50123.456789'), Decimal('2615.123456')]
-        })
-        sender.dataframe(df, table_name='prices', symbols=['symbol'],
-                        at=TimestampNanos.now())
 
 When using pandas DataFrames, you can also use PyArrow decimal types for better
 performance:
 
 .. code-block:: python
 
+    import pandas as pd
     import pyarrow as pa
 
     df = pd.DataFrame({
-        'symbol': ['BTC-USD', 'ETH-USD'],
+        'symbol': pd.Categorical(['BTC-USD', 'ETH-USD']),
         'price': pd.Series([50123.456789, 2615.123456],
-                          dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
+                           dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
     })
 
 Populating Designated Timestamps
@@ -260,15 +269,17 @@ received by the server.
 
 .. code-block:: python
 
-    from questdb import Sender, ServerTimestamp
+    import questdb
+    from questdb import ServerTimestamp
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
-            at=ServerTimestamp)  # Legacy feature, not recommended.
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.sender() as sender:
+            sender.row(
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={'price': 2615.54, 'amount': 0.00044},
+                at=ServerTimestamp)  # Legacy feature, not recommended.
+            sender.flush(wait=True)
 
 .. warning::
 
@@ -295,23 +306,28 @@ send any pending data immediately.
 
 .. code-block:: python
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
-            at=TimestampNanos.now())
-        sender.flush()
-        sender.row(
-            'trades',
-            symbols={'symbol': 'BTC-USD', 'side': 'sell'},
-            columns={'price': 39269.98, 'amount': 0.001},
-            at=TimestampNanos.now())
-        sender.flush()
+    import questdb
+    from questdb import TimestampNanos
 
-Note that the last ``sender.flush()`` is entirely optional as flushing
-also happens at the end of the ``with`` block.
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.sender() as sender:
+            sender.row(
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={'price': 2615.54, 'amount': 0.00044},
+                at=TimestampNanos.now())
+            sender.flush()
+            sender.row(
+                'trades',
+                symbols={'symbol': 'BTC-USD', 'side': 'sell'},
+                columns={'price': 39269.98, 'amount': 0.001},
+                at=TimestampNanos.now())
+            sender.flush()
+
+Note that the last ``sender.flush()`` is entirely optional as the pooled
+sender publishes any pending rows when the ``with`` block returns it to
+the pool (pass ``wait=True`` on the final flush to also await the server
+acknowledgement).
 
 .. _sender_auto_flush:
 
@@ -383,6 +399,8 @@ rows as a single transaction.
 **Transactions are limited to a single table.**
 
 .. code-block:: python
+
+    from questdb import Sender, TimestampNanos
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
@@ -574,7 +592,9 @@ deprecated ``questdb.ingress`` compatibility shim:
         columns={'price': 2615.54, 'amount': 0.00044},
         at=TimestampNanos.now())
 
-    conf = 'http::addr=localhost:9000;'
+    # Pin the sender to the buffer's protocol version: HTTP would otherwise
+    # negotiate a newer one and refuse the explicitly-versioned buffer.
+    conf = 'http::addr=localhost:9000;protocol_version=2;'
     with Sender.from_conf(conf) as sender:
         sender.flush(buf, transactional=True)
 

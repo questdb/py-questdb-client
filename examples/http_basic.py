@@ -2,9 +2,13 @@ from questdb import Sender, QuestDBError, TimestampNanos
 import sys
 
 
-def example(host: str = 'localhost', port: int = 9009):
+def example(host: str = 'localhost', port: int = 9000, token: str = None):
     try:
-        conf = f'https::addr={host}:{port};token=the_secure_token;'
+        if token is not None:
+            # Bearer-token auth runs over TLS.
+            conf = f'https::addr={host}:{port};token={token};'
+        else:
+            conf = f'http::addr={host}:{port};'
         with Sender.from_conf(conf) as sender:
             # Record with provided designated timestamp (using the 'at' param)
             # Notice the designated timestamp is expected in Nanoseconds,

@@ -25,6 +25,9 @@ Existing row code can move from a standalone ``Sender`` to a pooled one:
 
 .. code-block:: python
 
+    import questdb
+    from questdb import Sender, ServerTimestamp
+
     # Before: a standalone multi-transport sender.
     with Sender.from_conf('ws::addr=localhost:9000;') as sender:
         sender.row('weather', columns={'temperature': 21.5},
@@ -59,6 +62,14 @@ entry point is :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` on the
 handle; the sender variants exist as conveniences and share the same path:
 
 .. code-block:: python
+
+    import pandas as pd
+    import questdb
+    from questdb import Sender, ServerTimestamp
+
+    frame = pd.DataFrame({
+        't': [21.5, 20.9],
+        'ts': pd.to_datetime(['2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z'])})
 
     with questdb.connect('ws::addr=localhost:9000;') as db:
         # Recommended — on the handle:

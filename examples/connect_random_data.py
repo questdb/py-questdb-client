@@ -51,4 +51,6 @@ def example(host: str = 'localhost', port: int = 9000, total_rows=None):
 
 
 if __name__ == '__main__':
-    example()
+    # Bounded run so the example terminates; pass total_rows=None to run
+    # until Ctrl^C, as a real ticking-data loop would.
+    example(total_rows=25)

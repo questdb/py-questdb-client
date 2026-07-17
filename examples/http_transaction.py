@@ -17,7 +17,7 @@ def example():
                     'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
             txn.dataframe(
                 df,
-                symbols=['pair'],
+                symbols=['symbol', 'side'],
                 at='timestamp')
 
             # You can write additional dataframes or rows,
