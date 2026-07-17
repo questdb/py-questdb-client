@@ -540,12 +540,14 @@ cdef enum:
     _ARROW_METADATA_CLONE_CAP = 1 << 20
 
 
-cdef size_t _arrow_metadata_byte_len(const char* md, size_t max_len) noexcept:
+cdef size_t _arrow_metadata_byte_len(
+        const char* md, size_t max_len, int32_t* kept_n) noexcept:
     cdef int32_t n
     cdef int32_t klen
     cdef int32_t vlen
     cdef size_t pos
     cdef int32_t i
+    kept_n[0] = 0
     if max_len < sizeof(int32_t):
         return 0
     memcpy(&n, md, sizeof(int32_t))
@@ -565,6 +567,7 @@ cdef size_t _arrow_metadata_byte_len(const char* md, size_t max_len) noexcept:
         if vlen < 0 or <size_t>vlen > max_len - pos - sizeof(int32_t):
             return pos
         pos += sizeof(int32_t) + <size_t>vlen
+        kept_n[0] = i + 1
     return pos
 
 
@@ -599,6 +602,7 @@ cdef int _arrow_schema_deep_clone(const ArrowSchema* src, ArrowSchema* dst) noex
     cdef size_t format_len
     cdef size_t name_len
     cdef size_t metadata_len
+    cdef int32_t kept_n
     cdef int64_t i
     cdef ArrowSchema* child
     memset(dst, 0, sizeof(ArrowSchema))
@@ -620,12 +624,16 @@ cdef int _arrow_schema_deep_clone(const ArrowSchema* src, ArrowSchema* dst) noex
         memcpy(<void*>dst.name, src.name, name_len + 1)
     if src.metadata != NULL:
         metadata_len = _arrow_metadata_byte_len(
-            src.metadata, _ARROW_METADATA_CLONE_CAP)
+            src.metadata, _ARROW_METADATA_CLONE_CAP, &kept_n)
         dst.metadata = <const char*>malloc(metadata_len)
         if dst.metadata == NULL:
             _arrow_schema_clone_release(dst)
             return -1
         memcpy(<void*>dst.metadata, src.metadata, metadata_len)
+        # Keep the cloned block self-consistent: its leading key/value count
+        # must never exceed the entries actually copied, or a downstream
+        # consumer would read past the allocation.
+        memcpy(<void*>dst.metadata, &kept_n, sizeof(int32_t))
     if src.n_children > 0:
         dst.children = <ArrowSchema**>calloc(
             <size_t>src.n_children, sizeof(ArrowSchema*))

@@ -675,12 +675,14 @@ cdef int64_t datetime_to_nanos(cp_datetime dt):
     Convert a `datetime.datetime` to nanoseconds since the epoch.
     """
     cdef int64_t micros = datetime_to_micros(dt)
-    if (micros >= <int64_t>9_223_372_036_000_000 or
-            micros < <int64_t>-9_223_372_036_000_000):
+    # INT64_MAX // 1000 == 9_223_372_036_854_775 is the largest microsecond
+    # value whose nanosecond product still fits in an int64.
+    if (micros > <int64_t>9_223_372_036_854_775 or
+            micros < <int64_t>-9_223_372_036_854_775):
         raise ValueError(
             'datetime is out of range for a nanosecond timestamp: '
-            'must be between 1677-09-21T00:12:44Z and '
-            '2262-04-11T23:47:16Z.')
+            'must be between 1677-09-21T00:12:43.145225Z and '
+            '2262-04-11T23:47:16.854775Z.')
     return micros * 1000
 
 
@@ -1834,6 +1836,11 @@ cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     if millis < 0:
         raise ValueError(
             f'Negative timedelta not allowed: {timedelta!r}.')
+    if millis == 0 and (
+            timedelta.days or timedelta.seconds or timedelta.microseconds):
+        # Never silently turn a positive finite duration into 0ms, which
+        # several options interpret as "no deadline".
+        return 1
     return millis
 
 
@@ -1891,7 +1898,7 @@ cdef void_int _parse_auto_flush(
             auto_flush_rows = False
         else:
             auto_flush_rows = int(auto_flush_rows)
-    elif auto_flush_rows is False or isinstance(auto_flush_rows, int):
+    elif auto_flush_rows is False or _is_int_not_bool(auto_flush_rows):
         pass
     else:
         raise TypeError(
@@ -1907,7 +1914,7 @@ cdef void_int _parse_auto_flush(
             auto_flush_bytes = False
         else:
             auto_flush_bytes = int(auto_flush_bytes)
-    elif auto_flush_bytes is False or isinstance(auto_flush_bytes, int):
+    elif auto_flush_bytes is False or _is_int_not_bool(auto_flush_bytes):
         pass
     else:
         raise TypeError(
@@ -1923,7 +1930,7 @@ cdef void_int _parse_auto_flush(
             auto_flush_interval = False
         else:
             auto_flush_interval = int(auto_flush_interval)
-    elif auto_flush_interval is False or isinstance(auto_flush_interval, int):
+    elif auto_flush_interval is False or _is_int_not_bool(auto_flush_interval):
         pass
     elif isinstance(auto_flush_interval, cp_timedelta):
         auto_flush_interval = _timedelta_to_millis(auto_flush_interval)
@@ -4295,7 +4302,7 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
         elif kind == 'geohash':
             gh = _geohash_override_dtype(col.setup.source)
             bits = meta.get('precision_bits') or 0
-            if gh != -1 and 1 <= bits <= 60:
+            if gh != -1 and _is_int_not_bool(bits) and 1 <= bits <= 60:
                 col.setup.has_override = True
                 col.setup.override_dtype = <column_sender_numpy_dtype>gh
                 col.setup.override_geohash_bits = <uint8_t>bits
@@ -4947,7 +4954,7 @@ cdef void_int _capsule_consume_stream(
                 conn, c_table_name, &batch, c_schema, c_ts_column_ptr,
                 at_scalar_set, at_scalar_nanos,
                 c_overrides, c_overrides_len,
-                deferred_since_sync[0] > 0, committed_prefix,
+                True, committed_prefix,
                 deferred_since_sync)
             any_flushed[0] = True
             deferred_since_sync[0] += 1
@@ -5721,7 +5728,7 @@ cdef void_int _dataframe_numpy_publish(
                 _dataframe_columnar_flush(
                     conn,
                     chunk,
-                    row_offset != 0,
+                    True,
                     committed_prefix)
                 flushed = True
                 row_offset += chunk_rows
@@ -6919,7 +6926,12 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
         if tls_ca is not None:
-            c_tls_ca = TlsCa.parse(tls_ca).c_value
+            try:
+                c_tls_ca = TlsCa.parse(tls_ca).c_value
+            except ValueError:
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
+                    f'"tls_ca" has invalid value: {tls_ca!r}')
             if not line_sender_opts_tls_ca(self._opts, c_tls_ca, &err):
                 raise c_err_to_py(err)
         elif protocol.tls_enabled and tls_roots is None:
@@ -7083,6 +7095,10 @@ cdef class Sender:
         b = qdb_pystr_buf_new()
         try:
             protocol = Protocol.parse(protocol)
+            if protocol is None:
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
+                    '"protocol" is required and cannot be None.')
             c_protocol = protocol.c_value
             if PyLong_CheckExact(<PyObject*>port):
                 port_str = str(port)
@@ -7613,7 +7629,7 @@ cdef class Sender:
     def row(self,
             table_name: str,
             *,
-            symbols: Optional[Dict[str, str]]=None,
+            symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
                 Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray, Decimal]]]=None,
@@ -7816,6 +7832,8 @@ cdef class Sender:
         cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
         cdef bint ok = False
 
+        self._check_not_in_own_callback('flush')
+
         if self._in_txn:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -7867,6 +7885,17 @@ cdef class Sender:
             else:
                 raise c_err_to_py(err)
 
+    cdef inline void_int _check_not_in_own_callback(self, str method) except -1:
+        # The QWP/WebSocket error handler runs synchronously on the flushing
+        # thread while the native sender is borrowed; reentering it from the
+        # handler would alias or free the live sender and abort the process.
+        if _on_dispatch_thread_for(
+                self._error_handler, self._connection_listener):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f'{method}() cannot be called from within this sender\'s own '
+                'error_handler or connection_listener callback.')
+
     cdef inline void_int _check_qwp_ws(self, str method) except -1:
         if self._impl == NULL:
             raise QuestDBError(
@@ -7876,6 +7905,7 @@ cdef class Sender:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f'{method}() is only supported for QWP/WebSocket senders.')
+        self._check_not_in_own_callback(method)
 
     cdef inline void_int _check_buffer_protocol(self, Buffer buffer) except -1:
         cdef bint need_qwp = (
@@ -8174,6 +8204,7 @@ cdef class Sender:
             For QWP/WebSocket, this also drains already-published frames before
             closing.
         """
+        self._check_not_in_own_callback('close')
         try:
             if (flush and (self._impl != NULL) and
                     (not line_sender_must_close(self._impl))):

@@ -2141,6 +2141,73 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_standalone_ws_sender_dataframe_lands_rows(self):
+        """A standalone ws ``Sender.dataframe()`` bulk-loads through a
+        poolless direct connection opened from the sender's own config."""
+        table_name = 't_standalone_ws_df_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} ('
+                'ts TIMESTAMP, source SYMBOL, value LONG'
+                ') TIMESTAMP(ts) PARTITION BY DAY WAL')
+            frame = pd.DataFrame({
+                'ts': pd.to_datetime([1_700_000_003_000_000], unit='us'),
+                'source': pd.Categorical(['standalone']),
+                'value': np.array([7], dtype=np.int64),
+            })
+            with qi.Sender.from_conf(self._conf()) as sender:
+                sender.dataframe(
+                    frame,
+                    table_name=table_name,
+                    symbols=['source'],
+                    at='ts')
+            self.qdb_plain.retry_check_table(table_name, min_rows=1)
+            resp = self._exec(f'SELECT source, value FROM {table_name}')
+            self.assertEqual(resp['dataset'], [['standalone', 7]])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_pooled_sender_dataframe_lands_rows(self):
+        """``PooledSender.dataframe()`` borrows a direct connection from the
+        pool for the call and commits on return; the lease stays usable for
+        row-buffered writes afterwards."""
+        table_name = 't_pooled_ws_df_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} ('
+                'ts TIMESTAMP, source SYMBOL, value LONG'
+                ') TIMESTAMP(ts) PARTITION BY DAY WAL')
+            frame = pd.DataFrame({
+                'ts': pd.to_datetime([1_700_000_004_000_000], unit='us'),
+                'source': pd.Categorical(['pooled']),
+                'value': np.array([8], dtype=np.int64),
+            })
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                with client.sender() as sender:
+                    sender.dataframe(
+                        frame,
+                        table_name=table_name,
+                        symbols=['source'],
+                        at='ts')
+                    sender.row(
+                        table_name,
+                        symbols={'source': 'pooled'},
+                        columns={'value': 9},
+                        at=qi.TimestampNanos(1_700_000_005_000_000_000))
+                    sender.flush(wait=True)
+            self.qdb_plain.retry_check_table(table_name, min_rows=2)
+            resp = self._exec(
+                f'SELECT source, value FROM {table_name} ORDER BY value')
+            self.assertEqual(resp['dataset'], [['pooled', 8], ['pooled', 9]])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_type_coverage_round_trip(self):
         """One row, every QuestDB type we can express in SQL, read back
         via ``QuestDB.query``. Single WAL apply, one query, per-column

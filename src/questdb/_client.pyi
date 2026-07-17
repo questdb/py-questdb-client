@@ -1592,7 +1592,7 @@ class Sender:
         self,
         table_name: str,
         *,
-        symbols: Optional[Dict[str, str]] = None,
+        symbols: Optional[Dict[str, Optional[str]]] = None,
         columns: Optional[
             Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
         ] = None,

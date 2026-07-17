@@ -294,9 +294,10 @@ appropriate table-level deduplication guarantee.
 Build & dependencies
 ~~~~~~~~~~~~~~~~~~~~~~
 
-- The bundled ``c-questdb-client`` native library is upgraded to 7.0.0,
-  providing the QWP transports, the columnar ``column_sender`` API and the
-  ``line_reader`` query API that back the new features above.
+- The bundled ``c-questdb-client`` native library is upgraded to the 7.0.0
+  development series (pinned at ``6.1.0-441-g2158029``), providing the QWP
+  transports, the columnar ``column_sender`` API and the ``line_reader``
+  query API that back the new features above.
 - ``numpy>=1.21.0`` is now a hard runtime dependency (previously it was
   pulled in only via the ``dataframe`` extra).
 - **pyarrow is now optional.** It is imported lazily, only when actually

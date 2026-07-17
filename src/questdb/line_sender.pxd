@@ -23,7 +23,7 @@
 ################################################################################
 
 from libc.stdint cimport int64_t, uint16_t, uint64_t, uint8_t, uint32_t, \
-    int32_t, int8_t, int16_t
+    int32_t, int8_t, int16_t, uintptr_t, intptr_t
 
 from .arrow_c_data_interface cimport ArrowArray, ArrowArrayStream, ArrowSchema
 
@@ -341,7 +341,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_buffer* buffer,
         line_sender_column_name name,
         size_t rank,
-        const size_t* shapes,
+        const uintptr_t* shapes,
         const double* data,
         size_t data_len,
         line_sender_error** err_out
@@ -351,8 +351,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_buffer* buffer,
         line_sender_column_name name,
         size_t rank,
-        const size_t* shapes,
-        const ssize_t* strides,
+        const uintptr_t* shapes,
+        const intptr_t* strides,
         const double* data,
         size_t data_len,
         line_sender_error** err_out
@@ -1005,7 +1005,7 @@ cdef extern from "questdb/ingress/column_sender.h":
     column_sender_arrow_import* column_sender_arrow_import_new(
         ArrowArray* array,
         const ArrowSchema* schema,
-        column_sender_symbol_mode symbol_mode,
+        uint32_t symbol_mode,
         line_sender_error** err_out
         ) noexcept nogil
 

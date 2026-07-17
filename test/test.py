@@ -896,6 +896,64 @@ class TestQwpWebSocketApi(unittest.TestCase):
             finally:
                 sender.close(False)
 
+    def test_standalone_sender_method_reentrancy_from_handler_raises(self):
+        """In manual-progress mode a standalone ws sender delivers its error
+        handler synchronously on the driving thread. Calling any sender method
+        from inside that handler must raise QuestDBError(InvalidApiCall) rather
+        than reenter the live native sender (which would abort the
+        interpreter)."""
+        holder = []
+        captured = []
+        fired = threading.Event()
+
+        def on_error(error):
+            sender = holder[0]
+            for call in (
+                    sender.published_fsn,
+                    sender.acked_fsn,
+                    sender.drive_once,
+                    sender.flush,
+                    sender.close):
+                try:
+                    call()
+                except qi.QuestDBError as e:
+                    captured.append(e.code)
+                else:
+                    captured.append(None)
+            fired.set()
+
+        with QwpAckServer(error_status=0x0C) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'qwp_ws_progress=manual;'
+                'close_flush_timeout_millis=0;'
+                'reconnect_max_duration_millis=30000;')
+            sender = qi.Sender.from_conf(conf, error_handler=on_error)
+            holder.append(sender)
+            try:
+                sender.establish()
+                sender.row(
+                    'events', columns={'value': 1}, at=qi.ServerTimestamp)
+                sender.flush()
+                deadline = time.monotonic() + 15
+                while not fired.is_set():
+                    self.assertLess(
+                        time.monotonic(), deadline,
+                        'the error handler must fire')
+                    try:
+                        sender.drive_once()
+                    except qi.QuestDBError:
+                        pass
+                    time.sleep(0.01)
+            finally:
+                sender.close(False)
+
+        self.assertTrue(captured, 'the handler must run reentrant calls')
+        self.assertTrue(
+            all(code is qi.QuestDBErrorCode.InvalidApiCall
+                for code in captured),
+            captured)
+
     def test_sender_pool_concurrent_borrow_flush(self):
         """Deterministic multi-thread exerciser for the sender pool:
         8 threads share a 2-connection pool while another thread reaps
@@ -3247,8 +3305,10 @@ class TestIngressShim(unittest.TestCase):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             import questdb.ingress as ingress
-        self.assertTrue(any(
-            issubclass(w.category, DeprecationWarning) for w in caught))
+        deprecations = [
+            w for w in caught
+            if issubclass(w.category, DeprecationWarning)]
+        self.assertEqual(len(deprecations), 1)
         self.assertIs(ingress.IngressError, qi.QuestDBError)
         self.assertIs(ingress.IngressErrorCode, qi.QuestDBErrorCode)
         self.assertIs(ingress.Sender, qi.Sender)
