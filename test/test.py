@@ -1519,6 +1519,32 @@ class TestQwpWebSocketApi(unittest.TestCase):
                             9000,
                             **{option: value})
 
+    def test_duration_options_reject_negative_timedelta(self):
+        options = (
+            'auth_timeout',
+            'retry_timeout',
+            'retry_max_backoff',
+            'request_timeout',
+            'auto_flush_interval',
+        )
+        for option in options:
+            with self.subTest(option=option):
+                with self.assertRaisesRegex(
+                        ValueError, 'Negative timedelta not allowed'):
+                    qi.Sender(
+                        qi.Protocol.Http,
+                        '127.0.0.1',
+                        9000,
+                        **{option: datetime.timedelta(milliseconds=-5)})
+
+    def test_sub_millisecond_duration_is_not_truncated_to_zero(self):
+        sender = qi.Sender(
+            qi.Protocol.Http,
+            '127.0.0.1',
+            9000,
+            auth_timeout=datetime.timedelta(microseconds=500))
+        sender.close(False)
+
     def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):
         sender = qi.Sender.from_conf(
             'ws::addr=localhost:9000;sf_dir=/tmp/qdb;;sf;')

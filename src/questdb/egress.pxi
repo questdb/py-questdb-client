@@ -1208,6 +1208,11 @@ cdef object _numpy_varlen_chunk(
                 <int>kind, row_count))
     offsets = cd.var_offsets
     data = cd.var_data
+    if data == NULL and cd.var_data_len > 0:
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
+            'column kind 0x{:02X} has {} rows but no data buffer'.format(
+                <int>kind, row_count))
     validity = cd.validity
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
