@@ -42,9 +42,13 @@ Breaking changes
   string, :func:`questdb.connect` also accepts the equivalent keywords
   (``host=``, ``port=``, ``tls=`` plus any further settings).
 - The sender borrowed from the pool is a lean pooled row sender: it
-  exposes ``row()``, ``dataframe()``, ``flush()``, ``wait()`` and
-  ``close()``, and is not a ``Sender`` subclass — the standalone-only API
-  such as ``establish()`` or FSN tracking simply does not exist on it. One
+  exposes ``row()``, ``dataframe()``, ``flush()``, ``wait()``, the FSN
+  delivery receipts (``flush_and_get_fsn``,
+  ``flush_and_keep_and_get_fsn``, ``published_fsn`` / ``acked_fsn``,
+  ``await_acked_fsn``), lease-scoped rejection polling (``poll_error``,
+  ``error_events_dropped``) and ``close()``, and is not a ``Sender``
+  subclass — the standalone-only API such as ``establish()``, manual
+  progress or explicit buffers simply does not exist on it. One
   concurrency rule applies everywhere: borrow one sender per thread.
   The pooled sender has no auto-flush: flushing is always explicit
   (``flush()``, or ``flush(wait=True)`` for the server acknowledgement).

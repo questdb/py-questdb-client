@@ -476,6 +476,68 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QuestDB.from_conf(
                 'ws::addr=127.0.0.1:1;', error_handler=42)
 
+    def test_pooled_sender_fsn_receipts(self):
+        with QwpAckServer(ack_delay_s=0.2) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    self.assertIsNone(sender.published_fsn())
+                    self.assertIsNone(sender.flush_and_get_fsn())
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    fsn = sender.flush_and_get_fsn()
+                    self.assertEqual(fsn, 0)
+                    self.assertEqual(sender.published_fsn(), 0)
+                    self.assertFalse(sender.await_acked_fsn(fsn, 25))
+                    self.assertTrue(sender.await_acked_fsn(fsn, 10_000))
+                    self.assertEqual(sender.acked_fsn(), 0)
+                    self.assertTrue(sender.await_acked_fsn(fsn, 25))
+                    sender.row(
+                        'events', columns={'value': 2},
+                        at=qi.ServerTimestamp)
+                    keep_fsn = sender.flush_and_keep_and_get_fsn()
+                    self.assertEqual(keep_fsn, 1)
+                    self.assertGreater(len(sender), 0)
+                    self.assertTrue(sender.await_acked_fsn(keep_fsn, 10_000))
+                    sender.close(flush=False)
+                    with self.assertRaises(TypeError):
+                        sender.await_acked_fsn('0')
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 2)
+
+    def test_pooled_sender_poll_error_is_lease_scoped(self):
+        with QwpAckServer(error_status=0x09) as server:  # retriable
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'reconnect_max_duration_millis=200;'
+                'close_flush_timeout_millis=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    self.assertIsNone(sender.poll_error())
+                    self.assertEqual(sender.error_events_dropped(), 0)
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    sender.flush()
+                    deadline = time.monotonic() + 5
+                    error = None
+                    while error is None:
+                        self.assertLess(time.monotonic(), deadline)
+                        error = sender.poll_error()
+                        time.sleep(0.01)
+                    self.assertIsInstance(error, qi.SenderError)
+                    self.assertIs(
+                        error.category, qi.SenderErrorCategory.WriteError)
+
     def test_from_conf_rejects_bad_inbox_capacities(self):
         # Regression: these conversions must raise while holding the GIL
         # instead of crashing in the no-GIL connect region.
@@ -737,11 +799,15 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     self.assertTrue(callable(sender.dataframe))
                     for name in (
                             'establish', 'transaction', 'new_buffer',
-                            'published_fsn', 'acked_fsn', 'await_acked_fsn',
-                            'flush_and_get_fsn', 'drive_once',
-                            'poll_error', 'close_drain',
+                            'drive_once', 'close_drain',
                             'protocol_version', 'auto_flush'):
                         self.assertFalse(hasattr(sender, name), name)
+                    for name in (
+                            'flush_and_get_fsn',
+                            'flush_and_keep_and_get_fsn',
+                            'published_fsn', 'acked_fsn', 'await_acked_fsn',
+                            'poll_error', 'error_events_dropped'):
+                        self.assertTrue(callable(getattr(sender, name)), name)
                     sender.row(
                         'weather',
                         symbols={'city': 'London'},

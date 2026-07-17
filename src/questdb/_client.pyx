@@ -8291,6 +8291,165 @@ cdef class PooledSender:
             self._wait_locked(<uint64_t>timeout_millis)
         return self
 
+    def flush_and_get_fsn(self):
+        """
+        Publish and clear buffered rows, returning the frame sequence
+        number (FSN) of the published frame, or ``None`` if the buffer was
+        empty.
+
+        FSNs are watermarks of the lease's pooled connection: use them for
+        progress tracking while this lease is held (see
+        :meth:`await_acked_fsn`); they are not portable receipts across
+        leases, which may borrow different connections.
+        """
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef line_sender_qwpws_fsn fsn
+        cdef bint ok = False
+        with self._lock:
+            self._check_open('flush_and_get_fsn')
+            _ensure_doesnt_have_gil(&gs)
+            ok = qwp_sender_flush_buffer_and_get_fsn(
+                self._qwp, self._buffer._impl, &fsn, &err)
+            _ensure_has_gil(&gs)
+            if not ok:
+                raise c_err_to_py(err)
+            qdb_pystr_buf_clear(self._buffer._b)
+        return fsn.value if fsn.has_value else None
+
+    def flush_and_keep_and_get_fsn(self):
+        """
+        Publish buffered rows without clearing the buffer, returning the
+        published frame's FSN, or ``None`` if the buffer was empty.
+        """
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef line_sender_qwpws_fsn fsn
+        cdef bint ok = False
+        with self._lock:
+            self._check_open('flush_and_keep_and_get_fsn')
+            _ensure_doesnt_have_gil(&gs)
+            ok = qwp_sender_flush_buffer_and_keep_and_get_fsn(
+                self._qwp, self._buffer._impl, &fsn, &err)
+            _ensure_has_gil(&gs)
+            if not ok:
+                raise c_err_to_py(err)
+        return fsn.value if fsn.has_value else None
+
+    def poll_error(self):
+        """
+        Poll the next server-rejection diagnostic recorded on the lease's
+        connection since this lease was borrowed, as a
+        :class:`SenderError`, or ``None`` when none is pending.
+
+        The pool's ``error_handler`` independently receives every rejection
+        the moment it is recorded; polling here is a per-lease pull
+        alternative for code that wants diagnostics inline.
+        """
+        cdef line_sender_error* err = NULL
+        cdef line_sender_qwpws_error* c_error = NULL
+        cdef line_sender_qwpws_error_view view
+        with self._lock:
+            self._check_open('poll_error')
+            if not qwp_sender_poll_error(self._qwp, &c_error, &err):
+                raise c_err_to_py(err)
+            if c_error == NULL:
+                return None
+            try:
+                view = line_sender_qwpws_error_get_view(c_error)
+                return _sender_error_from_raw(
+                    c_sender_error_view_to_raw(view))
+            finally:
+                line_sender_qwpws_error_free(c_error)
+
+    def error_events_dropped(self):
+        """
+        Diagnostics dropped from the lease's connection ring
+        (``error_inbox_capacity``).
+        """
+        cdef line_sender_error* err = NULL
+        cdef uint64_t dropped = 0
+        with self._lock:
+            self._check_open('error_events_dropped')
+            if not qwp_sender_error_events_dropped(
+                    self._qwp, &dropped, &err):
+                raise c_err_to_py(err)
+        return dropped
+
+    def published_fsn(self):
+        """
+        Highest FSN published locally on the lease's pooled connection, or
+        ``None`` if nothing has been published on it yet.
+        """
+        cdef line_sender_error* err = NULL
+        cdef line_sender_qwpws_fsn fsn
+        with self._lock:
+            self._check_open('published_fsn')
+            if not qwp_sender_published_fsn(self._qwp, &fsn, &err):
+                raise c_err_to_py(err)
+        return fsn.value if fsn.has_value else None
+
+    def acked_fsn(self):
+        """
+        Highest FSN acknowledged on the lease's pooled connection, or
+        ``None`` if no frame has been acknowledged yet.
+        """
+        cdef line_sender_error* err = NULL
+        cdef line_sender_qwpws_fsn fsn
+        with self._lock:
+            self._check_open('acked_fsn')
+            if not qwp_sender_acked_fsn(self._qwp, &fsn, &err):
+                raise c_err_to_py(err)
+        return fsn.value if fsn.has_value else None
+
+    def await_acked_fsn(self, fsn, timeout_millis: int=0):
+        """
+        Wait until the acknowledgement watermark reaches ``fsn`` (as
+        returned by :meth:`flush_and_get_fsn` on this lease).
+
+        Returns ``True`` once ``fsn`` is acknowledged, or ``False`` if the
+        no-progress timeout elapsed first (``0`` waits indefinitely). Only
+        a terminal connection failure raises.
+        """
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL
+        cdef uint64_t c_fsn
+        cdef line_sender_qwpws_fsn acked
+        cdef bint ok = False
+        if not isinstance(fsn, int) or isinstance(fsn, bool):
+            raise TypeError('"fsn" must be a non-negative int.')
+        if fsn < 0:
+            raise ValueError('"fsn" must be a non-negative int.')
+        if timeout_millis < 0:
+            raise ValueError('timeout_millis must be non-negative.')
+        c_fsn = fsn
+        with self._lock:
+            self._check_open('await_acked_fsn')
+            if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
+                raise c_err_to_py(err)
+            if acked.has_value and acked.value >= c_fsn:
+                return True
+            # The barrier drains every frame published so far (a superset
+            # of ``fsn``); a no-progress expiry surfaces as FailoverRetry
+            # and maps to the ``False`` return.
+            _ensure_doesnt_have_gil(&gs)
+            ok = qwp_sender_wait(
+                self._qwp,
+                qwpws_ack_level.qwpws_ack_level_ok,
+                <uint64_t>timeout_millis,
+                &err)
+            _ensure_has_gil(&gs)
+            if not ok:
+                if line_sender_error_get_code(err) == \
+                        line_sender_error_failover_retry:
+                    line_sender_error_free(err)
+                    return False
+                raise c_err_to_py(err)
+            err = NULL
+            if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
+                raise c_err_to_py(err)
+            return bool(acked.has_value and acked.value >= c_fsn)
+
     def close(self, flush: bool=True, wait: bool=False):
         """
         Return this sender to its pool. Idempotent.

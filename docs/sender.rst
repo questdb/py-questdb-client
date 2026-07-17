@@ -44,10 +44,11 @@ publishes pending rows when it returns the lease to the pool.
 The standalone :class:`Sender <questdb.Sender>` remains available as the
 lower-level API for the legacy ILP transports (HTTP/TCP) and QWP/UDP. Over
 ``ws::`` / ``wss::``, use :func:`questdb.connect` and ``db.sender()``
-instead — the standalone ws sender exists only for frame-level control
-(FSN receipts, manual progress; see :ref:`sender_qwp_ws`) that the pooled
-lease deliberately does not expose, and its ``dataframe()`` opens a fresh
-direct connection per call. See the :doc:`5.0 migration guide
+instead — the pooled lease carries the full ws delivery surface
+(FSN receipts, ack barriers, rejection polling); the standalone ws sender
+exists only for manual progress mode and explicit buffer control (see
+:ref:`sender_qwp_ws`), and its ``dataframe()`` opens a fresh direct
+connection per call. See the :doc:`5.0 migration guide
 <migration>`.
 
 You can read more on :ref:`sender_preparing_data` and :ref:`sender_flushing`.
@@ -883,9 +884,13 @@ QWP/WebSocket
 
 QWP/WebSocket (``ws``, or ``wss`` for TLS) is an acknowledged streaming
 transport. For general ingestion use :func:`questdb.connect` and
-``db.sender()`` — the pooled path described throughout this guide. A
-*standalone* ``Sender.from_conf('ws::...')`` exists for frame-level
-control that the pooled lease deliberately omits, described below.
+``db.sender()`` — the pooled path described throughout this guide, whose
+lease carries the same delivery surface: the FSN receipts
+(``flush_and_get_fsn``, ``flush_and_keep_and_get_fsn``,
+``published_fsn`` / ``acked_fsn``, ``await_acked_fsn``) and rejection
+polling (``poll_error``, ``error_events_dropped``). A *standalone*
+``Sender.from_conf('ws::...')`` additionally offers manual progress mode
+and explicit buffer control, described below.
 
 Each flush publishes a frame identified by a monotonically
 increasing **frame sequence number (FSN)**; the server acknowledges frames as

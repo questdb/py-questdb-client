@@ -1020,6 +1020,33 @@ class PooledSender:
         terminal connection failure raises; server rejections go to the
         pool's ``error_handler``."""
 
+    def flush_and_get_fsn(self) -> Optional[int]:
+        """Publish and clear buffered rows, returning the published
+        frame's FSN (``None`` for an empty buffer). FSNs are watermarks of
+        the lease's pooled connection — use them while the lease is held;
+        they are not portable across leases."""
+
+    def published_fsn(self) -> Optional[int]:
+        """Highest FSN published locally on the lease's connection."""
+
+    def acked_fsn(self) -> Optional[int]:
+        """Highest FSN acknowledged on the lease's connection."""
+
+    def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
+        """Wait until the ack watermark reaches ``fsn``; ``False`` on
+        no-progress timeout. Only a terminal connection failure raises."""
+
+    def flush_and_keep_and_get_fsn(self) -> Optional[int]:
+        """Publish without clearing the buffer; returns the frame's FSN."""
+
+    def poll_error(self) -> Optional[SenderError]:
+        """Next rejection recorded on the lease's connection since this
+        borrow, or ``None``. The pool ``error_handler`` independently
+        receives every rejection at record time."""
+
+    def error_events_dropped(self) -> int:
+        """Diagnostics dropped from the lease's connection ring."""
+
     def close(self, flush: bool = True, wait: bool = False) -> None:
         """Return this sender to its pool. Idempotent. Without
         ``wait=True`` a later server rejection of this lease's rows is

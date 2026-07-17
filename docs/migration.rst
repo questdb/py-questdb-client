@@ -10,8 +10,10 @@ The QWP/WebSocket API has one connection-owning root, the :class:`QuestDB
 
 * :meth:`QuestDB.sender <questdb.QuestDB.sender>` lends a pooled
   row-building sender — a lean lease exposing ``row()``, ``dataframe()``,
-  ``flush()``, ``wait()`` and ``close()``, not a :class:`Sender
-  <questdb.Sender>` instance (``isinstance`` checks and type annotations
+  ``flush()``, ``wait()``, the FSN delivery receipts
+  (``flush_and_get_fsn`` / ``await_acked_fsn``), rejection polling
+  (``poll_error``) and ``close()``, not a
+  :class:`Sender <questdb.Sender>` instance (``isinstance`` checks and type annotations
   must not assume the ``Sender`` class — use the exported
   :class:`questdb.PooledSender` instead);
 * :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` bulk-loads a whole

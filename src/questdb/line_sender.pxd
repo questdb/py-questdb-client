@@ -1111,6 +1111,44 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint qwp_sender_flush_buffer_and_get_fsn(
+        qwp_sender* sender,
+        line_sender_buffer* buffer,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint qwp_sender_published_fsn(
+        const qwp_sender* sender,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint qwp_sender_acked_fsn(
+        const qwp_sender* sender,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint qwp_sender_flush_buffer_and_keep_and_get_fsn(
+        qwp_sender* sender,
+        const line_sender_buffer* buffer,
+        line_sender_qwpws_fsn* fsn_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint qwp_sender_poll_error(
+        qwp_sender* sender,
+        line_sender_qwpws_error** error_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint qwp_sender_error_events_dropped(
+        const qwp_sender* sender,
+        uint64_t* dropped_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint qwp_sender_wait(
         qwp_sender* sender,
         uint32_t ack_level,
