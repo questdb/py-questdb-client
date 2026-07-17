@@ -1730,7 +1730,8 @@ cdef object _numpy_assemble_frame(
                 arr = _build_nullable_array(arr, mask, kind, pd)
         arrays.append(arr)
     frame = pd.DataFrame(dict(enumerate(arrays)), copy=False)
-    frame.columns = col_names
+    # Keep pandas 3 from inferring a pyarrow-backed StringDtype Index.
+    frame.columns = pd.Index(col_names, dtype=object)
     columns_meta = {}
     for col_idx in range(n_cols):
         entry = {'kind': _KIND_NAMES.get(col_kinds[col_idx], 'unknown')}

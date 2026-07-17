@@ -2685,7 +2685,8 @@ class TestEgressWithDatabase(unittest.TestCase):
                 nullable = client.query(sql).to_pandas(
                     dtype_backend='numpy_nullable')
 
-            # Default: numpy int64, new pandas 3.0 str dtype.
+            # Default: object labels, numpy int64, pandas 3.0 str data.
+            self.assertEqual(default.columns.dtype, np.dtype(object))
             self.assertEqual(default['lg'].dtype, np.int64)
             self.assertTrue(
                 pd.api.types.is_string_dtype(default['vc'].dtype),
