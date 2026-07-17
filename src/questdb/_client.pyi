@@ -1164,8 +1164,10 @@ class QuestDB:
         assign each row's timestamp on arrival.
 
         The columnar path loads one table per call: name it via
-        ``table_name`` or the dataframe's index name, and
-        ``table_name_col`` raises
+        ``table_name`` — or, for NumPy-backed pandas input, the
+        dataframe's index name (``df.index.name``); Arrow-native input
+        (polars, pyarrow, pyarrow-backed pandas) requires an explicit
+        ``table_name``. ``table_name_col`` raises
         :class:`UnsupportedDataFrameShapeError` — split multi-table frames
         (e.g. ``df.groupby(col)``) and load each group.
 

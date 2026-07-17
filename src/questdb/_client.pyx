@@ -6197,8 +6197,17 @@ cdef class QuestDB:
         since server-assigned timestamps defeat ``DEDUP UPSERT KEYS`` on
         resubmission.
 
-        Supports a column-QWP v1 subset: fixed ``table_name``, non-null
-        designated timestamp column, and the following per-column dtypes:
+        The columnar path loads one table per call: name it via
+        ``table_name`` — or, for NumPy-backed pandas input, the
+        dataframe's index name (``df.index.name``); Arrow-native input
+        (polars, pyarrow, pyarrow-backed pandas) requires an explicit
+        ``table_name``. ``table_name_col`` raises
+        :class:`UnsupportedDataFrameShapeError` — split multi-table
+        frames (e.g. ``df.groupby(col)``) and load each group.
+
+        Supports a column-QWP v1 subset: a single per-call table name,
+        non-null designated timestamp column, and the following
+        per-column dtypes:
 
         - **Numeric**: NumPy ``bool/int{8,16,32,64}/uint{8..64}/float{32,64}``.
           Arrow ``pa.int{8,16,32,64}``, ``pa.float{16,32,64}``, and
