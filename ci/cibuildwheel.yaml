@@ -191,7 +191,7 @@ stages:
             inputs: {pathtoPublish: 'wheelhouse'}
 
       - job: macos_cp310_cp311
-        pool: {vmImage: 'macOS-14'}
+        pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
@@ -208,7 +208,7 @@ stages:
             inputs: {pathtoPublish: wheelhouse}
 
       - job: macos_cp312_cp313
-        pool: {vmImage: 'macOS-14'}
+        pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
@@ -225,7 +225,7 @@ stages:
             inputs: {pathtoPublish: wheelhouse}
 
       - job: macos_cp314
-        pool: {vmImage: 'macOS-14'}
+        pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
@@ -242,7 +242,7 @@ stages:
             inputs: {pathtoPublish: wheelhouse}
 
       - job: macos_cp314t
-        pool: {vmImage: 'macOS-14'}
+        pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
           - task: UsePythonVersion@0
