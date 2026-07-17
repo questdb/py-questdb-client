@@ -421,27 +421,35 @@ For more details on using self-signed test certificates, see:
 Auto-flushing
 =============
 
-The following parameters control the :ref:`sender_auto_flush` behavior.
+The following parameters control the :ref:`sender_auto_flush` behavior. The
+standalone :class:`Sender <questdb.Sender>` uses the defaults below. Pooled
+senders are deliberately explicit-only by default. Set ``auto_flush=on`` or
+configure one of the thresholds below to opt in; ``auto_flush=off`` explicitly
+disables the mode. Once enabled, unspecified thresholds use the same defaults
+as the standalone sender.
 
 * ``auto_flush`` - ``'on'`` | ``'off'``: Global switch for the auto-flushing
   behavior.
 
-  Default: ``'on'``.
+  Default: ``'on'`` for the standalone sender; ``'off'`` for pooled senders
+  when no auto-flush parameter is present.
 
 * ``auto_flush_rows`` - ``int > 0`` | ``'off'``: The number of rows that will
   trigger a flush. Set to ``'off'`` to disable.
 
-  *Default: 75000 (HTTP) | 600 (TCP, QWP/UDP).*
+  *Default when auto-flush is enabled: 75000 (HTTP) | 600 (TCP, QWP/UDP,
+  QWP/WebSocket).*
 
 * ``auto_flush_bytes`` - ``int > 0`` | ``'off'``: The number of bytes that will
   trigger a flush. Set to ``'off'`` to disable.
 
-  *Default: off (TCP, HTTP) | max_datagram_size (QWP/UDP, 1400 by default).*
+  *Default when auto-flush is enabled: off (TCP, HTTP, QWP/WebSocket) |
+  max_datagram_size (QWP/UDP, 1400 by default).*
 
 * ``auto_flush_interval`` - ``int > 0`` | ``'off'``: The time in milliseconds
   that will trigger a flush. Set to ``'off'`` to disable.
     
-  Default: 1000 (millis).
+  Default when auto-flush is enabled: 1000 (millis).
 
 .. _sender_conf_auto_flush_interval:
 
@@ -449,14 +457,16 @@ The following parameters control the :ref:`sender_auto_flush` behavior.
 -----------------------
 
 The `auto_flush_interval` parameter controls how long the sender's buffer can be
-left unflushed for after appending a new row via the
-:func:`Sender.row <questdb.Sender.row>` or the
-:func:`Sender.dataframe <questdb.Sender.dataframe>` methods.
+left unflushed for after appending a new row via
+:func:`Sender.row <questdb.Sender.row>`,
+:func:`PooledSender.row <questdb.PooledSender.row>`, or the standalone
+:func:`Sender.dataframe <questdb.Sender.dataframe>` method.
 It is defined in milliseconds.
 
 Note that this parameter does *not* create a timer that counts down
 each time data is added. Instead, the client checks the time elapsed since the
-last flush each time new data is added. If the elapsed time exceeds the
+last flush (or, for a pooled sender, since the current lease was borrowed)
+each time new data is added. If the elapsed time exceeds the
 specified ``auto_flush_interval``, the client automatically flushes the current
 buffer to the database.
 

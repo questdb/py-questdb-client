@@ -5951,6 +5951,7 @@ cdef class QuestDB:
     cdef object _connection_listener
     cdef object _error_handler
     cdef size_t _cb_refs_key
+    cdef auto_flush_mode_t _auto_flush_mode
 
     def __cinit__(self):
         self._db = NULL
@@ -5961,6 +5962,10 @@ cdef class QuestDB:
         self._connection_listener = None
         self._error_handler = None
         self._cb_refs_key = 0
+        self._auto_flush_mode.enabled = False
+        self._auto_flush_mode.interval = -1
+        self._auto_flush_mode.row_count = -1
+        self._auto_flush_mode.byte_count = -1
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
@@ -5999,6 +6004,13 @@ cdef class QuestDB:
         Construct a handle from a QWP/WebSocket configuration string.
 
         Prefer the :func:`questdb.connect` module-level factory.
+
+        Pooled row auto-flush is disabled when the configuration contains no
+        auto-flush settings. Set ``auto_flush=on`` or provide an
+        ``auto_flush_rows``, ``auto_flush_bytes`` or ``auto_flush_interval``
+        threshold to opt in. The mode is immutable and shared by every lease;
+        each borrow starts a fresh interval. Auto-triggered publishes do not
+        wait for server acknowledgement.
 
         The underlying connection pool is opened by
         `questdb_db_connect_with_handlers`.
@@ -6050,8 +6062,17 @@ cdef class QuestDB:
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
+        cdef line_sender_protocol c_protocol
         cdef object protocol
         cdef dict params
+        cdef set auto_flush_keys = {
+            'auto_flush',
+            'auto_flush_rows',
+            'auto_flush_bytes',
+            'auto_flush_interval',
+        }
+        cdef bint auto_flush_configured
+        cdef str native_conf_str
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef QuestDB db = QuestDB.__new__(QuestDB)
         cdef PyThreadState* gs = NULL
@@ -6071,6 +6092,32 @@ cdef class QuestDB:
                     QuestDBErrorCode.ConfigError,
                     'Missing "addr" parameter in config string')
 
+            # The pooled native core does not implement row-buffer
+            # auto-flushing: it rejects the threshold keys and accepts only
+            # auto_flush=off. Keep this Python-owned handle configuration out
+            # of the native connect string and reuse the standalone Sender's
+            # validation/defaults. With no auto-flush keys, pooled senders stay
+            # explicitly-flushed by default.
+            c_protocol = protocol.c_value
+            auto_flush_configured = not auto_flush_keys.isdisjoint(params)
+            _parse_auto_flush(
+                c_protocol,
+                params.get('auto_flush') if auto_flush_configured else False,
+                params.get('auto_flush_rows'),
+                params.get('auto_flush_bytes'),
+                params.get('auto_flush_interval'),
+                &db._auto_flush_mode,
+                0)
+            if auto_flush_configured:
+                native_conf_str = protocol.tag + '::' + ''.join(
+                    f'{key}={conf_str_value(value)};'
+                    for key, value in params.items()
+                    if key not in auto_flush_keys)
+            else:
+                # Preserve the existing native configuration path byte for
+                # byte when pooled auto-flush was not requested.
+                native_conf_str = conf_str
+
             if connection_listener is not None and not callable(
                     connection_listener):
                 raise TypeError(
@@ -6081,7 +6128,7 @@ cdef class QuestDB:
                 raise TypeError(
                     '"error_handler" must be callable or None, '
                     f'not {_fqn(type(error_handler))}')
-            str_to_utf8(b, <PyObject*>conf_str, &c_conf)
+            str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
                 # pre-opened by connect cannot emit events before the listener
@@ -8273,13 +8320,15 @@ cdef class PooledSender:
     :meth:`poll_error` and :meth:`error_events_dropped`. Prefer
     :meth:`QuestDB.dataframe` for bulk loads; the lease's own
     ``dataframe()`` is a convenience that routes to the same direct
-    columnar path.
+    columnar path. Row auto-flush is disabled by default and can be enabled
+    for every lease through the parent handle's connection settings.
     """
     cdef qwp_sender* _qwp
     cdef questdb_db* _db
     cdef QuestDB _handle
     cdef Buffer _buffer
     cdef object _lock
+    cdef int64_t _last_flush_ms
 
     def __cinit__(self):
         self._qwp = NULL
@@ -8287,6 +8336,7 @@ cdef class PooledSender:
         self._handle = None
         self._buffer = None
         self._lock = threading.RLock()
+        self._last_flush_ms = 0
 
     cdef void _attach(
             self,
@@ -8298,6 +8348,7 @@ cdef class PooledSender:
         self._db = db
         self._qwp = sender
         self._buffer = buffer
+        self._last_flush_ms = line_sender_now_micros() // 1000
 
     cdef void_int _check_open(self, str method) except -1:
         if self._qwp == NULL:
@@ -8342,6 +8393,7 @@ cdef class PooledSender:
         if not ok:
             raise c_err_to_py(err)
         qdb_pystr_buf_clear(self._buffer._b)
+        self._last_flush_ms = line_sender_now_micros() // 1000
 
     cdef void _release_locked(self) except *:
         cdef qwp_sender* sender = self._qwp
@@ -8377,7 +8429,14 @@ cdef class PooledSender:
                       Decimal]]] = None,
             at: Union[ServerTimestampType, TimestampNanos,
                       datetime.datetime]):
-        """Append one row to this sender's QWP buffer."""
+        """
+        Append one row to this sender's QWP buffer.
+
+        When pooled auto-flush is enabled on the :class:`QuestDB` handle,
+        completing a row that breaches a configured row, byte, or interval
+        threshold publishes the buffer without waiting for an acknowledgement.
+        Any error raised by that publish propagates from this method.
+        """
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -8387,6 +8446,11 @@ cdef class PooledSender:
             self._check_open('row')
             self._buffer._row(
                 False, table_name, symbols, columns, at)
+            if should_auto_flush(
+                    &self._handle._auto_flush_mode,
+                    self._buffer._impl,
+                    self._last_flush_ms):
+                self._flush_locked(False)
         return self
 
     def dataframe(
@@ -8494,6 +8558,8 @@ cdef class PooledSender:
             if not ok:
                 raise c_err_to_py(err)
             qdb_pystr_buf_clear(self._buffer._b)
+            if fsn.has_value:
+                self._last_flush_ms = line_sender_now_micros() // 1000
         return fsn.value if fsn.has_value else None
 
     def flush_and_keep_and_get_fsn(self):
@@ -8513,6 +8579,8 @@ cdef class PooledSender:
             _ensure_has_gil(&gs)
             if not ok:
                 raise c_err_to_py(err)
+            if fsn.has_value:
+                self._last_flush_ms = line_sender_now_micros() // 1000
         return fsn.value if fsn.has_value else None
 
     def poll_error(self):

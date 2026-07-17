@@ -59,6 +59,48 @@ try:
 except ImportError:
     pyarrow = None
 
+
+def _read_qwp_varint(payload, pos):
+    value = 0
+    shift = 0
+    while True:
+        if pos >= len(payload):
+            raise AssertionError('truncated QWP varint')
+        byte = payload[pos]
+        pos += 1
+        value |= (byte & 0x7f) << shift
+        if byte & 0x80 == 0:
+            return value, pos
+        shift += 7
+        if shift >= 64:
+            raise AssertionError('oversize QWP varint')
+
+
+def _first_qwp_table_row_count(payload):
+    """Decode the first table's row count from a captured QWP1 frame."""
+    if len(payload) < 12 or payload[:4] != b'QWP1':
+        raise AssertionError('not a QWP1 frame')
+    if int.from_bytes(payload[6:8], 'little') < 1:
+        raise AssertionError('QWP1 frame contains no table')
+
+    # Pooled row frames carry a delta-symbol-dictionary prefix before the
+    # table blocks: start id, entry count, then length-prefixed entries.
+    pos = 12
+    _delta_start, pos = _read_qwp_varint(payload, pos)
+    delta_count, pos = _read_qwp_varint(payload, pos)
+    for _ in range(delta_count):
+        entry_len, pos = _read_qwp_varint(payload, pos)
+        pos += entry_len
+        if pos > len(payload):
+            raise AssertionError('truncated QWP symbol dictionary')
+
+    table_name_len, pos = _read_qwp_varint(payload, pos)
+    pos += table_name_len
+    if pos > len(payload):
+        raise AssertionError('truncated QWP table name')
+    row_count, _ = _read_qwp_varint(payload, pos)
+    return row_count
+
 from test_client_capsule_path import (
     TestCapsulePathPyArrow,
     TestCapsulePathPolars,
@@ -557,6 +599,195 @@ class TestQwpWebSocketApi(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 2)
+
+    def test_pooled_sender_auto_flush_rows_from_connect_kwargs(self):
+        import questdb
+
+        with QwpAckServer(record_payloads=True) as server:
+            with questdb.connect(
+                    host='127.0.0.1',
+                    port=server.port,
+                    sender_pool_min=1,
+                    sender_pool_max=1,
+                    pool_reap='manual',
+                    auto_flush_rows=3,
+                    auto_flush_bytes='off',
+                    auto_flush_interval='off') as client:
+                with client.sender() as sender:
+                    for value in range(2):
+                        sender.row(
+                            'events', columns={'value': value},
+                            at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 2)
+                    self.assertEqual(server.snapshot()['binary_frames'], 0)
+
+                    sender.row(
+                        'events', columns={'value': 2},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 0)
+                    sender.wait(5000)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        data_frames = [
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0)]
+        self.assertEqual(len(data_frames), 1)
+        self.assertEqual(_first_qwp_table_row_count(data_frames[0]), 3)
+
+    def test_pooled_sender_auto_flush_interval_on_next_row(self):
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=off;'
+                'auto_flush_bytes=off;'
+                'auto_flush_interval=50;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+                    time.sleep(0.1)
+                    self.assertEqual(len(sender), 1)
+
+                    sender.row(
+                        'events', columns={'value': 2},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 0)
+                    sender.wait(5000)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        data_frames = [
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0)]
+        self.assertEqual(len(data_frames), 1)
+        self.assertEqual(_first_qwp_table_row_count(data_frames[0]), 2)
+
+    def test_pooled_sender_auto_flush_interval_resets_on_borrow(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=off;'
+                'auto_flush_bytes=off;'
+                'auto_flush_interval=50;')
+            with qi.QuestDB.from_conf(conf) as client:
+                # Let the pooled connection sit idle past the interval. A new
+                # lease starts its own interval at borrow time.
+                with client.sender():
+                    pass
+                time.sleep(0.1)
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+                    self.assertEqual(server.snapshot()['binary_frames'], 0)
+                    sender.close(flush=False)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+
+    def test_pooled_sender_auto_flush_is_off_by_default(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    # 600 is the legacy ws row threshold. Reaching it proves
+                    # the pooled path did not silently inherit legacy defaults.
+                    for value in range(600):
+                        sender.row(
+                            'events', columns={'value': value},
+                            at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 600)
+                    self.assertEqual(server.snapshot()['binary_frames'], 0)
+                    sender.close(flush=False)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+
+    def test_pooled_sender_auto_flush_close_publishes_partial_buffer(self):
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=3;'
+                'auto_flush_bytes=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        data_frames = [
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0)]
+        self.assertEqual(len(data_frames), 1)
+        self.assertEqual(_first_qwp_table_row_count(data_frames[0]), 1)
+
+    def test_pooled_sender_auto_flush_error_propagates_from_row(self):
+        rejected = threading.Event()
+
+        def on_rejection(_error):
+            rejected.set()
+
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'close_flush_timeout_millis=0;'
+                'auto_flush_rows=1;'
+                'auto_flush_bytes=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(
+                    conf, error_handler=on_rejection) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    self.assertTrue(
+                        rejected.wait(5),
+                        'the terminal rejection must be latched')
+                    with self.assertRaises(qi.QuestDBError) as raised:
+                        sender.row(
+                            'events', columns={'value': 2},
+                            at=qi.ServerTimestamp)
+                    sender.close(flush=False)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertIsInstance(
+            raised.exception, qi.QuestDBServerRejectionError)
 
     def test_pooled_sender_await_acked_fsn_validates_timeout(self):
         # Regression: timeout_millis must be validated and converted while

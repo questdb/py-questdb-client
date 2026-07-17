@@ -111,6 +111,12 @@ def connect(
     deployment; list every cluster node in a single ``addr`` server
     list.
 
+    Pooled row senders do not auto-flush by default. Add ``auto_flush='on'``
+    and/or an ``auto_flush_rows``, ``auto_flush_bytes`` or
+    ``auto_flush_interval`` setting to opt in. Auto-triggered publishes do not
+    wait for server acknowledgement; use an explicit ``flush(wait=True)`` or
+    ``wait()`` as an acknowledgement barrier.
+
     ``connection_listener`` receives one :class:`ConnectionEvent` per
     connection-state transition; ``error_handler`` receives one
     :class:`SenderError` per server rejection (without it rejections are

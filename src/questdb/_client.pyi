@@ -958,7 +958,9 @@ class PooledSender:
     and per-lease server diagnostics through :meth:`poll_error` and
     :meth:`error_events_dropped`. ``dataframe()`` routes to the same
     direct columnar path as :meth:`QuestDB.dataframe`, borrowing a direct
-    connection from the pool for that call.
+    connection from the pool for that call. Row auto-flush is disabled by
+    default and can be enabled for every lease through the ``auto_flush``
+    settings on the parent :class:`QuestDB` configuration.
     """
 
     def __enter__(self) -> PooledSender: ...
@@ -987,7 +989,9 @@ class PooledSender:
         ] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> PooledSender:
-        """Append one row to this sender's QWP buffer."""
+        """Append one row to this sender's QWP buffer. If a configured
+        auto-flush threshold is breached, this publishes without waiting for
+        an acknowledgement; a publish error propagates from ``row()``."""
 
     def dataframe(
         self,
@@ -1136,6 +1140,12 @@ class QuestDB:
         Construct a handle from a QWP/WebSocket configuration string.
 
         Prefer the :func:`questdb.connect` module-level factory.
+
+        Pooled row auto-flush is off unless the configuration opts in with
+        ``auto_flush=on`` or an ``auto_flush_rows``, ``auto_flush_bytes`` or
+        ``auto_flush_interval`` threshold. These settings use the standalone
+        sender's validation and threshold defaults. The mode is shared by all
+        leases, while each borrow starts a fresh interval.
 
         ``connection_listener`` receives one :class:`ConnectionEvent` per
         connection-state transition, on a dedicated dispatcher thread.

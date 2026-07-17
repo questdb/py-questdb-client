@@ -39,7 +39,9 @@ the connection pools; ``db.sender()`` lends a row-building sender and
         db.dataframe(df, table_name='trades', at='timestamp')
 
 The pooled sender holds an internal QWP buffer. A successful ``with`` block
-publishes pending rows when it returns the lease to the pool.
+publishes pending rows when it returns the lease to the pool. Auto-flush is off
+by default on this path and can be enabled through the handle's connection
+settings.
 
 .. _sender_api_layers:
 
@@ -376,8 +378,10 @@ acknowledgement).
 Auto-flushing
 -------------
 
-To avoid accumulating very large buffers, the sender will - by default -
-occasionally flush the buffer automatically.
+The standalone :class:`Sender <questdb.Sender>` auto-flushes by default to
+avoid accumulating very large buffers. A pooled sender is explicit-only by
+default; add auto-flush settings to the :func:`questdb.connect`
+configuration to opt in.
 
 Auto-flushing is triggered when:
 
@@ -385,7 +389,8 @@ Auto-flushing is triggered when:
 
 * and the buffer either:
 
-    * Reaches 75,000 rows (for HTTP) or 600 rows (for TCP and QWP/UDP).
+    * Reaches 75,000 rows (for HTTP) or 600 rows (for TCP, QWP/UDP, and
+      QWP/WebSocket).
 
     * Hasn't been flushed for 1 second (there are no timers).
 
@@ -395,12 +400,23 @@ logic.
 
 ``http::addr=localhost:9000;auto_flush_rows=10;auto_flush_interval=off;``
 
+The equivalent pooled configuration uses QWP/WebSocket. The mode belongs to
+the :class:`QuestDB <questdb.QuestDB>` handle and is shared by all leases; the
+interval starts fresh on every borrow.
+
+``ws::addr=localhost:9000;auto_flush_rows=10;auto_flush_interval=off;``
+
+A pooled auto-flush only publishes into the store-and-forward path; it does
+not wait for an acknowledgement. Keep acknowledgement barriers explicit with
+``sender.flush(wait=True)`` or ``sender.wait()``. Errors encountered while
+auto-publishing propagate from ``PooledSender.row()``.
+
 Here is a configuration string with auto-flushing
 completely disabled:
 
 ``http::addr=localhost:9000;auto_flush=off;``
 
-See the :ref:`sender_conf_auto_flush` section for more details. and note that
+See the :ref:`sender_conf_auto_flush` section for more details, and note that
 ``auto_flush_interval`` :ref:`does NOT start a timer <sender_conf_auto_flush_interval>`.
 
 Error Reporting

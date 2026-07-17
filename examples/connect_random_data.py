@@ -15,8 +15,8 @@ def example(host: str = 'localhost', port: int = 9000, total_rows=None):
     try:
         with questdb.connect(f'ws::addr={host}:{port};') as db:
             with db.sender() as sender:
-                # The pooled sender has no auto-flush: accumulate rows
-                # on your own cadence and flush explicitly.
+                # Pooled auto-flush is off by default: accumulate rows on
+                # your own cadence and flush explicitly.
                 sent = 0
                 last_flush = time.monotonic()
                 print('Ctrl^C to terminate...')
