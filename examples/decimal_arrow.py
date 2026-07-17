@@ -21,13 +21,13 @@ def example(host: str = 'localhost', port: int = 9000):
     })
     try:
         with questdb.connect(f'ws::addr={host}:{port};') as db:
-            db.query(
+            db.execute(
                 'CREATE TABLE IF NOT EXISTS financial_data ('
                 '  symbol SYMBOL,'
                 '  price DECIMAL(18, 6),'
                 '  quantity DECIMAL(12, 4),'
                 '  timestamp TIMESTAMP_NS'
-                ') TIMESTAMP(timestamp) PARTITION BY DAY WAL').close()
+                ') TIMESTAMP(timestamp) PARTITION BY DAY WAL')
 
             db.dataframe(
                 df, table_name='financial_data', symbols=['symbol'],

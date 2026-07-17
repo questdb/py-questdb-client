@@ -7,13 +7,14 @@ from questdb import QuestDBError
 def example(host: str = 'localhost', port: int = 9000):
     try:
         with questdb.connect(f'ws::addr={host}:{port};') as db:
-            # query() also runs DDL and DML statements; close the result
-            # even when no rows are expected.
-            db.query(
+            # execute() runs DDL and DML statements: it drains the
+            # (empty) result and returns the pooled connection in one
+            # call.
+            db.execute(
                 'CREATE TABLE IF NOT EXISTS trades ('
                 '  timestamp TIMESTAMP, symbol SYMBOL,'
                 '  price DOUBLE, amount DOUBLE'
-                ') TIMESTAMP(timestamp) PARTITION BY DAY WAL').close()
+                ') TIMESTAMP(timestamp) PARTITION BY DAY WAL')
 
             # Bind positional parameters to $1..$N placeholders instead of
             # interpolating values into the SQL.

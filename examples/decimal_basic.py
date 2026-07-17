@@ -12,13 +12,13 @@ def example(host: str = 'localhost', port: int = 9000):
         with questdb.connect(f'ws::addr={host}:{port};') as db:
             # DECIMAL columns must be created ahead of time; the server
             # does not auto-create them.
-            db.query(
+            db.execute(
                 'CREATE TABLE IF NOT EXISTS financial_data ('
                 '  symbol SYMBOL,'
                 '  price DECIMAL(18, 6),'
                 '  quantity DECIMAL(12, 4),'
                 '  timestamp TIMESTAMP_NS'
-                ') TIMESTAMP(timestamp) PARTITION BY DAY WAL').close()
+                ') TIMESTAMP(timestamp) PARTITION BY DAY WAL')
 
             # Row-by-row ingestion with Python Decimal values.
             with db.sender() as sender:

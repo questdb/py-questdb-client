@@ -2537,6 +2537,43 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_execute(self):
+        """``execute()`` runs statements without the drain ceremony:
+        DDL and DML complete, the connection returns to the pool, a
+        stray SELECT's output is discarded, binds are plumbed through,
+        and a reader lease stays usable after interleaved statements."""
+        table_name = 't_execute_' + uuid.uuid4().hex[:8]
+        try:
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                self.assertIsNone(client.execute(
+                    f'CREATE TABLE {table_name} '
+                    '(ts TIMESTAMP, lg LONG) '
+                    'TIMESTAMP(ts) PARTITION BY DAY WAL'))
+                self.assertIsNone(client.execute(
+                    f'INSERT INTO {table_name} VALUES '
+                    "('2024-01-01T00:00:00.000000Z', 7)"))
+                self.qdb_plain.retry_check_table(table_name, min_rows=1)
+                self.assertIsNone(client.execute(
+                    f'SELECT * FROM {table_name} WHERE lg = $1', [7]))
+                frame = client.query(
+                    f'SELECT count() AS n FROM {table_name}').to_pandas()
+                self.assertEqual(int(frame['n'][0]), 1)
+                with client.reader() as r:
+                    self.assertIsNone(r.execute(
+                        f'INSERT INTO {table_name} VALUES '
+                        "('2024-01-01T00:00:01.000000Z', 8)"))
+                    self.qdb_plain.retry_check_table(
+                        table_name, min_rows=2)
+                    frame = r.query(
+                        f'SELECT count() AS n FROM {table_name}'
+                    ).to_pandas()
+                    self.assertEqual(int(frame['n'][0]), 2)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_cancel_is_safe_and_idempotent(self):
         """``cancel()`` drives the FFI cancel on a live cursor without
         raising, is idempotent, and is a no-op after ``close()``."""

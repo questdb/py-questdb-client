@@ -238,6 +238,14 @@ on its own cadence).
   connection's SYMBOL dictionary warm across queries via
   ``reset_symbol_dict=False``.
 
+- :meth:`QuestDB.execute <questdb.QuestDB.execute>` (also on the reader
+  lease) runs a statement, drains whatever it returns, and hands the
+  pooled connection back in one call —
+  ``db.execute('CREATE TABLE ...')`` — replacing the
+  ``with db.query(ddl) as r: r.to_pandas()`` drain ceremony for DDL and
+  DML. Statement output is discarded and ``None`` is returned; use
+  :meth:`QuestDB.query <questdb.QuestDB.query>` when you want the result.
+
 Columnar DataFrame Ingestion
 ****************************
 

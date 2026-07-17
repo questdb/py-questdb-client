@@ -1074,6 +1074,18 @@ as Arrow record batches::
                       [datetime.datetime(2026, 7, 1)]) as result:
             df = result.to_pandas()
 
+Statements with nothing to return — DDL, ``INSERT`` — go through
+:meth:`QuestDB.execute <questdb.QuestDB.execute>` instead: it runs the
+SQL, drains the result and returns the pooled connection in one call
+(:class:`PooledReader <questdb.PooledReader>` offers the same verb)::
+
+    db.execute('CREATE TABLE IF NOT EXISTS trades ('
+               '  timestamp TIMESTAMP, symbol SYMBOL, price DOUBLE'
+               ') TIMESTAMP(timestamp) PARTITION BY DAY WAL')
+
+Statement output (a ``COPY`` status row, admin-function rows, a stray
+``SELECT``) is discarded — use ``query()`` when you want it.
+
 Positional bind parameters fill the ``$1``..``$N`` placeholders — always
 prefer them over interpolating values into the SQL text. Supported bind
 types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,

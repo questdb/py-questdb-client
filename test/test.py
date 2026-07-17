@@ -352,6 +352,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 qi.QuestDBError,
                 "sender\\(\\) can't be called: QuestDB is closed"):
             client.sender()
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                "execute\\(\\) can't be called: QuestDB is closed"):
+            client.execute('SELECT 1')
 
     def test_query_binds_container_validation(self):
         # Rejected before any reader is borrowed, so no server is needed
@@ -361,6 +365,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 with self.assertRaisesRegex(
                         TypeError, '"binds" must be a list or tuple'):
                     client.query('SELECT $1', bad)
+                with self.assertRaisesRegex(
+                        TypeError, '"binds" must be a list or tuple'):
+                    client.execute('SELECT $1', bad)
 
     def test_query_requires_sql(self):
         # Rejected before any reader is borrowed, so no server is needed

@@ -23,7 +23,7 @@ pandas.
 Queries
 -------
 
-The following example runs DDL through ``query()``, binds positional
+The following example runs DDL through ``execute()``, binds positional
 parameters, streams a large result batch by batch, and leases one reader
 connection for a run of queries.
 

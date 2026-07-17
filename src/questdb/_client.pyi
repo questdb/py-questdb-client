@@ -1096,6 +1096,17 @@ class PooledReader:
         SYMBOL dictionary built up by the lease's earlier queries.
         """
 
+    def execute(
+        self,
+        sql: str,
+        binds: Optional[Union[list, tuple]] = None,
+    ) -> None:
+        """
+        Run a statement on the lease's connection and discard whatever
+        it returns. Mirrors :meth:`QuestDB.execute`; the lease stays
+        usable for the next call.
+        """
+
     def close(self) -> None:
         """Release the lease's reader connection. Idempotent."""
 
@@ -1220,6 +1231,22 @@ class QuestDB:
         ``to_pandas()``. Set ``False`` to keep the dictionary warm across
         repeated identical queries. No-op against servers that predate the
         capability.
+        """
+
+    def execute(
+        self,
+        sql: str,
+        binds: Optional[Union[list, tuple]] = None,
+    ) -> None:
+        """
+        Run a statement and discard whatever it returns.
+
+        Executes ``sql`` like :meth:`query`, drains the result to its
+        clean end and returns the pooled connection. Statement output
+        (a ``COPY`` status row, admin-function rows, a stray
+        ``SELECT``) is discarded; use :meth:`query` when you want the
+        result. Returns ``None``: the protocol carries no
+        rows-affected count.
         """
 
     def reader(self) -> PooledReader:

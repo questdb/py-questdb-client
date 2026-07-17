@@ -305,6 +305,26 @@ cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
         reader._must_close = False
 
 
+cdef void_int _drain_cursor(_CursorHandle handle) except -1:
+    cdef reader_cursor* cursor
+    cdef questdb_error* err = NULL
+    cdef const reader_batch* batch
+    while True:
+        with handle._lock:
+            cursor = handle._cursor
+            if cursor == NULL:
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
+            with nogil:
+                batch = reader_cursor_next_batch(cursor, &err)
+        if batch == NULL:
+            if err != NULL:
+                raise _reader_err_to_py(err)
+            break
+    _mark_reader_drained(handle)
+    handle._free()
+
+
 cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
     """Borrow a reader from the Rust-side ``questdb_db`` pool.
 
@@ -2235,6 +2255,9 @@ class QueryResult:
         handle = self._cursor_handle
         self._cursor_handle = None
         return handle
+
+    def _drain(self):
+        _drain_cursor(self._take_cursor_handle())
 
     def __arrow_c_stream__(self, requested_schema=None):
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL

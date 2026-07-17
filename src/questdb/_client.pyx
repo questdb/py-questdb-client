@@ -6341,6 +6341,31 @@ cdef class QuestDB:
             if db_use:
                 self._end_db_use()
 
+    def execute(self, str sql, object binds=None):
+        """
+        Run a statement and discard whatever it returns.
+
+        Executes ``sql`` like :meth:`query`, drains the result to its
+        clean end and returns the pooled connection — the pattern DDL
+        and DML otherwise need spelled out as
+        ``with db.query(sql) as r: r.to_pandas()``. Statement output
+        (a ``COPY`` status row, admin-function rows, a stray
+        ``SELECT``) is discarded; use :meth:`query` when you want the
+        result. The connection's SYMBOL dictionary is left untouched.
+
+        ``binds`` behaves exactly as on :meth:`query`. Returns
+        ``None``: the protocol carries no rows-affected count.
+        """
+        self._begin_db_use('execute')
+        try:
+            result = self.query(sql, binds, reset_symbol_dict=False)
+            try:
+                result._drain()
+            finally:
+                result.close()
+        finally:
+            self._end_db_use()
+
     def query(
             self,
             str sql,
@@ -8756,6 +8781,25 @@ cdef class PooledReader:
             cursor_handle._owns_reader = False
             self._last_cursor = cursor_handle
         return QueryResult(cursor_handle)
+
+    def execute(self, str sql, object binds=None):
+        """
+        Run a statement on the lease's connection and discard whatever
+        it returns.
+
+        Mirrors :meth:`QuestDB.execute`. The result is drained to its
+        clean end, so the lease stays usable for the next call, and the
+        connection's SYMBOL dictionary is left untouched — an
+        interleaved statement does not invalidate a warm dictionary
+        built with ``reset_symbol_dict=False``.
+        """
+        with self._lock:
+            self._check_open('execute')
+        result = self.query(sql, binds, reset_symbol_dict=False)
+        try:
+            result._drain()
+        finally:
+            result.close()
 
     def close(self):
         """
