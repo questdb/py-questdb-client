@@ -29,6 +29,11 @@ try:
 except ImportError:
     pa = None
 
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
 
 def _client_conf(port):
     return (
@@ -283,6 +288,7 @@ class TestServerTimestampAt(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 0)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_numpy_pandas_server_timestamp(self):
         # NumPy-backed pandas routes through the chunk planner, whose
         # encoder supports server stamping via the chunk at_now opt-in.
@@ -299,6 +305,7 @@ class TestServerTimestampAt(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_numpy_pandas_server_timestamp_multi_chunk(self):
         # Server stamping must survive the max_rows_per_batch split: every
         # chunk carries the at_now opt-in, none carries a ts column.
@@ -383,6 +390,7 @@ class TestScalarAt(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_numpy_pandas_scalar_at(self):
         import pandas as pd
         for at in (qi.TimestampNanos(self.AT_NANOS),
@@ -392,6 +400,7 @@ class TestScalarAt(unittest.TestCase):
             self.assertEqual(stats['errors'], [])
             self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_numpy_pandas_scalar_at_multi_chunk(self):
         import pandas as pd
         stats = self._ingest(
@@ -453,6 +462,7 @@ class TestScalarAt(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 0)
 
 
+@unittest.skipIf(pd is None, 'pandas not installed')
 class TestNdarrayArrayColumns(unittest.TestCase):
     """Object-dtype columns of float64 numpy-array cells land as QuestDB
     ARRAY(DOUBLE) through the columnar manual-planner route (promoted to
@@ -605,6 +615,7 @@ class TestConnectionEvents(unittest.TestCase):
             finally:
                 client.close()
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_unreachable_fires_attempt_failed_and_unreachable(self):
         import socket
         events, listener = self._collect()

@@ -207,7 +207,7 @@ class QwpAckServer:
                     pass
                 return
         try:
-            conn.settimeout(5)
+            conn.settimeout(30)
             request = _read_until(conn, b"\r\n\r\n")
             key = _header(request, "Sec-WebSocket-Key")
             accept = _compute_accept(key)
