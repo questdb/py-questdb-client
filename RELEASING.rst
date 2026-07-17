@@ -19,13 +19,10 @@ Azure Pipelines (``ci/cibuildwheel.yaml``):
 
 GitHub Actions (``.github/workflows/macos-arm64-wheels.yml``):
 
-* macOS arm64: the standard GitHub Actions ``macos-15`` runners are
-  Apple Silicon. A single job builds CPython 3.10 through 3.14 plus
-  3.14t, with the full test suite run against every wheel. Like the
-  Azure jobs it runs on every non-fork pull request (not on pushes to
-  ``main``). ``MACOSX_DEPLOYMENT_TARGET`` is pinned to ``11.0`` so the
-  wheels keep the ``macosx_11_0_arm64`` floor shipped since 4.x; the
-  delocate repair step fails the build on any mismatch.
+* macOS arm64: built on the Apple Silicon ``macos-15`` runners, CPython
+  3.10 through 3.14 plus 3.14t. Runs on every non-fork pull request,
+  like the Azure jobs. ``MACOSX_DEPLOYMENT_TARGET=11.0`` keeps the
+  ``macosx_11_0_arm64`` floor shipped since 4.x.
 
 Every wheel is built without the ``insecure-skip-verify`` native
 feature: released binaries must reject ``tls_verify=unsafe_off``. Never
