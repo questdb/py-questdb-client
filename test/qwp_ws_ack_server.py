@@ -1,12 +1,18 @@
 import base64
 import hashlib
+import pathlib
 import socket
+import ssl
 import struct
 import threading
 import time
 
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+CERTS_DIR = pathlib.Path(__file__).parent / 'certs'
+TLS_CA = CERTS_DIR / 'ca.crt'
+TLS_CERT = CERTS_DIR / 'server.crt'
+TLS_KEY = CERTS_DIR / 'server.key'
 QWP_STATUS_OK = 0x00
 QWP_FLAG_DEFER_COMMIT = 0x01
 
@@ -15,7 +21,8 @@ class QwpAckServer:
     def __init__(self, *, host="127.0.0.1", ack_delay_s=0.0,
                  close_plan=None, max_batch_size=0,
                  defer_aware_acks=False, record_payloads=False,
-                 error_status=None, error_message=b"mock rejection"):
+                 error_status=None, error_message=b"mock rejection",
+                 tls=False):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -36,6 +43,11 @@ class QwpAckServer:
         `error_status`: when set (a QWP status byte, e.g. 0x03 for
         schema-mismatch), every binary frame is answered with an error
         response carrying that status instead of an OK ack.
+
+        `tls`: when True, wrap every accepted connection in TLS using the
+        self-signed certificate under ``test/certs`` (SAN: 127.0.0.1,
+        localhost). Handshake failures are counted in
+        ``tls_handshake_failures``, not ``errors``.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
@@ -45,6 +57,11 @@ class QwpAckServer:
         self.record_payloads = record_payloads
         self.error_status = error_status
         self.error_message = error_message
+        self._tls_context = None
+        if tls:
+            self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self._tls_context.load_cert_chain(str(TLS_CERT), str(TLS_KEY))
+        self.tls_handshake_failures = 0
         self.port = None
         self._sock = None
         self._stop = threading.Event()
@@ -108,6 +125,7 @@ class QwpAckServer:
                 "binary_payloads": list(self.binary_payloads),
                 "control_frames": self.control_frame_count,
                 "errors": list(self.errors),
+                "tls_handshake_failures": self.tls_handshake_failures,
             }
 
     def wait_binary_frames_settled(self, quiet_s=0.02, timeout_s=5.0):
@@ -175,6 +193,18 @@ class QwpAckServer:
     def _handle_connection(self, conn, close_after):
         next_seq = 0
         frames_handled = 0
+        if self._tls_context is not None:
+            try:
+                conn.settimeout(5)
+                conn = self._tls_context.wrap_socket(conn, server_side=True)
+            except (ssl.SSLError, OSError):
+                with self._lock:
+                    self.tls_handshake_failures += 1
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                return
         try:
             conn.settimeout(5)
             request = _read_until(conn, b"\r\n\r\n")

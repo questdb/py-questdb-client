@@ -3696,6 +3696,80 @@ class TestEgressPool(unittest.TestCase):
                 f'in_use={in_use}, idle={idle}')
 
 
+class TestEgressLeaks(unittest.TestCase):
+    """RSS-plateau leak checks for the query/egress path.
+
+    Every result-consumption route owns native memory (reader cursor,
+    Arrow batch buffers, schema clones, the stream producer's caches);
+    each must free it on its own teardown path. Reuses the shape-based
+    plateau harness from ``test_dataframe_leaks``.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    def setUp(self):
+        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
+            self.skipTest(
+                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+        try:
+            import psutil  # noqa: F401
+        except ImportError:
+            self.skipTest('psutil not installed')
+
+    def _conf(self, **extra):
+        conf = (f'ws::addr={self.qdb_plain.host}:'
+                f'{self.qdb_plain.http_server_port};')
+        for k, v in extra.items():
+            conf += f'{k}={v};'
+        return conf
+
+    def _seed_table(self, n_rows):
+        table = 't_egress_leaks_' + uuid.uuid4().hex[:8]
+        self.qdb_plain.http_sql_query(
+            f'CREATE TABLE {table} '
+            '(ts TIMESTAMP, x LONG, s VARCHAR) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        values = ','.join(
+            f"('2024-01-01T00:{i // 60:02d}:{i % 60:02d}Z', {i}, "
+            f"'value_{i:06d}')"
+            for i in range(n_rows))
+        self.qdb_plain.http_sql_query(
+            f'INSERT INTO {table} VALUES {values}')
+        self.qdb_plain.retry_check_table(table, min_rows=n_rows)
+        self.addCleanup(
+            lambda: self.qdb_plain.http_sql_query(
+                f'DROP TABLE IF EXISTS {table}'))
+        return table
+
+    def test_query_consumption_routes_do_not_leak(self):
+        from test_dataframe_leaks import _assert_no_leak
+        import pyarrow as pa
+        # 64 rows span multiple Arrow batches (see the lease tests), so
+        # the partial-drain route genuinely abandons a live cursor.
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT * FROM {table}'
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            def work():
+                client.query(sql).to_arrow()
+                client.query(sql).to_pandas()
+                result = client.query(sql)
+                for _ in result.iter_arrow():
+                    pass
+                pa.table(client.query(sql))
+                result = client.query(sql)
+                next(result.iter_arrow())
+                result.close()
+                client.query(sql).close()
+
+            _assert_no_leak(self, work, warmup=40, measure=240)
+
+
 class TestColumnIngressNarrowTypes(unittest.TestCase):
     """End-to-end tests for the narrow Arrow primitive types added to
     ``QuestDB.dataframe`` column ingress: ``pa.int8/16/32`` →

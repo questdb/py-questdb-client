@@ -236,12 +236,33 @@ def _gen_float64(rng, n):
     return pd.Series(out)
 
 
+def _sprinkle_nat(rng, values):
+    # ~1 in 4 columns carries NaT; each such column nulls ~1/8 of its
+    # rows (at least one).
+    s = pd.Series(values)
+    if len(s) == 0 or rng.next_int(4) != 0:
+        return s
+    hit = False
+    for i in range(len(s)):
+        if rng.next_int(8) == 0:
+            s.iloc[i] = pd.NaT
+            hit = True
+    if not hit:
+        s.iloc[rng.next_int(len(s))] = pd.NaT
+    return s
+
+
 def _gen_dt64ns_field(rng, n):
-    return pd.Series(_datetime_array(n, 'ns'))
+    values = _datetime_array(n, 'ns')
+    if pa is None:
+        # Without pyarrow the planner rejects NaT-carrying [ns] fields
+        # (no Arrow re-export to preserve the INT64_MIN null sentinel).
+        return pd.Series(values)
+    return _sprinkle_nat(rng, values)
 
 
 def _gen_dt64us_field(rng, n):
-    return pd.Series(_datetime_array(n, 'us'))
+    return _sprinkle_nat(rng, _datetime_array(n, 'us'))
 
 
 def _gen_categorical(rng, n):

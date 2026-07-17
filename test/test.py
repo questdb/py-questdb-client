@@ -29,7 +29,7 @@ sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
-from qwp_ws_ack_server import QwpAckServer
+from qwp_ws_ack_server import QwpAckServer, TLS_CA
 
 import questdb._client as qi
 
@@ -614,6 +614,114 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 closer.is_alive(),
                 'close() must not deadlock against the handler thread')
             self.assertTrue(handler_done.wait(5))
+
+    def test_error_event_inbox_overflow_drops_oldest(self):
+        """With the handler blocked and a 1-slot inbox, a continuous
+        rejection stream must overflow the inbox and count drops.
+
+        Status 0x0C (not-writable) maps to the RetriableOther policy,
+        which replays the frame with no backoff — every replay is
+        rejected again, so events flow while the handler is blocked.
+        """
+        release = threading.Event()
+        first_delivered = threading.Event()
+
+        def on_error(error):
+            first_delivered.set()
+            release.wait(30)
+
+        with QwpAckServer(error_status=0x0C) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'close_flush_timeout_millis=0;')
+            with qi.QuestDB.from_conf(
+                    conf,
+                    error_handler=on_error,
+                    error_event_inbox_capacity=1) as client:
+                try:
+                    with client.sender() as sender:
+                        sender.row(
+                            'events', columns={'value': 1},
+                            at=qi.ServerTimestamp)
+                        sender.flush()
+                    self.assertTrue(
+                        first_delivered.wait(10),
+                        'the first rejection must reach the handler')
+                    deadline = time.monotonic() + 15
+                    while client.error_events_dropped < 1:
+                        self.assertLess(
+                            time.monotonic(), deadline,
+                            'inbox overflow must drop the oldest event')
+                        time.sleep(0.01)
+                    release.set()
+                    # Delivery is counted once the handler returns.
+                    deadline = time.monotonic() + 10
+                    while client.error_events_delivered < 1:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                finally:
+                    release.set()
+
+    def test_sender_pool_concurrent_borrow_flush(self):
+        """Deterministic multi-thread exerciser for the sender pool:
+        8 threads share a 2-connection pool while another thread reaps
+        concurrently. Every flush must land exactly one frame and the
+        pool accounting must let close() finish promptly."""
+        n_threads = 8
+        iterations = 25
+        errors = []
+        barrier = threading.Barrier(n_threads)
+        reap_stop = threading.Event()
+
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=2;'
+                'pool_reap=manual;'
+                'acquire_timeout_ms=30000;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def worker(thread_index):
+                    try:
+                        barrier.wait(30)
+                        for i in range(iterations):
+                            with client.sender() as sender:
+                                sender.row(
+                                    'events',
+                                    columns={'t': thread_index, 'i': i},
+                                    at=qi.ServerTimestamp)
+                                sender.flush(wait=True)
+                    except BaseException as e:
+                        errors.append(e)
+
+                def reaper():
+                    while not reap_stop.is_set():
+                        client.reap_idle()
+                        time.sleep(0.005)
+
+                threads = [
+                    threading.Thread(target=worker, args=(t,))
+                    for t in range(n_threads)]
+                reap_thread = threading.Thread(target=reaper)
+                for thread in threads:
+                    thread.start()
+                reap_thread.start()
+                for thread in threads:
+                    thread.join(90)
+                reap_stop.set()
+                reap_thread.join(10)
+                self.assertFalse(
+                    any(t.is_alive() for t in threads + [reap_thread]),
+                    'worker or reaper thread did not finish')
+                self.assertEqual(errors, [])
+                self.assertEqual(
+                    server.wait_binary_frames_settled(),
+                    n_threads * iterations)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
 
     def test_client_sender_publishes_rows_without_dataframe_surface(self):
         with QwpAckServer() as server:
@@ -1269,6 +1377,89 @@ class TestQwpWebSocketApi(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+
+class TestQwpWebSocketTls(unittest.TestCase):
+    """wss:: against a TLS-wrapped mock server, using the self-signed
+    certificate under test/certs as its own trust root."""
+
+    TLS_CA = TLS_CA
+
+    def _pool_keys(self):
+        return ('sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;')
+
+    def _publish_one_row(self, client):
+        with client.sender() as sender:
+            sender.row(
+                'events', columns={'value': 1}, at=qi.ServerTimestamp)
+            sender.flush(wait=True)
+
+    def test_wss_with_pinned_root_publishes(self):
+        with QwpAckServer(tls=True) as server:
+            conf = (
+                f'wss::addr=127.0.0.1:{server.port};'
+                f'tls_roots={self.TLS_CA};'
+                + self._pool_keys())
+            with qi.QuestDB.from_conf(conf) as client:
+                self._publish_one_row(client)
+                self.assertEqual(server.wait_binary_frames_settled(), 1)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['tls_handshake_failures'], 0)
+
+    def test_connect_tls_keyword_form_publishes(self):
+        import questdb
+        with QwpAckServer(tls=True) as server:
+            with questdb.connect(
+                    host='127.0.0.1',
+                    port=server.port,
+                    tls=True,
+                    tls_roots=str(self.TLS_CA),
+                    sender_pool_min=1,
+                    sender_pool_max=1,
+                    pool_reap='manual') as db:
+                self._publish_one_row(db)
+                self.assertEqual(server.wait_binary_frames_settled(), 1)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+
+    def test_wss_rejects_untrusted_certificate(self):
+        with QwpAckServer(tls=True) as server:
+            conf = (
+                f'wss::addr=127.0.0.1:{server.port};'
+                'reconnect_max_duration_millis=1000;'
+                'close_flush_timeout_millis=0;'
+                + self._pool_keys())
+            with qi.QuestDB.from_conf(conf) as client:
+                with self.assertRaises(qi.QuestDBError):
+                    with client.sender() as sender:
+                        sender.row(
+                            'events', columns={'value': 1},
+                            at=qi.ServerTimestamp)
+                        sender.flush()
+                        sender.wait(timeout_millis=2000)
+            deadline = time.monotonic() + 10
+            while server.tls_handshake_failures < 1:
+                self.assertLess(
+                    time.monotonic(), deadline,
+                    'the server must observe a failed TLS handshake')
+                time.sleep(0.01)
+            stats = server.snapshot()
+        self.assertEqual(stats['binary_frames'], 0)
+
+    def test_wss_unsafe_off_skips_verification(self):
+        with QwpAckServer(tls=True) as server:
+            conf = (
+                f'wss::addr=127.0.0.1:{server.port};'
+                'tls_verify=unsafe_off;'
+                + self._pool_keys())
+            with qi.QuestDB.from_conf(conf) as client:
+                self._publish_one_row(client)
+                self.assertEqual(server.wait_binary_frames_settled(), 1)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
 
 
 class TestBases:
