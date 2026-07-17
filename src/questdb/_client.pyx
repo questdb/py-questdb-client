@@ -2145,12 +2145,31 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
 _DISPATCH_THREAD = threading.local()
 
 
+cdef list _dispatch_target_stack():
+    stack = getattr(_DISPATCH_THREAD, 'targets', None)
+    if stack is None:
+        stack = []
+        _DISPATCH_THREAD.targets = stack
+    return stack
+
+
+cdef bint _on_dispatch_thread_for(object handler, object listener):
+    stack = getattr(_DISPATCH_THREAD, 'targets', None)
+    if not stack:
+        return False
+    for target in stack:
+        if target is handler or target is listener:
+            return True
+    return False
+
+
 cdef void _connection_event_dispatch(
         void* user_data,
         const questdb_connection_event* event) noexcept with gil:
-    _DISPATCH_THREAD.active = True
+    listener = <object>user_data
+    stack = _dispatch_target_stack()
+    stack.append(listener)
     try:
-        listener = <object>user_data
         kind = ConnectionEventKind.Connected
         for entry in ConnectionEventKind:
             if entry.c_value == <int>event.kind:
@@ -2175,7 +2194,7 @@ cdef void _connection_event_dispatch(
         logging.getLogger("questdb").exception(
             "connection event listener failed")
     finally:
-        _DISPATCH_THREAD.active = False
+        stack.pop()
 
 
 cdef void _connection_event_trampoline(
@@ -2285,16 +2304,17 @@ def _default_error_handler(error):
 cdef void _sender_error_dispatch(
         void* user_data,
         const line_sender_qwpws_error_view* view) noexcept with gil:
-    _DISPATCH_THREAD.active = True
+    handler = <object>user_data
+    stack = _dispatch_target_stack()
+    stack.append(handler)
     try:
-        handler = <object>user_data
         handler(_sender_error_from_raw(
             c_sender_error_view_to_raw(view[0])))
     except BaseException:
         logging.getLogger("questdb").exception(
             "QWP/WebSocket error handler failed")
     finally:
-        _DISPATCH_THREAD.active = False
+        stack.pop()
 
 
 cdef void _sender_error_trampoline(
@@ -2448,6 +2468,17 @@ cdef bint _dataframe_columnar_i64_has_nat(
         if data[row_index] == _NAT:
             return True
     return False
+
+
+cdef bint _dataframe_columnar_col_has_nat(
+        col_t* col,
+        size_t row_count) noexcept nogil:
+    if not col.setup.nat_scan_done:
+        col.setup.nat_found = _dataframe_columnar_i64_has_nat(
+            <const int64_t*>col.setup.chunks.chunks[0].buffers[1],
+            row_count)
+        col.setup.nat_scan_done = True
+    return col.setup.nat_found
 
 
 cdef bint _dataframe_columnar_i64_has_negative(
@@ -2688,8 +2719,7 @@ cdef object _dataframe_columnar_plan_failures(
                 # pyarrow, _dataframe_columnar_promote_cols already
                 # re-exported any NaT-carrying column through Arrow (and
                 # imported pyarrow doing so), leaving nothing to reject.
-                ts_data = <const int64_t*>col.setup.chunks.chunks[0].buffers[1]
-                if _dataframe_columnar_i64_has_nat(ts_data, plan.row_count):
+                if _dataframe_columnar_col_has_nat(col, plan.row_count):
                     failures.append(_dataframe_columnar_col_failure(
                         df,
                         col,
@@ -2935,9 +2965,7 @@ cdef void_int _dataframe_columnar_promote_cols(
                 and col.setup.source == col_source_t.col_source_dt64ns_numpy
                 and _dataframe_columnar_has_single_contiguous_chunk(
                     col, plan.row_count)
-                and _dataframe_columnar_i64_has_nat(
-                    <const int64_t*>col.setup.chunks.chunks[0].buffers[1],
-                    plan.row_count)):
+                and _dataframe_columnar_col_has_nat(col, plan.row_count)):
             if not _dataframe_try_import_pyarrow():
                 continue
             arrow_array = _dataframe_columnar_col_from_pandas(df, col)
@@ -5867,6 +5895,10 @@ cdef bint _is_batch_too_large_error(object exc):
         or 'batch too large' in msg)
 
 
+# no_gc_clear keeps tp_clear from nulling fields the native dispatchers
+# still target. Cycle collection stays possible only because the handler
+# attributes are assigned exclusively at construction; adding a setter
+# would create uncollectable cycles through leases.
 @cython.no_gc_clear
 cdef class QuestDB:
     """
@@ -5973,6 +6005,12 @@ cdef class QuestDB:
         :attr:`error_events_dropped`. Use the handler for
         dead-lettering, alerting, and metrics; terminal failures also
         surface as :class:`QuestDBError` from the sender calls themselves.
+
+        When a handler or listener closes over the returned handle, call
+        :meth:`close` explicitly (or use ``with``): a handle abandoned to
+        the garbage collector while callbacks are still firing may have
+        its callback's internals cleared by the cycle collector before
+        the dispatchers are joined, crashing the process.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_utf8 c_conf
@@ -6131,8 +6169,8 @@ cdef class QuestDB:
         (including the first chunk, which commits eagerly on a fresh
         connection) unless the table has ``DEDUP UPSERT KEYS``. Server-side
         rejections (e.g. a schema mismatch) surface as a plain
-        :class:`QuestDBError`; the structured ``rejection`` diagnostic is
-        attached only by the store-and-forward senders.
+        :class:`QuestDBError`; the structured ``sender_error`` diagnostic
+        is attached only by the store-and-forward senders.
 
         ``df`` accepts any of:
 
@@ -6473,7 +6511,11 @@ cdef class QuestDB:
         """
         Close the client and its connection pool.
 
-        This method is idempotent.
+        This method is idempotent. When called from inside one of this
+        handle's own ``error_handler`` / ``connection_listener``
+        callbacks, it does not wait for a concurrent ``close()`` on
+        another thread to finish; the in-flight callback completes after
+        that close returns.
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
@@ -6481,9 +6523,10 @@ cdef class QuestDB:
         try:
             db = self._db
             if db == NULL:
-                # A dispatcher-thread caller must not wait here: the
-                # in-flight closer joins this very thread.
-                if not getattr(_DISPATCH_THREAD, 'active', False):
+                # A caller dispatching for this handle must not wait here:
+                # the in-flight closer joins this very thread.
+                if not _on_dispatch_thread_for(
+                        self._error_handler, self._connection_listener):
                     while self._closing:
                         self._state_cond.wait()
                 return
@@ -6531,7 +6574,14 @@ cdef class QuestDB:
 @cython.no_gc_clear
 cdef class Sender:
     """
-    Ingest data into QuestDB.
+    Ingest data into QuestDB over a single connection.
+
+    This is the connection-level API: one sender drives exactly one
+    connection (ILP/HTTP, ILP/TCP, QWP/UDP, or a single QWP/WebSocket
+    connection) and carries the point-to-point capabilities the
+    deployment-level handle does not: HTTP transactions, UDP datagrams,
+    and manual ws progress and buffer control. For pooled ingestion and
+    queries, prefer :func:`questdb.connect`.
 
     See the :ref:`sender` documentation for more information.
     """

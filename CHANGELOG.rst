@@ -285,7 +285,7 @@ cannot be expressed on the QWP columnar path) and the
 ``ArrowUnsupportedColumnKind``, ``ArrowIngest``, ``FailoverRetry``,
 ``ConnectTimeout``, ``FailoverWouldDuplicate``, ``Cancelled``,
 ``BatchTooLarge`` and ``StoreResendRequired``.
-:class:`QuestDBError <questdb.QuestDBError>` gains a ``rejection`` property exposing the
+:class:`QuestDBError <questdb.QuestDBError>` gains a ``sender_error`` property exposing the
 structured :class:`SenderError <questdb.SenderError>` view on a server-side QWP/WebSocket
 rejection, plus an ``in_doubt`` property indicating that failed ingress input
 may already have been delivered and must not be blindly replayed without an

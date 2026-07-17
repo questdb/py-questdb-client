@@ -85,13 +85,15 @@ def connect(
     """
     Connect to a QuestDB deployment and return a :class:`QuestDB` handle.
 
-    This is the entry point for new code. The handle owns connection
-    pools for both ingestion and queries: borrow row-building senders
-    with :meth:`QuestDB.sender`, bulk-load DataFrames with
-    :meth:`QuestDB.dataframe`, run SQL with :meth:`QuestDB.query`, and
-    borrow reader leases with :meth:`QuestDB.reader`. The
-    :class:`Sender` class remains the channel for the legacy ILP
-    protocols (HTTP, TCP, UDP).
+    This is the deployment-level entry point and the default for new
+    code. The handle owns connection pools for both ingestion and
+    queries: borrow row-building senders with :meth:`QuestDB.sender`,
+    bulk-load DataFrames with :meth:`QuestDB.dataframe`, run SQL with
+    :meth:`QuestDB.query`, and borrow reader leases with
+    :meth:`QuestDB.reader`. The standalone :class:`Sender` is the
+    complementary connection-level API (one sender = one connection)
+    for point-to-point needs: ILP/HTTP transactions, ILP/TCP, QWP/UDP
+    datagrams, and manually driven single ws connections.
 
     Pass either a QWP/WebSocket configuration string
     (``ws::addr=host:port;`` or ``wss::...``) or the equivalent
@@ -106,7 +108,10 @@ def connect(
     connection-state transition; ``error_handler`` receives one
     :class:`SenderError` per server rejection (without it rejections are
     logged through the ``questdb`` logger). Each runs on its own
-    dispatcher thread; see :meth:`QuestDB.from_conf` for details.
+    dispatcher thread; see :meth:`QuestDB.from_conf` for details. When
+    a handler or listener closes over the returned handle, call
+    :meth:`QuestDB.close` explicitly (or use ``with``) rather than
+    leaving the handle to the garbage collector.
 
     .. code-block:: python
 
@@ -137,7 +142,12 @@ def connect(
                 f'({", ".join(given)}) together with host=, not with a '
                 'configuration string; add them to the string instead.')
     else:
-        host = str(host)
+        if not isinstance(host, str):
+            raise TypeError(
+                f'"host" must be a str, not {type(host).__name__}')
+        for key in params:
+            if not key.isidentifier():
+                raise TypeError(f'invalid settings keyword {key!r}')
         if ':' in host and not host.startswith('['):
             host = f'[{host}]'
         settings = [('addr', f'{host}:{port if port is not None else 9000}')]

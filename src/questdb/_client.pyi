@@ -1133,6 +1133,10 @@ class QuestDB:
         ``questdb`` logger (``ERROR`` for terminal rejections,
         ``WARNING`` for retriable ones, which are replayed), so
         rejections are never silent.
+
+        When a handler or listener closes over the returned handle, call
+        :meth:`close` explicitly (or use ``with``) rather than leaving
+        the handle to the garbage collector.
         """
 
     def __enter__(self) -> QuestDB: ...
@@ -1159,8 +1163,9 @@ class QuestDB:
         or the explicit ``ServerTimestamp`` sentinel to let the server
         assign each row's timestamp on arrival.
 
-        The columnar path loads one table per call: a fixed ``table_name``
-        is required and ``table_name_col`` raises
+        The columnar path loads one table per call: name it via
+        ``table_name`` or the dataframe's index name, and
+        ``table_name_col`` raises
         :class:`UnsupportedDataFrameShapeError` — split multi-table frames
         (e.g. ``df.groupby(col)``) and load each group.
 
@@ -1239,6 +1244,12 @@ class QuestDB:
     def close(self):
         """
         Close the client and its connection pool.
+
+        Idempotent. When called from inside one of this handle's own
+        ``error_handler`` / ``connection_listener`` callbacks, it does
+        not wait for a concurrent ``close()`` on another thread to
+        finish; the in-flight callback completes after that close
+        returns.
         """
 
     def __exit__(self, exc_type, _exc_val, _exc_tb): ...
@@ -1322,7 +1333,14 @@ class QueryResult:
 
 class Sender:
     """
-    Ingest data into QuestDB.
+    Ingest data into QuestDB over a single connection.
+
+    This is the connection-level API: one sender drives exactly one
+    connection (ILP/HTTP, ILP/TCP, QWP/UDP, or a single QWP/WebSocket
+    connection) and carries the point-to-point capabilities the
+    deployment-level handle does not: HTTP transactions, UDP datagrams,
+    and manual ws progress and buffer control. For pooled ingestion and
+    queries, prefer :func:`questdb.connect`.
 
     See the :ref:`sender` documentation for more information.
     """

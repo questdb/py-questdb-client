@@ -606,6 +606,8 @@ cdef struct col_setup_t:
     bint has_override
     column_sender_numpy_dtype override_dtype
     uint8_t override_geohash_bits
+    bint nat_scan_done
+    bint nat_found
 
 
 cdef struct col_t:
@@ -867,13 +869,19 @@ cdef object _dataframe_require_pyarrow():
     _PYARROW = pyarrow
 
 
+cdef bint _PYARROW_IMPORT_FAILED = False
+
+
 cdef bint _dataframe_try_import_pyarrow():
-    global _PYARROW
+    global _PYARROW, _PYARROW_IMPORT_FAILED
     if _PYARROW is not None:
         return True
+    if _PYARROW_IMPORT_FAILED:
+        return False
     try:
         import pyarrow
     except ImportError:
+        _PYARROW_IMPORT_FAILED = True
         return False
     _PYARROW = pyarrow
     return True
