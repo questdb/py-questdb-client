@@ -462,7 +462,7 @@ class TestScalarAt(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 0)
 
 
-@unittest.skipIf(pd is None, 'pandas not installed')
+@unittest.skipIf(pd is None or pa is None, 'pandas/pyarrow not installed')
 class TestNdarrayArrayColumns(unittest.TestCase):
     """Object-dtype columns of float64 numpy-array cells land as QuestDB
     ARRAY(DOUBLE) through the columnar manual-planner route (promoted to
