@@ -1114,7 +1114,11 @@ queries on it sequentially::
 
 Each query skips the per-call pool round-trip, and because they share one
 connection, ``reset_symbol_dict=False`` on follow-up queries keeps the
-connection's ``SYMBOL`` dictionary warm across them. Queries on a lease are
+connection's ``SYMBOL`` dictionary warm across them — skipping the
+re-interning of symbols the connection already knows. The default
+(``True``) keeps each result's dictionary exactly as large as the values
+it uses, so materialising ``SYMBOL`` columns into pandas or polars
+categoricals stays compact. Queries on a lease are
 strictly sequential: fully drain (or close) each :class:`QueryResult <questdb.QueryResult>` before
 the next ``r.query()`` call. Closing a result before draining it tears down
 the lease's connection, after which the lease is terminal — close it and take

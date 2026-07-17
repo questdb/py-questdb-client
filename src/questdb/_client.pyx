@@ -6295,7 +6295,16 @@ cdef class QuestDB:
         rejected. It requires the Arrow columnar path (fully Arrow-backed
         input without ``table_name_col``); on input that falls back to the
         NumPy planner it raises :class:`UnsupportedDataFrameShapeError`.
-        ``max_rows_per_batch`` bounds the rows sent per columnar batch.
+        ``max_rows_per_batch`` sets the pipelining granularity, not a
+        safety limit: any batch exceeding the negotiated per-batch byte
+        cap is split regardless of it, and a single row is never bounded
+        by it. Each batch is one unit of client memory and server-side
+        apply, and a commit checkpoint fires every ~100 batches, so
+        ``max_rows_per_batch * 100`` rows is the replay window on a
+        transient failover. Raise it for narrow numeric rows; lower it
+        for very wide rows or tight memory. Streaming Arrow input
+        (``pa.RecordBatchReader``) is not re-batched — the producer's
+        batch size governs.
         """
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
