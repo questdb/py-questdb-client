@@ -63,9 +63,12 @@ __all__ = [
 ]
 
 
-def _conf_value(value) -> str:
+def _conf_value(key: str, value) -> str:
     if isinstance(value, bool):
-        value = 'on' if value else 'off'
+        if key == 'tls_verify':
+            value = 'on' if value else 'unsafe_off'
+        else:
+            value = 'on' if value else 'off'
     return str(value).replace(';', ';;')
 
 
@@ -98,11 +101,15 @@ def connect(
     Pass either a QWP/WebSocket configuration string
     (``ws::addr=host:port;`` or ``wss::...``) or the equivalent
     keywords: ``host``, ``port`` (default 9000) and ``tls`` (default
-    ``False``) select the endpoint, and any further keyword arguments
-    are appended as configuration-string settings verbatim
-    (``username='u'``, ``sender_pool_max=4``, ...; booleans map to
-    ``on``/``off``). One configuration addresses the whole deployment;
-    list every cluster node in a single ``addr`` server list.
+    ``False``) select the endpoint. Either way, any further keyword
+    arguments are added as configuration-string settings
+    (``username='u'``, ``sender_pool_max=4``, ...; booleans normally map
+    to ``on``/``off``, while ``tls_verify=False`` maps to
+    ``unsafe_off``); a setting present both in the string and as a
+    keyword raises :class:`ValueError`, matching
+    :meth:`Sender.from_conf`. One configuration addresses the whole
+    deployment; list every cluster node in a single ``addr`` server
+    list.
 
     ``connection_listener`` receives one :class:`ConnectionEvent` per
     connection-state transition; ``error_handler`` receives one
@@ -132,22 +139,30 @@ def connect(
             'connect() takes either a configuration string or a host= '
             'keyword (with optional port=, tls= and further settings), '
             'but not both.')
+    for key in params:
+        if not key.isidentifier():
+            raise TypeError(f'invalid settings keyword {key!r}')
     if conf_str is not None:
         given = [name for name, value
                  in (('port', port), ('tls', tls)) if value is not None]
-        given.extend(sorted(params))
         if given:
             raise TypeError(
-                'connect() only accepts endpoint and settings keywords '
+                'connect() only accepts the endpoint keywords '
                 f'({", ".join(given)}) together with host=, not with a '
-                'configuration string; add them to the string instead.')
+                'configuration string; use ws::/wss:: and addr= in the '
+                'string instead.')
+        if params:
+            # Insert right after 'ws::'/'wss::': appending at the tail
+            # would mis-merge when the string ends inside an escaped
+            # ';;' value.
+            schema, sep, rest = conf_str.partition('::')
+            conf_str = schema + sep + ''.join(
+                f'{key}={_conf_value(key, value)};'
+                for key, value in params.items()) + rest
     else:
         if not isinstance(host, str):
             raise TypeError(
                 f'"host" must be a str, not {type(host).__name__}')
-        for key in params:
-            if not key.isidentifier():
-                raise TypeError(f'invalid settings keyword {key!r}')
         if host.startswith('['):
             if not host.endswith(']'):
                 raise ValueError(
@@ -162,13 +177,25 @@ def connect(
         settings = [('addr', f'{host}:{port if port is not None else 9000}')]
         settings.extend(params.items())
         conf_str = ('wss::' if tls else 'ws::') + ''.join(
-            f'{key}={_conf_value(value)};' for key, value in settings)
-    return QuestDB.from_conf(
-        conf_str,
-        connection_listener=connection_listener,
-        connection_event_inbox_capacity=connection_event_inbox_capacity,
-        error_handler=error_handler,
-        error_event_inbox_capacity=error_event_inbox_capacity)
+            f'{key}={_conf_value(key, value)};' for key, value in settings)
+    try:
+        return QuestDB.from_conf(
+            conf_str,
+            connection_listener=connection_listener,
+            connection_event_inbox_capacity=connection_event_inbox_capacity,
+            error_handler=error_handler,
+            error_event_inbox_capacity=error_event_inbox_capacity)
+    except QuestDBError as e:
+        # The native parser reports a keyword/string conflict as a
+        # duplicate key at a position in the merged string the caller
+        # never wrote; rephrase it like Sender.from_conf does.
+        msg = str(e)
+        for key in params:
+            if f'duplicate key "{key}"' in msg:
+                raise ValueError(
+                    f'"{key}" is already present in the conf_str '
+                    'and cannot be overridden.') from None
+        raise
 
 
 class _QuestdbModule(_ModuleType):

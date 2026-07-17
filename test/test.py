@@ -410,9 +410,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};'
                 'sender_pool_min=1;'
-                'sender_pool_max=1;'
                 'pool_reap=manual;')
-            with questdb.connect(conf) as db:
+            with questdb.connect(conf, sender_pool_max=1) as db:
                 self.assertIsInstance(db, questdb.QuestDB)
                 with db.sender() as sender:
                     sender.row(
@@ -445,9 +444,13 @@ class TestQwpWebSocketApi(unittest.TestCase):
             questdb.connect('ws::addr=localhost:9000;', host='localhost')
         with self.assertRaisesRegex(TypeError, 'but not both'):
             questdb.connect()
-        with self.assertRaisesRegex(TypeError, 'sender_pool_max'):
+        with self.assertRaisesRegex(
+                ValueError, '"sender_pool_max" is already present'):
             questdb.connect(
-                'ws::addr=localhost:9000;', sender_pool_max=4)
+                'ws::addr=localhost:9000;sender_pool_max=2;',
+                sender_pool_max=4)
+        with self.assertRaisesRegex(TypeError, 'invalid settings keyword'):
+            questdb.connect('ws::addr=localhost:9000;', **{'a;b': 'x'})
         with self.assertRaisesRegex(TypeError, 'tls'):
             questdb.connect('ws::addr=localhost:9000;', tls=True)
         with self.assertRaisesRegex(TypeError, 'port'):
@@ -466,10 +469,12 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_module_connect_conf_building(self):
         import questdb
-        self.assertEqual(questdb._conf_value(True), 'on')
-        self.assertEqual(questdb._conf_value(False), 'off')
-        self.assertEqual(questdb._conf_value('a;b'), 'a;;b')
-        self.assertEqual(questdb._conf_value(4), '4')
+        self.assertEqual(questdb._conf_value('failover', True), 'on')
+        self.assertEqual(questdb._conf_value('failover', False), 'off')
+        self.assertEqual(
+            questdb._conf_value('tls_verify', False), 'unsafe_off')
+        self.assertEqual(questdb._conf_value('password', 'a;b'), 'a;;b')
+        self.assertEqual(questdb._conf_value('sender_pool_max', 4), '4')
 
         built = []
 
@@ -486,13 +491,31 @@ class TestQwpWebSocketApi(unittest.TestCase):
             questdb.connect(host='[::1]', port=1)
             questdb.connect(
                 host='h', password='p;w', sender_pool_max=2, tls=False)
+            questdb.connect(
+                'ws::addr=h:9000;', sender_pool_max=2, tls_verify=False)
         self.assertEqual(built, [
             'ws::addr=localhost:9000;',
             'wss::addr=localhost:9009;',
             'ws::addr=[::1]:1;',
             'ws::addr=[::1]:1;',
             'ws::addr=h:9000;password=p;;w;sender_pool_max=2;',
+            'ws::sender_pool_max=2;tls_verify=unsafe_off;addr=h:9000;',
         ])
+
+    def test_module_connect_tls_verify_false_uses_unsafe_off(self):
+        import questdb
+        try:
+            db = questdb.connect(
+                'wss::addr=127.0.0.1:1;', tls_verify=False)
+        except questdb.QuestDBError as e:
+            # Shipped wheels omit the insecure-skip-verify feature. Reaching
+            # this feature-gate error proves the bool was serialized using
+            # the native `unsafe_off` spelling, not the invalid `off`.
+            self.assertIs(e.code, questdb.QuestDBErrorCode.ConfigError)
+            self.assertIn('insecure-skip-verify', str(e))
+        else:
+            # Explicitly opted-in development builds accept unsafe_off.
+            db.close()
 
     def test_from_conf_rejects_non_callable_error_handler(self):
         with self.assertRaisesRegex(
