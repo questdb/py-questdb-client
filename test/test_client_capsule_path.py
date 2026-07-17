@@ -741,7 +741,9 @@ class TestSenderConnectionEvents(unittest.TestCase):
                     f'ws::addr=127.0.0.1:{server.port};',
                     connection_listener=events.append) as sender:
                 deadline = time.time() + 5
-                while time.time() < deadline and not events:
+                while time.time() < deadline and (
+                        not events
+                        or sender.connection_events_delivered < 1):
                     time.sleep(0.01)
                 self.assertTrue(events)
                 self.assertIs(events[0].kind,
