@@ -20,11 +20,12 @@ Azure Pipelines (``ci/cibuildwheel.yaml``):
 GitHub Actions (``.github/workflows/macos-arm64-wheels.yml``):
 
 * macOS arm64: the standard GitHub Actions ``macos-15`` runners are
-  Apple Silicon. The workflow mirrors the Azure macOS jobs — the same
-  CPython buckets (3.10 through 3.14 plus 3.14t) with the full test
-  suite run against every wheel. ``MACOSX_DEPLOYMENT_TARGET`` is pinned
-  to ``11.0`` so the wheels keep the ``macosx_11_0_arm64`` floor shipped
-  since 4.x; the delocate repair step fails the build on any mismatch.
+  Apple Silicon. A single job builds CPython 3.10 through 3.14 plus
+  3.14t, with the full test suite run against every wheel. Like the
+  Azure jobs it runs on every non-fork pull request (not on pushes to
+  ``main``). ``MACOSX_DEPLOYMENT_TARGET`` is pinned to ``11.0`` so the
+  wheels keep the ``macosx_11_0_arm64`` floor shipped since 4.x; the
+  delocate repair step fails the build on any mismatch.
 
 Every wheel is built without the ``insecure-skip-verify`` native
 feature: released binaries must reject ``tls_verify=unsafe_off``. Never
@@ -58,15 +59,16 @@ If you're unsure, append ``--dry-run`` to preview changes.
 
 Now merge the PR with the title "Bump version: V.V.V → W.W.W".
 
-Note that CI will build the release binaries:
+Note that CI builds the release binaries on the bump PR itself — both
+systems run as PR checks:
 
 * Azure Pipelines runs the ``cibuildwheel`` jobs for Linux, Windows and
   macOS Intel.
-* The GitHub Actions "macOS arm64 wheels" workflow runs automatically on
-  the push to ``main``. It can also be re-run manually from the Actions
-  tab ("macOS arm64 wheels" → "Run workflow"), or with::
+* The GitHub Actions "macOS arm64 wheels" workflow builds the macOS ARM
+  wheels. (It can also be triggered manually: Actions tab → "macOS arm64
+  wheels" → "Run workflow", or ``gh workflow run "macOS arm64 wheels"``.)
 
-      gh workflow run "macOS arm64 wheels"
+The binaries you release are collected from the merged bump PR's runs.
 
 Double-check the date in the CHANGELOG
 --------------------------------------
@@ -95,14 +97,15 @@ commit::
 Download the macOS ARM binaries from GitHub Actions
 ---------------------------------------------------
 
-Find the workflow run for the release commit and download its merged
-artifact into ``dist/``::
+Find the workflow run for the bump PR and download its artifact into
+``dist/``::
 
     gh run list --workflow "macOS arm64 wheels" --limit 5
     gh run download <run-id> --name wheels-macos-arm64 --dir dist
 
-(Or via the browser: Actions tab → "macOS arm64 wheels" → the run for
-the release commit → download the ``wheels-macos-arm64`` artifact.)
+(Or via the browser: the bump PR's Checks tab → "macOS arm64 wheels" —
+or Actions tab → "macOS arm64 wheels" → the run for the bump PR — then
+download the ``wheels-macos-arm64`` artifact.)
 
 Download the other binaries from Azure CI
 -----------------------------------------
