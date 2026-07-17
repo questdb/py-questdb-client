@@ -742,7 +742,7 @@ cdef class TimestampMicros:
     """
     cdef int64_t _value
 
-    def __cinit__(self, value: int):
+    def __cinit__(self, value):
         if value < 0:
             raise ValueError('value must be a non-negative integer.')
         self._value = value
@@ -808,7 +808,7 @@ cdef class TimestampNanos:
     """
     cdef int64_t _value
 
-    def __cinit__(self, value: int):
+    def __cinit__(self, value):
         if value < 0:
             raise ValueError('value must be a non-negative integer.')
         self._value = value
@@ -1122,7 +1122,7 @@ cdef class Buffer:
         """Maximum length of a table or column name."""
         return self._max_name_len
 
-    def reserve(self, additional: int):
+    def reserve(self, additional):
         """
         Ensure the buffer has at least `additional` bytes of future capacity.
 
@@ -2155,12 +2155,20 @@ _DISPATCH_THREAD = threading.local()
 _LIVE_CALLBACK_REFS = {}
 
 
-cdef _retain_callback_refs(object owner, object error_handler, object listener):
-    _LIVE_CALLBACK_REFS[id(owner)] = (error_handler, listener)
+# The registry is keyed by a value captured while the owner is alive and
+# released through that key alone: `tp_dealloc` must never pass the dying
+# owner back into Python-level calls (PyPy's cpyext aborts on reviving a
+# dying object mid-dealloc).
+cdef size_t _retain_callback_refs(
+        object owner, object error_handler, object listener):
+    cdef size_t key = id(owner)
+    _LIVE_CALLBACK_REFS[key] = (error_handler, listener)
+    return key
 
 
-cdef _release_callback_refs(object owner):
-    _LIVE_CALLBACK_REFS.pop(id(owner), None)
+cdef _release_callback_refs(size_t key):
+    if key != 0:
+        _LIVE_CALLBACK_REFS.pop(key, None)
 
 
 cdef list _dispatch_target_stack():
@@ -5935,6 +5943,7 @@ cdef class QuestDB:
     cdef bint _closing
     cdef object _connection_listener
     cdef object _error_handler
+    cdef size_t _cb_refs_key
 
     def __cinit__(self):
         self._db = NULL
@@ -5944,6 +5953,7 @@ cdef class QuestDB:
         self._closing = False
         self._connection_listener = None
         self._error_handler = None
+        self._cb_refs_key = 0
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
@@ -5975,9 +5985,9 @@ cdef class QuestDB:
             str conf_str,
             *,
             connection_listener=None,
-            connection_event_inbox_capacity: int = 0,
+            connection_event_inbox_capacity=0,
             error_handler=None,
-            error_event_inbox_capacity: int = 0):
+            error_event_inbox_capacity=0):
         """
         Construct a handle from a QWP/WebSocket configuration string.
 
@@ -6100,7 +6110,7 @@ cdef class QuestDB:
                 db._error_handler = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
-            _retain_callback_refs(
+            db._cb_refs_key = _retain_callback_refs(
                 db, db._error_handler, db._connection_listener)
             return db
         finally:
@@ -6581,7 +6591,8 @@ cdef class QuestDB:
             questdb_db_close(db)
         finally:
             _ensure_has_gil(&gs)
-            _release_callback_refs(self)
+            _release_callback_refs(self._cb_refs_key)
+            self._cb_refs_key = 0
             with self._state_cond:
                 self._closing = False
                 self._state_cond.notify_all()
@@ -6598,7 +6609,8 @@ cdef class QuestDB:
             _ensure_doesnt_have_gil(&gs)
             questdb_db_close(db)
             _ensure_has_gil(&gs)
-        _release_callback_refs(self)
+        _release_callback_refs(self._cb_refs_key)
+        self._cb_refs_key = 0
 
 
 @cython.no_gc_clear
@@ -6635,6 +6647,7 @@ cdef class Sender:
     # so dataframe() can open a poolless direct columnar connection per call
     # (carrying auth/TLS). NULL for other protocols.
     cdef line_sender_opts* _qwp_ws_opts
+    cdef size_t _cb_refs_key
 
     cdef void_int _set_sender_fields(
             self,
@@ -7514,7 +7527,7 @@ cdef class Sender:
         line_sender_opts_free(self._opts)
         self._opts = NULL
 
-        _retain_callback_refs(
+        self._cb_refs_key = _retain_callback_refs(
             self, self._error_handler, self._connection_listener)
 
         # Request callbacks when rows are complete.
@@ -7965,7 +7978,7 @@ cdef class Sender:
             return fsn.value
         return None
 
-    def await_acked_fsn(self, fsn, timeout_millis: int=0):
+    def await_acked_fsn(self, fsn, timeout_millis=0):
         """
         Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
 
@@ -8122,7 +8135,8 @@ cdef class Sender:
             line_sender_opts_free(opts)
             line_sender_opts_free(qwp_ws_opts)
             _ensure_has_gil(&gs)
-        _release_callback_refs(self)
+        _release_callback_refs(self._cb_refs_key)
+        self._cb_refs_key = 0
         self._buffer = None
         self._error_handler = None
         self._connection_listener = None
@@ -8362,7 +8376,7 @@ cdef class PooledSender:
             self._flush_locked(wait)
         return self
 
-    def wait(self, timeout_millis: int=0):
+    def wait(self, timeout_millis=0):
         """
         Wait for everything published through this lease to receive an OK
         ack; returns immediately if this lease published nothing.
@@ -8373,6 +8387,8 @@ cdef class PooledSender:
 
         ``timeout_millis`` is a no-progress timeout; ``0`` waits indefinitely.
         """
+        if not isinstance(timeout_millis, int) or isinstance(timeout_millis, bool):
+            raise TypeError('"timeout_millis" must be a non-negative int.')
         if timeout_millis < 0:
             raise ValueError('timeout_millis must be non-negative.')
         with self._lock:
@@ -8493,7 +8509,7 @@ cdef class PooledSender:
                 raise c_err_to_py(err)
         return fsn.value if fsn.has_value else None
 
-    def await_acked_fsn(self, fsn, timeout_millis: int=0):
+    def await_acked_fsn(self, fsn, timeout_millis=0):
         """
         Wait until the acknowledgement watermark reaches ``fsn`` (as
         returned by :meth:`flush_and_get_fsn` on this lease).
