@@ -1,0 +1,70 @@
+# macOS arm64 wheels — the one wheel family Azure Pipelines cannot build:
+# its hosted macOS agents are Intel-only, while the standard GitHub
+# Actions macos-15 runners are Apple Silicon.
+#
+# Mirrors the four macOS jobs in ci/cibuildwheel.yaml: the same
+# CIBW_BUILD buckets and the same install-latest-cibuildwheel policy,
+# with the shared cibuildwheel configuration (before-build Rust install,
+# per-wheel test suite, skips) coming from pyproject.toml.
+
+name: macOS arm64 wheels
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/macos-arm64-wheels.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: cibuildwheel ${{ matrix.id }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: cp310_cp311, build: "cp310-* cp311-*" }
+          - { id: cp312_cp313, build: "cp312-* cp313-*" }
+          - { id: cp314, build: "cp314-*" }
+          - { id: cp314t, build: "cp314t-*" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          set -o errexit
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cibuildwheel
+      - name: Build wheels
+        run: cibuildwheel --output-dir wheelhouse .
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_ARCHS_MACOS: arm64
+          # Keep the macosx_11_0_arm64 floor shipped since 4.x. The
+          # delocate repair step fails the build if any binary in the
+          # wheel requires a newer macOS than this tag claims.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-arm64-${{ matrix.id }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  merge:
+    name: merge artifacts
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@v4
+        with:
+          name: wheels-macos-arm64
+          pattern: wheels-macos-arm64-*
+          delete-merged: true
