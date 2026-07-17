@@ -1455,7 +1455,16 @@ class TestQwpWebSocketTls(unittest.TestCase):
                 f'wss::addr=127.0.0.1:{server.port};'
                 'tls_verify=unsafe_off;'
                 + self._pool_keys())
-            with qi.QuestDB.from_conf(conf) as client:
+            try:
+                client = qi.QuestDB.from_conf(conf)
+            except qi.QuestDBError as e:
+                # Shipped wheels are built without the insecure-skip-verify
+                # native feature: `tls_verify=unsafe_off` must be rejected
+                # up front rather than silently ignored.
+                self.assertIs(e.code, qi.QuestDBErrorCode.ConfigError)
+                self.assertIn('insecure-skip-verify', str(e))
+                return
+            with client:
                 self._publish_one_row(client)
                 self.assertEqual(server.wait_binary_frames_settled(), 1)
             stats = server.snapshot()
