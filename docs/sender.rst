@@ -7,10 +7,10 @@ Sending Data
 Overview
 ========
 
-For QWP/WebSocket, use one :class:`QuestDB <questdb.QuestDB>` for row ingestion,
-whole-dataframe ingestion, and queries. The handle owns the connection pools;
-``db.sender()`` lends a row-building sender and ``db.dataframe()``
-keeps whole sources on the direct columnar path.
+Start at the deployment level: one :class:`QuestDB <questdb.QuestDB>` handle
+covers row ingestion, whole-dataframe ingestion, and queries. The handle owns
+the connection pools; ``db.sender()`` lends a row-building sender and
+``db.dataframe()`` keeps whole sources on the direct columnar path.
 
 .. code-block:: python
 
@@ -41,14 +41,57 @@ keeps whole sources on the direct columnar path.
 The pooled sender holds an internal QWP buffer. A successful ``with`` block
 publishes pending rows when it returns the lease to the pool.
 
-The standalone :class:`Sender <questdb.Sender>` remains available as the
-lower-level API for the legacy ILP transports (HTTP/TCP) and QWP/UDP. Over
-``ws::`` / ``wss::``, use :func:`questdb.connect` and ``db.sender()``
-instead — the pooled lease carries the full ws delivery surface
+.. _sender_api_layers:
+
+Two API layers
+--------------
+
+The package has two complementary API layers. They are two abstraction
+levels, not an old and a new API:
+
+* **Deployment level** — :func:`questdb.connect` returns a
+  :class:`QuestDB <questdb.QuestDB>` handle that addresses a whole
+  deployment: ``addr`` lists every cluster node, the handle owns the
+  ingestion and reader connection pools, and its methods are database
+  operations (``sender()``, ``dataframe()``, ``query()``, ``reader()``,
+  ``server_info()``).
+
+* **Connection level** — the standalone :class:`Sender <questdb.Sender>`
+  drives exactly one connection (one sender = one connection). It carries
+  the point-to-point capabilities that live below the handle abstraction:
+  :ref:`ILP/HTTP transactions <sender_transaction>` (transactions are
+  HTTP-only), fire-and-forget :ref:`QWP/UDP datagrams <sender_qwp_udp>`,
+  ILP/TCP, and :ref:`manual control of a single ws connection
+  <sender_qwp_ws>` (progress driving, explicit buffers and draining).
+
+The QuestDB documentation calls ILP over HTTP/TCP the *legacy ILP*
+transports: that names the protocol generation — QWP is the current one —
+not the API layer. The connection-level ``Sender`` is a permanent, fully
+supported surface, and it also speaks current-generation QWP over UDP and
+WebSocket.
+
+Default to the deployment level; drop down only when you need a
+connection-level capability:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 62 38
+
+   * - You need
+     - Use
+   * - Pooled row ingestion, DataFrame bulk loads, queries — the default
+       for new code
+     - :func:`questdb.connect` → :class:`QuestDB <questdb.QuestDB>`
+   * - HTTP transactions, UDP datagrams, ILP/TCP, or manual progress /
+       buffer control over one ws connection
+     - standalone :class:`Sender <questdb.Sender>`
+
+Over ``ws::`` / ``wss::`` specifically, prefer :func:`questdb.connect` and
+``db.sender()`` — the pooled lease carries the full ws delivery surface
 (FSN receipts, ack barriers, rejection polling); the standalone ws sender
 exists only for manual progress mode and explicit buffer control (see
 :ref:`sender_qwp_ws`), and its ``dataframe()`` opens a fresh direct
-connection per call. See the :doc:`5.0 migration guide
+connection per call. Moving from 4.x? See the :doc:`5.0 migration guide
 <migration>`.
 
 You can read more on :ref:`sender_preparing_data` and :ref:`sender_flushing`.
@@ -209,6 +252,10 @@ over ``ws`` / ``wss``):
             symbols=['symbol'],
             at=TimestampNanos.now())
 
+Loading ``object``-dtype ``Decimal`` columns through ``db.dataframe(...)``
+requires ``pyarrow``: each such column is re-exported through Arrow to infer
+its decimal width and scale.
+
 When using pandas DataFrames, you can also use PyArrow decimal types for better
 performance:
 
@@ -366,8 +413,8 @@ See the :ref:`sender_conf_auto_flush` section for more details. and note that
 Error Reporting
 ===============
 
-**TL;DR: QWP/WebSocket has the richest error reporting; among the legacy ILP
-transports, use HTTP.**
+**TL;DR: QWP/WebSocket has the richest error reporting; if you drop to the
+connection-level ILP transports, use HTTP.**
 
 Over QWP/WebSocket every server rejection is delivered as a structured
 :class:`SenderError <questdb.SenderError>` — pushed to the pool's
@@ -376,7 +423,7 @@ default), while terminal rejections also raise
 :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`
 from the affected sender. See :ref:`sender_qwp_ws`.
 
-For the legacy ILP transports, the sender will do its best to check for
+For the ILP transports (HTTP/TCP), the sender will do its best to check for
 errors before sending data to the server.
 
 When using the HTTP protocol, the server will send back an error message if
@@ -501,15 +548,17 @@ Instead, if you don't have a timestamp immediately available, use
 
 This is lighter-weight than using a fully-fledged ``datetime.datetime`` object.
 
-Prefer QWP/WebSocket
---------------------
+Default to the deployment level
+-------------------------------
 
-New code should use QWP/WebSocket through :func:`questdb.connect`: it
+New code should connect through :func:`questdb.connect`: QWP/WebSocket
 combines acknowledged delivery, structured server rejections, queries, and
-connection pooling. Among the legacy ILP transports, prefer ILP/HTTP over
-ILP/TCP for better error reporting and transaction control. Use QWP/UDP only
-when you need fire-and-forget, lowest-latency ingestion and can tolerate
-potential data loss.
+connection pooling in one handle. Drop to the connection-level
+:class:`Sender <questdb.Sender>` when you need one of its point-to-point
+capabilities (see :ref:`sender_api_layers`): ILP/HTTP for transactions and
+the best error reporting among the ILP transports, QWP/UDP for
+fire-and-forget, lowest-latency ingestion that can tolerate potential data
+loss, or ILP/TCP for servers that predate ILP/HTTP support.
 
 .. _sender_tips_connection_reuse:
 
@@ -535,9 +584,9 @@ block so the pooled connection is returned.
                 sender.row(table, symbols=symbols, columns=columns, at=at)
             sender.flush(wait=True)
 
-With the legacy ILP transports there is no pool: create longer-lived
-standalone ``Sender`` objects and reuse them across requests instead of
-constructing one per request.
+At the connection level there is no pool: create longer-lived standalone
+``Sender`` objects and reuse them across requests instead of constructing
+one per request.
 
 .. code-block:: python
 
@@ -871,11 +920,13 @@ Which protocol?
 The sender supports ``tcp``, ``tcps``, ``http``, ``https``, ``udp``,
 ``ws``, and ``wss`` protocols.
 
-**New code should prefer QWP/WebSocket (``ws`` / ``wss``) through**
-:func:`questdb.connect` **: acknowledged delivery, structured server
-rejections, queries and connection pooling in one handle. Among the legacy
+**Default to the deployment level:** connect through :func:`questdb.connect`
+over QWP/WebSocket (``ws`` / ``wss``) for acknowledged delivery, structured
+server rejections, queries and connection pooling in one handle. The other
+protocols belong to the connection-level standalone
+:class:`Sender <questdb.Sender>` (see :ref:`sender_api_layers`); among the
 ILP transports, prefer ILP/HTTP for better error feedback and transaction
-control.**
+control.
 
 .. _sender_qwp_ws:
 

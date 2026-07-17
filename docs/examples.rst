@@ -154,7 +154,7 @@ carry width and scale in the column type:
 .. note::
 
     Over ``ws::`` / ``wss::`` decimal support is negotiated automatically.
-    On the legacy ILP transports, HTTP/HTTPS auto-negotiates
+    On the ILP transports, HTTP/HTTPS auto-negotiates
     :ref:`protocol version 3 <sender_conf_protocol_version>` while TCP/TCPS
     must configure it explicitly:
     ``tcp::addr=localhost:9009;protocol_version=3;``.
@@ -177,8 +177,14 @@ spool, and a connection-event listener.
 .. literalinclude:: ../examples/connect_auth_tls.py
    :language: python
 
-Other transports
-================
+Connection-level transports
+===========================
+
+The examples below use the standalone :class:`Sender <questdb.Sender>` —
+the connection-level API, where one sender drives exactly one connection.
+This layer carries the point-to-point capabilities the deployment-level
+handle does not: QWP/UDP datagrams, ILP over HTTP and TCP, and HTTP
+transactions. See :ref:`sender_api_layers`.
 
 .. _qwp_udp_example:
 
@@ -193,14 +199,15 @@ default listener port is ``9007``.
 .. literalinclude:: ../examples/qwp_udp.py
    :language: python
 
-Legacy ILP (HTTP/TCP)
-=====================
+ILP over HTTP and TCP
+---------------------
 
-The 4.x-style standalone :class:`Sender <questdb.Sender>` remains fully
-supported for InfluxDB Line Protocol ingestion.
+InfluxDB Line Protocol ingestion is fully supported through the standalone
+:class:`Sender <questdb.Sender>` — including HTTP transactions, which are
+unique to this layer.
 
 HTTP with Token Auth
---------------------
+~~~~~~~~~~~~~~~~~~~~
 
 The following example connects to the database and sends two rows (lines).
 
@@ -212,7 +219,7 @@ The data is sent at the end of the ``with`` block.
    :language: python
 
 HTTP Transactions
------------------
+~~~~~~~~~~~~~~~~~
 
 The following example sends rows atomically inside an ILP/HTTP transaction,
 a capability unique to the HTTP transport.
@@ -221,7 +228,7 @@ a capability unique to the HTTP transport.
    :language: python
 
 TCP Basics
-----------
+~~~~~~~~~~
 
 The following example writes rows over ILP/TCP with auto-flush.
 
@@ -231,7 +238,7 @@ The following example writes rows over ILP/TCP with auto-flush.
 .. _auth_and_tls_example:
 
 TCP Authentication and TLS
---------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Continuing from the previous example, the connection is authenticated
 and also uses TLS.
@@ -239,6 +246,6 @@ and also uses TLS.
 .. literalinclude:: ../examples/tcp_auth_tls.py
    :language: python
 
-Further legacy examples — ECDSA auth (``tcp_auth.py``) and configuration
-loading (``http_from_conf.py``) — live in the repository's
+Further connection-level examples — ECDSA auth (``tcp_auth.py``) and
+configuration loading (``http_from_conf.py``) — live in the repository's
 `examples directory <https://github.com/questdb/py-questdb-client/tree/main/examples>`_.

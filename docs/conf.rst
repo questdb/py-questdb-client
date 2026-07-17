@@ -4,8 +4,8 @@
 Configuration
 =============
 
-Configuration strings configure both the QWP/WebSocket
-:class:`QuestDB <questdb.QuestDB>` handle and the legacy standalone
+Configuration strings configure both the deployment-level QWP/WebSocket
+:class:`QuestDB <questdb.QuestDB>` handle and the connection-level standalone
 :class:`Sender <questdb.Sender>`:
 
 .. code-block:: python

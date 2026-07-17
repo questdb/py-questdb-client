@@ -5,9 +5,11 @@ QuestDB Client Library for Python
 This is the official Python client library for `QuestDB <https://questdb.com>`_.
 
 This client library implements the QuestDB Wire Protocol (QWP) over WebSocket
-for pooled ingestion and queries. It also supports QuestDB's variant of the
+for pooled ingestion and queries — the deployment-level ``questdb.connect()``
+API. A connection-level ``Sender`` (one sender = one connection) covers the
+point-to-point transports: QuestDB's variant of the
 `InfluxDB Line Protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_
-(ILP) over HTTP and TCP, plus QWP over UDP.
+(ILP) over HTTP and TCP — including HTTP transactions — plus QWP over UDP.
 
 This implementation supports `authentication
 <https://py-questdb-client.readthedocs.io/en/latest/conf.html#authentication>`_
@@ -82,14 +84,18 @@ You can also send individual rows. This only requires a more minimal installatio
             sender.flush(wait=True)
 
 
-To connect via the `older TCP protocol <https://py-questdb-client.readthedocs.io/en/latest/sender.html#which-protocol>`_, set the
-`configuration string <https://py-questdb-client.readthedocs.io/en/latest/conf.html>`_ to:
+``questdb.connect()`` addresses a whole deployment through connection pools.
+For `connection-level needs <https://py-questdb-client.readthedocs.io/en/latest/sender.html#two-api-layers>`_
+— ILP/HTTP transactions, QWP/UDP datagrams, ILP/TCP — use the standalone
+``Sender``, where one sender drives one connection. Set the
+`configuration string <https://py-questdb-client.readthedocs.io/en/latest/conf.html>`_
+to the transport you need:
 
 .. code-block:: python
 
     from questdb import Sender
 
-    conf = 'tcp::addr=localhost:9009;'
+    conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         ...
 
