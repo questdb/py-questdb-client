@@ -1118,6 +1118,13 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint qwp_sender_effective_frame_cap(
+        const qwp_sender* sender,
+        size_t* cap_out,
+        cbool* server_cap_known_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint qwp_sender_published_fsn(
         const qwp_sender* sender,
         line_sender_qwpws_fsn* fsn_out,

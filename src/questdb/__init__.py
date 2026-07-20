@@ -111,11 +111,12 @@ def connect(
     deployment; list every cluster node in a single ``addr`` server
     list.
 
-    Pooled row senders auto-flush by default at 1,000 rows or 100
-    milliseconds; byte-based auto-flush is disabled. Set
-    ``auto_flush='off'`` to opt out, or configure the individual thresholds.
-    Auto-triggered publishes do not wait for server acknowledgement; use an
-    explicit ``flush(wait=True)`` or ``wait()`` as an acknowledgement barrier.
+    Pooled row senders auto-flush by default at 1,000 rows, 100 milliseconds,
+    or a cap-derived byte threshold. Set ``auto_flush_bytes='off'`` to disable
+    only the byte trigger, or ``auto_flush='off'`` to disable all automatic
+    publishing. Auto-triggered publishes do not wait for server
+    acknowledgement; use an explicit ``flush(wait=True)`` or ``wait()`` as an
+    acknowledgement barrier.
 
     ``connection_listener`` receives one :class:`ConnectionEvent` per
     connection-state transition; ``error_handler`` receives one

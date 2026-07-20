@@ -50,10 +50,11 @@ Breaking changes
   subclass — the standalone-only API such as ``establish()``, manual
   progress or explicit buffers simply does not exist on it. One
   concurrency rule applies everywhere: borrow one sender per thread.
-  Pooled row senders auto-flush by default at 1,000 rows or 100 milliseconds
-  (byte-based auto-flush is off); ``auto_flush=off`` restores fully explicit
-  publishing. Auto-flush publishes without waiting for an acknowledgement;
-  use ``flush(wait=True)`` or ``wait()`` as the acknowledgement barrier.
+  Pooled row senders auto-flush by default at 1,000 rows, 100 milliseconds,
+  or a byte threshold derived from the QWP frame cap; ``auto_flush=off``
+  restores fully explicit publishing. Auto-flush publishes without waiting
+  for an acknowledgement; use ``flush(wait=True)`` or ``wait()`` as the
+  acknowledgement barrier.
   The lease types are exported as :class:`questdb.PooledSender` and
   :class:`questdb.PooledReader` for ``isinstance`` checks and type
   annotations; instances are only ever constructed by

@@ -772,6 +772,232 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(len(data_frames), 1)
         self.assertEqual(_first_qwp_table_row_count(data_frames[0]), 2)
 
+    def test_pooled_sender_auto_flush_default_bytes_uses_server_cap(self):
+        cap = 4096
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(
+                max_batch_size=cap, record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(
+                    conf, connection_listener=on_event) as client:
+                with client.sender() as sender:
+                    self.assertTrue(connected.wait(5))
+                    flushed_after = None
+                    for row_count in range(1, 33):
+                        sender.row(
+                            'events', columns={'value': 'x' * 300},
+                            at=qi.ServerTimestamp)
+                        if len(sender) == 0:
+                            flushed_after = row_count
+                            break
+                    self.assertIsNotNone(flushed_after)
+                    self.assertGreater(flushed_after, 1)
+                    sender.wait(5000)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        data_frames = [
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0)]
+        self.assertEqual(len(data_frames), 1)
+        self.assertLessEqual(len(data_frames[0]), cap)
+        self.assertEqual(
+            _first_qwp_table_row_count(data_frames[0]), flushed_after)
+
+    def test_pooled_sender_auto_flush_bytes_off_ignores_server_cap(self):
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(max_batch_size=4096) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=off;'
+                'auto_flush_bytes=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(
+                    conf, connection_listener=on_event) as client:
+                with client.sender() as sender:
+                    self.assertTrue(connected.wait(5))
+                    for _ in range(20):
+                        sender.row(
+                            'events', columns={'value': 'x' * 300},
+                            at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 20)
+                    self.assertEqual(server.snapshot()['binary_frames'], 0)
+                    sender.close(flush=False)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+
+    def test_pooled_sender_auto_flush_bytes_is_clamped_to_server_cap(self):
+        cap = 4096
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(
+                max_batch_size=cap, record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=off;'
+                'auto_flush_bytes=100000;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(
+                    conf, connection_listener=on_event) as client:
+                with client.sender() as sender:
+                    self.assertTrue(connected.wait(5))
+                    for row_count in range(1, 33):
+                        sender.row(
+                            'events', columns={'value': 'x' * 300},
+                            at=qi.ServerTimestamp)
+                        if len(sender) == 0:
+                            break
+                    else:
+                        self.fail('the cap-clamped byte threshold did not fire')
+                    sender.wait(5000)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        data_frames = [
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0)]
+        self.assertEqual(len(data_frames), 1)
+        self.assertLessEqual(len(data_frames[0]), cap)
+        self.assertEqual(
+            _first_qwp_table_row_count(data_frames[0]), row_count)
+
+    def test_pooled_sender_auto_flush_default_bytes_falls_back_to_8_mib(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'sf_max_segment_bytes=16mb;'
+                'auto_flush_rows=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 'x' * (8 * 1024 * 1024)},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 0)
+                    sender.wait(5000)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 1)
+
+    def test_pooled_sender_auto_flush_oversize_row_error_propagates(self):
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(max_batch_size=1024) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(
+                    conf, connection_listener=on_event) as client:
+                sender = client.sender()
+                try:
+                    self.assertTrue(connected.wait(5))
+                    with self.assertRaises(qi.QuestDBError) as raised:
+                        sender.row(
+                            'events', columns={'value': 'x' * 2048},
+                            at=qi.ServerTimestamp)
+                    self.assertEqual(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.BatchTooLarge)
+                    self.assertEqual(
+                        len(sender), 0,
+                        'an irreducibly oversized row must be removed')
+                finally:
+                    sender.close(flush=False)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+
+    def test_pooled_sender_auto_flush_multirow_overshoot_keeps_batch(self):
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(max_batch_size=4096) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                'auto_flush_rows=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(
+                    conf, connection_listener=on_event) as client:
+                sender = client.sender()
+                try:
+                    self.assertTrue(connected.wait(5))
+                    sender.row(
+                        'events', columns={'value': 'x' * 3000},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+
+                    with self.assertRaises(qi.QuestDBError) as raised:
+                        sender.row(
+                            'events', columns={'value': 'y' * 1500},
+                            at=qi.ServerTimestamp)
+                    self.assertEqual(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.BatchTooLarge)
+                    self.assertEqual(
+                        len(sender), 2,
+                        'a failed multi-row publish must retain the full batch')
+                finally:
+                    sender.close(flush=False)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 0)
+
     def test_pooled_sender_auto_flush_can_be_disabled(self):
         with QwpAckServer() as server:
             conf = (
@@ -779,15 +1005,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
+                'auto_flush_bytes=1000;'
                 'auto_flush=off;')
             with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
                     sender.row(
-                        'events', columns={'value': 1},
+                        'events', columns={'value': 'x' * 2000},
                         at=qi.ServerTimestamp)
                     time.sleep(0.15)
                     sender.row(
-                        'events', columns={'value': 2},
+                        'events', columns={'value': 'y'},
                         at=qi.ServerTimestamp)
                     self.assertEqual(len(sender), 2)
                     self.assertEqual(server.snapshot()['binary_frames'], 0)
@@ -854,6 +1081,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         sender.row(
                             'events', columns={'value': 2},
                             at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
                     sender.close(flush=False)
 
             stats = server.snapshot()

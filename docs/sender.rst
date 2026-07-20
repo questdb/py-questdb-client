@@ -39,9 +39,8 @@ the connection pools; ``db.sender()`` lends a row-building sender and
         db.dataframe(df, table_name='trades', at='timestamp')
 
 The pooled sender holds an internal QWP buffer. A successful ``with`` block
-publishes pending rows when it returns the lease to the pool. Auto-flush is off
-by default on this path and can be enabled through the handle's connection
-settings.
+publishes pending rows when it returns the lease to the pool. Row appends also
+auto-flush by default; the thresholds are configured on the parent handle.
 
 .. _sender_api_layers:
 
@@ -385,9 +384,12 @@ Their defaults reflect the different protocols:
 * A standalone sender publishes at 75,000 rows over HTTP, or 600 rows over
   TCP and QWP, and after 1 second.
 
-* A pooled QWP sender publishes at 1,000 rows or after 100 milliseconds.
-  Byte-based auto-flush is disabled because the current QWP buffer size is an
-  estimate that is not constant-time to calculate.
+* A pooled QWP sender publishes at 1,000 rows, after 100 milliseconds, or when
+  its estimated encoded size reaches 90% of the current frame limit. Before a
+  server limit is known, it uses the lower of 8 MiB and 90% of the local queue
+  limit. Explicit byte thresholds above that 90% limit are clamped. The
+  estimate is a batching heuristic; the exact encoded size is checked when
+  publishing, particularly for symbol dictionaries.
 
 Auto-flushing is triggered when:
 
@@ -411,7 +413,9 @@ interval starts when the first row enters an empty lease buffer.
 A pooled auto-flush only publishes into the store-and-forward path; it does
 not wait for an acknowledgement. Keep acknowledgement barriers explicit with
 ``sender.flush(wait=True)`` or ``sender.wait()``. Errors encountered while
-auto-publishing propagate from ``PooledSender.row()``. If every explicit
+auto-publishing propagate from ``PooledSender.row()``. An oversized single row
+is removed; if a multi-row batch exceeds the exact frame limit, the whole batch
+remains buffered. If every explicit
 ``flush_and_get_fsn()`` must return the receipt for one complete application
 batch, configure ``auto_flush=off``; otherwise an earlier auto-flush may have
 already published and cleared some or all of that batch.

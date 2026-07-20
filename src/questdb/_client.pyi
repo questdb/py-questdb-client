@@ -959,8 +959,9 @@ class PooledSender:
     :meth:`error_events_dropped`. ``dataframe()`` routes to the same
     direct columnar path as :meth:`QuestDB.dataframe`, borrowing a direct
     connection from the pool for that call. Row auto-flush is enabled by
-    default at 1,000 rows or 100 milliseconds and can be configured through
-    the ``auto_flush`` settings on the parent :class:`QuestDB` configuration.
+    default at 1,000 rows, 100 milliseconds, or a cap-derived byte threshold,
+    and can be configured through the ``auto_flush`` settings on the parent
+    :class:`QuestDB` configuration.
     """
 
     def __enter__(self) -> PooledSender: ...
@@ -1143,11 +1144,12 @@ class QuestDB:
 
         Prefer the :func:`questdb.connect` module-level factory.
 
-        Pooled row auto-flush is enabled by default at 1,000 rows or 100
-        milliseconds; byte-based auto-flush is disabled. Set
-        ``auto_flush=off`` to opt out or configure individual thresholds.
-        The mode is shared by all leases; a lease's interval starts when its
-        first row enters an empty buffer.
+        Pooled row auto-flush is enabled by default at 1,000 rows, 100
+        milliseconds, or a cap-derived byte threshold. Set
+        ``auto_flush_bytes=off`` to disable only the byte trigger, or
+        ``auto_flush=off`` to disable all automatic publishing. The mode is
+        shared by all leases; a lease's interval starts when its first row
+        enters an empty buffer.
 
         ``connection_listener`` receives one :class:`ConnectionEvent` per
         connection-state transition, on a dedicated dispatcher thread.

@@ -1375,7 +1375,8 @@ cdef class Buffer:
             str table_name,
             dict symbols=None,
             dict columns=None,
-            object at=None) except -1:
+            object at=None,
+            bint keep_marker=False) except -1:
         """
         Add a row to the buffer.
         """
@@ -1396,7 +1397,8 @@ cdef class Buffer:
                         wrote_fields = True
             if wrote_fields:
                 self._at(at if not isinstance(at, ServerTimestampType) else None)
-                self._clear_marker()
+                if not keep_marker:
+                    self._clear_marker()
             else:
                 self._rewind_to_marker()
         except:
@@ -2002,14 +2004,18 @@ cdef void_int _parse_pooled_auto_flush(
     object auto_flush_bytes,
     object auto_flush_interval,
     auto_flush_mode_t* c_auto_flush,
+    bint* c_auto_flush_bytes_dynamic,
 ) except -1:
     """Parse the QWP pool's Java-builder-compatible auto-flush policy."""
+    cdef bint default_auto_flush_bytes = auto_flush_bytes is None
     if auto_flush_rows is None:
         auto_flush_rows = 1000
     if auto_flush_bytes is None:
-        # QWP/WebSocket size estimation currently walks the buffered schema
-        # and symbol dictionaries, so keep the per-row decision O(1).
-        auto_flush_bytes = False
+        # The pooled path derives its byte threshold from the negotiated frame
+        # cap. Give the generic parser an enabled placeholder so the byte
+        # trigger alone still turns auto-flush on; the separate flag records
+        # that this placeholder is dynamic rather than a literal threshold.
+        auto_flush_bytes = 1
     if auto_flush_interval is None:
         auto_flush_interval = 100
     _parse_auto_flush(
@@ -2020,6 +2026,7 @@ cdef void_int _parse_pooled_auto_flush(
         auto_flush_interval,
         c_auto_flush,
         0)
+    c_auto_flush_bytes_dynamic[0] = default_auto_flush_bytes
 
 
 class TaggedEnum(Enum):
@@ -5979,6 +5986,7 @@ cdef class QuestDB:
     cdef object _error_handler
     cdef size_t _cb_refs_key
     cdef auto_flush_mode_t _auto_flush_mode
+    cdef bint _auto_flush_bytes_dynamic
 
     def __cinit__(self):
         self._db = NULL
@@ -5993,6 +6001,7 @@ cdef class QuestDB:
         self._auto_flush_mode.interval = -1
         self._auto_flush_mode.row_count = -1
         self._auto_flush_mode.byte_count = -1
+        self._auto_flush_bytes_dynamic = False
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
@@ -6032,9 +6041,13 @@ cdef class QuestDB:
 
         Prefer the :func:`questdb.connect` module-level factory.
 
-        Pooled row auto-flush is enabled by default at 1,000 rows or 100
-        milliseconds; byte-based auto-flush is disabled. Set
-        ``auto_flush=off`` to disable it or configure individual thresholds.
+        Pooled row auto-flush is enabled by default at 1,000 rows, 100
+        milliseconds, or an estimated encoded size at 90% of the effective
+        frame cap. Before a server cap is known, or when the server omits it,
+        the byte threshold is the lower of 8 MiB and 90% of the local
+        store-and-forward frame cap. Set
+        ``auto_flush_bytes=off`` to disable only the byte trigger, or
+        ``auto_flush=off`` to disable all automatic publishing.
         The mode is immutable and shared by every lease; the interval starts
         when the first row enters an empty lease buffer. Auto-triggered
         publishes do not wait for server acknowledgement.
@@ -6132,7 +6145,8 @@ cdef class QuestDB:
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
-                &db._auto_flush_mode)
+                &db._auto_flush_mode,
+                &db._auto_flush_bytes_dynamic)
             if auto_flush_configured:
                 native_conf_str = protocol.tag + '::' + ''.join(
                     f'{key}={conf_str_value(value)};'
@@ -8345,9 +8359,9 @@ cdef class PooledSender:
     :meth:`poll_error` and :meth:`error_events_dropped`. Prefer
     :meth:`QuestDB.dataframe` for bulk loads; the lease's own
     ``dataframe()`` is a convenience that routes to the same direct
-    columnar path. Row auto-flush is enabled by default at 1,000 rows or 100
-    milliseconds and can be configured through the parent handle's connection
-    settings.
+    columnar path. Row auto-flush is enabled by default at 1,000 rows, 100
+    milliseconds, or a cap-derived byte threshold, and can be configured
+    through the parent handle's connection settings.
     """
     cdef qwp_sender* _qwp
     cdef questdb_db* _db
@@ -8381,6 +8395,51 @@ cdef class PooledSender:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f"{method}() can't be called: Sender is closed.")
+
+    cdef bint _should_auto_flush_locked(self) except -1:
+        cdef auto_flush_mode_t* mode = &self._handle._auto_flush_mode
+        cdef size_t row_count
+        cdef size_t buffer_size
+        cdef size_t hard_cap = 0
+        cdef size_t soft_cap = 0
+        cdef size_t byte_limit = 0
+        cdef cbool server_cap_known = False
+        cdef line_sender_error* err = NULL
+
+        if not mode.enabled:
+            return False
+
+        row_count = line_sender_buffer_row_count(self._buffer._impl)
+        if mode.row_count != -1 and row_count >= <size_t>mode.row_count:
+            return True
+
+        if mode.byte_count != -1:
+            if not qwp_sender_effective_frame_cap(
+                    self._qwp, &hard_cap, &server_cap_known, &err):
+                raise c_err_to_py(err)
+
+            # floor(hard_cap * 0.9) without overflowing size_t.
+            soft_cap = ((hard_cap // 10) * 9
+                        + ((hard_cap % 10) * 9) // 10)
+            if self._handle._auto_flush_bytes_dynamic:
+                byte_limit = soft_cap
+                if not server_cap_known and byte_limit > 8 * 1024 * 1024:
+                    byte_limit = 8 * 1024 * 1024
+            else:
+                byte_limit = <size_t>mode.byte_count
+                if soft_cap < byte_limit:
+                    byte_limit = soft_cap
+
+            buffer_size = line_sender_buffer_size(self._buffer._impl)
+            if buffer_size >= byte_limit:
+                return True
+
+        if mode.interval != -1 and (
+                (line_sender_now_micros() // 1000)
+                - self._batch_started_ms) >= mode.interval:
+            return True
+
+        return False
 
     cdef void_int _wait_locked(self, uint64_t timeout_millis) except -1:
         cdef line_sender_error* err = NULL
@@ -8463,8 +8522,13 @@ cdef class PooledSender:
         completing a row that breaches a configured row, byte, or interval
         threshold publishes the buffer without waiting for an acknowledgement.
         Any error raised by that publish propagates from this method.
+        If a single row cannot fit in a QWP frame, that row is removed before
+        :class:`QuestDBErrorCode.BatchTooLarge` is raised. If a multi-row
+        batch exceeds the exact encoded limit despite the byte-size estimate,
+        the complete batch remains buffered.
         """
         cdef bint starts_batch
+        cdef bint auto_flush
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -8475,14 +8539,31 @@ cdef class PooledSender:
             starts_batch = (
                 line_sender_buffer_row_count(self._buffer._impl) == 0)
             self._buffer._row(
-                False, table_name, symbols, columns, at)
+                False, table_name, symbols, columns, at, True)
             if starts_batch:
                 self._batch_started_ms = line_sender_now_micros() // 1000
-            if should_auto_flush(
-                    &self._handle._auto_flush_mode,
-                    self._buffer._impl,
-                    self._batch_started_ms):
+            try:
+                auto_flush = self._should_auto_flush_locked()
+            except:
+                self._buffer._clear_marker()
+                raise
+            if not auto_flush:
+                self._buffer._clear_marker()
+                return self
+            try:
                 self._flush_locked(False)
+            except QuestDBError as exc:
+                if (starts_batch and
+                        exc.code == QuestDBErrorCode.BatchTooLarge):
+                    self._buffer._rewind_to_marker()
+                    self._batch_started_ms = 0
+                else:
+                    self._buffer._clear_marker()
+                raise
+            except:
+                self._buffer._clear_marker()
+                raise
+            self._buffer._clear_marker()
         return self
 
     def dataframe(
