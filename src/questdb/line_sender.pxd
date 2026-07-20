@@ -724,23 +724,23 @@ cdef extern from "questdb/ingress/line_sender.h":
         ) noexcept nogil
 
 
-cdef extern from "questdb/ingress/column_sender.h":
+cdef extern from "questdb/ingress/qwp_sender.h":
     cdef struct questdb_db:
         pass
 
     cdef struct qwp_sender:
         pass
 
-    cdef struct direct_column_sender:
+    cdef struct qwp_direct_sender:
         pass
 
-    cdef struct column_sender_chunk:
+    cdef struct qwp_chunk:
         pass
 
-    cdef struct column_sender_arrow_import:
+    cdef struct qwp_arrow_import:
         pass
 
-    cdef struct column_sender_validity:
+    cdef struct qwp_validity:
         const uint8_t* bits
         size_t bit_len
 
@@ -774,30 +774,30 @@ cdef extern from "questdb/ingress/column_sender.h":
         const questdb_db* db
         ) noexcept nogil
 
-    direct_column_sender* questdb_db_borrow_direct_column_sender(
+    qwp_direct_sender* questdb_db_borrow_direct_sender(
         questdb_db* db,
         line_sender_error** err_out
         ) noexcept nogil
 
-    direct_column_sender* questdb_db_borrow_direct_column_sender_with_retry(
+    qwp_direct_sender* questdb_db_borrow_direct_sender_with_retry(
         questdb_db* db,
         uint64_t budget_ms,
         line_sender_error** err_out
         ) noexcept nogil
 
-    direct_column_sender* direct_column_sender_from_conf(
+    qwp_direct_sender* qwp_direct_sender_from_conf(
         const char* conf,
         size_t conf_len,
         line_sender_error** err_out
         ) noexcept nogil
 
-    direct_column_sender* direct_column_sender_from_opts(
+    qwp_direct_sender* qwp_direct_sender_from_opts(
         const line_sender_opts* opts,
         line_sender_error** err_out
         ) noexcept nogil
 
-    void direct_column_sender_free(
-        direct_column_sender* sender
+    void qwp_direct_sender_free(
+        qwp_direct_sender* sender
         ) noexcept nogil
 
     uint64_t questdb_db_reconnect_max_duration_ms(
@@ -814,14 +814,14 @@ cdef extern from "questdb/ingress/column_sender.h":
         qwp_sender* sender
         ) noexcept nogil
 
-    void questdb_db_return_direct_column_sender(
+    void questdb_db_return_direct_sender(
         questdb_db* db,
-        direct_column_sender* conn
+        qwp_direct_sender* conn
         ) noexcept nogil
 
-    void questdb_db_drop_direct_column_sender(
+    void questdb_db_drop_direct_sender(
         questdb_db* db,
-        direct_column_sender* conn
+        qwp_direct_sender* conn
         ) noexcept nogil
 
     size_t questdb_db_reap_idle(
@@ -904,127 +904,127 @@ cdef extern from "questdb/ingress/column_sender.h":
         const line_sender* sender
         ) noexcept nogil
 
-    column_sender_chunk* column_sender_chunk_new(
+    qwp_chunk* qwp_chunk_new(
         const char* table_name,
         size_t table_name_len,
         line_sender_error** err_out
         ) noexcept nogil
 
-    void column_sender_chunk_free(
-        column_sender_chunk* chunk
+    void qwp_chunk_free(
+        qwp_chunk* chunk
         ) noexcept nogil
 
-    bint column_sender_chunk_clear(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_clear(
+        qwp_chunk* chunk,
         line_sender_error** err_out
         ) noexcept nogil
 
-    size_t column_sender_chunk_row_count(
-        const column_sender_chunk* chunk,
+    size_t qwp_chunk_row_count(
+        const qwp_chunk* chunk,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_column_bool(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_column_bool(
+        qwp_chunk* chunk,
         const char* name,
         size_t name_len,
         const uint8_t* data,
         size_t row_count,
-        const column_sender_validity* validity,
+        const qwp_validity* validity,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_column_str(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_column_str(
+        qwp_chunk* chunk,
         const char* name,
         size_t name_len,
         const int32_t* offsets,
         const uint8_t* bytes,
         size_t bytes_len,
         size_t row_count,
-        const column_sender_validity* validity,
+        const qwp_validity* validity,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_column_binary(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_column_binary(
+        qwp_chunk* chunk,
         const char* name,
         size_t name_len,
         const int32_t* offsets,
         const uint8_t* bytes,
         size_t bytes_len,
         size_t row_count,
-        const column_sender_validity* validity,
+        const qwp_validity* validity,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_at_micros(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_at_micros(
+        qwp_chunk* chunk,
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_at_nanos(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_at_nanos(
+        qwp_chunk* chunk,
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_at_millis(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_at_millis(
+        qwp_chunk* chunk,
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_at_seconds(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_at_seconds(
+        qwp_chunk* chunk,
         const int64_t* data,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_at_now(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_at_now(
+        qwp_chunk* chunk,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_at_scalar_nanos(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_at_scalar_nanos(
+        qwp_chunk* chunk,
         int64_t nanos,
         line_sender_error** err_out
         ) noexcept nogil
 
-    cdef enum column_sender_symbol_mode:
-        column_sender_symbol_mode_auto = 0
-        column_sender_symbol_mode_symbol = 1
-        column_sender_symbol_mode_not_symbol = 2
+    cdef enum qwp_symbol_mode:
+        qwp_symbol_mode_auto = 0
+        qwp_symbol_mode_symbol = 1
+        qwp_symbol_mode_not_symbol = 2
 
-    column_sender_arrow_import* column_sender_arrow_import_new(
+    qwp_arrow_import* qwp_arrow_import_new(
         ArrowArray* array,
         const ArrowSchema* schema,
         uint32_t symbol_mode,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint column_sender_chunk_append_arrow_import(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_append_arrow_import(
+        qwp_chunk* chunk,
         const char* name,
         size_t name_len,
-        const column_sender_arrow_import* imported,
+        const qwp_arrow_import* imported,
         size_t row_offset,
         size_t row_count,
         line_sender_error** err_out
         ) noexcept nogil
 
-    void column_sender_arrow_import_free(
-        column_sender_arrow_import* imported
+    void qwp_arrow_import_free(
+        qwp_arrow_import* imported
         ) noexcept nogil
 
-    bint column_sender_chunk_append_arrow_column(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_append_arrow_column(
+        qwp_chunk* chunk,
         const char* name,
         size_t name_len,
         ArrowArray* array,
@@ -1034,67 +1034,67 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    cdef enum column_sender_numpy_dtype:
-        column_sender_numpy_i8 = 0
-        column_sender_numpy_i16 = 1
-        column_sender_numpy_i32 = 2
-        column_sender_numpy_i64 = 3
-        column_sender_numpy_u8 = 4
-        column_sender_numpy_u16 = 5
-        column_sender_numpy_u32 = 6
-        column_sender_numpy_u64 = 7
-        column_sender_numpy_f32 = 8
-        column_sender_numpy_f64 = 9
-        column_sender_numpy_bool = 10
-        column_sender_numpy_f16 = 11
-        column_sender_numpy_datetime64_s = 12
-        column_sender_numpy_datetime64_ms = 13
-        column_sender_numpy_datetime64_us = 14
-        column_sender_numpy_datetime64_ns = 15
-        column_sender_numpy_timedelta64_s = 16
-        column_sender_numpy_timedelta64_ms = 17
-        column_sender_numpy_timedelta64_us = 18
-        column_sender_numpy_timedelta64_ns = 19
-        column_sender_numpy_s16 = 20
-        column_sender_numpy_s32 = 21
-        column_sender_numpy_decimal_s8 = 22
-        column_sender_numpy_decimal_s16 = 23
-        column_sender_numpy_decimal_s32 = 24
-        column_sender_numpy_u32_ipv4 = 25
-        column_sender_numpy_u16_char = 26
-        column_sender_numpy_geohash_i8 = 27
-        column_sender_numpy_geohash_i16 = 28
-        column_sender_numpy_geohash_i32 = 29
-        column_sender_numpy_geohash_i64 = 30
-        column_sender_numpy_f64_ndarray = 31
-        column_sender_numpy_datetime64_m = 32
-        column_sender_numpy_datetime64_h = 33
+    cdef enum qwp_numpy_dtype:
+        qwp_numpy_i8 = 0
+        qwp_numpy_i16 = 1
+        qwp_numpy_i32 = 2
+        qwp_numpy_i64 = 3
+        qwp_numpy_u8 = 4
+        qwp_numpy_u16 = 5
+        qwp_numpy_u32 = 6
+        qwp_numpy_u64 = 7
+        qwp_numpy_f32 = 8
+        qwp_numpy_f64 = 9
+        qwp_numpy_bool = 10
+        qwp_numpy_f16 = 11
+        qwp_numpy_datetime64_s = 12
+        qwp_numpy_datetime64_ms = 13
+        qwp_numpy_datetime64_us = 14
+        qwp_numpy_datetime64_ns = 15
+        qwp_numpy_timedelta64_s = 16
+        qwp_numpy_timedelta64_ms = 17
+        qwp_numpy_timedelta64_us = 18
+        qwp_numpy_timedelta64_ns = 19
+        qwp_numpy_s16 = 20
+        qwp_numpy_s32 = 21
+        qwp_numpy_decimal_s8 = 22
+        qwp_numpy_decimal_s16 = 23
+        qwp_numpy_decimal_s32 = 24
+        qwp_numpy_u32_ipv4 = 25
+        qwp_numpy_u16_char = 26
+        qwp_numpy_geohash_i8 = 27
+        qwp_numpy_geohash_i16 = 28
+        qwp_numpy_geohash_i32 = 29
+        qwp_numpy_geohash_i64 = 30
+        qwp_numpy_f64_ndarray = 31
+        qwp_numpy_datetime64_m = 32
+        qwp_numpy_datetime64_h = 33
         column_sender_numpy_datetime64_D = 34
         column_sender_numpy_datetime64_M = 35
         column_sender_numpy_datetime64_Y = 36
         column_sender_numpy_datetime64_W = 37
-        column_sender_numpy_timedelta64_m = 38
-        column_sender_numpy_timedelta64_h = 39
+        qwp_numpy_timedelta64_m = 38
+        qwp_numpy_timedelta64_h = 39
         column_sender_numpy_timedelta64_D = 40
         column_sender_numpy_timedelta64_M = 41
         column_sender_numpy_timedelta64_Y = 42
 
-    cdef struct column_sender_numpy_extras:
+    cdef struct qwp_numpy_extras:
         int8_t decimal_scale
         uint8_t geohash_bits
         uint8_t array_ndim
         const uint32_t* array_shape
 
-    bint column_sender_chunk_append_numpy_column(
-        column_sender_chunk* chunk,
+    bint qwp_chunk_append_numpy_column(
+        qwp_chunk* chunk,
         const char* name,
         size_t name_len,
         uint32_t dtype,
         const uint8_t* data,
         size_t data_len_bytes,
         size_t row_count,
-        const column_sender_validity* validity,
-        const column_sender_numpy_extras* extras,
+        const qwp_validity* validity,
+        const qwp_numpy_extras* extras,
         line_sender_error** err_out
         ) noexcept nogil
 
@@ -1156,309 +1156,309 @@ cdef extern from "questdb/ingress/column_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint direct_column_sender_flush(
-        direct_column_sender* conn,
-        column_sender_chunk* chunk,
+    bint qwp_direct_sender_flush(
+        qwp_direct_sender* conn,
+        qwp_chunk* chunk,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint direct_column_sender_commit(
-        direct_column_sender* conn,
+    bint qwp_direct_sender_commit(
+        qwp_direct_sender* conn,
         uint32_t ack_level,
         line_sender_error** err_out
         ) noexcept nogil
 
-    cdef enum column_sender_arrow_override_kind:
-        column_sender_arrow_override_symbol = 0
-        column_sender_arrow_override_ipv4 = 1
-        column_sender_arrow_override_char = 2
-        column_sender_arrow_override_geohash = 3
-        column_sender_arrow_override_not_symbol = 4
+    cdef enum qwp_arrow_override_kind:
+        qwp_arrow_override_symbol = 0
+        qwp_arrow_override_ipv4 = 1
+        qwp_arrow_override_char = 2
+        qwp_arrow_override_geohash = 3
+        qwp_arrow_override_not_symbol = 4
 
-    cdef struct column_sender_arrow_override:
+    cdef struct qwp_arrow_override:
         const char* column
         size_t column_len
         uint32_t kind
         uint32_t arg
 
-    bint direct_column_sender_flush_arrow_batch_at_now(
-        direct_column_sender* conn,
+    bint qwp_direct_sender_flush_arrow_batch_at_now(
+        qwp_direct_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,
-        const column_sender_arrow_override* overrides,
+        const qwp_arrow_override* overrides,
         size_t overrides_len,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint direct_column_sender_flush_arrow_batch_at_scalar_nanos(
-        direct_column_sender* conn,
+    bint qwp_direct_sender_flush_arrow_batch_at_scalar_nanos(
+        qwp_direct_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,
         int64_t at_nanos,
-        const column_sender_arrow_override* overrides,
+        const qwp_arrow_override* overrides,
         size_t overrides_len,
         line_sender_error** err_out
         ) noexcept nogil
 
-    bint direct_column_sender_flush_arrow_batch_at_column(
-        direct_column_sender* conn,
+    bint qwp_direct_sender_flush_arrow_batch_at_column(
+        qwp_direct_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         const ArrowSchema* schema,
         line_sender_column_name ts_column,
-        const column_sender_arrow_override* overrides,
+        const qwp_arrow_override* overrides,
         size_t overrides_len,
         line_sender_error** err_out
         ) noexcept nogil
 
 
-cdef extern from "questdb/egress/reader.h":
-    cdef struct reader:
+cdef extern from "questdb/egress/qwp_reader.h":
+    cdef struct qwp_reader:
         pass
 
-    cdef struct reader_query:
+    cdef struct qwp_reader_query:
         pass
 
-    cdef struct reader_cursor:
+    cdef struct qwp_reader_cursor:
         pass
 
-    cdef struct reader_server_info:
+    cdef struct qwp_reader_server_info:
         pass
 
-    cdef enum reader_server_role:
-        reader_server_role_standalone = 0
-        reader_server_role_primary = 1
-        reader_server_role_replica = 2
-        reader_server_role_primary_catchup = 3
-        reader_server_role_other = 0xFF
+    cdef enum qwp_reader_server_role:
+        qwp_reader_server_role_standalone = 0
+        qwp_reader_server_role_primary = 1
+        qwp_reader_server_role_replica = 2
+        qwp_reader_server_role_primary_catchup = 3
+        qwp_reader_server_role_other = 0xFF
 
-    cdef enum reader_arrow_batch_result:
-        reader_arrow_batch_ok = 0
-        reader_arrow_batch_end = 1
-        reader_arrow_batch_error = 2
+    cdef enum qwp_reader_arrow_batch_result:
+        qwp_reader_arrow_batch_ok = 0
+        qwp_reader_arrow_batch_end = 1
+        qwp_reader_arrow_batch_error = 2
 
-    void reader_close(
-        reader* reader
+    void qwp_reader_close(
+        qwp_reader* reader
         ) noexcept nogil
 
-    const reader_server_info* reader_current_server_info(
-        const reader* reader
+    const qwp_reader_server_info* qwp_reader_current_server_info(
+        const qwp_reader* reader
         ) noexcept nogil
 
-    reader_server_role reader_server_info_role(
-        const reader_server_info* si
+    qwp_reader_server_role qwp_reader_server_info_role(
+        const qwp_reader_server_info* si
         ) noexcept nogil
 
-    uint8_t reader_server_info_role_byte(
-        const reader_server_info* si
+    uint8_t qwp_reader_server_info_role_byte(
+        const qwp_reader_server_info* si
         ) noexcept nogil
 
-    uint64_t reader_server_info_epoch(
-        const reader_server_info* si
+    uint64_t qwp_reader_server_info_epoch(
+        const qwp_reader_server_info* si
         ) noexcept nogil
 
-    uint32_t reader_server_info_capabilities(
-        const reader_server_info* si
+    uint32_t qwp_reader_server_info_capabilities(
+        const qwp_reader_server_info* si
         ) noexcept nogil
 
-    int64_t reader_server_info_server_wall_ns(
-        const reader_server_info* si
+    int64_t qwp_reader_server_info_server_wall_ns(
+        const qwp_reader_server_info* si
         ) noexcept nogil
 
-    void reader_server_info_cluster_id(
-        const reader_server_info* si,
+    void qwp_reader_server_info_cluster_id(
+        const qwp_reader_server_info* si,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    void reader_server_info_node_id(
-        const reader_server_info* si,
+    void qwp_reader_server_info_node_id(
+        const qwp_reader_server_info* si,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    bint reader_server_info_zone_id(
-        const reader_server_info* si,
+    bint qwp_reader_server_info_zone_id(
+        const qwp_reader_server_info* si,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    reader_query* reader_prepare(
-        reader* reader,
+    qwp_reader_query* qwp_reader_prepare(
+        qwp_reader* reader,
         line_sender_utf8 sql,
         questdb_error** err_out
         ) noexcept nogil
 
-    void reader_query_free(
-        reader_query* query
+    void qwp_reader_query_free(
+        qwp_reader_query* query
         ) noexcept nogil
 
-    reader_cursor* reader_query_execute(
-        reader_query** query_inout,
+    qwp_reader_cursor* qwp_reader_query_execute(
+        qwp_reader_query** query_inout,
         questdb_error** err_out
         ) noexcept nogil
 
-    void reader_query_set_reset_symbol_dict(
-        reader_query* query,
+    void qwp_reader_query_set_reset_symbol_dict(
+        qwp_reader_query* query,
         cbool reset
         ) noexcept nogil
 
-    void reader_query_bind_bool(
-        reader_query* query,
+    void qwp_reader_query_bind_bool(
+        qwp_reader_query* query,
         cbool v
         ) noexcept nogil
 
-    void reader_query_bind_i64(
-        reader_query* query,
+    void qwp_reader_query_bind_i64(
+        qwp_reader_query* query,
         int64_t v
         ) noexcept nogil
 
-    void reader_query_bind_f64(
-        reader_query* query,
+    void qwp_reader_query_bind_f64(
+        qwp_reader_query* query,
         double v
         ) noexcept nogil
 
-    void reader_query_bind_timestamp_micros(
-        reader_query* query,
+    void qwp_reader_query_bind_timestamp_micros(
+        qwp_reader_query* query,
         int64_t v
         ) noexcept nogil
 
-    void reader_query_bind_timestamp_nanos(
-        reader_query* query,
+    void qwp_reader_query_bind_timestamp_nanos(
+        qwp_reader_query* query,
         int64_t v
         ) noexcept nogil
 
-    void reader_query_bind_varchar(
-        reader_query* query,
+    void qwp_reader_query_bind_varchar(
+        qwp_reader_query* query,
         line_sender_utf8 v
         ) noexcept nogil
 
-    void reader_query_bind_uuid(
-        reader_query* query,
+    void qwp_reader_query_bind_uuid(
+        qwp_reader_query* query,
         const uint8_t* value
         ) noexcept nogil
 
-    void reader_query_bind_null_varchar(
-        reader_query* query
+    void qwp_reader_query_bind_null_varchar(
+        qwp_reader_query* query
         ) noexcept nogil
 
-    reader_cursor* reader_execute(
-        reader* reader,
+    qwp_reader_cursor* qwp_reader_execute(
+        qwp_reader* reader,
         line_sender_utf8 sql,
         questdb_error** err_out
         ) noexcept nogil
 
-    cdef struct reader_failover_reset_event:
+    cdef struct qwp_reader_failover_reset_event:
         pass
 
-    ctypedef void (*reader_failover_reset_callback)(
-        const reader_failover_reset_event* event,
+    ctypedef void (*qwp_reader_failover_reset_callback)(
+        const qwp_reader_failover_reset_event* event,
         void* user_data) noexcept nogil
 
-    void reader_failover_reset_event_failed_host(
-        const reader_failover_reset_event* event,
+    void qwp_reader_failover_reset_event_failed_host(
+        const qwp_reader_failover_reset_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    uint16_t reader_failover_reset_event_failed_port(
-        const reader_failover_reset_event* event
+    uint16_t qwp_reader_failover_reset_event_failed_port(
+        const qwp_reader_failover_reset_event* event
         ) noexcept nogil
 
-    void reader_failover_reset_event_new_host(
-        const reader_failover_reset_event* event,
+    void qwp_reader_failover_reset_event_new_host(
+        const qwp_reader_failover_reset_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    uint16_t reader_failover_reset_event_new_port(
-        const reader_failover_reset_event* event
+    uint16_t qwp_reader_failover_reset_event_new_port(
+        const qwp_reader_failover_reset_event* event
         ) noexcept nogil
 
-    int64_t reader_failover_reset_event_new_request_id(
-        const reader_failover_reset_event* event
+    int64_t qwp_reader_failover_reset_event_new_request_id(
+        const qwp_reader_failover_reset_event* event
         ) noexcept nogil
 
-    uint32_t reader_failover_reset_event_attempts(
-        const reader_failover_reset_event* event
+    uint32_t qwp_reader_failover_reset_event_attempts(
+        const qwp_reader_failover_reset_event* event
         ) noexcept nogil
 
-    uint64_t reader_failover_reset_event_elapsed_ns(
-        const reader_failover_reset_event* event
+    uint64_t qwp_reader_failover_reset_event_elapsed_ns(
+        const qwp_reader_failover_reset_event* event
         ) noexcept nogil
 
-    questdb_error_code reader_failover_reset_event_trigger_code(
-        const reader_failover_reset_event* event
+    questdb_error_code qwp_reader_failover_reset_event_trigger_code(
+        const qwp_reader_failover_reset_event* event
         ) noexcept nogil
 
-    void reader_failover_reset_event_trigger_msg(
-        const reader_failover_reset_event* event,
+    void qwp_reader_failover_reset_event_trigger_msg(
+        const qwp_reader_failover_reset_event* event,
         const char** out_buf,
         size_t* out_len
         ) noexcept nogil
 
-    void reader_query_on_failover_reset(
-        reader_query* query,
-        reader_failover_reset_callback callback,
+    void qwp_reader_query_on_failover_reset(
+        qwp_reader_query* query,
+        qwp_reader_failover_reset_callback callback,
         void* user_data
         ) noexcept nogil
 
-    void reader_cursor_free(
-        reader_cursor* cursor
+    void qwp_reader_cursor_free(
+        qwp_reader_cursor* cursor
         ) noexcept nogil
 
-    bint reader_cursor_cancel(
-        reader_cursor* cursor,
+    bint qwp_reader_cursor_cancel(
+        qwp_reader_cursor* cursor,
         questdb_error** err_out
         ) noexcept nogil
 
-    reader_arrow_batch_result reader_cursor_next_arrow_batch(
-        reader_cursor* cursor,
+    qwp_reader_arrow_batch_result qwp_reader_cursor_next_arrow_batch(
+        qwp_reader_cursor* cursor,
         ArrowArray* out_array,
         ArrowSchema* out_schema,
         questdb_error** err_out
         ) noexcept nogil
 
-    reader_arrow_batch_result reader_cursor_next_arrow_batch_compact(
-        reader_cursor* cursor,
+    qwp_reader_arrow_batch_result qwp_reader_cursor_next_arrow_batch_compact(
+        qwp_reader_cursor* cursor,
         ArrowArray* out_array,
         ArrowSchema* out_schema,
         questdb_error** err_out
         ) noexcept nogil
 
-    cdef enum reader_column_kind:
-        reader_column_kind_boolean = 0x01
-        reader_column_kind_byte = 0x02
-        reader_column_kind_short = 0x03
-        reader_column_kind_int = 0x04
-        reader_column_kind_long = 0x05
-        reader_column_kind_float = 0x06
-        reader_column_kind_double = 0x07
-        reader_column_kind_symbol = 0x09
-        reader_column_kind_timestamp = 0x0A
-        reader_column_kind_date = 0x0B
-        reader_column_kind_uuid = 0x0C
-        reader_column_kind_long256 = 0x0D
-        reader_column_kind_geohash = 0x0E
-        reader_column_kind_varchar = 0x0F
-        reader_column_kind_timestamp_nanos = 0x10
-        reader_column_kind_double_array = 0x11
-        reader_column_kind_long_array = 0x12
-        reader_column_kind_decimal64 = 0x13
-        reader_column_kind_decimal128 = 0x14
-        reader_column_kind_decimal256 = 0x15
-        reader_column_kind_char = 0x16
-        reader_column_kind_binary = 0x17
-        reader_column_kind_ipv4 = 0x18
-        reader_column_kind_unknown = 0xFF
+    cdef enum qwp_reader_column_kind:
+        qwp_reader_column_kind_boolean = 0x01
+        qwp_reader_column_kind_byte = 0x02
+        qwp_reader_column_kind_short = 0x03
+        qwp_reader_column_kind_int = 0x04
+        qwp_reader_column_kind_long = 0x05
+        qwp_reader_column_kind_float = 0x06
+        qwp_reader_column_kind_double = 0x07
+        qwp_reader_column_kind_symbol = 0x09
+        qwp_reader_column_kind_timestamp = 0x0A
+        qwp_reader_column_kind_date = 0x0B
+        qwp_reader_column_kind_uuid = 0x0C
+        qwp_reader_column_kind_long256 = 0x0D
+        qwp_reader_column_kind_geohash = 0x0E
+        qwp_reader_column_kind_varchar = 0x0F
+        qwp_reader_column_kind_timestamp_nanos = 0x10
+        qwp_reader_column_kind_double_array = 0x11
+        qwp_reader_column_kind_long_array = 0x12
+        qwp_reader_column_kind_decimal64 = 0x13
+        qwp_reader_column_kind_decimal128 = 0x14
+        qwp_reader_column_kind_decimal256 = 0x15
+        qwp_reader_column_kind_char = 0x16
+        qwp_reader_column_kind_binary = 0x17
+        qwp_reader_column_kind_ipv4 = 0x18
+        qwp_reader_column_kind_unknown = 0xFF
 
-    cdef struct reader_batch:
+    cdef struct qwp_reader_batch:
         pass
 
-    cdef struct reader_column_data:
-        reader_column_kind kind
+    cdef struct qwp_reader_column_data:
+        qwp_reader_column_kind kind
         size_t row_count
         const uint8_t* validity
         const void* values
@@ -1470,8 +1470,8 @@ cdef extern from "questdb/egress/reader.h":
         int8_t decimal_scale
         uint8_t geohash_precision_bits
 
-    cdef struct reader_array_data:
-        reader_column_kind kind
+    cdef struct qwp_reader_array_data:
+        qwp_reader_column_kind kind
         size_t row_count
         const uint8_t* validity
         const uint8_t* data
@@ -1481,66 +1481,66 @@ cdef extern from "questdb/egress/reader.h":
         size_t shapes_len
         const uint32_t* shape_offsets
 
-    cdef struct reader_symbol_entry:
+    cdef struct qwp_reader_symbol_entry:
         uint32_t offset
         uint32_t length
 
-    cdef struct reader_symbol_dict:
+    cdef struct qwp_reader_symbol_dict:
         size_t entry_count
         const uint8_t* heap
         size_t heap_len
-        const reader_symbol_entry* entries
+        const qwp_reader_symbol_entry* entries
 
-    const reader_batch* reader_cursor_next_batch(
-        reader_cursor* cursor,
+    const qwp_reader_batch* qwp_reader_cursor_next_batch(
+        qwp_reader_cursor* cursor,
         questdb_error** err_out
         ) noexcept nogil
 
-    size_t reader_batch_row_count(
-        const reader_batch* batch
+    size_t qwp_reader_batch_row_count(
+        const qwp_reader_batch* batch
         ) noexcept nogil
 
-    size_t reader_batch_column_count(
-        const reader_batch* batch
+    size_t qwp_reader_batch_column_count(
+        const qwp_reader_batch* batch
         ) noexcept nogil
 
-    bint reader_batch_column_kind(
-        const reader_batch* batch,
+    bint qwp_reader_batch_column_kind(
+        const qwp_reader_batch* batch,
         size_t col_idx,
-        reader_column_kind* out_kind,
+        qwp_reader_column_kind* out_kind,
         questdb_error** err_out
         ) noexcept nogil
 
-    bint reader_batch_column_name(
-        const reader_batch* batch,
+    bint qwp_reader_batch_column_name(
+        const qwp_reader_batch* batch,
         size_t col_idx,
         const char** out_buf,
         size_t* out_len,
         questdb_error** err_out
         ) noexcept nogil
 
-    bint reader_batch_column_data(
-        const reader_batch* batch,
+    bint qwp_reader_batch_column_data(
+        const qwp_reader_batch* batch,
         size_t col_idx,
-        reader_column_data* out,
+        qwp_reader_column_data* out,
         questdb_error** err_out
         ) noexcept nogil
 
-    bint reader_batch_array_column_data(
-        const reader_batch* batch,
+    bint qwp_reader_batch_array_column_data(
+        const qwp_reader_batch* batch,
         size_t col_idx,
-        reader_array_data* out,
+        qwp_reader_array_data* out,
         questdb_error** err_out
         ) noexcept nogil
 
-    bint reader_batch_symbol_dict(
-        const reader_batch* batch,
-        reader_symbol_dict* out,
+    bint qwp_reader_batch_symbol_dict(
+        const qwp_reader_batch* batch,
+        qwp_reader_symbol_dict* out,
         questdb_error** err_out
         ) noexcept nogil
 
-    bint reader_batch_symbol(
-        const reader_batch* batch,
+    bint qwp_reader_batch_symbol(
+        const qwp_reader_batch* batch,
         size_t col_idx,
         uint32_t code,
         const char** out_buf,
@@ -1548,15 +1548,15 @@ cdef extern from "questdb/egress/reader.h":
         questdb_error** err_out
         ) noexcept nogil
 
-    void reader_drop_on_return(
-        reader* reader
+    void qwp_reader_drop_on_return(
+        qwp_reader* reader
         ) noexcept nogil
 
     # Reader-pool entry points live here (alongside reader)
     # because they wrap/unwrap reader instances; the questdb_db
     # opaque is forward-declared from the ingress-pool extern block
     # above.
-    reader* questdb_db_borrow_reader(
+    qwp_reader* questdb_db_borrow_reader(
         questdb_db* db,
         questdb_error** err_out
         ) noexcept nogil

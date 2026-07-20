@@ -26,7 +26,7 @@ cdef inline object _reader_err_to_py(questdb_error* err):
 
 
 cdef class _ReaderHandle:
-    """Owns a ``reader*``.
+    """Owns a ``qwp_reader*``.
 
     ``_close()`` runs eagerly when the owning ``_CursorHandle`` is
     freed (clean drain, ``QueryResult.close()``, or consumer
@@ -42,7 +42,7 @@ cdef class _ReaderHandle:
 
     The Python side carries only one extra bit of state —
     ``_must_close`` — which it forwards to the FFI via
-    ``reader_drop_on_return`` before calling close. We never
+    ``qwp_reader_drop_on_return`` before calling close. We never
     hold a raw ``questdb_db*`` pointer here: the reader struct
     holds an ``Arc<DbInner>`` internally, so the pool stays alive
     even if the user's ``QuestDB.close()`` ran after ``query()``
@@ -56,14 +56,14 @@ cdef class _ReaderHandle:
     still set at drop time — recycling such a reader would hand the
     next borrower a broken pipe.
     """
-    cdef reader* _reader
+    cdef qwp_reader* _reader
     cdef bint _must_close
 
     def __cinit__(self):
         self._reader = NULL
         self._must_close = True
 
-    cdef _attach(self, reader* reader):
+    cdef _attach(self, qwp_reader* reader):
         self._reader = reader
 
     cdef void _close(self) noexcept:
@@ -71,9 +71,9 @@ cdef class _ReaderHandle:
         if self._reader == NULL:
             return
         if self._must_close:
-            reader_drop_on_return(self._reader)
+            qwp_reader_drop_on_return(self._reader)
         _ensure_doesnt_have_gil(&gs)
-        reader_close(self._reader)
+        qwp_reader_close(self._reader)
         _ensure_has_gil(&gs)
         self._reader = NULL
 
@@ -83,7 +83,7 @@ cdef class _ReaderHandle:
 
 @cython.no_gc_clear
 cdef class _CursorHandle:
-    """Owns a ``reader_cursor*`` + back-ref to its reader.
+    """Owns a ``qwp_reader_cursor*`` + back-ref to its reader.
 
     ``_free()`` releases both: the cursor is freed and the reader
     closed (returned to its pool or dropped) in the same locked
@@ -109,7 +109,7 @@ cdef class _CursorHandle:
     discards every batch buffered so far so the replay-from-batch-0
     yields a correct whole result.
     """
-    cdef reader_cursor* _cursor
+    cdef qwp_reader_cursor* _cursor
     cdef _ReaderHandle _reader_ref
     cdef bint _owns_reader
     cdef object _lock
@@ -122,7 +122,7 @@ cdef class _CursorHandle:
         self._lock = threading.Lock()
         self._reset_seq = 0
 
-    cdef _attach(self, reader_cursor* cursor, _ReaderHandle reader_ref):
+    cdef _attach(self, qwp_reader_cursor* cursor, _ReaderHandle reader_ref):
         self._cursor = cursor
         self._reader_ref = reader_ref
 
@@ -131,7 +131,7 @@ cdef class _CursorHandle:
         with self._lock:
             if self._cursor != NULL:
                 _ensure_doesnt_have_gil(&gs)
-                reader_cursor_free(self._cursor)
+                qwp_reader_cursor_free(self._cursor)
                 _ensure_has_gil(&gs)
                 self._cursor = NULL
             if self._reader_ref is not None:
@@ -145,7 +145,7 @@ cdef class _CursorHandle:
 
 cdef object _fetch_one_batch(
         _CursorHandle handle, object pa_module, bint compact=False):
-    """Pull one batch via reader_cursor_next_arrow_batch.
+    """Pull one batch via qwp_reader_cursor_next_arrow_batch.
 
     Returns:
       - None on clean end-of-stream.
@@ -155,8 +155,8 @@ cdef object _fetch_one_batch(
     cdef ArrowArray array
     cdef ArrowSchema schema
     cdef questdb_error* err = NULL
-    cdef reader_arrow_batch_result result
-    cdef reader_cursor* cursor
+    cdef qwp_reader_arrow_batch_result result
+    cdef qwp_reader_cursor* cursor
 
     with handle._lock:
         cursor = handle._cursor
@@ -166,13 +166,13 @@ cdef object _fetch_one_batch(
                 'cursor is closed')
         with nogil:
             if compact:
-                result = reader_cursor_next_arrow_batch_compact(
+                result = qwp_reader_cursor_next_arrow_batch_compact(
                     cursor, &array, &schema, &err)
             else:
-                result = reader_cursor_next_arrow_batch(
+                result = qwp_reader_cursor_next_arrow_batch(
                     cursor, &array, &schema, &err)
 
-    if result == reader_arrow_batch_ok:
+    if result == qwp_reader_arrow_batch_ok:
         # Hand ownership of the array + schema buffers to pyarrow.
         # _import_from_c moves the structs and nulls their release
         # callbacks; pyarrow's RecordBatch owns the buffers from here.
@@ -186,14 +186,14 @@ cdef object _fetch_one_batch(
                 schema.release(&schema)
             raise
 
-    if result == reader_arrow_batch_end:
+    if result == qwp_reader_arrow_batch_end:
         return None
 
     # Error path.
     if err == NULL:
         raise QuestDBError(
             QuestDBErrorCode.ServerFlushError,
-            'reader_cursor_next_arrow_batch returned error '
+            'qwp_reader_cursor_next_arrow_batch returned error '
             'without setting err_out')
     raise _reader_err_to_py(err)
 
@@ -306,9 +306,9 @@ cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
 
 
 cdef void_int _drain_cursor(_CursorHandle handle) except -1:
-    cdef reader_cursor* cursor
+    cdef qwp_reader_cursor* cursor
     cdef questdb_error* err = NULL
-    cdef const reader_batch* batch
+    cdef const qwp_reader_batch* batch
     while True:
         with handle._lock:
             cursor = handle._cursor
@@ -316,7 +316,7 @@ cdef void_int _drain_cursor(_CursorHandle handle) except -1:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
             with nogil:
-                batch = reader_cursor_next_batch(cursor, &err)
+                batch = qwp_reader_cursor_next_batch(cursor, &err)
         if batch == NULL:
             if err != NULL:
                 raise _reader_err_to_py(err)
@@ -333,7 +333,7 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
     its dealloc returns/drops via the matching FFI.
     """
     cdef questdb_error* err = NULL
-    cdef reader* reader = NULL
+    cdef qwp_reader* reader = NULL
     with nogil:
         reader = questdb_db_borrow_reader(db, &err)
     if reader == NULL:
@@ -347,7 +347,7 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
         handle = _ReaderHandle()
     except:
         with nogil:
-            reader_close(reader)
+            qwp_reader_close(reader)
         raise
     handle._attach(reader)
     # A freshly borrowed reader is pristine: recycle it unless a query
@@ -362,36 +362,36 @@ cdef object _snapshot_server_info(_ReaderHandle handle):
     The FFI pointer is borrowed and invalidated by any reader operation
     that may reconnect, so every field is copied out before returning.
     """
-    cdef const reader_server_info* si = \
-        reader_current_server_info(handle._reader)
+    cdef const qwp_reader_server_info* si = \
+        qwp_reader_current_server_info(handle._reader)
     cdef const char* buf = NULL
     cdef size_t buf_len = 0
     if si == NULL:
         raise QuestDBError(
             QuestDBErrorCode.SocketError,
             'SERVER_INFO unavailable: the connection is mid-reconnect.')
-    cdef int role_int = <int>reader_server_info_role(si)
+    cdef int role_int = <int>qwp_reader_server_info_role(si)
     role = ServerRole.Other
     for entry in ServerRole:
         if entry.c_value == role_int:
             role = entry
             break
-    cdef uint8_t role_byte = reader_server_info_role_byte(si)
-    cdef uint64_t epoch = reader_server_info_epoch(si)
-    cdef uint32_t capabilities = reader_server_info_capabilities(si)
-    cdef int64_t server_wall_ns = reader_server_info_server_wall_ns(si)
-    reader_server_info_cluster_id(si, &buf, &buf_len)
+    cdef uint8_t role_byte = qwp_reader_server_info_role_byte(si)
+    cdef uint64_t epoch = qwp_reader_server_info_epoch(si)
+    cdef uint32_t capabilities = qwp_reader_server_info_capabilities(si)
+    cdef int64_t server_wall_ns = qwp_reader_server_info_server_wall_ns(si)
+    qwp_reader_server_info_cluster_id(si, &buf, &buf_len)
     cluster_id = PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len) \
         if buf != NULL else ''
     buf = NULL
     buf_len = 0
-    reader_server_info_node_id(si, &buf, &buf_len)
+    qwp_reader_server_info_node_id(si, &buf, &buf_len)
     node_id = PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len) \
         if buf != NULL else ''
     buf = NULL
     buf_len = 0
     zone_id = None
-    if reader_server_info_zone_id(si, &buf, &buf_len):
+    if qwp_reader_server_info_zone_id(si, &buf, &buf_len):
         zone_id = PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len) \
             if buf != NULL else ''
     return ServerInfo(
@@ -406,9 +406,9 @@ cdef object _snapshot_server_info(_ReaderHandle handle):
 
 
 cdef void _failover_reset_trampoline(
-        const reader_failover_reset_event* event,
+        const qwp_reader_failover_reset_event* event,
         void* user_data) noexcept nogil:
-    # Fires synchronously inside reader_cursor_next_batch while the
+    # Fires synchronously inside qwp_reader_cursor_next_batch while the
     # reader re-executes on a new endpoint, before the replayed batch-0
     # arrives. Honour the C reentrancy contract: no reentrant FFI on the
     # reader/query/cursor, no exception escapes, non-blocking. user_data is
@@ -420,7 +420,7 @@ cdef void _failover_reset_trampoline(
     (<int*>user_data)[0] += 1
 
 
-cdef void_int _bind_query_params(reader_query* query, object binds) except -1:
+cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -1:
     """Append positional binds matching the SQL's ``$1``..``$N`` placeholders.
 
     Bind calls follow the C ABI's deferred-error contract (they return
@@ -436,17 +436,17 @@ cdef void_int _bind_query_params(reader_query* query, object binds) except -1:
     for value in binds:
         idx += 1
         if value is None:
-            reader_query_bind_null_varchar(query)
+            qwp_reader_query_bind_null_varchar(query)
         elif value is True or value is False:
-            reader_query_bind_bool(query, value)
+            qwp_reader_query_bind_bool(query, value)
         elif isinstance(value, int):
             if value < INT64_MIN or value > INT64_MAX:
                 raise OverflowError(
                     f'query bind ${idx}: int out of the signed 64-bit '
                     f'range QuestDB LONG supports: {value}')
-            reader_query_bind_i64(query, value)
+            qwp_reader_query_bind_i64(query, value)
         elif isinstance(value, float):
-            reader_query_bind_f64(query, value)
+            qwp_reader_query_bind_f64(query, value)
         elif isinstance(value, str):
             utf8 = value.encode('utf-8')
             if not line_sender_utf8_init(
@@ -455,13 +455,13 @@ cdef void_int _bind_query_params(reader_query* query, object binds) except -1:
                     <const char*>utf8,
                     &utf8_err):
                 raise c_err_to_py(utf8_err)
-            reader_query_bind_varchar(query, c_utf8)
+            qwp_reader_query_bind_varchar(query, c_utf8)
         elif isinstance(value, TimestampNanos):
-            reader_query_bind_timestamp_nanos(query, value.value)
+            qwp_reader_query_bind_timestamp_nanos(query, value.value)
         elif isinstance(value, TimestampMicros):
-            reader_query_bind_timestamp_micros(query, value.value)
+            qwp_reader_query_bind_timestamp_micros(query, value.value)
         elif isinstance(value, datetime.datetime):
-            reader_query_bind_timestamp_micros(
+            qwp_reader_query_bind_timestamp_micros(
                 query, datetime_to_micros(value))
         elif isinstance(value, uuid.UUID):
             # QuestDB's UUID wire layout: low 64 bits little-endian, then
@@ -471,7 +471,7 @@ cdef void_int _bind_query_params(reader_query* query, object binds) except -1:
             uuid_wire = (
                 (u_int & 0xFFFFFFFFFFFFFFFF).to_bytes(8, 'little')
                 + (u_int >> 64).to_bytes(8, 'little'))
-            reader_query_bind_uuid(
+            qwp_reader_query_bind_uuid(
                 query, <const uint8_t*>PyBytes_AsString(uuid_wire))
         else:
             raise TypeError(
@@ -500,8 +500,8 @@ cdef _CursorHandle _execute_query(
     cdef line_sender_error* utf8_err = NULL
     cdef line_sender_utf8 sql_utf8
     cdef questdb_error* err = NULL
-    cdef reader_query* query
-    cdef reader_cursor* cursor
+    cdef qwp_reader_query* query
+    cdef qwp_reader_cursor* cursor
 
     if not line_sender_utf8_init(
             &sql_utf8,
@@ -513,25 +513,25 @@ cdef _CursorHandle _execute_query(
     cdef _CursorHandle handle = _CursorHandle()
 
     with nogil:
-        query = reader_prepare(reader_handle._reader, sql_utf8, &err)
+        query = qwp_reader_prepare(reader_handle._reader, sql_utf8, &err)
 
     if query == NULL:
         if err == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.ServerFlushError,
-                'reader_prepare returned NULL without setting err')
+                'qwp_reader_prepare returned NULL without setting err')
         raise _reader_err_to_py(err)
 
     if binds is not None:
         try:
             _bind_query_params(query, binds)
         except:
-            reader_query_free(query)
+            qwp_reader_query_free(query)
             raise
 
-    reader_query_set_reset_symbol_dict(query, reset_symbol_dict)
+    qwp_reader_query_set_reset_symbol_dict(query, reset_symbol_dict)
 
-    reader_query_on_failover_reset(
+    qwp_reader_query_on_failover_reset(
         query, _failover_reset_trampoline, <void*>&handle._reset_seq)
 
     # Mark the reader unrecyclable only once we cross the network boundary:
@@ -540,16 +540,16 @@ cdef _CursorHandle _execute_query(
     reader_handle._must_close = True
 
     with nogil:
-        cursor = reader_query_execute(&query, &err)
+        cursor = qwp_reader_query_execute(&query, &err)
 
     if cursor == NULL:
         # _query_execute consumes the query (nulls *query_inout); the
         # defensive free is a no-op on the consumed handle.
-        reader_query_free(query)
+        qwp_reader_query_free(query)
         if err == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.ServerFlushError,
-                'reader_query_execute returned NULL without setting err')
+                'qwp_reader_query_execute returned NULL without setting err')
         raise _reader_err_to_py(err)
 
     handle._attach(cursor, reader_handle)
@@ -754,11 +754,11 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
 
 
 cdef int _qs_pull_impl(_QueryStreamProducer prod):
-    cdef reader_cursor* cursor
+    cdef qwp_reader_cursor* cursor
     cdef ArrowArray local_array
     cdef ArrowSchema local_schema
     cdef questdb_error* err = NULL
-    cdef reader_arrow_batch_result result
+    cdef qwp_reader_arrow_batch_result result
     cdef const char* err_msg = NULL
     cdef size_t err_len = 0
     cdef questdb_error_code code
@@ -783,9 +783,9 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
             prod.exhausted = True
             return -1
         with nogil:
-            result = reader_cursor_next_arrow_batch_compact(
+            result = qwp_reader_cursor_next_arrow_batch_compact(
                 cursor, &local_array, &local_schema, &err)
-    if result == reader_arrow_batch_ok:
+    if result == qwp_reader_arrow_batch_ok:
         if prod.cursor_handle._reset_seq != prod.seen_seq:
             if prod.delivered:
                 # Mid-query failover replayed from batch-0 after batches
@@ -824,7 +824,7 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
         memcpy(&prod.cached_array, &local_array, sizeof(ArrowArray))
         prod.has_cached_array = True
         return 0
-    if result == reader_arrow_batch_end:
+    if result == qwp_reader_arrow_batch_end:
         prod.exhausted = True
         if prod.cursor_handle._reader_ref is not None:
             prod.cursor_handle._reader_ref._must_close = False
@@ -1066,29 +1066,29 @@ cdef object _table_shared_symbol_dict(object table):
 
 
 cdef dict _KIND_NAMES = {
-    <int>reader_column_kind_boolean: 'boolean',
-    <int>reader_column_kind_byte: 'byte',
-    <int>reader_column_kind_short: 'short',
-    <int>reader_column_kind_int: 'int',
-    <int>reader_column_kind_long: 'long',
-    <int>reader_column_kind_float: 'float',
-    <int>reader_column_kind_double: 'double',
-    <int>reader_column_kind_char: 'char',
-    <int>reader_column_kind_ipv4: 'ipv4',
-    <int>reader_column_kind_timestamp: 'timestamp',
-    <int>reader_column_kind_timestamp_nanos: 'timestamp_ns',
-    <int>reader_column_kind_date: 'date',
-    <int>reader_column_kind_uuid: 'uuid',
-    <int>reader_column_kind_long256: 'long256',
-    <int>reader_column_kind_geohash: 'geohash',
-    <int>reader_column_kind_varchar: 'varchar',
-    <int>reader_column_kind_binary: 'binary',
-    <int>reader_column_kind_symbol: 'symbol',
-    <int>reader_column_kind_double_array: 'double_array',
-    <int>reader_column_kind_long_array: 'long_array',
-    <int>reader_column_kind_decimal64: 'decimal',
-    <int>reader_column_kind_decimal128: 'decimal',
-    <int>reader_column_kind_decimal256: 'decimal',
+    <int>qwp_reader_column_kind_boolean: 'boolean',
+    <int>qwp_reader_column_kind_byte: 'byte',
+    <int>qwp_reader_column_kind_short: 'short',
+    <int>qwp_reader_column_kind_int: 'int',
+    <int>qwp_reader_column_kind_long: 'long',
+    <int>qwp_reader_column_kind_float: 'float',
+    <int>qwp_reader_column_kind_double: 'double',
+    <int>qwp_reader_column_kind_char: 'char',
+    <int>qwp_reader_column_kind_ipv4: 'ipv4',
+    <int>qwp_reader_column_kind_timestamp: 'timestamp',
+    <int>qwp_reader_column_kind_timestamp_nanos: 'timestamp_ns',
+    <int>qwp_reader_column_kind_date: 'date',
+    <int>qwp_reader_column_kind_uuid: 'uuid',
+    <int>qwp_reader_column_kind_long256: 'long256',
+    <int>qwp_reader_column_kind_geohash: 'geohash',
+    <int>qwp_reader_column_kind_varchar: 'varchar',
+    <int>qwp_reader_column_kind_binary: 'binary',
+    <int>qwp_reader_column_kind_symbol: 'symbol',
+    <int>qwp_reader_column_kind_double_array: 'double_array',
+    <int>qwp_reader_column_kind_long_array: 'long_array',
+    <int>qwp_reader_column_kind_decimal64: 'decimal',
+    <int>qwp_reader_column_kind_decimal128: 'decimal',
+    <int>qwp_reader_column_kind_decimal256: 'decimal',
 }
 
 
@@ -1124,41 +1124,41 @@ cdef int _reader_check(bint ok, questdb_error** err, str what) except -1:
         what + ' returned false without err_out')
 
 
-cdef object _numpy_dtype_for_kind(reader_column_kind kind, object np):
-    if kind == reader_column_kind_boolean:
+cdef object _numpy_dtype_for_kind(qwp_reader_column_kind kind, object np):
+    if kind == qwp_reader_column_kind_boolean:
         return np.dtype(np.bool_)
-    if kind == reader_column_kind_byte:
+    if kind == qwp_reader_column_kind_byte:
         return np.dtype(np.int8)
-    if kind == reader_column_kind_short:
+    if kind == qwp_reader_column_kind_short:
         return np.dtype(np.int16)
-    if kind == reader_column_kind_int:
+    if kind == qwp_reader_column_kind_int:
         return np.dtype(np.int32)
-    if kind == reader_column_kind_long:
+    if kind == qwp_reader_column_kind_long:
         return np.dtype(np.int64)
-    if kind == reader_column_kind_float:
+    if kind == qwp_reader_column_kind_float:
         return np.dtype(np.float32)
-    if kind == reader_column_kind_double:
+    if kind == qwp_reader_column_kind_double:
         return np.dtype(np.float64)
-    if kind == reader_column_kind_char:
+    if kind == qwp_reader_column_kind_char:
         return np.dtype(np.uint16)
-    if kind == reader_column_kind_ipv4:
+    if kind == qwp_reader_column_kind_ipv4:
         return np.dtype(np.uint32)
-    if kind == reader_column_kind_timestamp:
+    if kind == qwp_reader_column_kind_timestamp:
         return np.dtype('datetime64[us]')
-    if kind == reader_column_kind_timestamp_nanos:
+    if kind == qwp_reader_column_kind_timestamp_nanos:
         return np.dtype('datetime64[ns]')
-    if kind == reader_column_kind_date:
+    if kind == qwp_reader_column_kind_date:
         return np.dtype('datetime64[ms]')
     return None
 
 
 cdef object _numpy_fixed_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
-        reader_column_kind kind,
+        qwp_reader_column_kind kind,
         size_t row_count,
         object np):
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef object dtype = _numpy_dtype_for_kind(kind, np)
     cdef size_t itemsize
@@ -1170,8 +1170,8 @@ cdef object _numpy_fixed_chunk(
             'numpy egress does not support column kind 0x{:02X} yet'.format(
                 <int>kind))
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     itemsize = dtype.itemsize
     if cd.value_stride != itemsize:
         raise QuestDBError(
@@ -1187,7 +1187,7 @@ cdef object _numpy_fixed_chunk(
                 <int>kind, row_count))
     nbytes = <Py_ssize_t>(row_count * cd.value_stride)
     src = <unsigned char*>cd.values
-    if kind == reader_column_kind_boolean:
+    if kind == qwp_reader_column_kind_boolean:
         return np.frombuffer((<unsigned char[:nbytes]>src), dtype=np.uint8) != 0
     return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
 
@@ -1200,12 +1200,12 @@ cdef inline void_int _obj_chunk_set(
 
 
 cdef object _numpy_varlen_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
-        reader_column_kind kind,
+        qwp_reader_column_kind kind,
         size_t row_count,
         object np):
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint32_t* offsets
     cdef const uint8_t* data
@@ -1214,10 +1214,10 @@ cdef object _numpy_varlen_chunk(
     cdef uint32_t start
     cdef uint32_t end
     cdef cnp.ndarray out
-    cdef bint is_binary = kind == reader_column_kind_binary
+    cdef bint is_binary = kind == qwp_reader_column_kind_binary
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
         return out
@@ -1257,19 +1257,19 @@ cdef object _numpy_varlen_chunk(
 
 
 cdef object _numpy_symbol_codes_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint32_t* codes
     cdef const uint8_t* validity
     cdef size_t r
     cdef int64_t[::1] mv
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     out = np.empty(row_count, dtype=np.int64)
     if row_count == 0:
         return out
@@ -1289,9 +1289,9 @@ cdef object _numpy_symbol_codes_chunk(
 
 
 cdef void _symbol_categories_extend(
-        list cats, const reader_symbol_dict* sd, size_t start):
+        list cats, const qwp_reader_symbol_dict* sd, size_t start):
     cdef size_t i
-    cdef const reader_symbol_entry* e
+    cdef const qwp_reader_symbol_entry* e
     for i in range(start, sd.entry_count):
         e = &sd.entries[i]
         if <uint64_t>e.offset + <uint64_t>e.length > <uint64_t>sd.heap_len:
@@ -1304,11 +1304,11 @@ cdef void _symbol_categories_extend(
 
 
 cdef object _numpy_geohash_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef object dtype
     cdef size_t stride
@@ -1316,8 +1316,8 @@ cdef object _numpy_geohash_chunk(
     cdef Py_ssize_t nbytes
     cdef unsigned char* src
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     stride = cd.value_stride
     if stride == 1:
         dtype = np.dtype(np.uint8)
@@ -1354,12 +1354,12 @@ cdef object _numpy_geohash_chunk(
 
 
 cdef object _numpy_uuid_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
     cdef object _uuid = _uuid_module()
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
@@ -1369,8 +1369,8 @@ cdef object _numpy_uuid_chunk(
     cdef uint64_t hi
     cdef cnp.ndarray out
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
         return out
@@ -1391,11 +1391,11 @@ cdef object _numpy_uuid_chunk(
 
 
 cdef object _numpy_long256_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
@@ -1403,8 +1403,8 @@ cdef object _numpy_long256_chunk(
     cdef size_t stride
     cdef cnp.ndarray out
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
         return out
@@ -1425,12 +1425,12 @@ cdef object _numpy_long256_chunk(
 
 
 cdef object _numpy_decimal_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
     cdef object Decimal = _decimal_type()
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
@@ -1439,8 +1439,8 @@ cdef object _numpy_decimal_chunk(
     cdef int scale
     cdef cnp.ndarray out
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
         return out
@@ -1464,12 +1464,12 @@ cdef object _numpy_decimal_chunk(
 
 
 cdef object _numpy_array_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
-        reader_column_kind kind,
+        qwp_reader_column_kind kind,
         size_t row_count,
         object np):
-    cdef reader_array_data ad
+    cdef qwp_reader_array_data ad
     cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* data
@@ -1484,14 +1484,14 @@ cdef object _numpy_array_chunk(
     cdef uint32_t send
     cdef Py_ssize_t blen
     cdef cnp.ndarray out
-    if kind != reader_column_kind_double_array:
+    if kind != qwp_reader_column_kind_double_array:
         raise QuestDBError(
             QuestDBErrorCode.InvalidApiCall,
             'numpy egress supports only double arrays (kind 0x{:02X})'.format(
                 <int>kind))
     _reader_check(
-        reader_batch_array_column_data(batch, col_idx, &ad, &err), &err,
-        'reader_batch_array_column_data')
+        qwp_reader_batch_array_column_data(batch, col_idx, &ad, &err), &err,
+        'qwp_reader_batch_array_column_data')
     out = np.empty(row_count, dtype=object)
     if row_count == 0:
         return out
@@ -1547,51 +1547,51 @@ cdef object _numpy_array_chunk(
 
 
 cdef object _numpy_column_chunk(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
-        reader_column_kind kind,
+        qwp_reader_column_kind kind,
         size_t row_count,
         object np):
-    if kind == reader_column_kind_symbol:
+    if kind == qwp_reader_column_kind_symbol:
         return _numpy_symbol_codes_chunk(batch, col_idx, row_count, np)
-    if (kind == reader_column_kind_varchar
-            or kind == reader_column_kind_binary):
+    if (kind == qwp_reader_column_kind_varchar
+            or kind == qwp_reader_column_kind_binary):
         return _numpy_varlen_chunk(batch, col_idx, kind, row_count, np)
-    if kind == reader_column_kind_geohash:
+    if kind == qwp_reader_column_kind_geohash:
         return _numpy_geohash_chunk(batch, col_idx, row_count, np)
-    if kind == reader_column_kind_uuid:
+    if kind == qwp_reader_column_kind_uuid:
         return _numpy_uuid_chunk(batch, col_idx, row_count, np)
-    if kind == reader_column_kind_long256:
+    if kind == qwp_reader_column_kind_long256:
         return _numpy_long256_chunk(batch, col_idx, row_count, np)
-    if (kind == reader_column_kind_decimal64
-            or kind == reader_column_kind_decimal128
-            or kind == reader_column_kind_decimal256):
+    if (kind == qwp_reader_column_kind_decimal64
+            or kind == qwp_reader_column_kind_decimal128
+            or kind == qwp_reader_column_kind_decimal256):
         return _numpy_decimal_chunk(batch, col_idx, row_count, np)
-    if (kind == reader_column_kind_double_array
-            or kind == reader_column_kind_long_array):
+    if (kind == qwp_reader_column_kind_double_array
+            or kind == qwp_reader_column_kind_long_array):
         return _numpy_array_chunk(batch, col_idx, kind, row_count, np)
     return _numpy_fixed_chunk(batch, col_idx, kind, row_count, np)
 
 
-cdef bint _is_hybrid_int(reader_column_kind kind):
-    return (kind == reader_column_kind_int
-            or kind == reader_column_kind_long
-            or kind == reader_column_kind_ipv4
-            or kind == reader_column_kind_geohash)
+cdef bint _is_hybrid_int(qwp_reader_column_kind kind):
+    return (kind == qwp_reader_column_kind_int
+            or kind == qwp_reader_column_kind_long
+            or kind == qwp_reader_column_kind_ipv4
+            or kind == qwp_reader_column_kind_geohash)
 
 
 cdef object _numpy_validity_mask(
-        const reader_batch* batch,
+        const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
-    cdef reader_column_data cd
+    cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef Py_ssize_t vbytes
     cdef unsigned char* vsrc
     _reader_check(
-        reader_batch_column_data(batch, col_idx, &cd, &err), &err,
-        'reader_batch_column_data')
+        qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
+        'qwp_reader_batch_column_data')
     if row_count == 0 or cd.validity == NULL:
         return None
     vbytes = <Py_ssize_t>((row_count + 7) // 8)
@@ -1602,11 +1602,11 @@ cdef object _numpy_validity_mask(
 
 
 cdef object _build_nullable_array(
-        values, mask, reader_column_kind kind, object pd):
-    if (kind == reader_column_kind_float
-            or kind == reader_column_kind_double):
+        values, mask, qwp_reader_column_kind kind, object pd):
+    if (kind == qwp_reader_column_kind_float
+            or kind == qwp_reader_column_kind_double):
         return pd.arrays.FloatingArray(values, mask)
-    if kind == reader_column_kind_boolean:
+    if kind == qwp_reader_column_kind_boolean:
         return pd.arrays.BooleanArray(values, mask)
     return pd.arrays.IntegerArray(values, mask)
 
@@ -1632,14 +1632,14 @@ cdef object _combine_hybrid_mask(list value_chunks, list mask_chunks, object np)
     return np.concatenate(parts)
 
 
-cdef tuple _numpy_extract_meta(const reader_batch* batch):
-    cdef size_t n_cols = reader_batch_column_count(batch)
+cdef tuple _numpy_extract_meta(const qwp_reader_batch* batch):
+    cdef size_t n_cols = qwp_reader_batch_column_count(batch)
     cdef size_t col_idx
-    cdef reader_column_kind kind = reader_column_kind_unknown
+    cdef qwp_reader_column_kind kind = qwp_reader_column_kind_unknown
     cdef const char* name_buf = NULL
     cdef size_t name_len = 0
     cdef questdb_error* err = NULL
-    cdef reader_column_data cd_meta
+    cdef qwp_reader_column_data cd_meta
     cdef bint has_symbol = False
     col_names = []
     col_kinds = []
@@ -1647,25 +1647,25 @@ cdef tuple _numpy_extract_meta(const reader_batch* batch):
     col_precision = []
     for col_idx in range(n_cols):
         _reader_check(
-            reader_batch_column_name(
+            qwp_reader_batch_column_name(
                 batch, col_idx, &name_buf, &name_len, &err),
-            &err, 'reader_batch_column_name')
+            &err, 'qwp_reader_batch_column_name')
         col_names.append(
             PyUnicode_FromStringAndSize(name_buf, <Py_ssize_t>name_len))
         _reader_check(
-            reader_batch_column_kind(batch, col_idx, &kind, &err),
-            &err, 'reader_batch_column_kind')
+            qwp_reader_batch_column_kind(batch, col_idx, &kind, &err),
+            &err, 'qwp_reader_batch_column_kind')
         col_kinds.append(<int>kind)
         col_scales.append(None)
         col_precision.append(None)
-        if kind == reader_column_kind_symbol:
+        if kind == qwp_reader_column_kind_symbol:
             has_symbol = True
-        elif (kind == reader_column_kind_geohash
-                or kind == reader_column_kind_decimal64
-                or kind == reader_column_kind_decimal128
-                or kind == reader_column_kind_decimal256):
-            if reader_batch_column_data(batch, col_idx, &cd_meta, &err):
-                if kind == reader_column_kind_geohash:
+        elif (kind == qwp_reader_column_kind_geohash
+                or kind == qwp_reader_column_kind_decimal64
+                or kind == qwp_reader_column_kind_decimal128
+                or kind == qwp_reader_column_kind_decimal256):
+            if qwp_reader_batch_column_data(batch, col_idx, &cd_meta, &err):
+                if kind == qwp_reader_column_kind_geohash:
                     col_precision[col_idx] = cd_meta.geohash_precision_bits
                 else:
                     col_scales[col_idx] = cd_meta.decimal_scale
@@ -1706,16 +1706,16 @@ cdef object _numpy_assemble_frame(
         object np, object pd, list col_masks, object symbol_dtype=None):
     cdef size_t n_cols = <size_t>len(col_names)
     cdef size_t col_idx
-    cdef reader_column_kind kind
+    cdef qwp_reader_column_kind kind
     arrays = []
     for col_idx in range(n_cols):
-        kind = <reader_column_kind><int>col_kinds[col_idx]
+        kind = <qwp_reader_column_kind><int>col_kinds[col_idx]
         chunks = col_chunks[col_idx]
         if len(chunks) == 1:
             arr = chunks[0]
         else:
             arr = np.concatenate(chunks)
-        if kind == reader_column_kind_symbol:
+        if kind == qwp_reader_column_kind_symbol:
             # Build the category Index once (here for fetch-all, or supplied
             # pre-built by `_NumpyBatchIter` across batches) and reuse it via
             # `dtype=` for every SYMBOL column, then build from the codes with no
@@ -1745,14 +1745,14 @@ cdef object _numpy_assemble_frame(
 
 
 cdef tuple _numpy_batch_columns(
-        const reader_batch* batch, list col_kinds,
+        const qwp_reader_batch* batch, list col_kinds,
         size_t n_cols, size_t row_count, object np):
     cdef size_t col_idx
-    cdef reader_column_kind kind
+    cdef qwp_reader_column_kind kind
     chunks = []
     masks = []
     for col_idx in range(n_cols):
-        kind = <reader_column_kind><int>col_kinds[col_idx]
+        kind = <qwp_reader_column_kind><int>col_kinds[col_idx]
         chunks.append(_numpy_column_chunk(batch, col_idx, kind, row_count, np))
         if _is_hybrid_int(kind):
             masks.append(_numpy_validity_mask(batch, col_idx, row_count, np))
@@ -1764,10 +1764,10 @@ cdef tuple _numpy_batch_columns(
 cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     import numpy as np
     import pandas as pd
-    cdef reader_cursor* cursor
+    cdef qwp_reader_cursor* cursor
     cdef questdb_error* err = NULL
-    cdef const reader_batch* batch
-    cdef reader_symbol_dict sd
+    cdef const qwp_reader_batch* batch
+    cdef qwp_reader_symbol_dict sd
     cdef size_t n_cols = 0
     cdef size_t row_count = 0
     cdef size_t col_idx
@@ -1796,7 +1796,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
                 with nogil:
-                    batch = reader_cursor_next_batch(cursor, &err)
+                    batch = qwp_reader_cursor_next_batch(cursor, &err)
                 if handle._reset_seq != seen_seq:
                     # Mid-query failover replayed from batch-0: discard the
                     # pre-failover accumulation and re-derive the schema.
@@ -1811,7 +1811,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                     if err != NULL:
                         raise _reader_err_to_py(err)
                     break
-                row_count = reader_batch_row_count(batch)
+                row_count = qwp_reader_batch_row_count(batch)
                 if first:
                     (col_names, col_kinds, col_scales, col_precision,
                      has_symbol) = _numpy_extract_meta(batch)
@@ -1821,8 +1821,8 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                     first = False
                 if has_symbol:
                     _reader_check(
-                        reader_batch_symbol_dict(batch, &sd, &err), &err,
-                        'reader_batch_symbol_dict')
+                        qwp_reader_batch_symbol_dict(batch, &sd, &err), &err,
+                        'qwp_reader_batch_symbol_dict')
                     if sd.entry_count > prev_dict_n:
                         _symbol_categories_extend(
                             symbol_categories, &sd, prev_dict_n)
@@ -2072,10 +2072,10 @@ cdef class _NumpyBatchIter:
         return self
 
     def __next__(self):
-        cdef reader_cursor* cursor
+        cdef qwp_reader_cursor* cursor
         cdef questdb_error* err = NULL
-        cdef const reader_batch* batch
-        cdef reader_symbol_dict sd
+        cdef const qwp_reader_batch* batch
+        cdef qwp_reader_symbol_dict sd
         cdef size_t row_count
         cdef size_t n_cols
         if self.done or self.handle is None or self.handle._cursor == NULL:
@@ -2087,7 +2087,7 @@ cdef class _NumpyBatchIter:
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
                 with nogil:
-                    batch = reader_cursor_next_batch(cursor, &err)
+                    batch = qwp_reader_cursor_next_batch(cursor, &err)
                 if self.handle._reset_seq != self.seen_seq:
                     if self.delivered:
                         # Mid-query failover after batches were already yielded:
@@ -2107,7 +2107,7 @@ cdef class _NumpyBatchIter:
                         raise _reader_err_to_py(err)
                     _mark_reader_drained(self.handle)
                     raise StopIteration
-                row_count = reader_batch_row_count(batch)
+                row_count = qwp_reader_batch_row_count(batch)
                 if self.first:
                     (self.col_names, self.col_kinds, self.col_scales,
                      self.col_precision, self.has_symbol) = \
@@ -2116,8 +2116,8 @@ cdef class _NumpyBatchIter:
                 n_cols = <size_t>len(self.col_names)
                 if self.has_symbol:
                     _reader_check(
-                        reader_batch_symbol_dict(batch, &sd, &err), &err,
-                        'reader_batch_symbol_dict')
+                        qwp_reader_batch_symbol_dict(batch, &sd, &err), &err,
+                        'qwp_reader_batch_symbol_dict')
                     if sd.entry_count > self.prev_dict_n:
                         _symbol_categories_extend(
                             self.symbol_categories, &sd, self.prev_dict_n)
@@ -2454,7 +2454,7 @@ class QueryResult:
         cdef _CursorHandle handle = self._cancel_handle
         cdef questdb_error* err = NULL
         cdef bint ok
-        cdef reader_cursor* cursor
+        cdef qwp_reader_cursor* cursor
         if handle is None:
             return
         with handle._lock:
@@ -2462,13 +2462,13 @@ class QueryResult:
             if cursor == NULL:
                 return
             with nogil:
-                ok = reader_cursor_cancel(cursor, &err)
+                ok = qwp_reader_cursor_cancel(cursor, &err)
         if not ok:
             if err != NULL:
                 raise _reader_err_to_py(err)
             raise QuestDBError(
                 QuestDBErrorCode.ServerFlushError,
-                'reader_cursor_cancel returned false '
+                'qwp_reader_cursor_cancel returned false '
                 'without setting err_out')
 
     def close(self):

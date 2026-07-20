@@ -2524,11 +2524,11 @@ cdef bint _dataframe_columnar_i64_has_negative(
     return False
 
 
-cdef const column_sender_validity* _dataframe_columnar_validity(
+cdef const qwp_validity* _dataframe_columnar_validity(
         ArrowArray* arr,
         size_t row_offset,
         size_t row_count,
-        column_sender_validity* validity) except? NULL:
+        qwp_validity* validity) except? NULL:
     if arr.null_count == 0:
         return NULL
     if row_offset % 8 != 0:
@@ -3635,14 +3635,14 @@ cdef void_int _dataframe_columnar_prebuild_pyobj(
 
 
 cdef void_int _dataframe_columnar_append_pyobj_str(
-        column_sender_chunk* chunk,
+        qwp_chunk* chunk,
         col_t* col,
         pyobj_built_t* prebuilt,
         size_t row_offset,
         size_t row_count) except -1:
     cdef line_sender_error* err = NULL
-    cdef column_sender_validity validity
-    cdef const column_sender_validity* validity_ptr = NULL
+    cdef qwp_validity validity
+    cdef const qwp_validity* validity_ptr = NULL
     cdef bint ok = False
     cdef int32_t* offsets
     cdef size_t bytes_len
@@ -3662,7 +3662,7 @@ cdef void_int _dataframe_columnar_append_pyobj_str(
     offsets = prebuilt.str_offsets + row_offset
     bytes_len = prebuilt.str_bytes_len
     with nogil:
-        ok = column_sender_chunk_column_str(
+        ok = qwp_chunk_column_str(
             chunk,
             col.name.buf,
             col.name.len,
@@ -3677,16 +3677,16 @@ cdef void_int _dataframe_columnar_append_pyobj_str(
 
 
 cdef void_int _dataframe_columnar_append_pyobj_simple(
-        column_sender_chunk* chunk,
+        qwp_chunk* chunk,
         col_t* col,
         pyobj_built_t* prebuilt,
         size_t row_offset,
         size_t row_count,
         size_t elem_size,
-        column_sender_numpy_dtype dtype) except -1:
+        qwp_numpy_dtype dtype) except -1:
     cdef line_sender_error* err = NULL
-    cdef column_sender_validity validity
-    cdef const column_sender_validity* validity_ptr = NULL
+    cdef qwp_validity validity
+    cdef const qwp_validity* validity_ptr = NULL
     cdef bint ok = False
 
     if prebuilt == NULL:
@@ -3700,7 +3700,7 @@ cdef void_int _dataframe_columnar_append_pyobj_simple(
         validity.bit_len = row_count
         validity_ptr = &validity
     with nogil:
-        ok = column_sender_chunk_append_numpy_column(
+        ok = qwp_chunk_append_numpy_column(
             chunk,
             col.name.buf,
             col.name.len,
@@ -3716,14 +3716,14 @@ cdef void_int _dataframe_columnar_append_pyobj_simple(
 
 
 cdef void_int _dataframe_columnar_append_pyobj_bytes(
-        column_sender_chunk* chunk,
+        qwp_chunk* chunk,
         col_t* col,
         pyobj_built_t* prebuilt,
         size_t row_offset,
         size_t row_count) except -1:
     cdef line_sender_error* err = NULL
-    cdef column_sender_validity validity
-    cdef const column_sender_validity* validity_ptr = NULL
+    cdef qwp_validity validity
+    cdef const qwp_validity* validity_ptr = NULL
     cdef bint ok = False
 
     if prebuilt == NULL:
@@ -3737,7 +3737,7 @@ cdef void_int _dataframe_columnar_append_pyobj_bytes(
         validity.bit_len = row_count
         validity_ptr = &validity
     with nogil:
-        ok = column_sender_chunk_column_binary(
+        ok = qwp_chunk_column_binary(
             chunk,
             col.name.buf,
             col.name.len,
@@ -3752,24 +3752,24 @@ cdef void_int _dataframe_columnar_append_pyobj_bytes(
 
 
 cdef void_int _dataframe_columnar_call_arrow_append(
-        column_sender_chunk* chunk,
+        qwp_chunk* chunk,
         col_t* col,
         size_t row_offset,
         size_t row_count,
-        column_sender_symbol_mode symbol_mode
-            =column_sender_symbol_mode_auto) except -1:
+        qwp_symbol_mode symbol_mode
+            =qwp_symbol_mode_auto) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
-    cdef column_sender_arrow_import* imported = col.setup.arrow_import
+    cdef qwp_arrow_import* imported = col.setup.arrow_import
     with nogil:
         if imported == NULL:
-            imported = column_sender_arrow_import_new(
+            imported = qwp_arrow_import_new(
                 &col.setup.chunks.chunks[0],
                 &col.setup.arrow_schema,
                 symbol_mode,
                 &err)
         if imported != NULL:
-            ok = column_sender_chunk_append_arrow_import(
+            ok = qwp_chunk_append_arrow_import(
                 chunk,
                 col.name.buf,
                 col.name.len,
@@ -3784,7 +3784,7 @@ cdef void_int _dataframe_columnar_call_arrow_append(
 
 
 cdef void_int _dataframe_columnar_append_field(
-        column_sender_chunk* chunk,
+        qwp_chunk* chunk,
         col_t* col,
         pyobj_built_t* prebuilt,
         size_t row_offset,
@@ -3798,15 +3798,15 @@ cdef void_int _dataframe_columnar_append_field(
     cdef size_t bytes_len
     cdef size_t dict_offsets_len
     cdef size_t dict_bytes_len
-    cdef column_sender_validity validity
-    cdef const column_sender_validity* validity_ptr = (
+    cdef qwp_validity validity
+    cdef const qwp_validity* validity_ptr = (
         _dataframe_columnar_validity(arr, row_offset, row_count, &validity))
     cdef bint ok = False
 
-    cdef column_sender_numpy_dtype numpy_dtype
+    cdef qwp_numpy_dtype numpy_dtype
     cdef size_t element_size
-    cdef column_sender_numpy_extras extras
-    cdef const column_sender_numpy_extras* extras_ptr
+    cdef qwp_numpy_extras extras
+    cdef const qwp_numpy_extras* extras_ptr
 
     if col.setup.target == col_target_t.col_target_column_bool:
         if col.setup.source == col_source_t.col_source_bool_pyobj:
@@ -3817,7 +3817,7 @@ cdef void_int _dataframe_columnar_append_field(
                 raise RuntimeError(
                     'PyObject bool column requires byte-aligned chunk boundaries.')
             with nogil:
-                ok = column_sender_chunk_column_bool(
+                ok = qwp_chunk_column_bool(
                     chunk,
                     col.name.buf,
                     col.name.len,
@@ -3827,13 +3827,13 @@ cdef void_int _dataframe_columnar_append_field(
                     &err)
         elif col.setup.source == col_source_t.col_source_bool_numpy:
             # NumPy bool is byte-per-row; Rust packs to LSB-bitmap
-            # inside column_sender_chunk_append_numpy_column.
+            # inside qwp_chunk_append_numpy_column.
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    column_sender_numpy_dtype.column_sender_numpy_bool,
+                    qwp_numpy_dtype.qwp_numpy_bool,
                     (<const uint8_t*>data) + row_offset,
                     row_count,
                     row_count,
@@ -3858,11 +3858,11 @@ cdef void_int _dataframe_columnar_append_field(
             else:
                 validity_ptr = NULL
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    column_sender_numpy_dtype.column_sender_numpy_i64,
+                    qwp_numpy_dtype.qwp_numpy_i64,
                     (<const uint8_t*>prebuilt.data) + row_offset * 8,
                     row_count * 8,
                     row_count,
@@ -3875,30 +3875,30 @@ cdef void_int _dataframe_columnar_append_field(
             if col.setup.source in (
                     col_source_t.col_source_i64_numpy,
                     col_source_t.col_source_i64_arrow):
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i64
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_i64
                 element_size = 8
             elif col.setup.source == col_source_t.col_source_i8_numpy:
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i8
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_i8
                 element_size = 1
             elif col.setup.source == col_source_t.col_source_i16_numpy:
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i16
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_i16
                 element_size = 2
             elif col.setup.source == col_source_t.col_source_i32_numpy:
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_i32
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_i32
                 element_size = 4
             elif col.setup.source == col_source_t.col_source_u8_numpy:
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u8
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_u8
                 element_size = 1
             elif col.setup.source == col_source_t.col_source_u16_numpy:
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u16
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_u16
                 element_size = 2
             elif col.setup.source in (
                     col_source_t.col_source_u32_numpy,
                     col_source_t.col_source_u32_arrow):
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u32
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_u32
                 element_size = 4
             elif col.setup.source == col_source_t.col_source_u64_numpy:
-                numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_u64
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_u64
                 element_size = 8
             else:
                 raise RuntimeError('Unsupported columnar int source.')
@@ -3906,18 +3906,18 @@ cdef void_int _dataframe_columnar_append_field(
             if col.setup.has_override:
                 numpy_dtype = col.setup.override_dtype
                 if (numpy_dtype
-                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i8
+                            == qwp_numpy_dtype.qwp_numpy_geohash_i8
                         or numpy_dtype
-                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i16
+                            == qwp_numpy_dtype.qwp_numpy_geohash_i16
                         or numpy_dtype
-                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i32
+                            == qwp_numpy_dtype.qwp_numpy_geohash_i32
                         or numpy_dtype
-                            == column_sender_numpy_dtype.column_sender_numpy_geohash_i64):
-                    memset(&extras, 0, sizeof(column_sender_numpy_extras))
+                            == qwp_numpy_dtype.qwp_numpy_geohash_i64):
+                    memset(&extras, 0, sizeof(qwp_numpy_extras))
                     extras.geohash_bits = col.setup.override_geohash_bits
                     extras_ptr = &extras
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
@@ -3932,10 +3932,10 @@ cdef void_int _dataframe_columnar_append_field(
         if col.setup.source in (
                 col_source_t.col_source_f64_numpy,
                 col_source_t.col_source_f64_arrow):
-            numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_f64
+            numpy_dtype = qwp_numpy_dtype.qwp_numpy_f64
             element_size = 8
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
@@ -3949,10 +3949,10 @@ cdef void_int _dataframe_columnar_append_field(
         elif col.setup.source == col_source_t.col_source_f32_numpy:
             # numpy f32 maps directly to a FLOAT column on the wire; the
             # source stride is 4 bytes per row.
-            numpy_dtype = column_sender_numpy_dtype.column_sender_numpy_f32
+            numpy_dtype = qwp_numpy_dtype.qwp_numpy_f32
             element_size = 4
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
@@ -3978,11 +3978,11 @@ cdef void_int _dataframe_columnar_append_field(
             else:
                 validity_ptr = NULL
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    column_sender_numpy_dtype.column_sender_numpy_f64,
+                    qwp_numpy_dtype.qwp_numpy_f64,
                     (<const uint8_t*>prebuilt.data) + row_offset * 8,
                     row_count * 8,
                     row_count,
@@ -3994,11 +3994,11 @@ cdef void_int _dataframe_columnar_append_field(
     elif col.setup.target == col_target_t.col_target_column_ts:
         if col.setup.source == col_source_t.col_source_dt64ns_numpy:
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    column_sender_numpy_dtype.column_sender_numpy_datetime64_ns,
+                    qwp_numpy_dtype.qwp_numpy_datetime64_ns,
                     (<const uint8_t*>data) + row_offset * 8,
                     row_count * 8,
                     row_count,
@@ -4007,11 +4007,11 @@ cdef void_int _dataframe_columnar_append_field(
                     &err)
         elif col.setup.source == col_source_t.col_source_dt64us_numpy:
             with nogil:
-                ok = column_sender_chunk_append_numpy_column(
+                ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    column_sender_numpy_dtype.column_sender_numpy_datetime64_us,
+                    qwp_numpy_dtype.qwp_numpy_datetime64_us,
                     (<const uint8_t*>data) + row_offset * 8,
                     row_count * 8,
                     row_count,
@@ -4027,7 +4027,7 @@ cdef void_int _dataframe_columnar_append_field(
         elif col.setup.source == col_source_t.col_source_datetime_pyobj:
             _dataframe_columnar_append_pyobj_simple(
                 chunk, col, prebuilt, row_offset, row_count, 8,
-                column_sender_numpy_dtype.column_sender_numpy_datetime64_us)
+                qwp_numpy_dtype.qwp_numpy_datetime64_us)
             return 0
         else:
             raise RuntimeError('Unsupported columnar timestamp field source.')
@@ -4044,7 +4044,7 @@ cdef void_int _dataframe_columnar_append_field(
         if col.setup.source == col_source_t.col_source_uuid_pyobj:
             _dataframe_columnar_append_pyobj_simple(
                 chunk, col, prebuilt, row_offset, row_count, 16,
-                column_sender_numpy_dtype.column_sender_numpy_s16)
+                qwp_numpy_dtype.qwp_numpy_s16)
             return 0
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
@@ -4053,7 +4053,7 @@ cdef void_int _dataframe_columnar_append_field(
         if col.setup.source == col_source_t.col_source_ipv4_pyobj:
             _dataframe_columnar_append_pyobj_simple(
                 chunk, col, prebuilt, row_offset, row_count, 4,
-                column_sender_numpy_dtype.column_sender_numpy_u32_ipv4)
+                qwp_numpy_dtype.qwp_numpy_u32_ipv4)
             return 0
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
@@ -4075,7 +4075,7 @@ cdef void_int _dataframe_columnar_append_field(
                 col_source_t.col_source_str_i32_cat):
             _dataframe_columnar_call_arrow_append(
                 chunk, col, row_offset, row_count,
-                column_sender_symbol_mode_not_symbol)
+                qwp_symbol_mode_not_symbol)
             return 0
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
@@ -4083,7 +4083,7 @@ cdef void_int _dataframe_columnar_append_field(
     elif col.setup.target == col_target_t.col_target_symbol:
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count,
-            column_sender_symbol_mode_symbol)
+            qwp_symbol_mode_symbol)
         return 0
     elif col.setup.target == col_target_t.col_target_column_arrow:
         _dataframe_columnar_call_arrow_append(
@@ -4101,7 +4101,7 @@ cdef void_int _dataframe_columnar_append_field(
 
 
 cdef void_int _dataframe_columnar_append_at(
-        column_sender_chunk* chunk,
+        qwp_chunk* chunk,
         col_t* col,
         pyobj_built_t* prebuilt,
         size_t row_offset,
@@ -4120,7 +4120,7 @@ cdef void_int _dataframe_columnar_append_at(
                 'Designated timestamp column cannot contain nulls.')
         data = <const int64_t*>prebuilt.data
         with nogil:
-            ok = column_sender_chunk_at_micros(
+            ok = qwp_chunk_at_micros(
                 chunk,
                 data + row_offset,
                 row_count,
@@ -4135,7 +4135,7 @@ cdef void_int _dataframe_columnar_append_at(
             col_source_t.col_source_dt64ns_numpy,
             col_source_t.col_source_dt64ns_tz_arrow):
         with nogil:
-            ok = column_sender_chunk_at_nanos(
+            ok = qwp_chunk_at_nanos(
                 chunk,
                 data + row_offset,
                 row_count,
@@ -4144,21 +4144,21 @@ cdef void_int _dataframe_columnar_append_at(
             col_source_t.col_source_dt64us_numpy,
             col_source_t.col_source_dt64us_tz_arrow):
         with nogil:
-            ok = column_sender_chunk_at_micros(
+            ok = qwp_chunk_at_micros(
                 chunk,
                 data + row_offset,
                 row_count,
                 &err)
     elif col.setup.source == col_source_t.col_source_dt64ms_tz_arrow:
         with nogil:
-            ok = column_sender_chunk_at_millis(
+            ok = qwp_chunk_at_millis(
                 chunk,
                 data + row_offset,
                 row_count,
                 &err)
     elif col.setup.source == col_source_t.col_source_dt64s_tz_arrow:
         with nogil:
-            ok = column_sender_chunk_at_seconds(
+            ok = qwp_chunk_at_seconds(
                 chunk,
                 data + row_offset,
                 row_count,
@@ -4173,16 +4173,16 @@ cdef void_int _dataframe_columnar_append_at(
 cdef int _geohash_override_dtype(col_source_t source) noexcept:
     if (source == col_source_t.col_source_u8_numpy
             or source == col_source_t.col_source_i8_numpy):
-        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i8
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i8
     if (source == col_source_t.col_source_u16_numpy
             or source == col_source_t.col_source_i16_numpy):
-        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i16
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i16
     if (source == col_source_t.col_source_u32_numpy
             or source == col_source_t.col_source_i32_numpy):
-        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i32
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i32
     if (source == col_source_t.col_source_u64_numpy
             or source == col_source_t.col_source_i64_numpy):
-        return <int>column_sender_numpy_dtype.column_sender_numpy_geohash_i64
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i64
     return -1
 
 
@@ -4293,25 +4293,25 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
                 and col.setup.source == col_source_t.col_source_u32_numpy):
             col.setup.has_override = True
             col.setup.override_dtype = \
-                column_sender_numpy_dtype.column_sender_numpy_u32_ipv4
+                qwp_numpy_dtype.qwp_numpy_u32_ipv4
         elif (kind == 'char'
                 and col.setup.source == col_source_t.col_source_u16_numpy):
             col.setup.has_override = True
             col.setup.override_dtype = \
-                column_sender_numpy_dtype.column_sender_numpy_u16_char
+                qwp_numpy_dtype.qwp_numpy_u16_char
         elif kind == 'geohash':
             gh = _geohash_override_dtype(col.setup.source)
             bits = meta.get('precision_bits') or 0
             if gh != -1 and _is_int_not_bool(bits) and 1 <= bits <= 60:
                 col.setup.has_override = True
-                col.setup.override_dtype = <column_sender_numpy_dtype>gh
+                col.setup.override_dtype = <qwp_numpy_dtype>gh
                 col.setup.override_geohash_bits = <uint8_t>bits
     return 0
 
 
 cdef void_int _dataframe_columnar_populate_chunk(
         dataframe_plan_t* plan,
-        column_sender_chunk* chunk,
+        qwp_chunk* chunk,
         size_t row_offset,
         size_t row_count) except -1:
     cdef size_t col_index
@@ -4363,12 +4363,12 @@ cdef void_int _dataframe_columnar_populate_chunk(
     if plan.at_value == _AT_IS_SERVER_NOW:
         # Explicit `at=ServerTimestamp` opt-in: the frame carries no
         # designated timestamp column; the server stamps rows on arrival.
-        if not column_sender_chunk_at_now(chunk, &err):
+        if not qwp_chunk_at_now(chunk, &err):
             raise c_err_to_py(err)
         return 0
     if plan.at_value >= 0:
         # Fixed scalar designated timestamp shared by every row.
-        if not column_sender_chunk_at_scalar_nanos(
+        if not qwp_chunk_at_scalar_nanos(
                 chunk, plan.at_value, &err):
             raise c_err_to_py(err)
         return 0
@@ -4380,7 +4380,7 @@ cdef void_int _dataframe_columnar_populate_chunk(
         chunk, at_col, at_prebuilt, row_offset, row_count)
 
 
-cdef void_int _dataframe_columnar_sync(direct_column_sender* conn) except -1:
+cdef void_int _dataframe_columnar_sync(qwp_direct_sender* conn) except -1:
     cdef line_sender_error* err = NULL
     cdef bint ok = False
     cdef PyThreadState* gs = NULL
@@ -4390,7 +4390,7 @@ cdef void_int _dataframe_columnar_sync(direct_column_sender* conn) except -1:
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = direct_column_sender_commit(
+    ok = qwp_direct_sender_commit(
         conn,
         qwpws_ack_level.qwpws_ack_level_ok,
         &err)
@@ -4403,7 +4403,7 @@ cdef void_int _dataframe_columnar_sync(direct_column_sender* conn) except -1:
 
 
 cdef bint _dataframe_columnar_force_drop_after_error(
-        direct_column_sender* conn,
+        qwp_direct_sender* conn,
         bint flushed) noexcept:
     # A failed call must not let its data reach the table. The direct pool's
     # return path best-effort-commits pipelined frames, so a connection that
@@ -4430,8 +4430,8 @@ cdef bint _dataframe_columnar_is_deferred_capacity_error(
 
 
 cdef void_int _dataframe_columnar_flush(
-        direct_column_sender* conn,
-        column_sender_chunk* chunk,
+        qwp_direct_sender* conn,
+        qwp_chunk* chunk,
         bint retry_after_sync,
         bint* committed_prefix) except -1:
     cdef line_sender_error* err = NULL
@@ -4446,7 +4446,7 @@ cdef void_int _dataframe_columnar_flush(
     if _dataframe_columnar_count_io_stats:
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
-    ok = direct_column_sender_flush(conn, chunk, &err)
+    ok = qwp_direct_sender_flush(conn, chunk, &err)
     _ensure_has_gil(&gs)
     if _dataframe_columnar_count_io_stats:
         _dataframe_columnar_flush_calls += 1
@@ -4466,7 +4466,7 @@ cdef void_int _dataframe_columnar_flush(
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
-        ok = direct_column_sender_flush(conn, chunk, &err)
+        ok = qwp_direct_sender_flush(conn, chunk, &err)
         _ensure_has_gil(&gs)
         if _dataframe_columnar_count_io_stats:
             _dataframe_columnar_flush_calls += 1
@@ -4478,14 +4478,14 @@ cdef void_int _dataframe_columnar_flush(
 
 
 cdef int _arrow_flush_once(
-        direct_column_sender* conn,
+        qwp_direct_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         ArrowSchema* schema,
         line_sender_column_name* ts_column,
         bint at_scalar_set,
         int64_t at_scalar_nanos,
-        const column_sender_arrow_override* overrides,
+        const qwp_arrow_override* overrides,
         size_t overrides_len,
         line_sender_error** err) except -1:
     cdef bint ok = False
@@ -4498,15 +4498,15 @@ cdef int _arrow_flush_once(
         start_ns = time.perf_counter_ns()
     _ensure_doesnt_have_gil(&gs)
     if ts_column != NULL:
-        ok = direct_column_sender_flush_arrow_batch_at_column(
+        ok = qwp_direct_sender_flush_arrow_batch_at_column(
             conn, table, array, schema, ts_column[0],
             overrides, overrides_len, err)
     elif at_scalar_set:
-        ok = direct_column_sender_flush_arrow_batch_at_scalar_nanos(
+        ok = qwp_direct_sender_flush_arrow_batch_at_scalar_nanos(
             conn, table, array, schema, at_scalar_nanos,
             overrides, overrides_len, err)
     else:
-        ok = direct_column_sender_flush_arrow_batch_at_now(
+        ok = qwp_direct_sender_flush_arrow_batch_at_now(
             conn, table, array, schema,
             overrides, overrides_len, err)
     _ensure_has_gil(&gs)
@@ -4517,14 +4517,14 @@ cdef int _arrow_flush_once(
 
 
 cdef void_int _dataframe_arrow_flush_batch(
-        direct_column_sender* conn,
+        qwp_direct_sender* conn,
         line_sender_table_name table,
         ArrowArray* array,
         ArrowSchema* schema,
         line_sender_column_name* ts_column,
         bint at_scalar_set,
         int64_t at_scalar_nanos,
-        const column_sender_arrow_override* overrides,
+        const qwp_arrow_override* overrides,
         size_t overrides_len,
         bint retry_after_sync,
         bint* committed_prefix,
@@ -4639,7 +4639,7 @@ def _bench_dataframe_flush_arrow_batch(
         object conf=None,
         size_t iterations=1):
     """
-    Internal benchmark hook for `direct_column_sender_flush_arrow_batch_at_now`
+    Internal benchmark hook for `qwp_direct_sender_flush_arrow_batch_at_now`
     FFI.
 
     `arrow_source` must expose the Arrow PyCapsule Interface
@@ -4655,7 +4655,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef size_t col_count = 0
     cdef size_t completed = 0
     cdef questdb_db* db = NULL
-    cdef direct_column_sender* conn = NULL
+    cdef qwp_direct_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef qdb_pystr_buf* b = NULL
     cdef PyThreadState* gs = NULL
@@ -4715,7 +4715,7 @@ def _bench_dataframe_flush_arrow_batch(
             c_ts_column_ptr = &c_ts_column
 
         _ensure_doesnt_have_gil(&gs)
-        conn = questdb_db_borrow_direct_column_sender(db, &err)
+        conn = questdb_db_borrow_direct_sender(db, &err)
         _ensure_has_gil(&gs)
         if conn == NULL:
             raise c_err_to_py(err)
@@ -4729,12 +4729,12 @@ def _bench_dataframe_flush_arrow_batch(
                 _dataframe_columnar_sync(conn)
             completed = iterations
         except:
-            questdb_db_drop_direct_column_sender(db, conn)
+            questdb_db_drop_direct_sender(db, conn)
             conn = NULL
             raise
         finally:
             if conn != NULL:
-                questdb_db_return_direct_column_sender(db, conn)
+                questdb_db_return_direct_sender(db, conn)
     finally:
         if c_schema.release != NULL:
             c_schema.release(&c_schema)
@@ -4770,7 +4770,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
     cdef size_t iteration
     cdef qdb_pystr_buf* b = NULL
     cdef dataframe_plan_t plan
-    cdef column_sender_chunk* chunk = NULL
+    cdef qwp_chunk* chunk = NULL
     cdef line_sender_error* err = NULL
     cdef uint64_t start_row_path_emissions
     cdef uint64_t end_row_path_emissions
@@ -4815,7 +4815,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                 rows_per_chunk = _dataframe_columnar_rows_per_chunk(
                     &plan,
                     max_rows_per_chunk)
-                chunk = column_sender_chunk_new(
+                chunk = qwp_chunk_new(
                     plan.c_table_name.buf,
                     plan.c_table_name.len,
                     &err)
@@ -4823,7 +4823,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                     raise c_err_to_py(err)
                 row_offset = 0
                 while row_offset < plan.row_count:
-                    if not column_sender_chunk_clear(chunk, &err):
+                    if not qwp_chunk_clear(chunk, &err):
                         raise c_err_to_py(err)
                     chunk_rows = rows_per_chunk
                     if chunk_rows > plan.row_count - row_offset:
@@ -4833,7 +4833,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                         chunk,
                         row_offset,
                         chunk_rows)
-                    populated_rows = column_sender_chunk_row_count(chunk, &err)
+                    populated_rows = qwp_chunk_row_count(chunk, &err)
                     if populated_rows == <size_t>-1:
                         raise c_err_to_py(err)
                     if populated_rows != 0:
@@ -4842,7 +4842,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
                     row_offset += chunk_rows
             finally:
                 if chunk != NULL:
-                    column_sender_chunk_free(chunk)
+                    qwp_chunk_free(chunk)
                     chunk = NULL
                 dataframe_plan_release(&plan)
                 if b != NULL:
@@ -4892,14 +4892,14 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
 
 
 cdef void_int _capsule_consume_stream(
-        direct_column_sender* conn,
+        qwp_direct_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
         bint at_scalar_set,
         int64_t at_scalar_nanos,
         ArrowSchema* c_schema,
-        const column_sender_arrow_override* c_overrides,
+        const qwp_arrow_override* c_overrides,
         size_t c_overrides_len,
         bint* any_flushed,
         size_t* deferred_since_sync,
@@ -4996,17 +4996,17 @@ cdef object _validate_schema_overrides(object schema_overrides):
                 f'{override!r}; expected str or (kind, value) tuple.')
         arg_int = 0
         if kind == 'symbol':
-            kind_int = <int>column_sender_arrow_override_symbol
+            kind_int = <int>qwp_arrow_override_symbol
         elif kind == 'ipv4':
-            kind_int = <int>column_sender_arrow_override_ipv4
+            kind_int = <int>qwp_arrow_override_ipv4
         elif kind == 'char':
-            kind_int = <int>column_sender_arrow_override_char
+            kind_int = <int>qwp_arrow_override_char
         elif kind == 'geohash':
             if not isinstance(value, int) or value < 1 or value > 60:
                 raise ValueError(
                     f'schema_overrides[{name!r}] geohash bits must '
                     f'be int in 1..=60, got {value!r}.')
-            kind_int = <int>column_sender_arrow_override_geohash
+            kind_int = <int>qwp_arrow_override_geohash
             arg_int = value
         else:
             raise ValueError(
@@ -5233,8 +5233,8 @@ cdef object _capsule_get_dict_string_column_names(object sliceable):
 cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     """Translate `symbols` into a list of
     (name_bytes, kind, arg) tuples matching the shape returned by
-    _validate_schema_overrides. `kind` is `column_sender_arrow_override_symbol`
-    to mark a column as SYMBOL or `column_sender_arrow_override_not_symbol`
+    _validate_schema_overrides. `kind` is `qwp_arrow_override_symbol`
+    to mark a column as SYMBOL or `qwp_arrow_override_not_symbol`
     to force a dict-encoded column to VARCHAR; `arg` is unused (0) for both.
     Returns:
 
@@ -5249,8 +5249,8 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     entry targets a non-string column (matches Manual plan semantics).
     """
     cdef list out
-    cdef int symbol_kind = <int>column_sender_arrow_override_symbol
-    cdef int not_symbol_kind = <int>column_sender_arrow_override_not_symbol
+    cdef int symbol_kind = <int>qwp_arrow_override_symbol
+    cdef int not_symbol_kind = <int>qwp_arrow_override_not_symbol
     cdef object col_names
     cdef object entry
     cdef object name
@@ -5449,31 +5449,31 @@ cdef struct direct_conn_source_t:
     const line_sender_opts* opts
 
 
-cdef direct_column_sender* _direct_conn_open(
+cdef qwp_direct_sender* _direct_conn_open(
         direct_conn_source_t* src,
         uint64_t budget_ms,
         line_sender_error** err) noexcept nogil:
     if src.db != NULL:
         if budget_ms == 0:
-            return questdb_db_borrow_direct_column_sender(src.db, err)
-        return questdb_db_borrow_direct_column_sender_with_retry(
+            return questdb_db_borrow_direct_sender(src.db, err)
+        return questdb_db_borrow_direct_sender_with_retry(
             src.db, budget_ms, err)
-    return direct_column_sender_from_opts(src.opts, err)
+    return qwp_direct_sender_from_opts(src.opts, err)
 
 
 cdef void _direct_conn_close(
         direct_conn_source_t* src,
-        direct_column_sender* conn,
+        qwp_direct_sender* conn,
         bint force_drop) noexcept nogil:
     if src.db != NULL:
         if force_drop:
-            questdb_db_drop_direct_column_sender(src.db, conn)
+            questdb_db_drop_direct_sender(src.db, conn)
         else:
-            questdb_db_return_direct_column_sender(src.db, conn)
+            questdb_db_return_direct_sender(src.db, conn)
     elif force_drop:
-        questdb_db_drop_direct_column_sender(NULL, conn)
+        questdb_db_drop_direct_sender(NULL, conn)
     else:
-        direct_column_sender_free(conn)
+        qwp_direct_sender_free(conn)
 
 
 cdef bint _dataframe_client_try_capsule_path(
@@ -5489,7 +5489,7 @@ cdef bint _dataframe_client_try_capsule_path(
         bint* committed_prefix,
         bint* nonreplayable_consumed) except -1:
     cdef qdb_pystr_buf* b = NULL
-    cdef direct_column_sender* conn = NULL
+    cdef qwp_direct_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
     cdef object sliceable = None
@@ -5507,7 +5507,7 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef line_sender_column_name c_ts_column
     cdef line_sender_column_name* c_ts_column_ptr = NULL
     cdef ArrowSchema c_schema
-    cdef column_sender_arrow_override* c_overrides = NULL
+    cdef qwp_arrow_override* c_overrides = NULL
     cdef size_t c_overrides_len = 0
     cdef bint at_is_column = False
     cdef bint at_scalar_set = False
@@ -5592,8 +5592,8 @@ cdef bint _dataframe_client_try_capsule_path(
 
         if merged_overrides is not None:
             c_overrides_len = len(merged_overrides)
-            c_overrides = <column_sender_arrow_override*>calloc(
-                c_overrides_len, sizeof(column_sender_arrow_override))
+            c_overrides = <qwp_arrow_override*>calloc(
+                c_overrides_len, sizeof(qwp_arrow_override))
             if c_overrides == NULL:
                 raise MemoryError()
             for i in range(c_overrides_len):
@@ -5669,8 +5669,8 @@ cdef void_int _dataframe_numpy_publish(
         object at,
         size_t max_rows_per_batch,
         bint* committed_prefix) except -1:
-    cdef column_sender_chunk* chunk = NULL
-    cdef direct_column_sender* conn = NULL
+    cdef qwp_chunk* chunk = NULL
+    cdef qwp_direct_sender* conn = NULL
     cdef line_sender_error* err = NULL
     cdef PyThreadState* gs = NULL
     cdef bint flushed = False
@@ -5706,7 +5706,7 @@ cdef void_int _dataframe_numpy_publish(
         if conn == NULL:
             raise c_err_to_py(err)
 
-        chunk = column_sender_chunk_new(
+        chunk = qwp_chunk_new(
             plan.c_table_name.buf,
             plan.c_table_name.len,
             &err)
@@ -5715,7 +5715,7 @@ cdef void_int _dataframe_numpy_publish(
         try:
             row_offset = 0
             while row_offset < plan.row_count:
-                if not column_sender_chunk_clear(chunk, &err):
+                if not qwp_chunk_clear(chunk, &err):
                     raise c_err_to_py(err)
                 chunk_rows = rows_per_chunk
                 if chunk_rows > plan.row_count - row_offset:
@@ -5746,7 +5746,7 @@ cdef void_int _dataframe_numpy_publish(
             with nogil:
                 _direct_conn_close(src, conn, force_drop_conn)
         if chunk != NULL:
-            column_sender_chunk_free(chunk)
+            qwp_chunk_free(chunk)
         # The plan is rebuilt on each failover attempt; release this
         # attempt's plan so a re-send starts from a blank plan.
         dataframe_plan_release(plan)
@@ -5864,14 +5864,14 @@ cdef void_int _direct_dataframe_run(
 
 
 cdef void_int _capsule_consume_stream_with_hint(
-        direct_column_sender* conn,
+        qwp_direct_sender* conn,
         object stream_owner,
         line_sender_table_name c_table_name,
         line_sender_column_name* c_ts_column_ptr,
         bint at_scalar_set,
         int64_t at_scalar_nanos,
         ArrowSchema* c_schema,
-        const column_sender_arrow_override* c_overrides,
+        const qwp_arrow_override* c_overrides,
         size_t c_overrides_len,
         bint* any_flushed,
         size_t* deferred_since_sync,
