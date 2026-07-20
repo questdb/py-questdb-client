@@ -958,9 +958,9 @@ class PooledSender:
     and per-lease server diagnostics through :meth:`poll_error` and
     :meth:`error_events_dropped`. ``dataframe()`` routes to the same
     direct columnar path as :meth:`QuestDB.dataframe`, borrowing a direct
-    connection from the pool for that call. Row auto-flush is disabled by
-    default and can be enabled for every lease through the ``auto_flush``
-    settings on the parent :class:`QuestDB` configuration.
+    connection from the pool for that call. Row auto-flush is enabled by
+    default at 1,000 rows or 100 milliseconds and can be configured through
+    the ``auto_flush`` settings on the parent :class:`QuestDB` configuration.
     """
 
     def __enter__(self) -> PooledSender: ...
@@ -1032,7 +1032,9 @@ class PooledSender:
         """Publish and clear buffered rows, returning the published
         frame's FSN (``None`` for an empty buffer). FSNs are watermarks of
         the lease's pooled connection — use them while the lease is held;
-        they are not portable across leases."""
+        they are not portable across leases. Configure ``auto_flush=off``
+        when this call must publish and identify one whole application
+        batch."""
 
     def published_fsn(self) -> Optional[int]:
         """Highest FSN published locally on the lease's connection."""
@@ -1141,11 +1143,11 @@ class QuestDB:
 
         Prefer the :func:`questdb.connect` module-level factory.
 
-        Pooled row auto-flush is off unless the configuration opts in with
-        ``auto_flush=on`` or an ``auto_flush_rows``, ``auto_flush_bytes`` or
-        ``auto_flush_interval`` threshold. These settings use the standalone
-        sender's validation and threshold defaults. The mode is shared by all
-        leases, while each borrow starts a fresh interval.
+        Pooled row auto-flush is enabled by default at 1,000 rows or 100
+        milliseconds; byte-based auto-flush is disabled. Set
+        ``auto_flush=off`` to opt out or configure individual thresholds.
+        The mode is shared by all leases; a lease's interval starts when its
+        first row enters an empty buffer.
 
         ``connection_listener`` receives one :class:`ConnectionEvent` per
         connection-state transition, on a dedicated dispatcher thread.

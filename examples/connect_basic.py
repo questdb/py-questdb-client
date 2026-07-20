@@ -22,10 +22,9 @@ def example(host: str = 'localhost', port: int = 9000):
                         'amount': 0.00044},
                     at=TimestampNanos.now())
 
-                # Rows accumulate on the lease until you flush; pooled
-                # auto-flush is off by default (it can be enabled through
-                # the connect settings). `wait=True` blocks until the server
-                # acknowledges everything published on this lease.
+                # Pooled rows auto-publish at the configured thresholds.
+                # `wait=True` also publishes any partial batch, then blocks
+                # until the server acknowledges everything on this lease.
                 sender.flush(wait=True)
 
             # Query with positional bind parameters ($1..$N) and read the

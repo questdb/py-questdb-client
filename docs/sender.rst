@@ -378,21 +378,23 @@ acknowledgement).
 Auto-flushing
 -------------
 
-The standalone :class:`Sender <questdb.Sender>` auto-flushes by default to
-avoid accumulating very large buffers. A pooled sender is explicit-only by
-default; add auto-flush settings to the :func:`questdb.connect`
-configuration to opt in.
+Both the standalone :class:`Sender <questdb.Sender>` and pooled QWP row
+senders auto-flush by default to avoid accumulating large or stale batches.
+Their defaults reflect the different protocols:
+
+* A standalone sender publishes at 75,000 rows over HTTP, or 600 rows over
+  TCP and QWP, and after 1 second.
+
+* A pooled QWP sender publishes at 1,000 rows or after 100 milliseconds.
+  Byte-based auto-flush is disabled because the current QWP buffer size is an
+  estimate that is not constant-time to calculate.
 
 Auto-flushing is triggered when:
 
 * appending a row to the internal sender buffer
 
-* and the buffer either:
-
-    * Reaches 75,000 rows (for HTTP) or 600 rows (for TCP, QWP/UDP, and
-      QWP/WebSocket).
-
-    * Hasn't been flushed for 1 second (there are no timers).
+* and the buffer reaches its row or byte threshold, or its interval has
+  elapsed (there is no background timer).
 
 Here is an example :ref:`configuration string <sender_conf>` that sets up a
 sender to flush every 10 rows and disables the interval-based auto-flushing
@@ -402,19 +404,26 @@ logic.
 
 The equivalent pooled configuration uses QWP/WebSocket. The mode belongs to
 the :class:`QuestDB <questdb.QuestDB>` handle and is shared by all leases; the
-interval starts fresh on every borrow.
+interval starts when the first row enters an empty lease buffer.
 
 ``ws::addr=localhost:9000;auto_flush_rows=10;auto_flush_interval=off;``
 
 A pooled auto-flush only publishes into the store-and-forward path; it does
 not wait for an acknowledgement. Keep acknowledgement barriers explicit with
 ``sender.flush(wait=True)`` or ``sender.wait()``. Errors encountered while
-auto-publishing propagate from ``PooledSender.row()``.
+auto-publishing propagate from ``PooledSender.row()``. If every explicit
+``flush_and_get_fsn()`` must return the receipt for one complete application
+batch, configure ``auto_flush=off``; otherwise an earlier auto-flush may have
+already published and cleared some or all of that batch.
 
 Here is a configuration string with auto-flushing
 completely disabled:
 
 ``http::addr=localhost:9000;auto_flush=off;``
+
+For a pooled sender, use:
+
+``ws::addr=localhost:9000;auto_flush=off;``
 
 See the :ref:`sender_conf_auto_flush` section for more details, and note that
 ``auto_flush_interval`` :ref:`does NOT start a timer <sender_conf_auto_flush_interval>`.

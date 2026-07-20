@@ -48,8 +48,8 @@ Ticking data and flush cadence
 ------------------------------
 
 The following example mimics an application loop producing rows at random
-intervals. Pooled auto-flush is off by default, so this example publishes on
-an explicit row-count / elapsed-time cadence.
+intervals. It disables pooled auto-flush and publishes on an explicit
+row-count / elapsed-time cadence.
 
 .. literalinclude:: ../examples/connect_random_data.py
    :language: python

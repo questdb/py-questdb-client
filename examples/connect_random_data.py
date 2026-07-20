@@ -13,10 +13,11 @@ FLUSH_INTERVAL = 5.0    # ... or once this many seconds have passed
 def example(host: str = 'localhost', port: int = 9000, total_rows=None):
     table_name = str(uuid.uuid1())
     try:
-        with questdb.connect(f'ws::addr={host}:{port};') as db:
+        with questdb.connect(
+                f'ws::addr={host}:{port};auto_flush=off;') as db:
             with db.sender() as sender:
-                # Pooled auto-flush is off by default: accumulate rows on
-                # your own cadence and flush explicitly.
+                # Auto-flush is disabled above so this example can implement
+                # its own row-count / elapsed-time cadence.
                 sent = 0
                 last_flush = time.monotonic()
                 print('Ctrl^C to terminate...')

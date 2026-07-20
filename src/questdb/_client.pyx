@@ -1995,6 +1995,33 @@ cdef void_int _parse_auto_flush(
         c_auto_flush.interval = auto_flush_interval
 
 
+cdef void_int _parse_pooled_auto_flush(
+    line_sender_protocol protocol,
+    object auto_flush,
+    object auto_flush_rows,
+    object auto_flush_bytes,
+    object auto_flush_interval,
+    auto_flush_mode_t* c_auto_flush,
+) except -1:
+    """Parse the QWP pool's Java-builder-compatible auto-flush policy."""
+    if auto_flush_rows is None:
+        auto_flush_rows = 1000
+    if auto_flush_bytes is None:
+        # QWP/WebSocket size estimation currently walks the buffered schema
+        # and symbol dictionaries, so keep the per-row decision O(1).
+        auto_flush_bytes = False
+    if auto_flush_interval is None:
+        auto_flush_interval = 100
+    _parse_auto_flush(
+        protocol,
+        auto_flush,
+        auto_flush_rows,
+        auto_flush_bytes,
+        auto_flush_interval,
+        c_auto_flush,
+        0)
+
+
 class TaggedEnum(Enum):
     """
     Base class for tagged enums.
@@ -6005,12 +6032,12 @@ cdef class QuestDB:
 
         Prefer the :func:`questdb.connect` module-level factory.
 
-        Pooled row auto-flush is disabled when the configuration contains no
-        auto-flush settings. Set ``auto_flush=on`` or provide an
-        ``auto_flush_rows``, ``auto_flush_bytes`` or ``auto_flush_interval``
-        threshold to opt in. The mode is immutable and shared by every lease;
-        each borrow starts a fresh interval. Auto-triggered publishes do not
-        wait for server acknowledgement.
+        Pooled row auto-flush is enabled by default at 1,000 rows or 100
+        milliseconds; byte-based auto-flush is disabled. Set
+        ``auto_flush=off`` to disable it or configure individual thresholds.
+        The mode is immutable and shared by every lease; the interval starts
+        when the first row enters an empty lease buffer. Auto-triggered
+        publishes do not wait for server acknowledgement.
 
         The underlying connection pool is opened by
         `questdb_db_connect_with_handlers`.
@@ -6095,27 +6122,25 @@ cdef class QuestDB:
             # The pooled native core does not implement row-buffer
             # auto-flushing: it rejects the threshold keys and accepts only
             # auto_flush=off. Keep this Python-owned handle configuration out
-            # of the native connect string and reuse the standalone Sender's
-            # validation/defaults. With no auto-flush keys, pooled senders stay
-            # explicitly-flushed by default.
+            # of the native connect string. Pooled QWP uses its own defaults,
+            # while validation stays shared with the standalone Sender.
             c_protocol = protocol.c_value
             auto_flush_configured = not auto_flush_keys.isdisjoint(params)
-            _parse_auto_flush(
+            _parse_pooled_auto_flush(
                 c_protocol,
-                params.get('auto_flush') if auto_flush_configured else False,
+                params.get('auto_flush'),
                 params.get('auto_flush_rows'),
                 params.get('auto_flush_bytes'),
                 params.get('auto_flush_interval'),
-                &db._auto_flush_mode,
-                0)
+                &db._auto_flush_mode)
             if auto_flush_configured:
                 native_conf_str = protocol.tag + '::' + ''.join(
                     f'{key}={conf_str_value(value)};'
                     for key, value in params.items()
                     if key not in auto_flush_keys)
             else:
-                # Preserve the existing native configuration path byte for
-                # byte when pooled auto-flush was not requested.
+                # Preserve the native configuration path byte for byte when
+                # there are no Python-owned auto-flush settings to remove.
                 native_conf_str = conf_str
 
             if connection_listener is not None and not callable(
@@ -8320,15 +8345,16 @@ cdef class PooledSender:
     :meth:`poll_error` and :meth:`error_events_dropped`. Prefer
     :meth:`QuestDB.dataframe` for bulk loads; the lease's own
     ``dataframe()`` is a convenience that routes to the same direct
-    columnar path. Row auto-flush is disabled by default and can be enabled
-    for every lease through the parent handle's connection settings.
+    columnar path. Row auto-flush is enabled by default at 1,000 rows or 100
+    milliseconds and can be configured through the parent handle's connection
+    settings.
     """
     cdef qwp_sender* _qwp
     cdef questdb_db* _db
     cdef QuestDB _handle
     cdef Buffer _buffer
     cdef object _lock
-    cdef int64_t _last_flush_ms
+    cdef int64_t _batch_started_ms
 
     def __cinit__(self):
         self._qwp = NULL
@@ -8336,7 +8362,7 @@ cdef class PooledSender:
         self._handle = None
         self._buffer = None
         self._lock = threading.RLock()
-        self._last_flush_ms = 0
+        self._batch_started_ms = 0
 
     cdef void _attach(
             self,
@@ -8348,7 +8374,7 @@ cdef class PooledSender:
         self._db = db
         self._qwp = sender
         self._buffer = buffer
-        self._last_flush_ms = line_sender_now_micros() // 1000
+        self._batch_started_ms = 0
 
     cdef void_int _check_open(self, str method) except -1:
         if self._qwp == NULL:
@@ -8376,6 +8402,7 @@ cdef class PooledSender:
         cdef bint ok = False
         self._check_open('flush')
         if line_sender_buffer_row_count(self._buffer._impl) == 0:
+            self._batch_started_ms = 0
             if wait:
                 self._wait_locked(0)
             return 0
@@ -8393,7 +8420,7 @@ cdef class PooledSender:
         if not ok:
             raise c_err_to_py(err)
         qdb_pystr_buf_clear(self._buffer._b)
-        self._last_flush_ms = line_sender_now_micros() // 1000
+        self._batch_started_ms = 0
 
     cdef void _release_locked(self) except *:
         cdef qwp_sender* sender = self._qwp
@@ -8437,6 +8464,7 @@ cdef class PooledSender:
         threshold publishes the buffer without waiting for an acknowledgement.
         Any error raised by that publish propagates from this method.
         """
+        cdef bint starts_batch
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -8444,12 +8472,16 @@ cdef class PooledSender:
                 "ServerTimestamp")
         with self._lock:
             self._check_open('row')
+            starts_batch = (
+                line_sender_buffer_row_count(self._buffer._impl) == 0)
             self._buffer._row(
                 False, table_name, symbols, columns, at)
+            if starts_batch:
+                self._batch_started_ms = line_sender_now_micros() // 1000
             if should_auto_flush(
                     &self._handle._auto_flush_mode,
                     self._buffer._impl,
-                    self._last_flush_ms):
+                    self._batch_started_ms):
                 self._flush_locked(False)
         return self
 
@@ -8543,7 +8575,10 @@ cdef class PooledSender:
         FSNs are watermarks of the lease's pooled connection: use them for
         progress tracking while this lease is held (see
         :meth:`await_acked_fsn`); they are not portable receipts across
-        leases, which may borrow different connections.
+        leases, which may borrow different connections. Configure
+        ``auto_flush=off`` when this call must publish and identify one whole
+        application batch; auto-flush may already have published and cleared
+        some or all buffered rows.
         """
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
@@ -8558,8 +8593,7 @@ cdef class PooledSender:
             if not ok:
                 raise c_err_to_py(err)
             qdb_pystr_buf_clear(self._buffer._b)
-            if fsn.has_value:
-                self._last_flush_ms = line_sender_now_micros() // 1000
+            self._batch_started_ms = 0
         return fsn.value if fsn.has_value else None
 
     def flush_and_keep_and_get_fsn(self):
@@ -8580,7 +8614,7 @@ cdef class PooledSender:
             if not ok:
                 raise c_err_to_py(err)
             if fsn.has_value:
-                self._last_flush_ms = line_sender_now_micros() // 1000
+                self._batch_started_ms = line_sender_now_micros() // 1000
         return fsn.value if fsn.has_value else None
 
     def poll_error(self):
