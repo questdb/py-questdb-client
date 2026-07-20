@@ -1131,8 +1131,11 @@ are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing
-it drops the connection and the pool refills on demand. Call
-:func:`QueryResult.cancel <questdb.QueryResult.cancel>` first if the server should stop streaming.
+it drops the connection and the pool refills on demand. To stop streaming
+while preserving the connection, call
+:func:`QueryResult.cancel <questdb.QueryResult.cancel>`, which blocks while
+draining to a terminal reply, then close the result (or leave its context
+manager).
 
 ``SYMBOL`` columns: ``to_polars`` / ``to_pandas`` build the categorical directly
 (connection dictionary interned once, no per-row remap). ``to_arrow`` /
@@ -1163,9 +1166,11 @@ categoricals stays compact. Queries on a lease are
 strictly sequential: fully drain (or close) each :class:`QueryResult <questdb.QueryResult>` before
 the next ``r.query()`` call. Closing a result before draining it tears down
 the lease's connection, after which the lease is terminal — close it and take
-a fresh one. A lease has thread affinity: use one lease per thread, on the
-thread that created it (threads sharing a :class:`QuestDB <questdb.QuestDB>` handle each take
-their own lease).
+a fresh one. To abandon a result without losing the lease, call ``cancel()``
+and then ``close()``; cancellation drains to terminal, so the next query can
+reuse the connection. A lease has thread affinity: use one lease per thread,
+on the thread that created it (threads sharing a
+:class:`QuestDB <questdb.QuestDB>` handle each take their own lease).
 
 The same :class:`QuestDB <questdb.QuestDB>` can ingest dataframes through the pooled columnar QWP
 path with :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. Dataframe ingestion always uses the direct

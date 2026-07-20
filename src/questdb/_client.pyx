@@ -8861,9 +8861,11 @@ cdef class PooledReader:
     (or ``close()``) each :class:`QueryResult` before calling
     :meth:`query` again; running the next query while the previous
     result is still open raises ``QuestDBError``. Closing a result
-    before draining it tears down the lease's connection (the server
-    may still be streaming into it), after which the lease is terminal:
-    ``close()`` it and obtain a fresh one with ``QuestDB.reader()``.
+    before draining it tears down the lease's connection. To abandon a
+    result while preserving the lease, call ``result.cancel()`` and then
+    ``result.close()``. A lease whose result was closed without draining
+    or cancelling is terminal: ``close()`` it and obtain a fresh one
+    with ``QuestDB.reader()``.
 
     Because every query shares one connection, passing
     ``reset_symbol_dict=False`` to follow-up queries keeps the

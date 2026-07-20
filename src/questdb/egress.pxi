@@ -2201,9 +2201,9 @@ class QueryResult:
 
     **Consumption rule**: fully drain the result, use it as a context
     manager (``with db.query(...) as result:``), or call :meth:`close`.
-    A partially-consumed result cannot return its connection to the
-    pool. Call :meth:`cancel` first if the server should stop
-    streaming.
+    Closing a partially-consumed result drops its connection. To stop
+    streaming while preserving the connection, call :meth:`cancel`,
+    then close the result (or leave its context manager).
 
     **Thread affinity**: the underlying cursor is bound to the thread that
     created it (via ``QuestDB.query``). Create, consume, ``cancel``,
@@ -2443,18 +2443,25 @@ class QueryResult:
         return _PolarsBatchIter(self._take_cursor_handle(), pl, pa)
 
     def cancel(self):
-        """Ask the server to stop streaming. Idempotent.
+        """Ask the server to stop streaming and drain to terminal.
 
-        Distinct from :meth:`close`: ``cancel`` sends a cancellation
-        frame to QuestDB so the server can drop in-flight work;
-        ``close`` only releases local resources. A subsequent batch
-        pull after ``cancel`` typically surfaces
-        ``QuestDBErrorCode.Cancelled``.
+        This call blocks until QuestDB sends a terminal reply. On
+        success the connection is reusable, but the result remains
+        open: call :meth:`close` (or leave its context manager) before
+        starting the next query on a reader lease. A subsequent batch
+        pull ends normally or surfaces ``QuestDBErrorCode.Cancelled``.
+
+        Idempotent after success. If cancellation fails, the unusable
+        result is closed and the error is raised. A healthy connection
+        is still recycled when the failure is a server error for this
+        request; transport failures are dropped.
         """
         cdef _CursorHandle handle = self._cancel_handle
         cdef questdb_error* err = NULL
         cdef bint ok
+        cdef bint reusable
         cdef qwp_reader_cursor* cursor
+        cdef object exc
         if handle is None:
             return
         with handle._lock:
@@ -2463,24 +2470,36 @@ class QueryResult:
                 return
             with nogil:
                 ok = qwp_reader_cursor_cancel(cursor, &err)
+                reusable = qwp_reader_cursor_connection_reusable(cursor)
+        if reusable:
+            # Native state, not cancel's return value, decides whether the
+            # reader is safe to recycle: a server QUERY_ERROR terminates only
+            # this request, while transport/protocol failures tear it down.
+            _mark_reader_drained(handle)
         if not ok:
             if err != NULL:
-                raise _reader_err_to_py(err)
-            raise QuestDBError(
-                QuestDBErrorCode.ServerFlushError,
-                'qwp_reader_cursor_cancel returned false '
-                'without setting err_out')
+                exc = _reader_err_to_py(err)
+            else:
+                exc = QuestDBError(
+                    QuestDBErrorCode.ServerFlushError,
+                    'qwp_reader_cursor_cancel returned false '
+                    'without setting err_out')
+            # A failed cancel leaves no useful result. Close it before
+            # raising; `_must_close` now reflects the native reusability
+            # signal, so healthy server-error terminals are recycled and
+            # torn-down transports are dropped.
+            self.close()
+            raise exc
 
     def close(self):
         """Release the cursor + reader. Idempotent.
 
         Releases the pooled connection immediately: it returns to the
-        pool only if the stream already reached its clean end;
-        otherwise the connection is dropped and the pool refills on
-        demand. Does not send a cancellation frame; use :meth:`cancel`
-        first if you need the server to stop work. After ``close``, any
-        previously-returned iterator that hasn't been exhausted will
-        fail on its next pump with
+        pool only if the stream reached terminal (including through a
+        successful :meth:`cancel`); otherwise the connection is dropped
+        and the pool refills on demand. Does not send a cancellation
+        frame. After ``close``, any previously-returned iterator that
+        hasn't been exhausted will fail on its next pump with
         ``QuestDBErrorCode.InvalidApiCall``.
         """
         cdef _CursorHandle handle = self._cancel_handle
@@ -2498,16 +2517,21 @@ class QueryResult:
         return False
 
     def __del__(self):
+        cdef _CursorHandle handle
+        cdef _ReaderHandle reader
         try:
-            if not _cursor_handle_is_live(self._cursor_handle):
+            handle = self._cursor_handle
+            if not _cursor_handle_is_live(handle):
                 return
-            warnings.warn(
-                'QueryResult was neither drained nor closed; its '
-                'pooled connection is being released by the garbage '
-                'collector. Use `with db.query(...)` or call '
-                '`close()`.',
-                ResourceWarning,
-                stacklevel=2)
+            reader = handle._reader_ref
+            if reader is None or reader._must_close:
+                warnings.warn(
+                    'QueryResult was neither drained nor closed; its '
+                    'pooled connection is being released by the garbage '
+                    'collector. Use `with db.query(...)` or call '
+                    '`close()`.',
+                    ResourceWarning,
+                    stacklevel=2)
             self.close()
         except Exception:
             pass
