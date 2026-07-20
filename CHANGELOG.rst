@@ -162,7 +162,7 @@ returns on local acceptance and a background runner delivers the frames,
 reconnecting and replaying across transient failures within the
 ``reconnect_*`` budget. With the opt-in ``sf_dir`` directory the queue is
 disk-backed per sender slot and unacknowledged frames are replayed after a
-client restart (``sender_id`` names the slots; ``sf_max_bytes`` /
+client restart (``sender_id`` names the slots; ``sf_max_segment_bytes`` /
 ``sf_max_total_bytes`` / ``sf_append_deadline_millis`` /
 ``close_flush_timeout_millis`` bound it — see the configuration reference).
 ``flush(wait=True)`` / ``wait()`` observe the server acknowledgement;

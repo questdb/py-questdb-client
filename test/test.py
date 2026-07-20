@@ -1720,8 +1720,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_from_conf_preserves_c_only_qwpws_keys(self):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
-                'invalid sf_max_bytes'):
-            qi.Sender.from_conf('ws::addr=localhost:9000;sf_max_bytes=64mi;')
+                'invalid sf_max_segment_bytes'):
+            qi.Sender.from_conf('ws::addr=localhost:9000;sf_max_segment_bytes=64mi;')
 
     def test_from_conf_accepts_wss_tls_roots_password(self):
         with tempfile.NamedTemporaryFile() as roots:

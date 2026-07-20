@@ -226,7 +226,7 @@ Store-and-forward queue (QWP/WebSocket)
 
   Default: ``'default'``.
 
-* ``sf_max_bytes`` - ``int``: Segment and single-payload size cap for the
+* ``sf_max_segment_bytes`` - ``int``: Segment and single-payload size cap for the
   store-and-forward queue.
 
   Default: 4194304 (4 MiB).
