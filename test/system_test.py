@@ -2575,9 +2575,6 @@ class TestEgressWithDatabase(unittest.TestCase):
                 pass
 
     def test_cancel_is_safe_and_idempotent(self):
-        """``cancel()`` drains a live cursor to terminal, is idempotent,
-        and leaves a follow-up pull with Rust's terminal outcome: clean
-        end or ``Cancelled``. It remains a no-op after ``close()``."""
         table_name = 't_egress_cancel_' + uuid.uuid4().hex[:8]
         try:
             self._make_table(table_name, 8)
@@ -3374,10 +3371,6 @@ class TestEgressPool(unittest.TestCase):
             del it
 
     def test_cancel_then_close_recycles_reader(self):
-        """Cancellation drains the native cursor but, like Rust, keeps
-        the result and reader borrow alive until ``close()``. Closing
-        then recycles the clean connection instead of dropping it.
-        """
         table = self._seed_table(n_rows=64)
         with qi.QuestDB.from_conf(self._conf()) as client:
             result = client.query(f'SELECT x FROM {table} ORDER BY x')
@@ -3497,10 +3490,6 @@ class TestEgressPool(unittest.TestCase):
             self.assertEqual((in_use, idle), (0, 1))
 
     def test_cancelled_result_does_not_warn_at_del(self):
-        """A cancelled cursor reached terminal, so garbage collection
-        closes it without the warning reserved for undrained results and
-        returns its reusable connection to the pool.
-        """
         import gc
         import warnings
         table = self._seed_table(n_rows=64)
@@ -3612,10 +3601,6 @@ class TestEgressPool(unittest.TestCase):
                 self.assertEqual(after.column(0).to_pylist(), [64])
 
     def test_query_lease_reuses_reader_after_cancel_then_close(self):
-        """Successful cancellation makes the lease's reader reusable,
-        but the next query remains blocked until the cancelled result is
-        explicitly closed, matching Rust's outstanding cursor borrow.
-        """
         table = self._seed_table(n_rows=64)
         with qi.QuestDB.from_conf(self._conf()) as client:
             with client.reader() as lease:
@@ -3648,10 +3633,6 @@ class TestEgressPool(unittest.TestCase):
             self.assertEqual((in_use, idle), (0, 1))
 
     def test_query_lease_survives_server_error_during_cancel(self):
-        """A server QUERY_ERROR encountered while ``cancel()`` drains is
-        an error for that request, not a broken transport. Cancellation
-        closes the failed result, and the lease remains immediately usable.
-        """
         with qi.QuestDB.from_conf(self._conf()) as client:
             with client.reader() as lease:
                 cancel_error = None
@@ -3659,9 +3640,7 @@ class TestEgressPool(unittest.TestCase):
                     result = lease.query(
                         'SELECT missing_cancel_column '
                         'FROM long_sequence(1)')
-                    # Let the deterministic compile error reach the socket
-                    # before CANCEL so the drain observes QUERY_ERROR rather
-                    # than winning the race with STATUS_CANCELLED.
+                    # Let QUERY_ERROR reach the socket before CANCEL.
                     time.sleep(0.02)
                     try:
                         result.cancel()

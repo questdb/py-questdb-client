@@ -1077,13 +1077,10 @@ class PooledReader:
     connection: back to the pool if the last query was drained cleanly,
     dropped otherwise.
 
-    Queries are strictly sequential — fully drain (or close) each
-    :class:`QueryResult` before the next :meth:`query` call. Closing a
-    result before draining it tears down the lease's connection. To
-    abandon a result while preserving the lease, call ``cancel()`` and
-    then ``close()``. A lease whose result was closed without draining
-    or cancelling is terminal: close it and obtain a fresh one. Use one
-    lease per thread, on the thread that created it.
+    Queries are strictly sequential. Closing an undrained result
+    terminates the lease; call ``cancel()`` before ``close()`` to
+    preserve it. Use one lease per thread, on the thread that created
+    it.
     """
 
     def __enter__(self) -> PooledReader: ...
@@ -1322,9 +1319,8 @@ class QueryResult:
 
     Consumption rule: fully drain the result, use it as a context
     manager (``with db.query(...) as result:``), or call :meth:`close`.
-    Closing a partially-consumed result drops its connection. To stop
-    streaming while preserving the connection, call :meth:`cancel`,
-    then close the result (or leave its context manager).
+    Closing a partial result drops its connection. Call :meth:`cancel`
+    before closing to preserve it.
 
     SYMBOL columns: :meth:`to_polars` / :meth:`to_pandas` build the
     Categorical directly, interning the connection dictionary once;
@@ -1378,19 +1374,13 @@ class QueryResult:
         ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
 
     def cancel(self) -> None:
-        """Ask the server to stop streaming and block while draining
-        to terminal. On success the connection is reusable, but the
-        result remains open until :meth:`close` or context exit. A
-        subsequent batch pull ends normally or raises ``Cancelled``.
-        Idempotent after success. A cancellation failure closes the
-        unusable result and raises; healthy connections are recycled,
-        while transport failures are dropped."""
+        """Cancel the query and drain to terminal. The result remains
+        open until :meth:`close` or context exit. On failure, it is
+        closed. Idempotent after success."""
 
     def close(self) -> None:
-        """Release the cursor and reader. Idempotent. The pooled
-        connection is released immediately: returned to the pool if
-        the stream reached terminal (including through successful
-        cancellation), dropped otherwise."""
+        """Release the cursor and reader. Terminal connections return
+        to the pool; others are dropped. Idempotent."""
 
     def __enter__(self) -> QueryResult: ...
 
