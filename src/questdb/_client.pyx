@@ -2160,6 +2160,9 @@ class ConnectionEvent:
     Listeners run on a dedicated dispatcher thread — never on an I/O or
     caller thread — fed by a bounded inbox with a drop-oldest overflow
     policy, so a slow listener cannot stall ingest or reconnects.
+    Successful events are queued only after negotiated connection state,
+    including the server-advertised frame cap, is committed. They are not
+    data-delivery or acknowledgement barriers.
     Exceptions raised by the listener are logged and swallowed.
     """
     kind: ConnectionEventKind
@@ -6074,7 +6077,9 @@ cdef class QuestDB:
         cannot stall ingest or reconnects. Exceptions it raises are
         logged and swallowed. Dropped/delivered totals are available via
         :attr:`connection_events_dropped` /
-        :attr:`connection_events_delivered`.
+        :attr:`connection_events_delivered`. Successful events are queued
+        only after negotiated state, including the server frame cap, is
+        committed; they do not acknowledge data.
 
         ``error_handler``, when set, is a callable receiving one
         :class:`SenderError` per server rejection recorded by any of the
@@ -6087,6 +6092,8 @@ cdef class QuestDB:
         is logged through the ``questdb`` logger instead — ``ERROR`` for
         terminal rejections, ``WARNING`` for retriable ones (the affected
         rows are replayed, not lost) — so rejections are never silent.
+        A terminal rejection is queued only after the connection's terminal
+        latch and pollable diagnostic have been committed.
         Delivered/dropped totals are available via
         :attr:`error_events_delivered` /
         :attr:`error_events_dropped`. Use the handler for

@@ -166,7 +166,12 @@ class ConnectionEventKind(Enum):
 
 @dataclass(frozen=True)
 class ConnectionEvent:
-    """One connection-state transition delivered to a connection listener."""
+    """One connection-state transition delivered to a connection listener.
+
+    Successful events are queued only after negotiated connection state,
+    including the server-advertised frame cap, is committed. They are not
+    data-delivery or acknowledgement barriers.
+    """
 
     kind: ConnectionEventKind
     host: Optional[str]
@@ -1152,6 +1157,8 @@ class QuestDB:
 
         ``connection_listener`` receives one :class:`ConnectionEvent` per
         connection-state transition, on a dedicated dispatcher thread.
+        Successful events are queued only after negotiated state, including
+        the server frame cap, is committed; they do not acknowledge data.
 
         ``error_handler`` receives one :class:`SenderError` per
         server rejection recorded by any of the pool's connections —
@@ -1160,7 +1167,9 @@ class QuestDB:
         thread. Without it every rejection is logged through the
         ``questdb`` logger (``ERROR`` for terminal rejections,
         ``WARNING`` for retriable ones, which are replayed), so
-        rejections are never silent.
+        rejections are never silent. A terminal rejection is queued only
+        after the connection's terminal latch and pollable diagnostic have
+        been committed.
 
         When a handler or listener closes over the returned handle, call
         :meth:`close` explicitly (or use ``with``) rather than leaving
