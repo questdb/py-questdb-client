@@ -546,18 +546,11 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_module_connect_tls_verify_false_uses_unsafe_off(self):
         import questdb
-        try:
-            db = questdb.connect(
-                'wss::addr=127.0.0.1:1;', tls_verify=False)
-        except questdb.QuestDBError as e:
-            # Shipped wheels omit the insecure-skip-verify feature. Reaching
-            # this feature-gate error proves the bool was serialized using
-            # the native `unsafe_off` spelling, not the invalid `off`.
-            self.assertIs(e.code, questdb.QuestDBErrorCode.ConfigError)
-            self.assertIn('insecure-skip-verify', str(e))
-        else:
-            # Explicitly opted-in development builds accept unsafe_off.
-            db.close()
+        # Succeeding proves the bool was serialized using the native
+        # `unsafe_off` spelling (not the invalid `off`) and that the build
+        # ships the insecure-skip-verify native feature, as all builds must.
+        db = questdb.connect('wss::addr=127.0.0.1:1;', tls_verify=False)
+        db.close()
 
     def test_from_conf_rejects_non_callable_error_handler(self):
         with self.assertRaisesRegex(
@@ -2340,15 +2333,7 @@ class TestQwpWebSocketTls(unittest.TestCase):
                 f'wss::addr=127.0.0.1:{server.port};'
                 'tls_verify=unsafe_off;'
                 + self._pool_keys())
-            try:
-                client = qi.QuestDB.from_conf(conf)
-            except qi.QuestDBError as e:
-                # Shipped wheels are built without the insecure-skip-verify
-                # native feature: `tls_verify=unsafe_off` must be rejected
-                # up front rather than silently ignored.
-                self.assertIs(e.code, qi.QuestDBErrorCode.ConfigError)
-                self.assertIn('insecure-skip-verify', str(e))
-                return
+            client = qi.QuestDB.from_conf(conf)
             with client:
                 self._publish_one_row(client)
                 self.assertEqual(server.wait_binary_frames_settled(), 1)

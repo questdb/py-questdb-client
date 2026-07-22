@@ -24,10 +24,10 @@ GitHub Actions (``.github/workflows/macos-arm64-wheels.yml``):
   like the Azure jobs. ``MACOSX_DEPLOYMENT_TARGET=11.0`` keeps the
   ``macosx_11_0_arm64`` floor shipped since 4.x.
 
-Every wheel is built without the ``insecure-skip-verify`` native
-feature: released binaries must reject ``tls_verify=unsafe_off``. Never
-set ``QUESTDB_INSECURE_SKIP_VERIFY=1`` for a release build — it exists
-for test harnesses only.
+Every wheel is built with the ``insecure-skip-verify`` native feature,
+matching the 2.x releases: ``tls_verify=unsafe_off`` works out of the
+box, and TLS verification stays on unless the user explicitly disables
+it in the conf string.
 
 The source distribution is built on your workstation, which is also
 where you collate the CI artifacts and perform the final upload to PyPI.

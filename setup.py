@@ -152,12 +152,10 @@ def cargo_build():
             env['CXX'] = ORIG_CXX
         else:
             del env['CXX']
-    # `insecure-skip-verify` exposes `tls_verify=unsafe_off`, which disables TLS
-    # certificate verification. It must never be compiled into shipped wheels;
-    # opt in explicitly (test harnesses, MITM debugging) via the env var.
-    features = ['confstr-ffi', 'arrow']
-    if os.environ.get('QUESTDB_INSECURE_SKIP_VERIFY') == '1':
-        features.append('insecure-skip-verify')
+    # `insecure-skip-verify` exposes `tls_verify=unsafe_off`. Always on, as in
+    # the released 2.x wheels: the knob is off by default at runtime and must
+    # be explicitly set in the conf string, so compiling it in is safe.
+    features = ['confstr-ffi', 'arrow', 'insecure-skip-verify']
     subprocess.check_call(
         cargo_args + ['--features', ','.join(features)],
         cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'),
