@@ -6044,6 +6044,17 @@ cdef class QuestDB:
 
         Prefer the :func:`questdb.connect` module-level factory.
 
+        By default the handle connects eagerly: construction pre-opens the
+        warm minimums (``sender_pool_min`` sender and ``query_pool_min``
+        reader connections, one of each by default), so an unreachable
+        server or bad credentials fail here, fast. With
+        ``lazy_connect=true`` construction opens no connection: sender
+        leases buffer locally and connect in the background, readers
+        connect on first use (``query_pool_min`` defaults to 0), and
+        errors surface from the first operation instead. Combining
+        ``lazy_connect=true`` with a blocking ``initial_connect_retry``
+        or a positive ``query_pool_min`` is a configuration conflict.
+
         Pooled row auto-flush is enabled by default at 1,000 rows, 100
         milliseconds, or an estimated encoded size at 90% of the effective
         frame cap. Before a server cap is known, or when the server omits it,

@@ -44,7 +44,7 @@ except ImportError:
 
 def _conf(port, **extra):
     conf = (
-        f'ws::addr=127.0.0.1:{port};'
+        f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
         'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
     for key, value in extra.items():
         conf += f'{key}={value};'

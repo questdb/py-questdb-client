@@ -111,6 +111,13 @@ def connect(
     deployment; list every cluster node in a single ``addr`` server
     list.
 
+    By default ``connect()`` opens the warm minimums up front and fails
+    fast when the server is unreachable or rejects the credentials. Set
+    ``lazy_connect=True`` (or ``lazy_connect=true`` in the string) to
+    tolerate a down server at startup: nothing connects here, sender
+    leases buffer locally and connect in the background, and readers
+    connect on the first query.
+
     Pooled row senders auto-flush by default at 1,000 rows, 100 milliseconds,
     or a cap-derived byte threshold. Set ``auto_flush_bytes='off'`` to disable
     only the byte trigger, or ``auto_flush='off'`` to disable all automatic

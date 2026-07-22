@@ -1148,6 +1148,12 @@ class QuestDB:
 
         Prefer the :func:`questdb.connect` module-level factory.
 
+        By default construction connects eagerly: it pre-opens the warm
+        minimums (``sender_pool_min`` senders, ``query_pool_min`` readers),
+        failing fast when the server is unreachable. ``lazy_connect=true``
+        opens nothing at construction: senders buffer locally and connect
+        in the background, readers connect on first use.
+
         Pooled row auto-flush is enabled by default at 1,000 rows, 100
         milliseconds, or a cap-derived byte threshold. Set
         ``auto_flush_bytes=off`` to disable only the byte trigger, or

@@ -37,7 +37,7 @@ except ImportError:
 
 def _client_conf(port):
     return (
-        f'ws::addr=127.0.0.1:{port};'
+        f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
         'sender_pool_min=1;'
         'sender_pool_max=1;'
         'pool_reap=manual;')
@@ -541,7 +541,7 @@ class TestServerInfoLive(unittest.TestCase):
     def test_server_info_snapshot(self):
         import time
         addr = os.environ['QDB_HTTP_ADDR']
-        with qi.QuestDB.from_conf(f'ws::addr={addr};') as client:
+        with qi.QuestDB.from_conf(f'ws::addr={addr};lazy_connect=true;') as client:
             info = client.server_info()
             self.assertIsInstance(info, qi.ServerInfo)
             self.assertIsInstance(info.role, qi.ServerRole)
@@ -624,7 +624,7 @@ class TestConnectionEvents(unittest.TestCase):
         port = blk.getsockname()[1]
         blk.close()
         client = qi.QuestDB.from_conf(
-            f'ws::addr=127.0.0.1:{port};connect_timeout=100;'
+            f'ws::addr=127.0.0.1:{port};lazy_connect=true;connect_timeout=100;'
             f'reconnect_max_duration_millis=200;sender_pool_min=1;sender_pool_max=1;',
             connection_listener=listener)
         try:
@@ -662,7 +662,7 @@ class TestConnectionEvents(unittest.TestCase):
             client = qi.QuestDB.from_conf(
                 f'ws::addr=127.0.0.1:{server_a.port},'
                 f'127.0.0.1:{server_b.port};'
-                f'connect_timeout=200;sender_pool_min=1;sender_pool_max=1;'
+                f'lazy_connect=true;connect_timeout=200;sender_pool_min=1;sender_pool_max=1;'
                 f'pool_reap=manual;',
                 connection_listener=listener)
             try:
@@ -704,7 +704,7 @@ class TestConnectionEvents(unittest.TestCase):
     def test_listener_must_be_callable(self):
         with self.assertRaisesRegex(TypeError, 'must be callable'):
             qi.QuestDB.from_conf(
-                'ws::addr=127.0.0.1:9000;',
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;',
                 connection_listener='not-callable')
 
     @unittest.skipIf(pl is None, 'polars not installed')
@@ -738,7 +738,7 @@ class TestSenderConnectionEvents(unittest.TestCase):
         events = []
         with QwpAckServer() as server:
             with qi.Sender.from_conf(
-                    f'ws::addr=127.0.0.1:{server.port};',
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
                     connection_listener=events.append) as sender:
                 deadline = time.time() + 5
                 while time.time() < deadline and (
@@ -763,7 +763,7 @@ class TestSenderConnectionEvents(unittest.TestCase):
         blk.close()
         events = []
         sender = qi.Sender.from_conf(
-            f'ws::addr=127.0.0.1:{port};connect_timeout=100;'
+            f'ws::addr=127.0.0.1:{port};lazy_connect=true;connect_timeout=100;'
             f'reconnect_max_duration_millis=200;',
             connection_listener=events.append)
         with self.assertRaises(qi.QuestDBError):
@@ -791,7 +791,7 @@ class TestSenderConnectionEvents(unittest.TestCase):
     def test_non_callable_listener_rejected(self):
         with self.assertRaisesRegex(TypeError, 'must be callable'):
             qi.Sender.from_conf(
-                'ws::addr=127.0.0.1:9000;',
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;',
                 connection_listener='nope')
 
 

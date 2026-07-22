@@ -402,7 +402,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_query_binds_container_validation(self):
         # Rejected before any reader is borrowed, so no server is needed
         # (pools connect lazily).
-        with qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;') as client:
+        with qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;lazy_connect=true;') as client:
             for bad in ({'a': 1}, 42, 'x', {1, 2}):
                 with self.assertRaisesRegex(
                         TypeError, '"binds" must be a list or tuple'):
@@ -414,7 +414,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_query_requires_sql(self):
         # Rejected before any reader is borrowed, so no server is needed
         # (pools connect lazily).
-        with qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;') as client:
+        with qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;lazy_connect=true;') as client:
             with self.assertRaises(TypeError):
                 client.query()
             with self.assertRaisesRegex(
@@ -450,7 +450,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         import questdb
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'pool_reap=manual;')
             with questdb.connect(conf, sender_pool_max=1) as db:
@@ -469,6 +469,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with questdb.connect(
                     host='127.0.0.1',
                     port=server.port,
+                    lazy_connect=True,
                     sender_pool_min=1,
                     sender_pool_max=1,
                     pool_reap='manual') as db:
@@ -483,23 +484,23 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_module_connect_argument_validation(self):
         import questdb
         with self.assertRaisesRegex(TypeError, 'but not both'):
-            questdb.connect('ws::addr=localhost:9000;', host='localhost')
+            questdb.connect('ws::addr=localhost:9000;lazy_connect=true;', host='localhost')
         with self.assertRaisesRegex(TypeError, 'but not both'):
             questdb.connect()
         with self.assertRaisesRegex(
                 ValueError, '"sender_pool_max" is already present'):
             questdb.connect(
-                'ws::addr=localhost:9000;sender_pool_max=2;',
+                'ws::addr=localhost:9000;lazy_connect=true;sender_pool_max=2;',
                 sender_pool_max=4)
         with self.assertRaisesRegex(TypeError, 'invalid settings keyword'):
-            questdb.connect('ws::addr=localhost:9000;', **{'a;b': 'x'})
+            questdb.connect('ws::addr=localhost:9000;lazy_connect=true;', **{'a;b': 'x'})
         with self.assertRaisesRegex(TypeError, 'tls'):
-            questdb.connect('ws::addr=localhost:9000;', tls=True)
+            questdb.connect('ws::addr=localhost:9000;lazy_connect=true;', tls=True)
         with self.assertRaisesRegex(TypeError, 'port'):
-            questdb.connect('ws::addr=localhost:9000;', port=9009)
+            questdb.connect('ws::addr=localhost:9000;lazy_connect=true;', port=9009)
         with self.assertRaisesRegex(TypeError, 'port, tls'):
             questdb.connect(
-                'ws::addr=localhost:9000;', tls=False, port=9000)
+                'ws::addr=localhost:9000;lazy_connect=true;', tls=False, port=9000)
         with self.assertRaisesRegex(TypeError, '"host" must be a str'):
             questdb.connect(host=123)
         with self.assertRaisesRegex(TypeError, 'invalid settings keyword'):
@@ -549,19 +550,20 @@ class TestQwpWebSocketApi(unittest.TestCase):
         # Succeeding proves the bool was serialized using the native
         # `unsafe_off` spelling (not the invalid `off`) and that the build
         # ships the insecure-skip-verify native feature, as all builds must.
-        db = questdb.connect('wss::addr=127.0.0.1:1;', tls_verify=False)
+        db = questdb.connect(
+            'wss::addr=127.0.0.1:1;', tls_verify=False, lazy_connect=True)
         db.close()
 
     def test_from_conf_rejects_non_callable_error_handler(self):
         with self.assertRaisesRegex(
                 TypeError, '"error_handler" must be callable'):
             qi.QuestDB.from_conf(
-                'ws::addr=127.0.0.1:1;', error_handler=42)
+                'ws::addr=127.0.0.1:1;lazy_connect=true;', error_handler=42)
 
     def test_pooled_sender_fsn_receipts(self):
         with QwpAckServer(ack_delay_s=0.2) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -600,6 +602,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with questdb.connect(
                     host='127.0.0.1',
                     port=server.port,
+                    lazy_connect=True,
                     sender_pool_min=1,
                     sender_pool_max=1,
                     pool_reap='manual',
@@ -633,7 +636,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_auto_flush_interval_on_next_row(self):
         with QwpAckServer(record_payloads=True) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -668,7 +671,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_auto_flush_interval_starts_on_first_row(self):
         with QwpAckServer(record_payloads=True) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -705,7 +708,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_auto_flush_defaults_to_1000_rows(self):
         with QwpAckServer(record_payloads=True) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -738,7 +741,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_auto_flush_defaults_to_100ms(self):
         with QwpAckServer(record_payloads=True) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -776,7 +779,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer(
                 max_batch_size=cap, record_payloads=True) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -819,7 +822,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(max_batch_size=4096) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -854,7 +857,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with QwpAckServer(
                 max_batch_size=cap, record_payloads=True) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -890,7 +893,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_auto_flush_default_bytes_falls_back_to_8_mib(self):
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -919,7 +922,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(max_batch_size=1024) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -957,7 +960,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(max_batch_size=4096) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -994,7 +997,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_auto_flush_can_be_disabled(self):
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1021,7 +1024,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_auto_flush_close_publishes_partial_buffer(self):
         with QwpAckServer(record_payloads=True) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1053,7 +1056,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(error_status=0x03) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1089,7 +1092,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         # crashes the interpreter on overflow or a non-int.
         with QwpAckServer(ack_delay_s=0.2) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1112,7 +1115,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pooled_sender_poll_error_is_lease_scoped(self):
         with QwpAckServer(error_status=0x09) as server:  # retriable
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1145,7 +1148,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 {'connection_event_inbox_capacity': 'lots'},
                 {'error_event_inbox_capacity': None}):
             with self.assertRaises((TypeError, OverflowError)):
-                qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;', **kwargs)
+                qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;lazy_connect=true;', **kwargs)
 
     def test_pool_rejection_handler_receives_server_rejection(self):
         rejections = []
@@ -1157,7 +1160,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(error_status=0x03) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1187,7 +1190,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_pool_rejection_default_handler_logs(self):
         with QwpAckServer(error_status=0x03) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1216,7 +1219,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(error_status=0x03) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1254,7 +1257,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(error_status=0x03) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1284,7 +1287,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(error_status=0x03) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1320,7 +1323,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1350,7 +1353,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1389,7 +1392,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(error_status=0x0C) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1430,7 +1433,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         event, so 8 frames yield well over 16 diagnostics."""
         with QwpAckServer(error_status=0x0C) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'error_inbox_capacity=16;'
                 'close_flush_timeout_millis=0;'
                 'reconnect_max_duration_millis=30000;')
@@ -1479,7 +1482,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(error_status=0x0C) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'qwp_ws_progress=manual;'
                 'close_flush_timeout_millis=0;'
                 'reconnect_max_duration_millis=30000;')
@@ -1524,7 +1527,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=2;'
                 'pool_reap=manual;'
@@ -1574,7 +1577,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_client_sender_publishes_rows_without_dataframe_surface(self):
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1619,7 +1622,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_client_close_waits_for_sender_lease_return(self):
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1654,7 +1657,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_client_sender_context_flushes_success_and_discards_exception(self):
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1727,7 +1730,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1757,7 +1760,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1792,7 +1795,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1828,7 +1831,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer(ack_delay_s=0.2) as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1880,7 +1883,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
@@ -1918,7 +1921,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1946,7 +1949,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         with QwpAckServer() as server:
             conf = (
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
                 'sender_pool_max=1;'
                 'pool_reap=manual;')
@@ -1992,7 +1995,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_from_conf_preserves_qwpws_progress(self):
         sender = qi.Sender.from_conf(
-            'ws::addr=localhost:9000;qwp_ws_progress=manual;')
+            'ws::addr=localhost:9000;lazy_connect=true;qwp_ws_progress=manual;')
         try:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
@@ -2002,7 +2005,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             sender.close(False)
 
     def test_published_fsn_rejects_when_not_connected(self):
-        sender = qi.Sender.from_conf('ws::addr=localhost:9000;')
+        sender = qi.Sender.from_conf('ws::addr=localhost:9000;lazy_connect=true;')
         try:
             with self.assertRaisesRegex(
                     qi.QuestDBError,
@@ -2015,7 +2018,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaisesRegex(
                 qi.QuestDBError,
                 'invalid sf_max_segment_bytes'):
-            qi.Sender.from_conf('ws::addr=localhost:9000;sf_max_segment_bytes=64mi;')
+            qi.Sender.from_conf('ws::addr=localhost:9000;lazy_connect=true;sf_max_segment_bytes=64mi;')
 
     def test_from_conf_accepts_wss_tls_roots_password(self):
         with tempfile.NamedTemporaryFile() as roots:
@@ -2102,7 +2105,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
     def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):
         sender = qi.Sender.from_conf(
-            'ws::addr=localhost:9000;sf_dir=/tmp/qdb;;sf;')
+            'ws::addr=localhost:9000;lazy_connect=true;sf_dir=/tmp/qdb;;sf;')
         try:
             self.assertIsInstance(sender, qi.Sender)
         finally:
@@ -2190,7 +2193,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_qwpws_progress_conf_override_conflict(self):
         with self.assertRaisesRegex(ValueError, '"qwp_ws_progress" is already present'):
             qi.Sender.from_conf(
-                'ws::addr=localhost:9000;qwp_ws_progress=manual;',
+                'ws::addr=localhost:9000;lazy_connect=true;qwp_ws_progress=manual;',
                 qwp_ws_progress=qi.QwpWsProgress.Background)
 
     def test_dataframe_schema_overrides_rejects_non_websocket_protocol(self):
@@ -2210,7 +2213,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_qwpws_flush_and_keep_and_get_fsn_happy_path(self):
         with QwpAckServer() as server:
             with qi.Sender.from_conf(
-                    f'ws::addr=127.0.0.1:{server.port};',
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
                     auto_flush=False) as sender:
                 buf = sender.new_buffer()
                 buf.row(
@@ -2231,7 +2234,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_qwpws_drive_once_manual_progress_happy_path(self):
         with QwpAckServer() as server:
             sender = qi.Sender.from_conf(
-                f'ws::addr=127.0.0.1:{server.port};'
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'qwp_ws_progress=manual;',
                 auto_flush=False)
             try:
@@ -2266,7 +2269,8 @@ class TestQwpWebSocketTls(unittest.TestCase):
     def _pool_keys(self):
         return ('sender_pool_min=1;'
                 'sender_pool_max=1;'
-                'pool_reap=manual;')
+                'pool_reap=manual;'
+                'lazy_connect=true;')
 
     def _publish_one_row(self, client):
         with client.sender() as sender:
@@ -2295,6 +2299,7 @@ class TestQwpWebSocketTls(unittest.TestCase):
                     port=server.port,
                     tls=True,
                     tls_roots=str(self.TLS_CA),
+                    lazy_connect=True,
                     sender_pool_min=1,
                     sender_pool_max=1,
                     pool_reap='manual') as db:

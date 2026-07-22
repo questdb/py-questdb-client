@@ -627,7 +627,7 @@ class TestClientDataframeFuzz(unittest.TestCase):
         self.server = QwpAckServer()
         self.server.start()
         self.conf = (
-            f'ws::addr=127.0.0.1:{self.server.port};'
+            f'ws::addr=127.0.0.1:{self.server.port};lazy_connect=true;'
             'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
 
     def tearDown(self):
