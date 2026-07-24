@@ -1858,6 +1858,7 @@ cdef class _PolarsSymbolRegistry:
     cdef object base
     cdef object pinned
     cdef Py_ssize_t n
+    cdef bint cat_to
 
     def __cinit__(self, object pl):
         self.pl = pl
@@ -1865,6 +1866,9 @@ cdef class _PolarsSymbolRegistry:
         self.base = None
         self.pinned = None
         self.n = 0
+        # polars >= 1.43 deprecates the physical-code `.cast(Categorical)` in
+        # favour of `.cat.to(Categorical)`, which older polars lacks.
+        self.cat_to = hasattr(pl.Series([], dtype=pl.UInt32).cat, 'to')
 
     def accepts(self, object cats_arrow):
         # True if this registry's Categories maps `cats_arrow`'s codes
@@ -1887,7 +1891,10 @@ cdef class _PolarsSymbolRegistry:
                 pl.from_arrow(cats_arrow), dtype=pl.Categorical(self.cats))
             self.pinned = cats_arrow
             self.n = len(cats_arrow)
-        return codes.cast(pl.UInt32).cast(pl.Categorical(self.cats)).alias(name)
+        codes = codes.cast(pl.UInt32)
+        if self.cat_to:
+            return codes.cat.to(pl.Categorical(self.cats)).alias(name)
+        return codes.cast(pl.Categorical(self.cats)).alias(name)
 
 
 cdef tuple _polars_dict_codes_cats(object col, object pl):
