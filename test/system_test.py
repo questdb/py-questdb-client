@@ -5894,11 +5894,10 @@ class _FakeStatusServer:
 
 
 class TestEgressFailoverRoleNegotiation(unittest.TestCase):
-    """Reader connect-time role/auth failover, ported from Java's
-    ``QwpQueryClientMultiHostFailoverTest``. The pool opens lazily, so the
-    connect walk -- and any role/auth error -- surfaces on the first borrow
-    (``QuestDB.query()`` / ``QuestDB.reader()``), not at ``QuestDB.from_conf``. These run against
-    in-process fakes only and need no QuestDB instance."""
+    """Pooled reader connect-time role/auth failover, ported from Java's
+    ``QwpQueryClientMultiHostFailoverTest``. These tests exercise eager reader
+    prewarming through ``QuestDB.from_conf``. The in-process fakes implement
+    only the reader upgrade, so sender prewarming is disabled explicitly."""
 
     def _server(self, status_code, role_header=None):
         srv = _FakeStatusServer(status_code, role_header)
@@ -5909,7 +5908,8 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
     @staticmethod
     def _conf(servers, **extra):
         addr = ','.join(f'127.0.0.1:{s.port}' for s in servers)
-        conf = f'ws::addr={addr};'
+        conf = (f'ws::addr={addr};'
+                'sender_pool_min=0;query_pool_min=1;')
         for key, value in extra.items():
             conf += f'{key}={value};'
         return conf
@@ -5923,10 +5923,8 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [replica, auth],
             auth_timeout_ms=2000, failover='off', target='any')
-        client = qi.QuestDB.from_conf(conf)
-        self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
-            client.query('SELECT 1')
+            qi.QuestDB.from_conf(conf)
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.AuthError)
         self.assertIn('401', str(cm.exception))
         self.assertGreaterEqual(replica.connections, 1)
@@ -5945,17 +5943,15 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2],
             auth_timeout_ms=2000, failover='off', target='any')
-        client = qi.QuestDB.from_conf(conf)
-        self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
-            client.query('SELECT 1')
+            qi.QuestDB.from_conf(conf)
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.RoleMismatch)
         self.assertIn('REPLICA', str(cm.exception))
         self.assertGreaterEqual(r1.connections, 1)
         self.assertGreaterEqual(r2.connections, 1)
 
     def test_connect_does_not_double_walk_on_first_failure(self):
-        """With ``failover=off`` the first borrow walks the address list
+        """With ``failover=off`` eager reader prewarming walks the address list
         exactly once: each role-rejecting endpoint is probed a single time
         before the walk fails terminally -- no re-walking the list."""
         r1 = self._server(421, 'X-QuestDB-Role: REPLICA')
@@ -5964,10 +5960,8 @@ class TestEgressFailoverRoleNegotiation(unittest.TestCase):
         conf = self._conf(
             [r1, r2, r3],
             auth_timeout_ms=2000, failover='off', target='any')
-        client = qi.QuestDB.from_conf(conf)
-        self.addCleanup(client.close)
         with self.assertRaises(qi.QuestDBError) as cm:
-            client.query('SELECT 1')
+            qi.QuestDB.from_conf(conf)
         self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.RoleMismatch)
         self.assertEqual(r1.connections, 1)
         self.assertEqual(r2.connections, 1)
