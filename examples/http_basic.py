@@ -1,10 +1,14 @@
-from questdb.ingress import Sender, IngressError, TimestampNanos
+from questdb import Sender, QuestDBError, TimestampNanos
 import sys
 
 
-def example():
+def example(host: str = 'localhost', port: int = 9000, token: str = None):
     try:
-        conf = f'http::addr=localhost:9000;'
+        if token is not None:
+            # Bearer-token auth runs over TLS.
+            conf = f'https::addr={host}:{port};token={token};'
+        else:
+            conf = f'http::addr={host}:{port};'
         with Sender.from_conf(conf) as sender:
             # Record with provided designated timestamp (using the 'at' param)
             # Notice the designated timestamp is expected in Nanoseconds,
@@ -35,7 +39,7 @@ def example():
 
         # Any remaining pending rows will be sent when the `with` block ends.
 
-    except IngressError as e:
+    except QuestDBError as e:
         sys.stderr.write(f'Got error: {e}\n')
 
 

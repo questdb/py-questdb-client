@@ -91,7 +91,7 @@ def test(all=False, patch_path='1', *args):
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
     if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
-    _run('python3', 'test/test.py', '-v', *args,
+    _run('python3', '-u', 'test/test.py', '-v', *args,
          env=env)
 
 
@@ -123,6 +123,22 @@ def test_fuzzing(*args):
 def benchmark(*args):
     env = {'TEST_QUESTDB_PATCH_PATH': '1'}
     _run('python3', 'test/benchmark.py', '-v', *args, env=env)
+
+
+@command
+def pandas_to_questdb_throughput(*args):
+    """WS-7 headline ingress run (QWP_DATAFRAME_BENCH_PLAN.md s4).
+
+    Runs the s1-narrow columnar-populate floor + the cold/warm e2e split
+    (in-process mock server) + the populate_plus_encode sum. Pass extra args
+    through to the harness, e.g. ``--rows 10000000 --pretty`` or
+    ``--real-conf ws::addr=... --real-http http://...`` to add the
+    live-server real-client number. Ack level is Ok; Durable is Enterprise and
+    deferred.
+    """
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    _run('python3', 'test/benchmark_pandas_columnar.py', '--headline',
+         '--schema', 's1-narrow', *args, env=env)
 
 
 @command
@@ -167,7 +183,7 @@ def rr_test(*args):
                 
             Then re-run inside GDB, running up to a specific event:
                 $ rr replay -g $EVENT_ID
-                (rr) break ingress.c:9999
+                (rr) break _client.c:9999
                 (rr) continue  # or step, next, etc.{reset}\n\n''')
     
 

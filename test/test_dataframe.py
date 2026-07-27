@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
-import sys
 import os
+import subprocess
+import sys
+
 sys.dont_write_bytecode = True
 import unittest
 import datetime as dt
@@ -21,9 +23,7 @@ except ImportError:
     import pytz
     _TZ = pytz.timezone('America/New_York')
 
-import patch_path
-
-import questdb.ingress as qi
+import questdb._client as qi
 import pandas as pd
 import numpy as np
 import pyarrow as pa
@@ -166,12 +166,29 @@ class TestPandasBase:
             buf.row(table_name="test_mandatory_at_row", at=qi.ServerTimestamp)
 
         def test_bad_dataframe(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Expected pandas'):
                 _dataframe(self.version, [], at=qi.ServerTimestamp)
 
+        def test_row_path_rejects_columnar_only_object_columns(self):
+            import uuid
+            import ipaddress
+            cases = {
+                'bytes': b'\x00\x01',
+                'UUID': uuid.uuid4(),
+                'IPv4Address': ipaddress.IPv4Address('1.2.3.4'),
+            }
+            for descr, value in cases.items():
+                df = pd.DataFrame({'a': [value]})
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        f'{descr} objects, which are only supported on the '
+                        'columnar QuestDB.dataframe'):
+                    _dataframe(self.version, df, table_name='t',
+                               at=qi.ServerTimestamp)
+
         def test_no_table_name(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Must specify at least one of'):
                 _dataframe(self.version, DF1, at=qi.ServerTimestamp)
 
@@ -180,63 +197,63 @@ class TestPandasBase:
                 _dataframe(self.version, DF1, table_name=1.5, at=qi.ServerTimestamp)
 
         def test_invalid_table_name(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name`: Bad string "."'):
                 _dataframe(self.version, DF1, table_name='.', at=qi.ServerTimestamp)
 
         def test_invalid_column_dtype(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: Bad dtype'):
                 _dataframe(self.version, DF1, table_name_col='B', at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: Bad dtype'):
                 _dataframe(self.version, DF1, table_name_col=1, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: Bad dtype'):
                 _dataframe(self.version, DF1, table_name_col=-3, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`table_name_col`: -5 index'):
                 _dataframe(self.version, DF1, table_name_col=-5, at=qi.ServerTimestamp)
 
         def test_bad_str_obj_col(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
                 _dataframe(self.version, DF1, table_name_col='D', at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
                 _dataframe(self.version, DF1, table_name_col=3, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`table_name_col`: Bad.*`object`.*bool.*'D'.*Must.*strings"):
                 _dataframe(self.version, DF1, table_name_col=-1, at=qi.ServerTimestamp)
 
         def test_bad_symbol(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`symbols`.*bool.*tuple.*list'):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=0, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`symbols`.*bool.*tuple.*list'):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols={}, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`symbols`.*bool.*tuple.*list'):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=None, at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`symbols`: Bad dtype `float64`.*'A'.*Must.*strings col"):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=(0,), at=qi.ServerTimestamp)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     "`symbols`: Bad dtype `int64`.*'B'.*Must be a strings column."):
                 _dataframe(self.version, DF1, table_name='tbl1', symbols=[1], at=qi.ServerTimestamp)
 
         def test_bad_at(self):
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*2018.*not found in the'):
                 _dataframe(self.version, DF1, table_name='tbl1', at='2018-03-10T00:00:00Z')
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*float64.*be a datetime'):
                 _dataframe(self.version, DF1, table_name='tbl1', at='A')
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*int64.*be a datetime'):
                 _dataframe(self.version, DF1, table_name='tbl1', at=1)
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     '`at`.*object.*be a datetime'):
                 _dataframe(self.version, DF1, table_name='tbl1', at=-1)
 
@@ -311,7 +328,7 @@ class TestPandasBase:
                 b'c a=3i\n')
 
             df.index.name = 42  # bad type, not str
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Bad dataframe index name as table.*: Expected str, not.*int.'):
                 _dataframe(self.version, df, at=qi.ServerTimestamp)
 
@@ -321,13 +338,13 @@ class TestPandasBase:
                 'a': [1, 2, 3],
                 'b': ['a', 'b', 'c']})
             df.index.name = 'test_at_good'
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Bad argument `at`: Column .2018-03.* not found .* dataframe.'):
                 _dataframe(self.version, df, at='2018-03-10T00:00:00Z')
 
             # Same timestamp, specified in various ways.
             t1_setup = dt.datetime(2018, 3, 10, 0, 0, 0, tzinfo=dt.timezone.utc)
-            t1 = t1_setup.astimezone(tz=None).replace(tzinfo=None)  # naive, local
+            t1 = t1_setup.replace(tzinfo=None)  # naive, interpreted as UTC
             t2 = dt.datetime(2018, 3, 10, 0, 0, 0, tzinfo=dt.timezone.utc)
             t3 = dt.datetime(2018, 3, 9, 19, 0, 0, tzinfo=_TZ)
             t4 = qi.TimestampNanos(1520640000000000000)
@@ -351,7 +368,7 @@ class TestPandasBase:
             n3 = dt.datetime(1965, 1, 1, 0, 0, 0)
             neg_timestamps = [n1, n2, n3]
             for ts in neg_timestamps:
-                with self.assertRaisesRegex(qi.IngressError,
+                with self.assertRaisesRegex(qi.QuestDBError,
                         'Bad.*`at`: Cannot .* before the Unix epoch .1970-01-01.*'):
                     _dataframe(self.version, DF2, at=ts, table_name='test_at_neg')
 
@@ -364,7 +381,7 @@ class TestPandasBase:
 
             # Epoch 0, specified in various ways.
             e1_setup = dt.datetime(1970, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
-            e1 = e1_setup.astimezone(tz=None).replace(tzinfo=None)  # naive, local
+            e1 = e1_setup.replace(tzinfo=None)  # naive, interpreted as UTC
             e2 = dt.datetime(1970, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
             e3 = dt.datetime(1969, 12, 31, 19, 0, 0, tzinfo=_TZ)
             e4 = qi.TimestampNanos(0)
@@ -384,15 +401,699 @@ class TestPandasBase:
 
         def test_single_at_col(self):
             df = pd.DataFrame({'timestamp': pd.to_datetime(['2023-01-01'])})
-            with self.assertRaisesRegex(qi.IngressError,
+            with self.assertRaisesRegex(qi.QuestDBError,
                     'Bad dataframe row at index 0: All values are nulls.'):
                 _dataframe(self.version, df, table_name='tbl1', at='timestamp')
 
         def test_row_of_nulls(self):
             df = pd.DataFrame({'a': ['a1', None, 'a3']})
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Bad dataframe row.*1: All values are nulls.'):
+                    qi.QuestDBError, 'Bad dataframe row.*1: All values are nulls.'):
                 _dataframe(self.version, df, table_name='tbl1', symbols=['a'], at=qi.ServerTimestamp)
+
+        def test_planning_error_keeps_existing_buffer(self):
+            buf = qi.Buffer(protocol_version=self.version)
+            buf.dataframe(
+                pd.DataFrame({'a': [1]}),
+                table_name='tbl1',
+                at=qi.ServerTimestamp)
+            before = bytes(buf)
+
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    "`symbols`: Bad dtype `int64`.*'a'.*Must be a strings column."):
+                buf.dataframe(
+                    pd.DataFrame({'a': [1]}),
+                    table_name='tbl2',
+                    symbols=['a'],
+                    at=qi.ServerTimestamp)
+
+            self.assertEqual(bytes(buf), before)
+
+        def test_debug_dataframe_plan_fixed_table_and_timestamp_column(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2], dtype='int64'),
+                'price': pd.Series([10.5, 11.5], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts', symbols=False)
+            cols = {col['orig_name']: col for col in plan['cols']}
+
+            self.assertEqual(plan['row_count'], 2)
+            self.assertEqual(plan['col_count'], 3)
+            self.assertEqual(plan['fixed_table_name'], 'trades')
+            self.assertEqual(plan['at_value'], 'column')
+            self.assertEqual(cols['seq']['target'], 'integer')
+            self.assertEqual(cols['seq']['target_name'], 'seq')
+            self.assertEqual(cols['price']['target'], 'float')
+            self.assertEqual(cols['price']['target_name'], 'price')
+            self.assertEqual(cols['ts']['target'], 'designated timestamp')
+            self.assertIsNone(cols['ts']['target_name'])
+            self.assertEqual(
+                _dataframe(1, df, table_name='trades', at='ts', symbols=False),
+                b'trades seq=1i,price=10.5 1704067200000000000\n'
+                b'trades seq=2i,price=11.5 1704067201000000000\n')
+
+        def test_debug_dataframe_plan_handles_zero_row_dataframe(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([], dtype='datetime64[ns]'),
+                'seq': pd.Series([], dtype='int64'),
+            })
+
+            row_plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts')
+            columnar_plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertEqual(row_plan['row_count'], 0)
+            self.assertEqual(row_plan['col_count'], 0)
+            self.assertEqual(row_plan['cols'], [])
+            self.assertTrue(columnar_plan['supported'])
+            self.assertEqual(columnar_plan['failures'], [])
+            self.assertEqual(columnar_plan['normalizations'], [])
+
+        def test_debug_dataframe_plan_table_column_and_auto_symbol(self):
+            df = pd.DataFrame({
+                'tbl': ['t1', 't2'],
+                'sym': pd.Categorical(['a', 'b']),
+                'value': pd.Series([1, 2], dtype='int64'),
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_plan(df, table_name_col='tbl', at='ts')
+            cols = {col['orig_name']: col for col in plan['cols']}
+
+            self.assertIsNone(plan['fixed_table_name'])
+            self.assertEqual(plan['at_value'], 'column')
+            self.assertEqual(cols['tbl']['target'], 'table name')
+            self.assertIsNone(cols['tbl']['target_name'])
+            self.assertEqual(cols['sym']['target'], 'symbol')
+            self.assertEqual(cols['sym']['target_name'], 'sym')
+            self.assertEqual(cols['value']['target'], 'integer')
+            self.assertEqual(cols['value']['target_name'], 'value')
+            self.assertEqual(cols['ts']['target'], 'designated timestamp')
+            self.assertEqual(
+                _dataframe(1, df, table_name_col='tbl', at='ts'),
+                b't1,sym=a value=1i 1704067200000000000\n'
+                b't2,sym=b value=2i 1704067201000000000\n')
+
+        def test_debug_dataframe_plan_reuses_row_path_validation(self):
+            df = pd.DataFrame({'a': [1]})
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    "`symbols`: Bad dtype `int64`.*'a'.*Must be a strings column."):
+                qi._debug_dataframe_plan(
+                    df,
+                    table_name='tbl1',
+                    symbols=['a'],
+                    at=qi.ServerTimestamp)
+
+        def test_debug_dataframe_columnar_plan_accepts_v1_numeric_core(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2], dtype='int64'),
+                'price': pd.Series([10.5, 11.5], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+
+        def test_columnar_plan_populates_plain_arrow_uint32_as_integer(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+                'seq': pd.Series(
+                    pa.array([1, 4294967295], type=pa.uint32()),
+                    dtype=pd.ArrowDtype(pa.uint32())),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+            self.assertTrue(plan['supported'], plan['failures'])
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df, table_name='trades', at='ts', symbols=False)
+
+            self.assertEqual(result['populated_rows_total'], 2)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_columnar_plan_accepts_arrow_wide_numeric_sources(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'arrow_i64': pd.Series(
+                    pa.array([1, None, -3], type=pa.int64()),
+                    dtype=pd.ArrowDtype(pa.int64())),
+                'nullable_i64': pd.Series(
+                    [4, pd.NA, -6], dtype=pd.Int64Dtype()),
+                'arrow_f64': pd.Series(
+                    pa.array([1.5, None, -3.25], type=pa.float64()),
+                    dtype=pd.ArrowDtype(pa.float64())),
+                'nullable_f64': pd.Series(
+                    [4.5, pd.NA, -6.25], dtype=pd.Float64Dtype()),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+            self.assertTrue(plan['supported'], plan['failures'])
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df, table_name='trades', at='ts', symbols=False)
+
+            self.assertEqual(result['populated_rows_total'], 3)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_debug_dataframe_columnar_plan_accepts_narrow_numpy_dtypes(self):
+            # Step 3 broadened the columnar planner to accept every
+            # narrower NumPy numeric dtype + native bool. The shapes
+            # that were rejected pre-Step-3 (int8/16/32, uint*, float32,
+            # bool) all flow through the Rust widening / packing
+            # appender now.
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00')], dtype='datetime64[ns]'),
+                'narrow_int': pd.Series([1], dtype='int32'),
+                'narrow_float': pd.Series([1.5], dtype='float32'),
+                'native_bool': pd.Series([True], dtype='bool'),
+                'u8': pd.Series([200], dtype='uint8'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts', symbols=False)
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+
+        def test_debug_dataframe_columnar_plan_accepts_tz_aware_timestamps(self):
+            # The columnar v1 planner was originally restricted to bare
+            # numpy datetime64[ns/us] for both the designated `at` column
+            # and `ts` field columns. The row path (Buffer.dataframe /
+            # Sender.dataframe) accepted tz-aware DatetimeTZDtype and
+            # pyarrow timestamp(unit, tz=...) all along; columnar v1
+            # was tightened by accident. This test pins the symmetric
+            # contract: every datetime variant the row path accepts
+            # also passes the columnar planner.
+            cases = [
+                # 1. pd.to_datetime(['...Z']) infers DatetimeTZDtype.
+                pd.to_datetime(
+                    ['2024-01-01T00:00:00Z', '2024-01-01T00:00:01Z']),
+                # 2. Explicit DatetimeTZDtype with a non-UTC zone.
+                pd.Series(
+                    [pd.Timestamp('2024-01-01 00:00:00',
+                                  tz='America/New_York'),
+                     pd.Timestamp('2024-01-01 00:00:01',
+                                  tz='America/New_York')]),
+                # 3. ArrowDtype timestamp[us, tz=...].
+                pd.Series(
+                    [1700000000000000, 1700000001000000],
+                    dtype=pd.ArrowDtype(
+                        pa.timestamp('us', tz='UTC'))),
+            ]
+            for idx, ts_series in enumerate(cases):
+                with self.subTest(case=idx, dtype=str(ts_series.dtype)):
+                    df = pd.DataFrame({
+                        'ts': ts_series,
+                        'lg': pd.Series([1, 2], dtype='int64'),
+                    })
+                    plan = qi._debug_dataframe_columnar_plan(
+                        df, table_name='t', at='ts')
+                    self.assertTrue(
+                        plan['supported'],
+                        f'case={idx} dtype={ts_series.dtype!r} '
+                        f'failures={plan["failures"]!r}')
+
+            # 4. tz-aware as a field column (non-`at`), with tz-naive at=.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    [pd.Timestamp('2024-01-01'),
+                     pd.Timestamp('2024-01-02')], dtype='datetime64[ns]'),
+                'event_ts': pd.to_datetime(
+                    ['2024-01-01T00:00:00Z', '2024-01-01T00:00:01Z']),
+                'lg': pd.Series([1, 2], dtype='int64'),
+            })
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='t', at='ts')
+            self.assertTrue(
+                plan['supported'],
+                f'tz-aware field column failures={plan["failures"]!r}')
+
+        def test_debug_dataframe_columnar_plan_accepts_object_datetime_field(self):
+            # Object-dtype datetime cells targeting a (non-designated)
+            # timestamp field column are supported on the columnar path.
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+                't': pd.Series([
+                    dt.datetime(2024, 1, 1, 12, 0, 0),
+                    dt.datetime(2024, 1, 1, 12, 0, 1)], dtype=object),
+                'v': pd.Series([1.0, 2.0], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(
+                plan['supported'],
+                f'object-datetime field column failures={plan["failures"]!r}')
+            self.assertEqual(plan['failures'], [])
+
+        def test_debug_dataframe_columnar_plan_rejects_unsupported_shape(self):
+            df = pd.DataFrame({
+                'tbl': ['t1'],
+                'sym': pd.Series(['a'], dtype='object'),
+                'value': pd.Series([1], dtype='int64'),
+                'ts': pd.Series([pd.NaT], dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name_col='tbl', symbols=['sym'], at='ts')
+            reasons = [failure['reason'] for failure in plan['failures']]
+
+            self.assertFalse(plan['supported'])
+            self.assertTrue(any('fixed table_name' in reason
+                                for reason in reasons))
+            self.assertTrue(any('Categorical or string[pyarrow]' in reason
+                                for reason in reasons))
+            self.assertTrue(any('cannot contain NaT' in reason
+                                for reason in reasons))
+
+        def test_debug_dataframe_columnar_plan_promotes_ns_nat_field(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[us]'),
+                'vts': pd.Series(
+                    [pd.Timestamp('1960-01-01'), pd.NaT],
+                    dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='tbl1', at='ts')
+
+            self.assertTrue(plan['supported'], plan['failures'])
+            self.assertEqual(plan['failures'], [])
+
+        def test_debug_dataframe_columnar_plan_accepts_v1_mixed_fast_paths(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'event_ts': pd.Series([
+                    pd.Timestamp('2024-01-02 00:00:00'),
+                    pd.Timestamp('2024-01-02 00:00:01'),
+                    pd.Timestamp('2024-01-02 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(['a', None, 'b']),
+                'label': pd.Series(
+                    pa.array(['alpha', None, 'gamma'], type=pa.string()),
+                    dtype='string[pyarrow]'),
+                'seq': pd.Series([1, 2, 3], dtype='int64'),
+                'price': pd.Series([10.5, 11.5, 12.5], dtype='float64'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+
+        def test_debug_dataframe_columnar_plan_rejects_timestamp_only_frame(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+            })
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertFalse(plan['supported'])
+            self.assertEqual(
+                [failure['reason'] for failure in plan['failures']],
+                ['v1 requires at least one non-timestamp data column.'])
+            with self.assertRaises(qi.UnsupportedDataFrameShapeError) as cm:
+                qi._bench_dataframe_plan_and_populate_column_chunks(
+                    df,
+                    table_name='trades',
+                    at='ts')
+            self.assertEqual(
+                cm.exception.column_failures,
+                ({'column': None,
+                  'target': None,
+                  'source_code': None,
+                  'reason': 'v1 requires at least one non-timestamp data column.'},))
+
+        def test_debug_dataframe_columnar_plan_preserves_large_string(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')],
+                    dtype='datetime64[ns]'),
+                'label': pd.Series(
+                    pa.array(['alpha', 'beta'], type=pa.large_string()),
+                    dtype=pd.ArrowDtype(pa.large_string())),
+                'seq': pd.Series([1, 2], dtype='int64'),
+            })
+
+            row_plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts')
+            label_col = next(
+                col for col in row_plan['cols']
+                if col['orig_name'] == 'label')
+            self.assertEqual(label_col['source_code'], 406000)
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+            self.assertEqual(plan['normalizations'], [])
+
+        def test_arrow_backed_column_nonzero_offset_slice(self):
+            # An Arrow-backed column whose underlying buffer has a non-zero
+            # offset (a positional slice) must serialize the surviving rows
+            # rather than walking off the chunk into the spare blank chunk.
+            ser = pd.Series(
+                pa.array(['a', 'b', 'c', 'd', 'e']),
+                dtype=pd.ArrowDtype(pa.string()))
+            df = pd.DataFrame({'s': ser}).iloc[2:]
+            buf = _dataframe(
+                self.version, df, table_name='t', at=qi.ServerTimestamp)
+            self.assertEqual(buf.count(b'\n'), 3)
+            for keep in (b'"c"', b'"d"', b'"e"'):
+                self.assertIn(keep, buf)
+            for drop in (b'"a"', b'"b"'):
+                self.assertNotIn(drop, buf)
+
+        def test_arrow_backed_column_empty_leading_chunk(self):
+            # A zero-length leading chunk must be stepped over: the
+            # values from the following chunk must serialize, not come
+            # out as empty strings.
+            ser = pd.concat([
+                pd.Series([], dtype='string[pyarrow]'),
+                pd.Series(['a', 'b'], dtype='string[pyarrow]')])
+            self.assertEqual(ser.array.__arrow_array__().num_chunks, 2)
+            df = pd.DataFrame({'x': ser})
+            buf = _dataframe(
+                self.version, df, table_name='t', at=qi.ServerTimestamp)
+            self.assertEqual(buf, b't x="a"\nt x="b"\n')
+            self.assertNotIn(b'x=""', buf)
+
+        def test_arrow_backed_column_empty_mid_frame_chunk(self):
+            ser = pd.concat([
+                pd.Series(['a'], dtype='string[pyarrow]'),
+                pd.Series([], dtype='string[pyarrow]'),
+                pd.Series(['b'], dtype='string[pyarrow]')])
+            self.assertEqual(ser.array.__arrow_array__().num_chunks, 3)
+            df = pd.DataFrame({'x': ser})
+            buf = _dataframe(
+                self.version, df, table_name='t', at=qi.ServerTimestamp)
+            self.assertEqual(buf, b't x="a"\nt x="b"\n')
+            self.assertNotIn(b'x=""', buf)
+
+        def test_debug_dataframe_columnar_plan_preserves_large_string_category(self):
+            symbols = pd.Series(
+                pa.array(
+                    ['alpha', 'beta', None, 'alpha'],
+                    type=pa.large_string()),
+                dtype=pd.ArrowDtype(pa.large_string())).astype('category')
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02'),
+                    pd.Timestamp('2024-01-01 00:00:03')],
+                    dtype='datetime64[ns]'),
+                'sym': symbols,
+                'seq': pd.Series([1, 2, 3, 4], dtype='int64'),
+            })
+
+            row_plan = qi._debug_dataframe_plan(
+                df, table_name='trades', at='ts')
+            sym_col = next(
+                col for col in row_plan['cols']
+                if col['orig_name'] == 'sym')
+            self.assertEqual(sym_col['source_code'], 403000)
+
+            plan = qi._debug_dataframe_columnar_plan(
+                df, table_name='trades', at='ts')
+
+            self.assertTrue(plan['supported'])
+            self.assertEqual(plan['failures'], [])
+            self.assertEqual(plan['normalizations'], [])
+
+        def test_bench_dataframe_plan_and_populate_column_chunks(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2], dtype='int64'),
+                'price': pd.Series([10.5, 11.5], dtype='float64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                symbols=False,
+                iterations=3)
+
+            self.assertEqual(result['iterations'], 3)
+            self.assertEqual(result['row_count'], 2)
+            self.assertEqual(result['col_count'], 3)
+            self.assertEqual(result['logical_cells'], 6)
+            self.assertEqual(result['populated_chunks'], 3)
+            self.assertEqual(result['last_populated_rows'], 2)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_splits_chunks(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')], dtype='datetime64[ns]'),
+                'seq': pd.Series([1, 2, 3], dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                symbols=False,
+                iterations=2,
+                max_rows_per_chunk=2)
+
+            self.assertEqual(result['rows_per_chunk'], 2)
+            self.assertEqual(result['populated_chunks'], 4)
+            self.assertEqual(result['populated_rows_total'], 6)
+            self.assertEqual(result['last_populated_rows'], 1)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_aligns_nullable_chunks(self):
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=10, freq='s'),
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(
+                    ['a', None, 'b', 'c', None, 'a', 'b', 'c', 'a', None]),
+                'seq': pd.Series(range(10), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=3)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['populated_rows_total'], 10)
+            self.assertEqual(result['last_populated_rows'], 2)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_reuses_arrow_import_across_three_chunks(self):
+            labels = [
+                'alpha', None, 'beta', 'gamma',
+                None, 'delta', 'epsilon', 'zeta',
+                'eta', None, 'theta', 'iota',
+                'kappa', 'lambda', None, 'mu',
+                'nu', 'xi', None, 'omicron',
+            ]
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=20, freq='s'),
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(labels),
+                'label': pd.Series(
+                    pa.array(labels, type=pa.string()),
+                    dtype='string[pyarrow]'),
+                'seq': pd.Series(range(20), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=3)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 3)
+            self.assertEqual(result['populated_rows_total'], 20)
+            self.assertEqual(result['last_populated_rows'], 4)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_aligns_pyobj_chunks(self):
+            # Regression: PyObject-sourced columns can carry nulls (or
+            # always be bitmaps in the bool_pyobj case). The chunk-size
+            # planner must align to 8 even though the wrapping ArrowArray
+            # has null_count=0 (the pyobj wrapper hardcodes this).
+            #
+            # Without the fix, max_rows_per_chunk=3 would survive as 3
+            # and the second chunk's row_offset=3 would trip the
+            # byte-aligned-offset check in the emit branch.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=10, freq='s'),
+                    dtype='datetime64[ns]'),
+                'obj_str': pd.Series(
+                    ['a', None, 'b', 'c', None, 'a', 'b', 'c', 'a', None],
+                    dtype='object'),
+                'seq': pd.Series(range(10), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=3)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['populated_rows_total'], 10)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_aligns_bool_pyobj_chunks(self):
+            # bool_pyobj always builds a bitmap of values; the emit
+            # offsets by row_offset // 8 regardless of nulls, so the
+            # planner must require 8-row alignment for this source too.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=10, freq='s'),
+                    dtype='datetime64[ns]'),
+                'flag': pd.Series(
+                    [True, False, True, True, False] * 2,
+                    dtype='object'),
+                'seq': pd.Series(range(10), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=5)
+
+            self.assertEqual(result['rows_per_chunk'], 8)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['populated_rows_total'], 10)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_binary_pyobj(self):
+            # Regression: a pandas `bytes`/object column forces the manual
+            # columnar planner, which previously rejected the binary target
+            # even though the build/populate path fully supports it.
+            df = pd.DataFrame({
+                'ts': pd.Series(
+                    pd.date_range('2024-01-01', periods=4, freq='s'),
+                    dtype='datetime64[ns]'),
+                'blob': pd.Series(
+                    [b'hello', b'', b'\x00\x01\x02', None],
+                    dtype='object'),
+                'seq': pd.Series(range(4), dtype='int64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=1,
+                max_rows_per_chunk=16384)
+
+            self.assertEqual(result['populated_rows_total'], 4)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
+
+        def test_bench_dataframe_plan_and_populate_rejects_unsupported_shape(self):
+            # Step 3 made bool/int32/etc. supported. Pick a shape that
+            # remains rejected: NaT in the designated timestamp.
+            df = pd.DataFrame({
+                'ts': pd.Series([pd.NaT], dtype='datetime64[ns]'),
+                'seq': pd.Series([1], dtype='int64'),
+            })
+
+            with self.assertRaisesRegex(
+                    qi.UnsupportedDataFrameShapeError,
+                    'DataFrame is not supported'):
+                qi._bench_dataframe_plan_and_populate_column_chunks(
+                    df,
+                    table_name='trades',
+                    at='ts',
+                    symbols=False)
+
+        def test_bench_dataframe_plan_and_populate_mixed_fast_paths(self):
+            df = pd.DataFrame({
+                'ts': pd.Series([
+                    pd.Timestamp('2024-01-01 00:00:00'),
+                    pd.Timestamp('2024-01-01 00:00:01'),
+                    pd.Timestamp('2024-01-01 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'event_ts': pd.Series([
+                    pd.Timestamp('2024-01-02 00:00:00'),
+                    pd.Timestamp('2024-01-02 00:00:01'),
+                    pd.Timestamp('2024-01-02 00:00:02')],
+                    dtype='datetime64[ns]'),
+                'sym': pd.Categorical(['a', None, 'b']),
+                'label': pd.Series(
+                    pa.array(['alpha', None, 'gamma'], type=pa.string()),
+                    dtype='string[pyarrow]'),
+                'seq': pd.Series([1, 2, 3], dtype='int64'),
+                'price': pd.Series([10.5, 11.5, 12.5], dtype='float64'),
+            })
+
+            result = qi._bench_dataframe_plan_and_populate_column_chunks(
+                df,
+                table_name='trades',
+                at='ts',
+                iterations=2)
+
+            self.assertEqual(result['iterations'], 2)
+            self.assertEqual(result['row_count'], 3)
+            self.assertEqual(result['col_count'], 6)
+            self.assertEqual(result['populated_chunks'], 2)
+            self.assertEqual(result['last_populated_rows'], 3)
+            self.assertEqual(result['row_path_cell_emissions'], 0)
 
         def test_u8_numpy_col(self):
             df = pd.DataFrame({'a': pd.Series([
@@ -518,7 +1219,7 @@ class TestPandasBase:
                     9223372036854775808],  # i64 max + 1
                 dtype='uint64')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.* serialize .* column .a. .* 4 .*9223372036854775808.*int64.*'):
                 buf.dataframe(df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -585,6 +1286,60 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(float('NAN'), self.version == 1) + b'\n' +
                 b'tbl1 a' + _float_binary_bytes(1.7976931348623157e308, self.version == 1) + b'\n')
 
+        def test_datetime_pyobj_column_matches_numpy(self):
+            ts = dt.datetime(2021, 1, 1, 12, 0, 0, 123456)
+            obj_df = pd.DataFrame({'ts': pd.Series([ts], dtype=object)})
+            np_df = pd.DataFrame(
+                {'ts': pd.Series([ts]).astype('datetime64[us]')})
+            obj_buf = _dataframe(
+                self.version, obj_df, table_name='tbl', at=qi.ServerTimestamp)
+            np_buf = _dataframe(
+                self.version, np_df, table_name='tbl', at=qi.ServerTimestamp)
+            self.assertNotEqual(obj_buf, b'')
+            self.assertEqual(obj_buf, np_buf)
+
+        def test_datetime_pyobj_column_with_null_matches_numpy(self):
+            ts = dt.datetime(2021, 1, 1, 12, 0, 0)
+            obj_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b']),
+                'ts': pd.Series([ts, None], dtype=object)})
+            np_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b']),
+                'ts': pd.Series([ts, pd.NaT]).astype('datetime64[us]')})
+            self.assertEqual(
+                _dataframe(
+                    self.version, obj_df, table_name='tbl',
+                    at=qi.ServerTimestamp),
+                _dataframe(
+                    self.version, np_df, table_name='tbl',
+                    at=qi.ServerTimestamp))
+
+        def test_datetime_pyobj_column_with_nat_is_null(self):
+            ts = dt.datetime(2021, 1, 1, 12, 0, 0)
+            obj_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b', 'c']),
+                'ts': pd.Series([ts, pd.NaT, None], dtype=object)})
+            np_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b', 'c']),
+                'ts': pd.Series([ts, pd.NaT, pd.NaT]).astype('datetime64[us]')})
+            obj_buf = _dataframe(
+                self.version, obj_df, table_name='tbl', at=qi.ServerTimestamp)
+            self.assertNotIn(b'0001-01-01', obj_buf)
+            self.assertEqual(
+                obj_buf,
+                _dataframe(
+                    self.version, np_df, table_name='tbl',
+                    at=qi.ServerTimestamp))
+
+        def test_datetime_pyobj_column_all_nat_is_null(self):
+            obj_df = pd.DataFrame({
+                'sym': pd.Categorical(['a', 'b']),
+                'ts': pd.Series([pd.NaT, pd.NaT], dtype=object)})
+            buf = _dataframe(
+                self.version, obj_df, table_name='tbl', at=qi.ServerTimestamp)
+            self.assertNotIn(b'ts=', buf)
+            self.assertNotIn(b'0001-01-01', buf)
+
         def test_decimal_pyobj_column(self):
             decimals = [
                 Decimal('123.45'),
@@ -601,7 +1356,7 @@ class TestPandasBase:
             ]
             if self.version < 3:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'does not support the decimal datatype'):
                     _dataframe(self.version, pd.DataFrame({'dec': [Decimal('123')]}), table_name='tbl', at=qi.ServerTimestamp)
                 return
@@ -618,6 +1373,40 @@ class TestPandasBase:
                     self.assertEqual(unscaled, expected_unscaled)
                 except Exception as ex:
                     self.fail(f'Failed to serialize {decimal}: {ex}')
+
+        def test_decimal_pyobj_null_cell(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({
+                'dec': pd.Series([Decimal('1.5'), None], dtype=object),
+                'other': [1, 2]})
+            lines = _dataframe(
+                self.version, df, table_name='tbl',
+                at=qi.ServerTimestamp).splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn(b'dec=', lines[0])
+            self.assertIn(b'other=1i', lines[0])
+            self.assertNotIn(b'dec=', lines[1])
+            self.assertIn(b'other=2i', lines[1])
+
+        def test_decimal_pyobj_mixed_cell_types(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            for bad_cell in ('oops', 3.0, [1]):
+                with self.subTest(bad_cell=bad_cell):
+                    df = pd.DataFrame({
+                        'dec': pd.Series(
+                            [Decimal('1.5'), bad_cell], dtype=object)})
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            'Expected an object of type Decimal') as raised:
+                        _dataframe(
+                            self.version, df, table_name='tbl',
+                            at=qi.ServerTimestamp)
+                    self.assertIs(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.BadDataFrame)
+                    self.assertIn('row index 1', str(raised.exception))
 
         def test_decimal_pyobj_trailing_zeros_and_integer(self):
             if self.version < 3:
@@ -638,7 +1427,7 @@ class TestPandasBase:
             try:
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
                 self.fail("special values shouldn't be encoded")
-            except qi.IngressError:
+            except qi.QuestDBError:
                 pass
 
         def test_decimal_pyobj_overflow(self):
@@ -647,7 +1436,7 @@ class TestPandasBase:
             df = pd.DataFrame({'dec': [Decimal('57896044618658097711785492504343953926634992332820282019728792003956564819968')]})
 
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.*Decimal mantissa too large; maximum supported size is 32 bytes.*'):
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
 
@@ -657,8 +1446,30 @@ class TestPandasBase:
             df = pd.DataFrame({'dec': [Decimal('1.2e-100')]})
 
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.*exceeds the maximum supported scale of 76.*'):
+                _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+
+        def test_decimal_pyobj_positive_exponent(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            # A representable positive exponent expands into the unscaled
+            # mantissa with scale 0.
+            df = pd.DataFrame({'dec': [Decimal('1E+20')]})
+            buf = _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
+            (scale, mantissa) = _decode_decimal_payload(buf.splitlines()[0])
+            self.assertEqual(scale, 0)
+            self.assertEqual(
+                int.from_bytes(mantissa, byteorder='big', signed=True),
+                10 ** 20)
+
+            # An out-of-range exponent must raise cleanly instead of
+            # being truncated to a bogus narrower value.
+            df = pd.DataFrame({'dec': [Decimal('1E+100')]})
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    '.*Decimal exponent 100 exceeds the maximum supported'
+                    ' value of 76.*'):
                 _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
 
         def test_decimal_arrow_columns(self):
@@ -668,7 +1479,7 @@ class TestPandasBase:
                     dtype=pd.ArrowDtype(pa.decimal128(10, 2)))
                 df = pd.DataFrame({'dec': arr, 'count': [0]})
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         'does not support the decimal datatype'):
                     _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
                 return
@@ -851,7 +1662,7 @@ class TestPandasBase:
                     9223372036854775808],  # i64 max + 1
                 dtype=pd.UInt64Dtype())})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     '.* serialize .* column .a. .* 4 .*9223372036854775808.*int64.*'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -969,7 +1780,7 @@ class TestPandasBase:
                     None, True, False],
                 dtype='boolean')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'Failed.*at row index 3 .*<NA>.: .*insert null .*boolean col'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -992,7 +1803,7 @@ class TestPandasBase:
                     True, False, 'false'],
                 dtype='object')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'serialize .* column .a. .* 2 .*false.*bool'):
                 _dataframe(self.version, df2, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -1000,7 +1811,7 @@ class TestPandasBase:
                     None, True, False],
                 dtype='object')})
             with self.assertRaisesRegex(
-                    qi.IngressError,
+                    qi.QuestDBError,
                     'serialize.*\\(None\\): Cannot insert null.*boolean column'):
                 _dataframe(self.version, df3, table_name='tbl1', at=qi.ServerTimestamp)
 
@@ -1263,7 +2074,7 @@ class TestPandasBase:
                     dtype=_NS_TZ_DTYPE),
                 'b': ['sym1']})
             with self.assertRaisesRegex(
-                    qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
+                    qi.QuestDBError, "Failed.*'a'.*-220897.* is neg"):
                 _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at='a')
 
         def test_datetime64_tz_arrow_micros_at(self):
@@ -1299,7 +2110,7 @@ class TestPandasBase:
                     dtype=_US_TZ_DTYPE),
                 'b': ['sym1']})
             with self.assertRaisesRegex(
-                    qi.IngressError, "Failed.*'a'.*-220897.* is neg"):
+                    qi.QuestDBError, "Failed.*'a'.*-220897.* is neg"):
                 _dataframe(self.version, df2, table_name='tbl1', symbols=['b'], at='a')
 
         def _test_pyobjstr_table(self, dtype):
@@ -1323,13 +2134,13 @@ class TestPandasBase:
                 '💩🦞 b=5i\n').encode("utf-8"))
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Too long"):
+                    qi.QuestDBError, "Too long"):
                 _dataframe(self.version,
                     pd.DataFrame({'a': pd.Series(['b' * 128], dtype=dtype)}),
                     table_name_col='a', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
+                    qi.QuestDBError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', None], dtype=dtype),
@@ -1337,7 +2148,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
+                    qi.QuestDBError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', float('nan')], dtype=dtype),
@@ -1345,7 +2156,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
+                    qi.QuestDBError, 'Failed.*(Expected a table name, got a null|Table name cannot be null).*'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', pd.NA], dtype=dtype),
@@ -1353,7 +2164,7 @@ class TestPandasBase:
                     table_name_col='.', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "''.*must have a non-zero length"):
+                    qi.QuestDBError, "''.*must have a non-zero length"):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '/': pd.Series([''], dtype=dtype),
@@ -1361,7 +2172,7 @@ class TestPandasBase:
                     table_name_col='/', at=qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
+                    qi.QuestDBError, "'tab..1'.*invalid dot `\\.` at position 4"):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '/': pd.Series(['tab..1'], dtype=dtype),
@@ -1372,7 +2183,7 @@ class TestPandasBase:
             self._test_pyobjstr_table('object')
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'table name .*got an object of type int'):
+                    qi.QuestDBError, 'table name .*got an object of type int'):
                 _dataframe(self.version,
                     pd.DataFrame({
                         '.': pd.Series(['x', 42], dtype='object'),
@@ -1429,7 +2240,7 @@ class TestPandasBase:
             self._test_pyobjstr_numpy_symbol('object')
 
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Expected a string, got an .* type int'):
+                    qi.QuestDBError, 'Expected a string, got an .* type int'):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -1493,7 +2304,7 @@ class TestPandasBase:
                 '💩🦞 b=5i\n').encode("utf-8"))
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Too long"):
+                    qi.QuestDBError, "Too long"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -1501,7 +2312,7 @@ class TestPandasBase:
                     table_name_col='a', at = qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Failed .*<NA>.*Table name cannot be null"):
+                    qi.QuestDBError, "Failed .*<NA>.*Table name cannot be null"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -1510,7 +2321,7 @@ class TestPandasBase:
                     table_name_col='.', at = qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "''.*must have a non-zero length"):
+                    qi.QuestDBError, "''.*must have a non-zero length"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -1518,7 +2329,7 @@ class TestPandasBase:
                     table_name_col='/', at = qi.ServerTimestamp)
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "'tab..1'.*invalid dot `\\.` at position 4"):
+                    qi.QuestDBError, "'tab..1'.*invalid dot `\\.` at position 4"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -1605,7 +2416,7 @@ class TestPandasBase:
                 'tbl1 a=' + str(int64_max) + 'i,b=10i\n').encode('utf-8'))
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "1 \\('STRING'\\): .*type int, got.*str\\."):
+                    qi.QuestDBError, "1 \\('STRING'\\): .*type int, got.*str\\."):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -1616,7 +2427,7 @@ class TestPandasBase:
             out_of_range = [int64_min - 1, int64_max + 1]
             for num in out_of_range:
                 with self.assertRaisesRegex(
-                        qi.IngressError, "index 1 .*922337203685477.*int too big"):
+                        qi.QuestDBError, "index 1 .*922337203685477.*int too big"):
                     _dataframe(
                         self.version,
                         pd.DataFrame({
@@ -1643,7 +2454,7 @@ class TestPandasBase:
                 b'tbl1 a' + _float_binary_bytes(7.0, self.version == 1) + b',b=7i\n')
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "1 \\('STRING'\\): .*type float, got.*str\\."):
+                    qi.QuestDBError, "1 \\('STRING'\\): .*type float, got.*str\\."):
                 _dataframe(
                     self.version,
                     pd.DataFrame({
@@ -1656,7 +2467,7 @@ class TestPandasBase:
             # (unless anyone asks for additional ones).
             # We want to test others are rejected.
             with self.assertRaisesRegex(
-                    qi.IngressError, "Bad column 'a'.*got a category of .*int64"):
+                    qi.QuestDBError, "Bad column 'a'.*got a category of .*int64"):
                 _dataframe(
                     self.version,
                     pd.DataFrame({'a': pd.Series([1, 2, 3, 2], dtype='category')}),
@@ -1680,7 +2491,7 @@ class TestPandasBase:
                 'a': pd.Series(slist, dtype='category'),
                 'b': list(range(len(slist)))})
             with self.assertRaisesRegex(
-                    qi.IngressError, 'Table name cannot be null'):
+                    qi.QuestDBError, 'Table name cannot be null'):
                 _dataframe(self.version, df2, table_name_col=0, at = qi.ServerTimestamp)
 
         def test_cat_i8_table(self):
@@ -1721,6 +2532,30 @@ class TestPandasBase:
         def test_cat_i8_symbol(self):
             self._test_cat_symbol(30)
             self._test_cat_symbol(127)
+
+        def test_cat_large_string_symbol(self):
+            df = pd.DataFrame({
+                'a': pd.Series(
+                    pa.array(
+                        ['alpha', 'beta', None, 'alpha'],
+                        type=pa.large_string()),
+                    dtype=pd.ArrowDtype(pa.large_string())).astype('category'),
+                'b': [1, 2, 3, 4],
+            })
+
+            buf = _dataframe(
+                self.version,
+                df,
+                table_name='tbl1',
+                symbols=True,
+                at=qi.ServerTimestamp)
+
+            self.assertEqual(
+                buf,
+                b'tbl1,a=alpha b=1i\n'
+                b'tbl1,a=beta b=2i\n'
+                b'tbl1 b=3i\n'
+                b'tbl1,a=alpha b=4i\n')
 
         def test_cat_i16_symbol(self):
             self._test_cat_symbol(128)
@@ -1794,7 +2629,7 @@ class TestPandasBase:
             df.columns = ['a']
 
             with self.assertRaisesRegex(
-                    qi.IngressError, "Bad column 'a': .*not.*contiguous"):
+                    qi.QuestDBError, "Bad column 'a': .*not.*contiguous"):
                 _dataframe(self.version, df, table_name='tbl1', at = qi.ServerTimestamp)
 
         def test_serializing_in_chunks(self):
@@ -1819,7 +2654,7 @@ class TestPandasBase:
 
             df = pd.DataFrame(zip(x, y), columns=header)
 
-            with self.assertRaisesRegex(qi.IngressError, 'Could not flush buffer: Buffer size of 21780 exceeds maximum configured allowed size of 1024 bytes'):
+            with self.assertRaisesRegex(qi.QuestDBError, 'Could not flush buffer: Buffer size of 21780 exceeds maximum configured allowed size of 1024 bytes'):
                 with qi.Sender.from_conf("http::addr=localhost:9000;auto_flush_rows=1000;max_buf_size=1024;protocol_version=2;") as sender:
                     sender.dataframe(df, table_name='test_df', at=qi.ServerTimestamp)
                     sender.flush()
@@ -1897,7 +2732,7 @@ class TestPandasBase:
                 self.assertTrue(exp_df.equals(deser_df))
 
             # fastparquet doesn't roundtrip with pyarrow parquet properly.
-            # It decays categories to object and UInt8 to float64.
+            # It decays categories to object/string and UInt8 to float64.
             # We need to set up special case expected results for that.
             fallback_exp_dtypes = [
                 np.dtype('O'),
@@ -1906,13 +2741,23 @@ class TestPandasBase:
                 np.dtype('float64')]
             fallback_df = df.astype({'s': 'object', 'b': 'float64'})
 
+            def fastparquet_pyarrow_expected(deser_df):
+                actual_dtypes = list(deser_df.dtypes)
+                if not isinstance(actual_dtypes[0], pd.StringDtype):
+                    return fallback_df, fallback_exp_dtypes
+
+                exp_dtypes = list(fallback_exp_dtypes)
+                exp_dtypes[0] = actual_dtypes[0]
+                return fallback_df.astype({'s': actual_dtypes[0]}), exp_dtypes
+
             df_eq(df, pa2pa_df, exp_dtypes)
             if fp_wrote:
                 pa2fp_df = pd.read_parquet(pa_parquet_path, engine='fastparquet')
                 fp2pa_df = pd.read_parquet(fp_parquet_path, engine='pyarrow')
                 fp2fp_df = pd.read_parquet(fp_parquet_path, engine='fastparquet')
                 df_eq(df, pa2fp_df, exp_dtypes)
-                df_eq(fallback_df, fp2pa_df, fallback_exp_dtypes)
+                fp2pa_exp_df, fp2pa_exp_dtypes = fastparquet_pyarrow_expected(fp2pa_df)
+                df_eq(fp2pa_exp_df, fp2pa_df, fp2pa_exp_dtypes)
                 df_eq(df, fp2fp_df, exp_dtypes)
 
             exp = (
@@ -1947,7 +2792,7 @@ class TestPandasBase:
 
             if self.version == 1:
                 with self.assertRaisesRegex(
-                        qi.IngressError,
+                        qi.QuestDBError,
                         "Protocol version v1 does not support array datatype"):
                     _ = _dataframe(self.version, df, table_name='tbl1', at=qi.ServerTimestamp)
             else:
@@ -1957,7 +2802,44 @@ class TestPandasBase:
                     b'tbl1 a=' + _array_binary_bytes(np.array([1.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
-                
+
+        def test_f64_np_array_null_cell(self):
+            if self.version == 1:
+                self.skipTest('Protocol version v1 does not support arrays')
+            df = pd.DataFrame({
+                'a': pd.Series(
+                    [np.array([1.0], np.float64), None], dtype=object),
+                'other': [1, 2]})
+            buf = _dataframe(
+                self.version, df, table_name='tbl1',
+                at=qi.ServerTimestamp)
+            self.assertEqual(
+                buf,
+                b'tbl1 a=' +
+                _array_binary_bytes(np.array([1.0], np.float64)) +
+                b',other=1i\n'
+                b'tbl1 other=2i\n')
+
+        def test_f64_np_array_mixed_cell_types(self):
+            if self.version == 1:
+                self.skipTest('Protocol version v1 does not support arrays')
+            for bad_cell in ('oops', [2.0], 3.0):
+                with self.subTest(bad_cell=bad_cell):
+                    df = pd.DataFrame({
+                        'a': pd.Series([
+                            np.array([1.0], np.float64),
+                            bad_cell], dtype=object)})
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            'Expected an object of type numpy.ndarray') as raised:
+                        _dataframe(
+                            self.version, df, table_name='tbl1',
+                            at=qi.ServerTimestamp)
+                    self.assertIs(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.BadDataFrame)
+                    self.assertIn('row index 1', str(raised.exception))
+
         def test_numpy_micros_col(self):
             df = pd.DataFrame({
                 'x': [1, 2, 3],
@@ -2184,6 +3066,78 @@ class TestPandasProtocolVersionV2(TestPandasBase.TestPandas):
 class TestPandasProtocolVersionV3(TestPandasBase.TestPandas):
     name = 'protocol version 3'
     version = 3
+
+
+class TestNaTScalarDatetime(unittest.TestCase):
+    def test_from_datetime_nat_raises_value_error(self):
+        for cls in (qi.TimestampNanos, qi.TimestampMicros):
+            with self.assertRaisesRegex(
+                    ValueError, 'NaT is not a valid timestamp'):
+                cls.from_datetime(pd.NaT)
+
+    def test_row_at_nat_raises_value_error(self):
+        buf = qi.Buffer(protocol_version=2)
+        with self.assertRaisesRegex(
+                ValueError, 'NaT is not a valid timestamp'):
+            buf.row('t', columns={'x': 1}, at=pd.NaT)
+
+    def test_dataframe_at_nat_raises(self):
+        buf = qi.Buffer(protocol_version=2)
+        df = pd.DataFrame({'x': [1]})
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'NaT is not a valid timestamp'):
+            buf.dataframe(df, table_name='t', at=pd.NaT)
+
+
+class TestColumnarPlanWithoutPyarrow(unittest.TestCase):
+    """The columnar planner's pyarrow-optional fallbacks, exercised in a
+    subprocess with the pyarrow import blocked."""
+
+    _SCRIPT = """
+import sys
+
+
+class _BlockPyarrow:
+    def find_spec(self, name, path=None, target=None):
+        if name == 'pyarrow' or name.startswith('pyarrow.'):
+            raise ImportError('pyarrow blocked for this test')
+
+
+sys.meta_path.insert(0, _BlockPyarrow())
+import pandas as pd
+from decimal import Decimal
+import questdb._client as qi
+
+df = pd.DataFrame({
+    'ts': pd.Series([pd.Timestamp('2024-01-01')], dtype='datetime64[us]'),
+    'vts': pd.Series([pd.NaT], dtype='datetime64[ns]'),
+})
+plan = qi._debug_dataframe_columnar_plan(df, table_name='t', at='ts')
+assert not plan['supported'], plan
+reasons = ' '.join(f['reason'] for f in plan['failures'])
+assert 'without pyarrow' in reasons, plan
+
+df = pd.DataFrame({
+    'ts': pd.Series([pd.Timestamp('2024-01-01')], dtype='datetime64[us]'),
+    'amt': pd.Series([Decimal('1.5')], dtype=object),
+})
+plan = qi._debug_dataframe_columnar_plan(df, table_name='t', at='ts')
+assert not plan['supported'], plan
+reasons = ' '.join(f['reason'] for f in plan['failures'])
+assert 'require pyarrow' in reasons, plan
+print('OK')
+"""
+
+    def test_planner_rejects_pyarrow_dependent_columns(self):
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        result = subprocess.run(
+            [sys.executable, '-c', self._SCRIPT],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK', result.stdout)
 
 
 if __name__ == '__main__':

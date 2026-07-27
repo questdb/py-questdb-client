@@ -4,11 +4,12 @@ QuestDB Client Library for Python
 
 This is the official Python client library for `QuestDB <https://questdb.com>`_.
 
-This client library implements QuestDB's variant of the
+This client library implements the QuestDB Wire Protocol (QWP) over WebSocket
+for pooled ingestion and queries — the deployment-level ``questdb.connect()``
+API. A connection-level ``Sender`` (one sender = one connection) covers the
+legacy ILP transports — QuestDB's variant of the
 `InfluxDB Line Protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_
-(ILP) over HTTP and TCP.
-
-ILP provides the fastest way to insert data into QuestDB.
+over HTTP and TCP, including HTTP transactions — plus QWP over UDP.
 
 This implementation supports `authentication
 <https://py-questdb-client.readthedocs.io/en/latest/conf.html#authentication>`_
@@ -18,7 +19,7 @@ and full-connection encryption with
 Install
 =======
 
-The latest version of the library is 4.1.0 (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
+The latest version of the library is 5.0.0 (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
 
 ::
 
@@ -34,8 +35,9 @@ The most common way to insert data is from a Pandas dataframe.
 
 .. code-block:: python
 
+    import numpy as np
     import pandas as pd
-    from questdb.ingress import Sender
+    import questdb
 
     df = pd.DataFrame({
         'symbol': pd.Categorical(['ETH-USD', 'BTC-USD']),
@@ -43,8 +45,7 @@ The most common way to insert data is from a Pandas dataframe.
         'price': [2615.54, 39269.98],
         'amount': [0.00044, 0.001],
 
-        # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
-        # Note that requires QuestDB server >= 9.0.0 for array support
+        # NumPy float64 arrays require QuestDB server >= 9.0.0.
         'ord_book_bids': [
             np.array([2615.54, 2618.63]),
             np.array([39269.98, 39270.00])
@@ -52,9 +53,9 @@ The most common way to insert data is from a Pandas dataframe.
 
         'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
-    conf = f'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.dataframe(df, table_name='trades', at='timestamp')
+    conf = 'ws::addr=localhost:9000;'
+    with questdb.connect(conf) as db:
+        db.dataframe(df, table_name='trades', at='timestamp')
 
 You can also send individual rows. This only requires a more minimal installation::
 
@@ -62,33 +63,48 @@ You can also send individual rows. This only requires a more minimal installatio
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    import numpy as np
+    import questdb
+    from questdb import TimestampNanos
 
-    conf = f'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={
-                'price': 2615.54,
-                'amount': 0.00044,
+    conf = 'ws::addr=localhost:9000;'
+    with questdb.connect(conf) as db:
+        with db.sender() as sender:
+            sender.row(
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={
+                    'price': 2615.54,
+                    'amount': 0.00044,
 
-                # NumPy float64 arrays are supported from v3.0.0rc1 onwards.
-                # Note that requires QuestDB server >= 9.0.0 for array support
-                'ord_book_bids': np.array([2615.54, 2618.63]),
-            },
-            at=TimestampNanos.now())
-        sender.flush()
+                    # NumPy float64 arrays require QuestDB server >= 9.0.0.
+                    'ord_book_bids': np.array([2615.54, 2618.63]),
+                },
+                at=TimestampNanos.now())
+            sender.flush(wait=True)
 
 
-To connect via the `older TCP protocol <https://py-questdb-client.readthedocs.io/en/latest/sender.html#ilp-tcp-or-ilp-http>`_, set the
-`configuration string <https://py-questdb-client.readthedocs.io/en/latest/conf.html>`_ to:
+``questdb.connect()`` addresses a whole deployment through connection pools.
+For `connection-level needs <https://py-questdb-client.readthedocs.io/en/latest/sender.html#two-api-layers>`_
+— ILP/HTTP transactions, QWP/UDP datagrams, ILP/TCP — use the standalone
+``Sender``, where one sender drives one connection. Set the
+`configuration string <https://py-questdb-client.readthedocs.io/en/latest/conf.html>`_
+to the transport you need:
 
 .. code-block:: python
 
-    conf = f'tcp::addr=localhost:9009;'
+    from questdb import Sender
+
+    conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         ...
+
+See the `5.0 migration guide
+<https://py-questdb-client.readthedocs.io/en/latest/migration.html>`_ when
+moving existing code to 5.0: ``questdb.connect()`` is the new
+QWP/WebSocket entry point, DataFrame bulk loads over QWP/WebSocket go through
+``QuestDB.dataframe()``, and the 4.x ``questdb.ingress`` import location is
+now a deprecated compatibility shim.
 
 
 You can continue by reading the

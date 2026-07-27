@@ -1,0 +1,35 @@
+name: macOS arm64 wheels
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: cibuildwheel
+    runs-on: macos-15
+    timeout-minutes: 120
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          set -o errexit
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cibuildwheel
+      - name: Build wheels
+        run: cibuildwheel --output-dir wheelhouse .
+        env:
+          CIBW_ARCHS_MACOS: arm64
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-arm64
+          path: wheelhouse/*.whl
+          if-no-files-found: error

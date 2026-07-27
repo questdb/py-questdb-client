@@ -59,25 +59,41 @@ stages:
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
-          - script: |
-              git clone --depth 1 https://github.com/questdb/questdb.git
-            displayName: git clone questdb master
+          - template: templates/clone_questdb.yaml
+            parameters:
+              condition: eq(variables.vsQuestDbMaster, true)
+          - bash: |
+              set -euo pipefail
+              JDK_HOME="${JAVA_HOME_25_X64:-}"
+              if [ -z "$JDK_HOME" ] || [ ! -x "$JDK_HOME/bin/javac" ]; then
+                JDK_HOME="/opt/jdk25"
+                sudo mkdir -p "$JDK_HOME"
+                curl -fsSL "https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jdk/hotspot/normal/eclipse" |
+                  sudo tar -xz -C "$JDK_HOME" --strip-components=1
+              fi
+              # Azure parses ##vso logging commands on both stdout and stderr.
+              # Keep xtrace off here so bash never emits a quoted stderr copy.
+              set +x
+              echo "##vso[task.setvariable variable=JAVA_HOME]$JDK_HOME"
+              echo "##vso[task.prependpath]$JDK_HOME/bin"
+            displayName: "Resolve JDK 25"
             condition: eq(variables.vsQuestDbMaster, true)
           - task: Maven@3
             displayName: "Compile QuestDB master"
             inputs:
               mavenPOMFile: "questdb/pom.xml"
-              jdkVersionOption: "1.17"
-              options: "-DskipTests -Pbuild-web-console"
+              javaHomeOption: "Path"
+              jdkDirectory: "$(JAVA_HOME)"
+              options: "-DskipTests -Pbuild-web-console$(CLIENT_PROFILE)"
             condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
-              JAVA_HOME: $(JAVA_HOME_17_X64)
+              JAVA_HOME: $(JAVA_HOME_25_X64)
           - script: python3 proj.py test 1
             displayName: "Test vs master"
             env:
-              JAVA_HOME: $(JAVA_HOME_17_X64)
+              JAVA_HOME: $(JAVA_HOME)
               QDB_REPO_PATH: "./questdb"
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x

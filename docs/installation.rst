@@ -5,81 +5,77 @@ Installation
 Dependency
 ==========
 
-The Python QuestDB client does not have any additional run-time dependencies and
-will run on any version of Python >= 3.9 on most platforms and architectures.
-
-From version 3.0.0, this library depends on ``numpy>=1.21.0``.
+The Python QuestDB client runs on any version of Python >= 3.10 on most
+platforms and architectures. Its only required run-time dependency is
+``numpy>=1.21.0``.
 
 Optional Dependencies
 ---------------------
 
-Ingesting dataframes also require the following
-dependencies to be installed:
+The ``dataframe`` extra bundles ``pandas`` and ``pyarrow``:
 
-* ``pandas``
-* ``pyarrow``
+* ``dataframe`` → ``pandas`` and ``pyarrow``
 
-These are bundled as the ``dataframe`` extra.
+Install it to ingest a **pandas** DataFrame, or to use the
+``to_pandas`` / ``to_arrow`` / ``iter_*`` helpers on ``QuestDB.query()``
+results. polars, pyarrow, duckdb and any other Arrow-native source need
+no extra — they go through the Arrow PyCapsule Interface; just install
+the source library as usual.
 
-Without this option, you may still ingest data row-by-row.
+Without it, you may still ingest data row-by-row through
+``Sender.row()``, and read query results through the
+``__arrow_c_stream__`` PyCapsule protocol.
 
 PIP
 ---
 
-You can install it (or update it) globally by running::
+DataFrame ingest (pandas + pyarrow)::
 
     python3 -m pip install -U questdb[dataframe]
 
+Row-only::
 
-Or, from within a virtual environment::
-
-    pip install -U questdb[dataframe]
-
-
-If you don't need to work with dataframes::
-    
     python3 -m pip install -U questdb
 
 Poetry
 ------
 
-If you're using poetry, you can add ``questdb`` as a dependency::
+Equivalents for poetry::
 
     poetry add questdb[dataframe]
-
-Similarly, if you don't need to work with dataframes::
-
     poetry add questdb
-
-or to update the dependency::
-
-    poetry update questdb
 
 
 Verifying the Installation
 ==========================
 
-If you want to check that you've installed the wheel correctly, you can run the
-following statements from a ``python3`` interactive shell:
+If you want to check that you've installed the wheel correctly, you can run
+the following statements from a ``python3`` interactive shell:
 
 .. code-block:: python
 
-    >>> import questdb.ingress
-    >>> buf = questdb.ingress.Buffer()
-    >>> buf.row('test', symbols={'a': 'b'})
-    <questdb.ingress.Buffer object at 0x104b68240>
-    >>> str(buf)
-    'test,a=b\n'
+    >>> import questdb
+    >>> questdb.__version__
+    '5.0.0'
+    >>> questdb.connect
+    <function connect at 0x104b68240>
 
-If you also want to if check you can serialize from Pandas
-(which requires additional dependencies):
+With a QuestDB server running locally, you can verify a full round trip
+(ingestion and query) in a few lines:
 
 .. code-block:: python
 
-    >>> import questdb.ingress
-    >>> import pandas as pd
-    >>> df = pd.DataFrame({'a': [1, 2]})
-    >>> buf = questdb.ingress.Buffer()
-    >>> buf.dataframe(df, table_name='test')
-    >>> str(buf)
-    'test a=1i\ntest a=2i\n'
+    >>> import questdb
+    >>> db = questdb.connect('ws::addr=localhost:9000;')
+    >>> with db.sender() as sender:
+    ...     sender.row('install_check', columns={'x': 1},
+    ...                at=questdb.ServerTimestamp)
+    ...     sender.flush(wait=True)
+    >>> db.query('SELECT count() FROM install_check').to_pandas()
+       count
+    0      1
+    >>> db.close()
+
+``flush(wait=True)`` confirms the server accepted the row, but query
+visibility follows asynchronously once the WAL is applied — if the count
+reads ``0``, re-run the query.

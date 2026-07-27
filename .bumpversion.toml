@@ -1,5 +1,5 @@
 [tool.bumpversion]
-current_version = "4.1.0"
+current_version = "5.0.0"
 commit = false
 tag = false
 
@@ -29,7 +29,7 @@ search = "__version__ = '{current_version}'"
 replace = "__version__ = '{new_version}'"
 
 [[tool.bumpversion.files]]
-filename = "src/questdb/ingress.pyx"
+filename = "src/questdb/_client.pyx"
 search = "VERSION = '{current_version}'"
 replace = "VERSION = '{new_version}'"
 

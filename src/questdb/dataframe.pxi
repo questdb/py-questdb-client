@@ -1,6 +1,8 @@
 # See: dataframe.md for technical overview.
 
 from decimal import Decimal
+import ipaddress as _ipaddress
+import uuid as _uuid
 
 from cpython.bytes cimport PyBytes_AsString
 from .mpdecimal_compat cimport decimal_pyobj_to_binary
@@ -81,6 +83,7 @@ cdef struct col_cursor_t:
     ArrowArray* chunk  # Current chunk.
     size_t chunk_index
     size_t offset  # i.e. the element index (not byte offset)
+    bint dictionary_large_offsets
 
 
 cdef enum col_target_t:
@@ -95,6 +98,22 @@ cdef enum col_target_t:
     col_target_column_arr_f64 = 8
     col_target_column_decimal = 9
     col_target_at = 10
+    # Narrow numeric targets used by the column-QWP path only. Each
+    # maps to a dedicated wire type (BYTE / SHORT / INT / FLOAT)
+    # instead of widening to LONG / DOUBLE. Selected by
+    # `_FIELD_TARGETS_QWP`, which puts these ahead of the wide
+    # targets so the resolver picks them for Arrow narrow sources;
+    # row-ILP uses `_FIELD_TARGETS_ROW`, which does not list them.
+    col_target_column_i8 = 11
+    col_target_column_i16 = 12
+    col_target_column_i32 = 13
+    col_target_column_f32 = 14
+    col_target_column_uuid = 15
+    col_target_column_long256 = 16
+    col_target_column_ipv4 = 17
+    col_target_column_binary = 18
+    # Generic Arrow field passthrough to the Rust importer; column-QWP only.
+    col_target_column_arrow = 19
 
 
 cdef dict _TARGET_NAMES = {
@@ -109,6 +128,15 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_arr_f64: "array",
     col_target_t.col_target_column_decimal: "decimal",
     col_target_t.col_target_at: "designated timestamp",
+    col_target_t.col_target_column_i8: "byte",
+    col_target_t.col_target_column_i16: "short",
+    col_target_t.col_target_column_i32: "int",
+    col_target_t.col_target_column_f32: "float32",
+    col_target_t.col_target_column_uuid: "uuid",
+    col_target_t.col_target_column_long256: "long256",
+    col_target_t.col_target_column_ipv4: "ipv4",
+    col_target_t.col_target_column_binary: "binary",
+    col_target_t.col_target_column_arrow: "arrow",
 }
 
 
@@ -150,12 +178,30 @@ cdef enum col_source_t:
     col_source_dt64ns_tz_arrow =        502000
     col_source_dt64us_numpy =           601000
     col_source_dt64us_tz_arrow =        602000
+    # Designated-`at` only (columnar): widened to micros in Rust by the
+    # millis/seconds designated-timestamp FFI.
+    col_source_dt64ms_tz_arrow =        603000
+    col_source_dt64s_tz_arrow =         604000
     col_source_arr_f64_numpyobj =       701100
     col_source_decimal_pyobj =          801100
     col_source_decimal32_arrow =        802000
     col_source_decimal64_arrow =        803000
     col_source_decimal128_arrow =       804000
     col_source_decimal256_arrow =       805000
+    # FixedSizeBinary(16) — the canonical Arrow shape egress emits
+    # for UUID columns (with or without the `arrow.uuid` extension
+    # wrapper, which we strip on input). Column-QWP only; row-ILP
+    # has no serializer for this source.
+    col_source_fsb16_arrow =            901000
+    # FixedSizeBinary(32) — the canonical shape egress emits for
+    # LONG256 columns. Column-QWP only.
+    col_source_fsb32_arrow =            902000
+    # PyObject sniff outputs for QuestDB-specific wire kinds.
+    col_source_uuid_pyobj =             903100
+    col_source_ipv4_pyobj =             904100
+    col_source_datetime_pyobj =         905100
+    col_source_bytes_pyobj =            906100
+    col_source_arrow_passthrough =     1000000
 
 
 cdef bint col_source_needs_gil(col_source_t source) noexcept nogil:
@@ -179,9 +225,25 @@ cdef dict _PYOBJ_SOURCE_DESCR = {
     col_source_t.col_source_float_pyobj: "float",
     col_source_t.col_source_str_pyobj: "str",
     col_source_t.col_source_decimal_pyobj: "Decimal",
+    col_source_t.col_source_uuid_pyobj: "UUID",
+    col_source_t.col_source_ipv4_pyobj: "IPv4Address",
+    col_source_t.col_source_datetime_pyobj: "datetime",
+    col_source_t.col_source_bytes_pyobj: "bytes",
 }
 
 
+# Object-column sources only the columnar `QuestDB.dataframe()` path can ingest;
+# the row-oriented `Sender.dataframe()` has no ILP target for them.
+cdef frozenset _COLUMNAR_ONLY_PYOBJ_SOURCES = frozenset((
+    col_source_t.col_source_uuid_pyobj,
+    col_source_t.col_source_ipv4_pyobj,
+    col_source_t.col_source_bytes_pyobj,
+))
+
+
+# Compatibility matrix for the Python dataframe planner. `QuestDB.dataframe()`
+# uses the Rust Arrow RecordBatch route as the canonical Arrow policy when its
+# public routing constraints are satisfied.
 cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_skip: {
         col_source_t.col_source_nulls,
@@ -233,6 +295,38 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_f32_arrow,
         col_source_t.col_source_f64_arrow,
     },
+    col_target_t.col_target_column_i8: {
+        col_source_t.col_source_i8_arrow,
+    },
+    col_target_t.col_target_column_i16: {
+        col_source_t.col_source_i16_arrow,
+    },
+    col_target_t.col_target_column_i32: {
+        col_source_t.col_source_i32_arrow,
+    },
+    col_target_t.col_target_column_f32: {
+        col_source_t.col_source_f32_arrow,
+    },
+    col_target_t.col_target_column_uuid: {
+        col_source_t.col_source_fsb16_arrow,
+        col_source_t.col_source_uuid_pyobj,
+    },
+    col_target_t.col_target_column_long256: {
+        col_source_t.col_source_fsb32_arrow,
+    },
+    col_target_t.col_target_column_binary: {
+        col_source_t.col_source_bytes_pyobj,
+    },
+    col_target_t.col_target_column_arrow: {
+        col_source_t.col_source_arrow_passthrough,
+    },
+    # The Rust Arrow path treats UInt32 as IPV4 only when Arrow field
+    # metadata says questdb.column_type=ipv4. Pandas drops Arrow field
+    # metadata before it reaches this planner, so plain UInt32 must
+    # resolve through col_target_column_i64 instead.
+    col_target_t.col_target_column_ipv4: {
+        col_source_t.col_source_ipv4_pyobj,
+    },
     col_target_t.col_target_column_str: {
         col_source_t.col_source_str_pyobj,
         col_source_t.col_source_str_utf8_arrow,
@@ -245,7 +339,8 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_dt64ns_numpy,
         col_source_t.col_source_dt64ns_tz_arrow,
         col_source_t.col_source_dt64us_numpy,
-        col_source_t.col_source_dt64us_tz_arrow
+        col_source_t.col_source_dt64us_tz_arrow,
+        col_source_t.col_source_datetime_pyobj,
     },
     col_target_t.col_target_column_arr_f64: {
         col_source_t.col_source_arr_f64_numpyobj,
@@ -262,12 +357,26 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_dt64ns_tz_arrow,
         col_source_t.col_source_dt64us_numpy,
         col_source_t.col_source_dt64us_tz_arrow,
+        col_source_t.col_source_dt64ms_tz_arrow,
+        col_source_t.col_source_dt64s_tz_arrow,
+        col_source_t.col_source_datetime_pyobj,
     },
 }
 
 
-# Targets associated with col_meta_target.field.
-cdef tuple _FIELD_TARGETS = (
+# Field-target orderings used by `_dataframe_resolve_target` — each
+# protocol passes its own ordering so the resolver picks the right
+# target on the first hit.
+#
+# Many Arrow sources sit in multiple targets' source-sets
+# (`_TARGET_TO_SOURCES`) on purpose, e.g. `col_source_i8_arrow` lives
+# in both `col_target_column_i64` (so row-ILP can serialize it as
+# text via the existing i64 dispatch) and `col_target_column_i8` (so
+# column-QWP can send it as a BYTE wire type). The two `_FIELD_TARGETS_*`
+# tuples disambiguate: row-ILP lists wide targets only; column-QWP
+# lists narrow targets first so they win the resolver loop.
+
+cdef tuple _FIELD_TARGETS_ROW = (
     col_target_t.col_target_skip,
     col_target_t.col_target_column_bool,
     col_target_t.col_target_column_i64,
@@ -276,6 +385,35 @@ cdef tuple _FIELD_TARGETS = (
     col_target_t.col_target_column_ts,
     col_target_t.col_target_column_arr_f64,
     col_target_t.col_target_column_decimal)
+
+cdef tuple _FIELD_TARGETS_QWP = (
+    col_target_t.col_target_skip,
+    col_target_t.col_target_column_bool,
+    # Narrow numeric targets first — they own the Arrow narrow
+    # sources (`i8_arrow`, `f32_arrow`, …) so column-QWP emits the
+    # corresponding narrow wire types (BYTE / SHORT / INT / FLOAT)
+    # instead of widening to LONG / DOUBLE.
+    col_target_t.col_target_column_i8,
+    col_target_t.col_target_column_i16,
+    col_target_t.col_target_column_i32,
+    col_target_t.col_target_column_i64,
+    # IPV4 remains a column-QWP target for the wire emitter, but this
+    # pandas planner has no metadata-preserving UInt32 source that can
+    # select it. Metadata-aware IPV4 routing belongs to the Rust Arrow
+    # ingestion path.
+    col_target_t.col_target_column_ipv4,
+    col_target_t.col_target_column_f32,
+    col_target_t.col_target_column_f64,
+    col_target_t.col_target_column_str,
+    col_target_t.col_target_column_ts,
+    col_target_t.col_target_column_arr_f64,
+    col_target_t.col_target_column_decimal,
+    # QuestDB-extension types whose Arrow source is unique
+    # (FixedSizeBinary widths).
+    col_target_t.col_target_column_uuid,
+    col_target_t.col_target_column_long256,
+    col_target_t.col_target_column_binary,
+    col_target_t.col_target_column_arrow)
 
 
 # Targets that map directly from a meta target.
@@ -422,6 +560,31 @@ cdef enum col_dispatch_code_t:
     col_dispatch_code_column_decimal__decimal256_arrow = \
         col_target_t.col_target_column_decimal + col_source_t.col_source_decimal256_arrow
 
+    col_dispatch_code_column_i8__i8_arrow = \
+        col_target_t.col_target_column_i8 + col_source_t.col_source_i8_arrow
+    col_dispatch_code_column_i16__i16_arrow = \
+        col_target_t.col_target_column_i16 + col_source_t.col_source_i16_arrow
+    col_dispatch_code_column_i32__i32_arrow = \
+        col_target_t.col_target_column_i32 + col_source_t.col_source_i32_arrow
+    col_dispatch_code_column_f32__f32_arrow = \
+        col_target_t.col_target_column_f32 + col_source_t.col_source_f32_arrow
+    col_dispatch_code_column_uuid__fsb16_arrow = \
+        col_target_t.col_target_column_uuid + col_source_t.col_source_fsb16_arrow
+    col_dispatch_code_column_uuid__uuid_pyobj = \
+        col_target_t.col_target_column_uuid + col_source_t.col_source_uuid_pyobj
+    col_dispatch_code_column_long256__fsb32_arrow = \
+        col_target_t.col_target_column_long256 + col_source_t.col_source_fsb32_arrow
+    col_dispatch_code_column_ipv4__u32_arrow = \
+        col_target_t.col_target_column_ipv4 + col_source_t.col_source_u32_arrow
+    col_dispatch_code_column_ipv4__ipv4_pyobj = \
+        col_target_t.col_target_column_ipv4 + col_source_t.col_source_ipv4_pyobj
+    col_dispatch_code_column_ts__datetime_pyobj = \
+        col_target_t.col_target_column_ts + col_source_t.col_source_datetime_pyobj
+    col_dispatch_code_at__datetime_pyobj = \
+        col_target_t.col_target_at + col_source_t.col_source_datetime_pyobj
+    col_dispatch_code_column_binary__bytes_pyobj = \
+        col_target_t.col_target_column_binary + col_source_t.col_source_bytes_pyobj
+
 
 # Int values in order for sorting (as needed for API's sequential coupling).
 cdef enum meta_target_t:
@@ -436,9 +599,15 @@ cdef struct col_setup_t:
     size_t orig_index
     Py_buffer pybuf
     ArrowSchema arrow_schema  # Schema of first chunk.
+    qwp_arrow_import* arrow_import
     col_source_t source
     meta_target_t meta_target
     col_target_t target
+    bint has_override
+    qwp_numpy_dtype override_dtype
+    uint8_t override_geohash_bits
+    bint nat_scan_done
+    bint nat_found
 
 
 cdef struct col_t:
@@ -459,8 +628,15 @@ cdef void col_t_release(col_t* col) noexcept:
     cdef size_t chunk_index
     cdef ArrowArray* chunk
 
+    if col.setup == NULL:
+        return
+
     if Py_buffer_obj_is_set(&col.setup.pybuf):
         PyBuffer_Release(&col.setup.pybuf)  # Note: Sets `.pybuf.obj` to NULL.
+
+    if col.setup.arrow_import != NULL:
+        qwp_arrow_import_free(col.setup.arrow_import)
+        col.setup.arrow_import = NULL
 
     for chunk_index in range(col.setup.chunks.n_chunks):
         chunk = &col.setup.chunks.chunks[chunk_index]
@@ -485,6 +661,44 @@ cdef struct col_t_arr:
     col_t* d
 
 
+# Storage for one column's PyObject-sniffed, pre-built typed buffers.
+#
+# Lifetime is bound to the dataframe_plan_t that owns it. Buffers are
+# heap-allocated and freed in `pyobj_built_free`. The columnar emitter
+# accesses them via raw pointers (offsets / bytes / data / validity)
+# until the chunk flush completes.
+cdef struct pyobj_built_t:
+    # Per-source typed payload. Only one of these is set:
+    #   - str_pyobj    : str_offsets + str_bytes
+    #   - int_pyobj    : data (int64*)
+    #   - float_pyobj  : data (double*)
+    #   - bool_pyobj   : data (uint8* — LSB-packed Arrow bitmap, value bits)
+    void* data
+    int32_t* str_offsets       # NULL except for str_pyobj
+    uint8_t* str_bytes         # NULL except for str_pyobj
+    size_t str_bytes_len       # bytes used (not capacity)
+
+    # Validity bitmap (Arrow LSB-first). NULL when no nulls were seen.
+    uint8_t* validity
+    bint has_nulls
+
+    size_t row_count
+
+
+cdef struct dataframe_plan_t:
+    size_t row_count
+    size_t col_count
+    line_sender_table_name c_table_name
+    int64_t at_value
+    col_t_arr cols
+    bint any_cols_need_gil
+    qdb_pystr_pos str_buf_marker
+    # Per-column pre-built PyObject buffers, indexed by col_index;
+    # NULL slot for non-PyObject columns. The outer array is NULL until
+    # `_dataframe_columnar_prebuild_pyobj` runs.
+    pyobj_built_t** pyobj_built
+
+
 cdef col_t_arr col_t_arr_blank() noexcept nogil:
     cdef col_t_arr arr
     arr.size = 0
@@ -495,10 +709,19 @@ cdef col_t_arr col_t_arr_blank() noexcept nogil:
 cdef col_t_arr col_t_arr_new(size_t size) noexcept nogil:
     cdef col_t_arr arr
     cdef size_t index
+    cdef size_t freed
     arr.size = size
     arr.d = <col_t*>calloc(size, sizeof(col_t))
+    if arr.d == NULL:
+        arr.size = 0
+        return arr
     for index in range(size):
         arr.d[index].setup = <col_setup_t*>calloc(1, sizeof(col_setup_t))
+        if arr.d[index].setup == NULL:
+            for freed in range(index):
+                free(arr.d[freed].setup)
+            free(arr.d)
+            return col_t_arr_blank()
     return arr
 
 
@@ -510,6 +733,53 @@ cdef void col_t_arr_release(col_t_arr* arr) noexcept:
         free(arr.d)
         arr.size = 0
         arr.d = NULL
+
+
+cdef dataframe_plan_t dataframe_plan_blank() noexcept nogil:
+    cdef dataframe_plan_t plan
+    plan.row_count = 0
+    plan.col_count = 0
+    plan.c_table_name.buf = NULL
+    plan.c_table_name.len = 0
+    plan.at_value = 0
+    plan.cols = col_t_arr_blank()
+    plan.any_cols_need_gil = False
+    plan.str_buf_marker.chain = 0
+    plan.str_buf_marker.string = 0
+    plan.pyobj_built = NULL
+    return plan
+
+
+cdef void pyobj_built_free(pyobj_built_t* b) noexcept nogil:
+    if b == NULL:
+        return
+    if b.data != NULL:
+        free(b.data)
+    if b.str_offsets != NULL:
+        free(b.str_offsets)
+    if b.str_bytes != NULL:
+        free(b.str_bytes)
+    if b.validity != NULL:
+        free(b.validity)
+    free(b)
+
+
+cdef void dataframe_plan_release(dataframe_plan_t* plan) noexcept:
+    cdef size_t i
+    if plan.pyobj_built != NULL:
+        for i in range(plan.col_count):
+            pyobj_built_free(plan.pyobj_built[i])
+        free(plan.pyobj_built)
+        plan.pyobj_built = NULL
+    col_t_arr_release(&plan.cols)
+    plan.row_count = 0
+    plan.col_count = 0
+    plan.c_table_name.buf = NULL
+    plan.c_table_name.len = 0
+    plan.at_value = 0
+    plan.any_cols_need_gil = False
+    plan.str_buf_marker.chain = 0
+    plan.str_buf_marker.string = 0
 
 
 cdef object _NUMPY = None  # module object
@@ -528,24 +798,18 @@ cdef object _NUMPY_DATETIME64 = None
 cdef object _NUMPY_OBJECT = None
 cdef object _PANDAS = None  # module object
 cdef object _PANDAS_NA = None  # pandas.NA
+cdef object _PANDAS_NAT = None  # pandas.NaT
 cdef object _PYARROW = None  # module object, if available or None
 
 cdef int64_t _NAT = INT64_MIN  # pandas NaT
+cdef object _EPOCH_AWARE_UTC = None  # datetime(1970, 1, 1, tzinfo=utc)
+
+cdef bint _dataframe_count_row_path_emissions = False
+cdef uint64_t _dataframe_row_path_emissions = 0
 
 
 cdef object _dataframe_may_import_deps():
-    """"
-    Lazily import module dependencies on first use to avoid startup overhead.
-
-    $ cat imp_test.py 
-    import numpy
-    import pandas
-    import pyarrow
-
-    $ time python3 ./imp_test.py
-    python3 ./imp_test.py  0.56s user 1.60s system 852% cpu 0.254 total
-    """
-    global _NUMPY, _PANDAS, _PYARROW, _PANDAS_NA
+    global _NUMPY, _PANDAS, _PANDAS_NA, _PANDAS_NAT, _EPOCH_AWARE_UTC
     global _NUMPY_BOOL
     global _NUMPY_UINT8
     global _NUMPY_INT8
@@ -564,36 +828,76 @@ cdef object _dataframe_may_import_deps():
     try:
         import pandas
         import numpy
+    except ImportError as ie:
+        raise ImportError(
+            'Missing dependencies: `pandas` and `numpy` must be installed ' +
+            'to use the `.dataframe()` method. ' +
+            'See: https://py-questdb-client.readthedocs.io/' +
+            'en/latest/installation.html.') from ie
+    _NUMPY_BOOL = type(numpy.dtype('bool'))
+    _NUMPY_UINT8 = type(numpy.dtype('uint8'))
+    _NUMPY_INT8 = type(numpy.dtype('int8'))
+    _NUMPY_UINT16 = type(numpy.dtype('uint16'))
+    _NUMPY_INT16 = type(numpy.dtype('int16'))
+    _NUMPY_UINT32 = type(numpy.dtype('uint32'))
+    _NUMPY_INT32 = type(numpy.dtype('int32'))
+    _NUMPY_UINT64 = type(numpy.dtype('uint64'))
+    _NUMPY_INT64 = type(numpy.dtype('int64'))
+    _NUMPY_FLOAT32 = type(numpy.dtype('float32'))
+    _NUMPY_FLOAT64 = type(numpy.dtype('float64'))
+    _NUMPY_DATETIME64 = type(numpy.dtype('datetime64[ns]'))
+    _NUMPY_OBJECT = type(numpy.dtype('object'))
+    _PANDAS = pandas
+    _PANDAS_NA = pandas.NA
+    _PANDAS_NAT = pandas.NaT
+    _EPOCH_AWARE_UTC = datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc)
+    _NUMPY = numpy
+
+
+cdef object _dataframe_require_pyarrow():
+    global _PYARROW
+    if _PYARROW is not None:
+        return
+    try:
         import pyarrow
     except ImportError as ie:
         raise ImportError(
-            'Missing dependencies: `pandas`, `numpy` and `pyarrow` must all ' +
-            'be installed to use the `.dataframe()` method. ' +
-            'See: https://py-questdb-client.readthedocs.io/' +
-            'en/latest/installation.html.') from ie
-    _NUMPY = numpy
-    _NUMPY_BOOL = type(_NUMPY.dtype('bool'))
-    _NUMPY_UINT8 = type(_NUMPY.dtype('uint8'))
-    _NUMPY_INT8 = type(_NUMPY.dtype('int8'))
-    _NUMPY_UINT16 = type(_NUMPY.dtype('uint16'))
-    _NUMPY_INT16 = type(_NUMPY.dtype('int16'))
-    _NUMPY_UINT32 = type(_NUMPY.dtype('uint32'))
-    _NUMPY_INT32 = type(_NUMPY.dtype('int32'))
-    _NUMPY_UINT64 = type(_NUMPY.dtype('uint64'))
-    _NUMPY_INT64 = type(_NUMPY.dtype('int64'))
-    _NUMPY_FLOAT32 = type(_NUMPY.dtype('float32'))
-    _NUMPY_FLOAT64 = type(_NUMPY.dtype('float64'))
-    _NUMPY_DATETIME64 = type(_NUMPY.dtype('datetime64[ns]'))
-    _NUMPY_OBJECT = type(_NUMPY.dtype('object'))
-    _PANDAS = pandas
-    _PANDAS_NA = pandas.NA
+            '`pyarrow` is required for this DataFrame path '
+            '(ArrowDtype columns, pyarrow Table/RecordBatch sources, '
+            'schema_overrides). Install with `pip install pyarrow`.') from ie
     _PYARROW = pyarrow
+
+
+cdef bint _PYARROW_IMPORT_FAILED = False
+
+
+cdef bint _dataframe_try_import_pyarrow():
+    global _PYARROW, _PYARROW_IMPORT_FAILED
+    if _PYARROW is not None:
+        return True
+    if _PYARROW_IMPORT_FAILED:
+        return False
+    try:
+        import pyarrow
+    except ImportError:
+        _PYARROW_IMPORT_FAILED = True
+        return False
+    _PYARROW = pyarrow
+    return True
+
+
+def _debug_dataframe_pyarrow_loaded():
+    """Internal: True iff `.dataframe()` has lazily imported pyarrow in
+    this process. Intended for tests that verify a code path stayed
+    pyarrow-free."""
+    return _PYARROW is not None
 
 
 cdef object _dataframe_check_is_dataframe(object df):
     if not isinstance(df, _PANDAS.DataFrame):
-        raise IngressError(
-            IngressErrorCode.InvalidApiCall,
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidApiCall,
             f'Bad argument `df`: Expected {_fqn(_PANDAS.DataFrame)}, ' +
             f'not an object of type {_fqn(type(df))}.')
 
@@ -623,7 +927,7 @@ cdef ssize_t _dataframe_resolve_table_name(
             try:
                 str_to_table_name_copy(b, <PyObject*>table_name, name_out)
                 return -1  # Magic value for "no column index".
-            except IngressError as ie:
+            except QuestDBError as ie:
                 raise ValueError(
                     f'Bad argument `table_name`: {ie}')
         else:
@@ -658,7 +962,7 @@ cdef ssize_t _dataframe_resolve_table_name(
         try:
             str_to_table_name_copy(b, <PyObject*>df.index.name, name_out)
             return -1  # Magic value for "no column index".
-        except IngressError as ie:
+        except QuestDBError as ie:
             raise ValueError(
                 f'Bad dataframe index name as table name: {ie}')
     else:
@@ -696,9 +1000,11 @@ cdef void_int _dataframe_check_column_is_str(
     cdef str inferred_descr = ""
     if not source in _STR_SOURCES:
         if isinstance(pandas_col.dtype, _NUMPY_OBJECT):
-            inferred_descr = f' (inferred type: {_PYOBJ_SOURCE_DESCR[source]})'
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+            inferred_descr = (
+                f' (inferred type: '
+                f'{_PYOBJ_SOURCE_DESCR.get(source, "unknown")})')
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             err_msg_prefix + 
             f'Bad dtype `{pandas_col.dtype}`{inferred_descr} for the ' +
             f'{pandas_col.name!r} column: Must be a strings column.')
@@ -839,24 +1145,38 @@ cdef int _dataframe_classify_timestamp_dtype(object dtype) except -1:
         elif dtype.unit == 'us':
             return col_source_t.col_source_dt64us_tz_arrow
         else:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 f'Unsupported pandas dtype {dtype} unit {dtype.unit}. ' +
                 'Raise an issue if you think it should be supported: ' +
                 'https://github.com/questdb/py-questdb-client/issues.')
     elif isinstance(dtype, _PANDAS.ArrowDtype):
+        _dataframe_require_pyarrow()
         arrow_type = dtype.pyarrow_dtype
         if arrow_type.id == _PYARROW.lib.Type_TIMESTAMP:
             if arrow_type.unit == "ns":
                 return col_source_t.col_source_dt64ns_tz_arrow
             elif arrow_type.unit == "us":
                 return col_source_t.col_source_dt64us_tz_arrow
-            else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
-                    f'Unsupported arrow dtype {dtype} unit {arrow_type.unit}. ' +
-                    'Raise an issue if you think it should be supported: ' +
-                    'https://github.com/questdb/py-questdb-client/issues.')
+            # s / ms fall through: field -> generic Arrow passthrough;
+            # designated-at -> _dataframe_classify_at_timestamp_dtype.
+    return 0
+
+
+cdef int _dataframe_classify_at_timestamp_dtype(object dtype) except -1:
+    # ms / s designated-`at` Arrow timestamps, widened to micros in Rust by
+    # the millis/seconds designated-timestamp FFI. Kept out of the shared
+    # field classifier so timestamp fields still route to the generic Arrow
+    # passthrough and row-ILP stays untouched.
+    cdef object arrow_type
+    if isinstance(dtype, _PANDAS.ArrowDtype):
+        _dataframe_require_pyarrow()
+        arrow_type = dtype.pyarrow_dtype
+        if arrow_type.id == _PYARROW.lib.Type_TIMESTAMP:
+            if arrow_type.unit == "ms":
+                return col_source_t.col_source_dt64ms_tz_arrow
+            elif arrow_type.unit == "s":
+                return col_source_t.col_source_dt64s_tz_arrow
     return 0
 
 
@@ -865,11 +1185,14 @@ cdef ssize_t _dataframe_resolve_at(
         col_t_arr* cols,
         object at,
         size_t col_count,
-        int64_t* at_value_out) except -2:
+        int64_t* at_value_out,
+        bint columnar) except -2:
     cdef size_t col_index
     cdef object dtype
     cdef PandasCol pandas_col
     cdef TimestampNanos at_nanos
+    cdef int64_t at_value
+    cdef int at_source
     if at is None:
         at_value_out[0] = _AT_IS_SERVER_NOW
         return -1
@@ -878,11 +1201,12 @@ cdef ssize_t _dataframe_resolve_at(
         at_value_out[0] = at_nanos._value
         return -1
     elif isinstance(at, cp_datetime):
-        if at.timestamp() < 0:
+        at_value = datetime_to_nanos(at)
+        if at_value < 0:
             raise ValueError(
                 'Bad argument `at`: Cannot use a datetime before the ' +
                 'Unix epoch (1970-01-01 00:00:00).')
-        at_value_out[0] = datetime_to_nanos(at)
+        at_value_out[0] = at_value
         return -1
     elif isinstance(at, str):
         _dataframe_get_loc(df, at, 'at', &col_index)
@@ -899,20 +1223,32 @@ cdef ssize_t _dataframe_resolve_at(
         col = &cols.d[col_index]
         col.setup.meta_target = meta_target_t.meta_target_at
         return col_index
-    else:
-        raise TypeError(
-            f'Bad argument `at`: Bad dtype `{dtype}` ' +
-            f'for the {at!r} column: Must be a {_SUPPORTED_DATETIMES} column.')
+    if columnar:
+        # ms / s Arrow timestamps resolved to the generic passthrough source
+        # in `_dataframe_resolve_source_and_buffers`; the buffers are already
+        # mapped, so override the source to the designated-ts unit and let the
+        # Rust millis/seconds FFI widen to micros.
+        at_source = _dataframe_classify_at_timestamp_dtype(dtype)
+        if at_source != 0:
+            at_value_out[0] = _AT_IS_SET_BY_COLUMN
+            col = &cols.d[col_index]
+            col.setup.source = <col_source_t>at_source
+            col.setup.meta_target = meta_target_t.meta_target_at
+            return col_index
+    raise TypeError(
+        f'Bad argument `at`: Bad dtype `{dtype}` ' +
+        f'for the {at!r} column: Must be a {_SUPPORTED_DATETIMES} column.')
 
 
 cdef void_int _dataframe_alloc_chunks(
         size_t n_chunks, col_t* col) except -1:
-    col.setup.chunks.n_chunks = n_chunks
-    col.setup.chunks.chunks = <ArrowArray*>calloc(
-        col.setup.chunks.n_chunks + 1,  # See `_dataframe_col_advance` on why +1.
+    cdef ArrowArray* chunks = <ArrowArray*>calloc(
+        n_chunks + 1,  # See `_dataframe_col_advance` on why +1.
         sizeof(ArrowArray))
-    if col.setup.chunks.chunks == NULL:
+    if chunks == NULL:
         raise MemoryError()
+    col.setup.chunks.chunks = chunks
+    col.setup.chunks.n_chunks = n_chunks
 
 
 cdef void _dataframe_free_mapped_arrow(ArrowArray* arr) noexcept nogil:
@@ -935,12 +1271,12 @@ cdef void_int _dataframe_series_as_pybuf(
         # Also note that this guarantees a 1D buffer.
         get_buf_ret = PyObject_GetBuffer(nparr, &col.setup.pybuf, PyBUF_SIMPLE)
     except ValueError as ve:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: {ve}') from ve
     except BufferError as be:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: Expected a buffer, got ' +
             f'{pandas_col.series!r} ({_fqn(type(pandas_col.series))})') from be
     _dataframe_alloc_chunks(1, col)
@@ -954,6 +1290,8 @@ cdef void_int _dataframe_series_as_pybuf(
     mapped.n_buffers = 2
     mapped.n_children = 0
     mapped.buffers = <const void**>calloc(2, sizeof(const void*))
+    if mapped.buffers == NULL:
+        raise MemoryError()
     mapped.buffers[0] = NULL
     mapped.buffers[1] = <const void*>col.setup.pybuf.buf
     mapped.children = NULL
@@ -962,6 +1300,7 @@ cdef void_int _dataframe_series_as_pybuf(
 
 cdef list _dataframe_series_to_arrow_chunks(PandasCol pandas_col):
     cdef object array
+    _dataframe_require_pyarrow()
     array = _PYARROW.Array.from_pandas(pandas_col.series)
     if isinstance(array, _PYARROW.ChunkedArray):
         return array.chunks
@@ -1003,16 +1342,6 @@ cdef void_int _dataframe_category_series_as_arrow(
     cdef const char* format
     cdef list chunks = _dataframe_series_to_arrow_chunks(pandas_col)
 
-    # Pandas 3.x with pyarrow may produce large_string ('U') dictionary
-    # values. Cast to regular string ('u') so our existing category
-    # accessors (which use int32 offsets) work unchanged.
-    if (len(chunks) > 0 and
-            hasattr(chunks[0].type, 'value_type') and
-            chunks[0].type.value_type == _PYARROW.large_string()):
-        target_type = _PYARROW.dictionary(
-            chunks[0].type.index_type, _PYARROW.string())
-        chunks = [chunk.cast(target_type) for chunk in chunks]
-
     _dataframe_export_arrow_chunks(chunks, col)
 
     format = col.setup.arrow_schema.format
@@ -1023,27 +1352,52 @@ cdef void_int _dataframe_category_series_as_arrow(
     elif strncmp(format, _ARROW_FMT_INT32, 1) == 0:
         col.setup.source = col_source_t.col_source_str_i32_cat
     else:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
             'Unsupported arrow category index type. ' +
             f'Got {(<bytes>format).decode("utf-8")!r}.')
 
     format = col.setup.arrow_schema.dictionary.format
-    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0):
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+    if (strncmp(format, _ARROW_FMT_UTF8_STRING, 1) != 0 and
+            strncmp(format, _ARROW_FMT_LRG_UTF8_STRING, 1) != 0):
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: ' +
             'Expected a category of strings, ' +
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
     cdef bint is_decimal_col = False
+    _dataframe_require_pyarrow()
+    if arrowtype.id == _PYARROW.lib.Type_STRING:
+        _dataframe_series_as_arrow(pandas_col, col)
+        col.setup.source = col_source_t.col_source_str_utf8_arrow
+        col.scale = 0
+        return 0
+    elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
+        _dataframe_series_as_arrow(pandas_col, col)
+        col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
+        col.scale = 0
+        return 0
+
+    # Unwrap pyarrow extension types (e.g. `arrow.uuid` wrapping
+    # `FixedSizeBinary(16)`) to their storage type so dispatch picks
+    # the storage-shape source. The wire format is identical for both
+    # forms; pyarrow may or may not have the extension registered at
+    # runtime, so we accept either input and produce the same source.
+    # pyarrow exposes no `Type_EXTENSION` constant in all versions we
+    # support; check via `BaseExtensionType` instead.
+    if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
+        arrowtype = arrowtype.storage_type
+
+    cdef object t_dec32 = getattr(_PYARROW.lib, 'Type_DECIMAL32', None)
+    cdef object t_dec64 = getattr(_PYARROW.lib, 'Type_DECIMAL64', None)
     _dataframe_series_as_arrow(pandas_col, col)
-    if arrowtype.id == _PYARROW.lib.Type_DECIMAL32:
+    if t_dec32 is not None and arrowtype.id == t_dec32:
         col.setup.source = col_source_t.col_source_decimal32_arrow
         is_decimal_col = True
-    elif arrowtype.id == _PYARROW.lib.Type_DECIMAL64:
+    elif t_dec64 is not None and arrowtype.id == t_dec64:
         col.setup.source = col_source_t.col_source_decimal64_arrow
         is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_DECIMAL128:
@@ -1054,8 +1408,6 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         is_decimal_col = True
     elif arrowtype.id == _PYARROW.lib.Type_BOOL:
         col.setup.source = col_source_t.col_source_bool_arrow
-    elif arrowtype.id == _PYARROW.lib.Type_LARGE_STRING:
-        col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
     elif arrowtype.id == _PYARROW.lib.Type_FLOAT:
         col.setup.source = col_source_t.col_source_f32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_DOUBLE:
@@ -1068,16 +1420,22 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         col.setup.source = col_source_t.col_source_i32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_INT64:
         col.setup.source = col_source_t.col_source_i64_arrow
+    elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 16):
+        col.setup.source = col_source_t.col_source_fsb16_arrow
+    elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 32):
+        col.setup.source = col_source_t.col_source_fsb32_arrow
+    elif arrowtype.id == _PYARROW.lib.Type_UINT32:
+        col.setup.source = col_source_t.col_source_u32_arrow
     else:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
-            f'Unsupported arrow type {arrowtype} for column {pandas_col.name!r}. ' +
-            'Raise an issue if you think it should be supported: ' +
-            'https://github.com/questdb/py-questdb-client/issues.')
+        col.setup.source = col_source_t.col_source_arrow_passthrough
+        col.scale = 0
+        return 0
     if is_decimal_col:
         if arrowtype.scale < 0 or arrowtype.scale > 76:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 f'Bad column {pandas_col.name!r}: ' +
                 f'Unsupported decimal scale {arrowtype.scale}: ' +
                 'Must be in the range 0 to 76 inclusive.')
@@ -1094,6 +1452,7 @@ cdef inline bint _dataframe_is_null_pyobj(PyObject* obj) noexcept:
     return (
         (obj == Py_None) or
         (obj == <PyObject*>_PANDAS_NA) or
+        (obj == <PyObject*>_PANDAS_NAT) or
         _dataframe_is_float_nan(obj))
 
 # noinspection PyUnreachableCode
@@ -1138,24 +1497,28 @@ cdef void_int _dataframe_series_sniff_pyobj(
                     arr_type_name = '??unknown??'
                     arr_descr = cnp.PyArray_DescrFromType(arr_type)
                     if arr_descr is not None:
-                        arr_type_name = arr_descr.name.decode('ascii')
-                    raise IngressError(
-                        IngressErrorCode.BadDataFrame,
+                        # numpy 2.x returns str; 1.x returned bytes.
+                        arr_type_name = arr_descr.name
+                        if isinstance(arr_type_name, bytes):
+                            arr_type_name = arr_type_name.decode('ascii')
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
                         f'Bad column {pandas_col.name!r}: ' +
                         'Unsupported object column containing a numpy array ' +
                         f'of an unsupported element type {arr_type_name}.')
             elif PyBytes_CheckExact(obj):
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
-                    f'Bad column {pandas_col.name!r}: ' +
-                    'Unsupported object column containing bytes.' +
-                    'If this is a string column, decode it first. ' +
-                    'See: https://stackoverflow.com/questions/40389764/')
+                col.setup.source = col_source_t.col_source_bytes_pyobj
+            elif isinstance(<object>obj, _uuid.UUID):
+                col.setup.source = col_source_t.col_source_uuid_pyobj
+            elif isinstance(<object>obj, _ipaddress.IPv4Address):
+                col.setup.source = col_source_t.col_source_ipv4_pyobj
+            elif isinstance(<object>obj, datetime.datetime):
+                col.setup.source = col_source_t.col_source_datetime_pyobj
             elif isinstance(<object>obj, Decimal):
                 col.setup.source = col_source_t.col_source_decimal_pyobj
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad column {pandas_col.name!r}: ' +
                     f'Unsupported object column containing an object of type ' +
                     _fqn(type(<object>obj)) + '.')
@@ -1256,8 +1619,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
             elif strncmp(col.setup.arrow_schema.format, _ARROW_FMT_LRG_UTF8_STRING, 1) == 0:
                 col.setup.source = col_source_t.col_source_str_lrg_utf8_arrow
             else:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Unknown string dtype storage: {dtype.storage} ' +
                     f'for column {pandas_col.name} of dtype {dtype}. ' +
                     f'Format specifier: ' + repr(bytes(col.setup.arrow_schema.format).decode('latin-1')))
@@ -1265,8 +1628,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
             col.setup.source = col_source_t.col_source_str_pyobj
             _dataframe_series_as_pybuf(pandas_col, col)
         else:
-            raise IngressError(
-                IngressErrorCode.BadDataFrame,
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
                 f'Unknown string dtype storage: f{dtype.storage} ' +
                 f'for column {pandas_col.name} of dtype {dtype}.')
     elif isinstance(dtype, _PANDAS.CategoricalDtype):
@@ -1276,26 +1639,33 @@ cdef void_int _dataframe_resolve_source_and_buffers(
     elif isinstance(dtype, _PANDAS.ArrowDtype):
         _dataframe_series_resolve_arrow(pandas_col, dtype.pyarrow_dtype, col)
     else:
-        raise IngressError(
-            IngressErrorCode.BadDataFrame,
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
             f'Unsupported dtype {dtype} for column {pandas_col.name!r}. ' +
             'Raise an issue if you think it should be supported: ' +
             'https://github.com/questdb/py-questdb-client/issues.')
 
 cdef void_int _dataframe_resolve_target(
-        PandasCol pandas_col, col_t* col) except -1:
+        PandasCol pandas_col, col_t* col, tuple field_targets) except -1:
     cdef col_target_t target
     cdef set target_sources
     if col.setup.meta_target in _DIRECT_META_TARGETS:
         col.setup.target = <col_target_t><int>col.setup.meta_target
         return 0
-    for target in _FIELD_TARGETS:
+    for target in field_targets:
         target_sources = _TARGET_TO_SOURCES[target]
         if col.setup.source in target_sources:
             col.setup.target = target
             return 0
-    raise IngressError(
-        IngressErrorCode.BadDataFrame,
+    if col.setup.source in _COLUMNAR_ONLY_PYOBJ_SOURCES:
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Column {pandas_col.name!r} holds '
+            f'{_PYOBJ_SOURCE_DESCR[col.setup.source]} objects, which are only '
+            f'supported on the columnar QuestDB.dataframe() path, not the '
+            f'row-oriented Sender.dataframe().')
+    raise QuestDBError(
+        QuestDBErrorCode.BadDataFrame,
         f'Could not map column source type (code {col.setup.source} for ' +
         f'column {pandas_col.name!r} ' +
         f' ({pandas_col.dtype}) to any ILP type.')
@@ -1304,7 +1674,17 @@ cdef void_int _dataframe_resolve_target(
 cdef void _dataframe_init_cursor(col_t* col) noexcept nogil:
     col.cursor.chunk = col.setup.chunks.chunks
     col.cursor.chunk_index = 0
+    while ((col.cursor.chunk_index < col.setup.chunks.n_chunks) and
+            (col.cursor.chunk.length == 0)):
+        col.cursor.chunk_index += 1
+        col.cursor.chunk += 1
     col.cursor.offset = col.cursor.chunk.offset
+    col.cursor.dictionary_large_offsets = (
+        col.setup.arrow_schema.dictionary != NULL and
+        strncmp(
+            col.setup.arrow_schema.dictionary.format,
+            _ARROW_FMT_LRG_UTF8_STRING,
+            1) == 0)
 
 
 cdef void_int _dataframe_resolve_cols(
@@ -1343,14 +1723,15 @@ cdef void_int _dataframe_resolve_cols(
 cdef void_int _dataframe_resolve_cols_target_name_and_dc(
         qdb_pystr_buf* b,
         list pandas_cols,
-        col_t_arr* cols) except -1:
+        col_t_arr* cols,
+        tuple field_targets) except -1:
     cdef size_t index
     cdef col_t* col
     cdef PandasCol pandas_col
     for index in range(cols.size):
         col = &cols.d[index]
         pandas_col = pandas_cols[index]
-        _dataframe_resolve_target(pandas_col, col)
+        _dataframe_resolve_target(pandas_col, col, field_targets)
         if col.setup.source not in _TARGET_TO_SOURCES[col.setup.target]:
             raise ValueError(
                 f'Bad value: Column {pandas_col.name!r} ' +
@@ -1387,7 +1768,8 @@ cdef void_int _dataframe_resolve_args(
         line_sender_table_name* c_table_name_out,
         int64_t* at_value_out,
         col_t_arr* cols,
-        bint* any_cols_need_gil_out) except -1:
+        bint* any_cols_need_gil_out,
+        tuple field_targets) except -1:
     cdef ssize_t name_col
     cdef ssize_t at_col
 
@@ -1404,10 +1786,115 @@ cdef void_int _dataframe_resolve_args(
         table_name_col,
         col_count,
         c_table_name_out)
-    at_col = _dataframe_resolve_at(df, cols, at, col_count, at_value_out)
+    at_col = _dataframe_resolve_at(
+        df, cols, at, col_count, at_value_out,
+        field_targets is _FIELD_TARGETS_QWP)
     _dataframe_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
-    _dataframe_resolve_cols_target_name_and_dc(b, pandas_cols, cols)
+    _dataframe_resolve_cols_target_name_and_dc(
+        b, pandas_cols, cols, field_targets)
     qsort(cols.d, col_count, sizeof(col_t), _dataframe_compare_cols)
+
+
+cdef void_int _dataframe_plan_build(
+        qdb_pystr_buf* b,
+        object df,
+        object table_name,
+        object table_name_col,
+        object symbols,
+        object at,
+        dataframe_plan_t* plan,
+        tuple field_targets) except -1:
+    _dataframe_may_import_deps()
+    _dataframe_check_is_dataframe(df)
+    plan.row_count = len(df)
+    if (len(df.columns) == 0) or (plan.row_count == 0):
+        plan.col_count = 0
+        return 0
+
+    plan.col_count = len(df.columns)
+    qdb_pystr_buf_clear(b)
+    plan.cols = col_t_arr_new(plan.col_count)
+    if plan.cols.d == NULL:
+        raise MemoryError()
+    _dataframe_resolve_args(
+        df,
+        table_name,
+        table_name_col,
+        symbols,
+        at if not isinstance(at, ServerTimestampType) else None,
+        b,
+        plan.col_count,
+        &plan.c_table_name,
+        &plan.at_value,
+        &plan.cols,
+        &plan.any_cols_need_gil,
+        field_targets)
+
+    # Headers and table names stored in `b` are borrowed by the plan.
+    # Serialization rewinds to this point for every row without dropping
+    # those borrowed strings.
+    plan.str_buf_marker = qdb_pystr_buf_tell(b)
+
+
+cdef object _dataframe_plan_debug_str(const char* buf, size_t length):
+    if buf == NULL:
+        return None
+    return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>length)
+
+
+def _debug_dataframe_plan(
+        object df,
+        *,
+        object table_name=None,
+        object table_name_col=None,
+        object symbols='auto',
+        object at=None):
+    cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+    cdef dataframe_plan_t plan = dataframe_plan_blank()
+    cdef size_t col_index
+    cdef col_t* col
+    cdef list cols = []
+    try:
+        _dataframe_plan_build(
+            b,
+            df,
+            table_name,
+            table_name_col,
+            symbols,
+            at,
+            &plan,
+            _FIELD_TARGETS_ROW)
+        for col_index in range(plan.col_count):
+            col = &plan.cols.d[col_index]
+            cols.append({
+                'orig_index': col.setup.orig_index,
+                'orig_name': df.columns[col.setup.orig_index],
+                'target': _TARGET_NAMES[col.setup.target],
+                'target_name': _dataframe_plan_debug_str(
+                    col.name.buf,
+                    col.name.len),
+                'source_code': <int>col.setup.source,
+                'dispatch_code': <int>col.dispatch_code,
+            })
+        if plan.at_value == _AT_IS_SERVER_NOW:
+            at_value = 'server_now'
+        elif plan.at_value == _AT_IS_SET_BY_COLUMN:
+            at_value = 'column'
+        else:
+            at_value = plan.at_value
+        return {
+            'row_count': plan.row_count,
+            'col_count': plan.col_count,
+            'fixed_table_name': _dataframe_plan_debug_str(
+                plan.c_table_name.buf,
+                plan.c_table_name.len),
+            'at_value': at_value,
+            'any_cols_need_gil': bool(plan.any_cols_need_gil),
+            'cols': cols,
+        }
+    finally:
+        dataframe_plan_release(&plan)
+        qdb_pystr_buf_free(b)
 
 
 cdef inline bint _dataframe_arrow_get_bool(col_cursor_t* cursor) noexcept nogil:
@@ -1434,13 +1921,23 @@ cdef inline void _dataframe_arrow_get_cat_value(
         size_t* len_out,
         const char** buf_out) noexcept nogil:
     cdef int32_t* value_index_access
+    cdef int64_t* value_lrg_index_access
     cdef int32_t value_begin
+    cdef int64_t value_lrg_begin
     cdef uint8_t* value_char_access
-    value_index_access = <int32_t*>cursor.chunk.dictionary.buffers[1]
-    value_begin = value_index_access[key]
-    len_out[0] = value_index_access[key + 1] - value_begin
     value_char_access = <uint8_t*>cursor.chunk.dictionary.buffers[2]
-    buf_out[0] = <const char*>&value_char_access[value_begin]
+    if cursor.dictionary_large_offsets:
+        value_lrg_index_access = <int64_t*>cursor.chunk.dictionary.buffers[1]
+        value_lrg_begin = value_lrg_index_access[key]
+        len_out[0] = <size_t>(
+            value_lrg_index_access[key + 1] - value_lrg_begin)
+        buf_out[0] = <const char*>&value_char_access[
+            <size_t>value_lrg_begin]
+    else:
+        value_index_access = <int32_t*>cursor.chunk.dictionary.buffers[1]
+        value_begin = value_index_access[key]
+        len_out[0] = value_index_access[key + 1] - value_begin
+        buf_out[0] = <const char*>&value_char_access[value_begin]
 
 
 cdef inline bint _dataframe_arrow_get_cat_i8(
@@ -2254,19 +2751,65 @@ cdef void_int _dataframe_serialize_cell_column_ts__dt64us_numpy(
             raise c_err_to_py(err)
 
 
+cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
+        line_sender_buffer* ls_buf,
+        qdb_pystr_buf* b,
+        col_t* col) except -1:
+    cdef line_sender_error* err = NULL
+    cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
+    cdef PyObject* cell = access[col.cursor.offset]
+    cdef object dt
+    cdef object delta
+    cdef int64_t micros
+    if _dataframe_is_null_pyobj(cell):
+        return 0
+    if not isinstance(<object>cell, cp_datetime):
+        raise ValueError(
+            'Expected an object of type datetime, got an object of type ' +
+            _fqn(type(<object>cell)) + '.')
+    dt = <object>cell
+    if dt.tzinfo is None:
+        micros = (
+            _days_from_civil(
+                PyDateTime_GET_YEAR(dt),
+                PyDateTime_GET_MONTH(dt),
+                PyDateTime_GET_DAY(dt)) * 86_400_000_000
+            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * 3_600_000_000
+            + <int64_t>PyDateTime_DATE_GET_MINUTE(dt) * 60_000_000
+            + <int64_t>PyDateTime_DATE_GET_SECOND(dt) * 1_000_000
+            + <int64_t>PyDateTime_DATE_GET_MICROSECOND(dt))
+    else:
+        delta = dt - _EPOCH_AWARE_UTC
+        micros = <int64_t>(
+            delta.days * 86_400_000_000
+            + delta.seconds * 1_000_000
+            + delta.microseconds)
+    if not line_sender_buffer_column_ts_micros(ls_buf, col.name, micros, &err):
+        raise c_err_to_py(err)
+    return 0
+
+
 cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
         col_t* col) except -1:
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
-    cdef PyArrayObject* arr = <PyArrayObject*> cell
-    cdef npy_int arr_type = PyArray_TYPE(arr)
+    cdef PyArrayObject* arr
+    cdef npy_int arr_type
     cdef cnp.dtype arr_descr
+    if _dataframe_is_null_pyobj(cell):
+        return 0
+    if not PyArray_CheckExact(cell):
+        raise ValueError(
+            'Expected an object of type numpy.ndarray, got an object of type ' +
+            _fqn(type(<object>cell)) + '.')
+    arr = <PyArrayObject*>cell
+    arr_type = PyArray_TYPE(arr)
     if arr_type != NPY_DOUBLE:
         arr_descr = cnp.PyArray_DescrFromType(arr_type)
-        raise IngressError(
-            IngressErrorCode.ArrayWriteToBufferError,
+        raise QuestDBError(
+            QuestDBErrorCode.ArrayError,
             f'Only float64 numpy arrays are supported, got dtype: {arr_descr}')
     cdef:
         size_t rank = PyArray_NDIM(arr)
@@ -2301,12 +2844,17 @@ cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_colu
     cdef uint8_t[32] unscaled
     cdef int unscaled_length
 
+    if not isinstance(<object>value, Decimal):
+        raise ValueError(
+            'Expected an object of type Decimal, got an object of type ' +
+            _fqn(type(<object>value)) + '.')
+
     unscaled_length = decimal_pyobj_to_binary(
         value,
         unscaled,
         &scale,
-        IngressError,
-        IngressErrorCode.BadDataFrame)
+        QuestDBError,
+        QuestDBErrorCode.BadDataFrame)
     if unscaled_length == 0:
         return 0
 
@@ -2516,6 +3064,9 @@ cdef void_int _dataframe_serialize_cell(
         col_t* col,
         PyThreadState** gs) except -1:
     cdef col_dispatch_code_t dc = col.dispatch_code
+    global _dataframe_row_path_emissions
+    if _dataframe_count_row_path_emissions:
+        _dataframe_row_path_emissions += 1
     # Note!: Code below will generate a `switch` statement.
     # Ensure this happens! Don't break the `dc == ...` pattern.
     if dc == col_dispatch_code_t.col_dispatch_code_skip_nulls:
@@ -2610,6 +3161,8 @@ cdef void_int _dataframe_serialize_cell(
         _dataframe_serialize_cell_column_ts__dt64ns_numpy(ls_buf, b, col, gs)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__dt64us_numpy:
         _dataframe_serialize_cell_column_ts__dt64us_numpy(ls_buf, b, col, gs)
+    elif dc == col_dispatch_code_t.col_dispatch_code_column_ts__datetime_pyobj:
+        _dataframe_serialize_cell_column_ts__datetime_pyobj(ls_buf, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_arr_f64__arr_f64_numpyobj:
         _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(ls_buf, b, col)
     elif dc == col_dispatch_code_t.col_dispatch_code_column_decimal__decimal_pyobj:
@@ -2642,37 +3195,24 @@ cdef void_int _dataframe_serialize_cell(
 
 
 cdef void _dataframe_col_advance(col_t* col) noexcept nogil:
-    # Branchless version of:
-    #     cdef bint new_chunk = cursor.offset == <size_t>cursor.chunk.length
-    #     if new_chunk == 0:
-    #         cursor.chunk_index += 1
-    #         cursor.chunk += 1  # pointer advance
-    #
-    #     if new_chunk:
-    #         cursor.offset = cursor.chunk.offset
-    #     else:
-    #         cursor.offset += 1
-    #
-    # (Checked with Godbolt, GCC -O3 code was rather "jumpy")
     cdef col_cursor_t* cursor = &col.cursor
-    cdef size_t new_chunk  # disguised bint. Either 0 or 1.
     cursor.offset += 1
-    new_chunk = cursor.offset == <size_t>cursor.chunk.length
-    cursor.chunk_index += new_chunk
-    cursor.chunk += new_chunk
-    # Note: We get away with this because we've allocated one extra blank chunk.
-    # This ensures that accessing `cursor.chunk.offset` doesn't segfault.
-    cursor.offset = (
-        (new_chunk * cursor.chunk.offset) +
-        ((not new_chunk) * cursor.offset))
+    # Note: We get away with accessing `cursor.chunk.offset` past the last
+    # chunk because we've allocated one extra blank chunk.
+    while ((cursor.chunk_index < col.setup.chunks.n_chunks) and
+            (cursor.offset ==
+                <size_t>(cursor.chunk.offset + cursor.chunk.length))):
+        cursor.chunk_index += 1
+        cursor.chunk += 1
+        cursor.offset = cursor.chunk.offset
 
 
 cdef void_int _dataframe_handle_auto_flush(
             const auto_flush_t* af,
             line_sender_buffer* ls_buf,
             PyThreadState** gs) except -1:
-    cdef line_sender_error* flush_err
-    cdef line_sender_error* marker_err
+    cdef line_sender_error* flush_err = NULL
+    cdef line_sender_error* marker_err = NULL
     cdef bint flush_ok
     cdef bint marker_ok
     if (af.sender == NULL) or (not should_auto_flush(&af.mode, ls_buf, af.last_flush_ms[0])):
@@ -2696,6 +3236,8 @@ cdef void_int _dataframe_handle_auto_flush(
         _ensure_has_gil(gs)
 
     if not flush_ok:
+        if not marker_ok:
+            line_sender_error_free(marker_err)
         raise c_err_to_py_fmt(flush_err, _FLUSH_FMT)
 
     # The flush error takes precedence over the marker error.
@@ -2722,13 +3264,7 @@ cdef void_int _dataframe(
         object table_name_col,
         object symbols,
         object at) except -1:
-    cdef size_t col_count
-    cdef line_sender_table_name c_table_name
-    cdef int64_t at_value = _AT_IS_SET_BY_COLUMN
-    cdef col_t_arr cols = col_t_arr_blank()
-    cdef bint any_cols_need_gil = False
-    cdef qdb_pystr_pos str_buf_marker
-    cdef size_t row_count
+    cdef dataframe_plan_t plan = dataframe_plan_blank()
     cdef line_sender_error* err = NULL
     cdef size_t row_index
     cdef size_t col_index
@@ -2737,51 +3273,38 @@ cdef void_int _dataframe(
     cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
     cdef bint had_gil
     cdef bint was_serializing_cell = False
-
-    _dataframe_may_import_deps()
-    _dataframe_check_is_dataframe(df)
-    row_count = len(df)
-    col_count = len(df.columns)
-    if (col_count == 0) or (row_count == 0):
-        return 0  # Nothing to do.
+    cdef bint was_auto_flush = False
+    cdef bint plan_has_content
 
     try:
-        qdb_pystr_buf_clear(b)
-        cols = col_t_arr_new(col_count)
-        _dataframe_resolve_args(
+        _dataframe_plan_build(
+            b,
             df,
             table_name,
             table_name_col,
             symbols,
-            at if not isinstance(at, ServerTimestampType) else None,
-            b,
-            col_count,
-            &c_table_name,
-            &at_value,
-            &cols,
-            &any_cols_need_gil)
-
-        # We've used the str buffer up to a point for the headers.
-        # Instead of clearing it (which would clear the headers' memory)
-        # we will truncate (rewind) back to this position.
-        str_buf_marker = qdb_pystr_buf_tell(b)
+            at,
+            &plan,
+            _FIELD_TARGETS_ROW)
+        if (plan.col_count == 0) or (plan.row_count == 0):
+            return 0  # Nothing to do.
         line_sender_buffer_clear_marker(ls_buf)
 
         # On error, undo all added lines.
         if not line_sender_buffer_set_marker(ls_buf, &err):
             raise c_err_to_py(err)
 
-        row_gil_blip_interval = _CELL_GIL_BLIP_INTERVAL // col_count
+        row_gil_blip_interval = _CELL_GIL_BLIP_INTERVAL // plan.col_count
         if row_gil_blip_interval < 400:  # ceiling reached at 100 columns
             row_gil_blip_interval = 400
         try:
             # Don't move this logic up! We need the GIL to execute a `try`.
             # Also we can't have any other `try` blocks between here and the
             # `finally` block.
-            if not any_cols_need_gil:
+            if not plan.any_cols_need_gil:
                 _ensure_doesnt_have_gil(&gs)
 
-            for row_index in range(row_count):
+            for row_index in range(plan.row_count):
                 if (gs == NULL) and (row_index % row_gil_blip_interval == 0):
                     # Release and re-acquire the GIL every so often.
                     # This is to allow other python threads to run.
@@ -2790,30 +3313,30 @@ cdef void_int _dataframe(
                     _ensure_doesnt_have_gil(&gs)
                     _ensure_has_gil(&gs)
 
-                qdb_pystr_buf_truncate(b, str_buf_marker)
+                qdb_pystr_buf_truncate(b, plan.str_buf_marker)
 
                 # Table-name from `table_name` arg in Python.
-                if c_table_name.buf != NULL:
-                    if not line_sender_buffer_table(ls_buf, c_table_name, &err):
+                if plan.c_table_name.buf != NULL:
+                    if not line_sender_buffer_table(ls_buf, plan.c_table_name, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 
                 # Serialize columns cells.
                 # Note: Columns are sorted: table name, symbols, fields, at.
                 was_serializing_cell = True
-                for col_index in range(col_count):
-                    col = &cols.d[col_index]
+                for col_index in range(plan.col_count):
+                    col = &plan.cols.d[col_index]
                     _dataframe_serialize_cell(ls_buf, b, col, &gs)  # may raise
                     _dataframe_col_advance(col)
                 was_serializing_cell = False
 
                 # Fixed "at" value (not from a column).
-                if at_value == _AT_IS_SERVER_NOW:
+                if plan.at_value == _AT_IS_SERVER_NOW:
                     if not line_sender_buffer_at_now(ls_buf, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
-                elif at_value >= 0:
-                    if not line_sender_buffer_at_nanos(ls_buf, at_value, &err):
+                elif plan.at_value >= 0:
+                    if not line_sender_buffer_at_nanos(ls_buf, plan.at_value, &err):
                         _ensure_has_gil(&gs)
                         raise c_err_to_py(err)
 
@@ -2825,18 +3348,18 @@ cdef void_int _dataframe(
             if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
                 raise c_err_to_py(err)
 
-            if (isinstance(e, IngressError) and
-                    (e.code == IngressErrorCode.InvalidApiCall) and not was_auto_flush):
+            if (isinstance(e, QuestDBError) and
+                    (e.code == QuestDBErrorCode.InvalidApiCall) and not was_auto_flush):
                 # TODO: This should be allowed by the database.
                 # It currently isn't so we have to raise an error.
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     f'Bad dataframe row at index {row_index}: ' +
                     'All values are nulls. '+
                     'Ensure at least one column is not null.') from e
             elif was_serializing_cell:
-                raise IngressError(
-                    IngressErrorCode.BadDataFrame,
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
                     'Failed to serialize value of column ' +
                     repr(df.columns[col.setup.orig_index]) +
                     f' at row index {row_index} (' +
@@ -2845,14 +3368,17 @@ cdef void_int _dataframe(
             else:
                 raise
     except Exception as e:
-        if not isinstance(e, IngressError):
-            raise IngressError(
-                IngressErrorCode.InvalidApiCall,
+        if not isinstance(e, QuestDBError):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
                 str(e)) from e
         else:
             raise
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
-        line_sender_buffer_clear_marker(ls_buf)
-        col_t_arr_release(&cols)
-        qdb_pystr_buf_clear(b)
+        plan_has_content = (plan.col_count != 0) and (plan.row_count != 0)
+        if plan_has_content:
+            line_sender_buffer_clear_marker(ls_buf)
+        dataframe_plan_release(&plan)
+        if plan_has_content:
+            qdb_pystr_buf_clear(b)
