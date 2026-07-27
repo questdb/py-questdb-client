@@ -4,8 +4,8 @@
 Changelog
 =========
 
-5.0.0 (unreleased)
-------------------
+5.0.0
+-----
 
 Highlights
 ~~~~~~~~~~
@@ -23,6 +23,8 @@ Highlights
   batches into pandas, polars, or pyarrow — pyarrow-free by default.
 - Columnar DataFrame ingestion for pandas / polars / pyarrow and any
   Arrow C Data Interface source.
+- Requires QuestDB server version 10 or later
+
 
 Breaking changes
 ~~~~~~~~~~~~~~~~~
@@ -353,16 +355,16 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
 
     # HTTP - protocol version 3 is auto-negotiated
     conf = 'http::addr=localhost:9000;'
-    
+
     # TCP - must specify protocol_version=3 explicitly
     conf = 'tcp::addr=localhost:9009;protocol_version=3;'
 
 .. important::
     **Server Requirement**: This feature requires QuestDB server version 9.2.0 or higher.
-    
+
     Unlike other column types, DECIMAL columns **must be created in advance** via SQL
     before ingesting data. Auto-creation is not supported for DECIMAL columns.
-    
+
     For details on creating DECIMAL columns and working with this data type, see the
     `QuestDB Decimal documentation <https://questdb.com/docs/concept/decimal/>`_.
 
@@ -372,7 +374,7 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
 
     from decimal import Decimal
     from questdb import Sender, TimestampNanos
-    
+
     # First, create the table with DECIMAL column via SQL:
     # CREATE TABLE trades (
     #     symbol SYMBOL,
@@ -380,7 +382,7 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
     #     amount DECIMAL(18,8),
     #     timestamp TIMESTAMP
     # ) TIMESTAMP(timestamp);
-    
+
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
         sender.row(
@@ -397,17 +399,17 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
 
     import pandas as pd
     from decimal import Decimal
-    
+
     # Create DataFrame with Python Decimal objects
     df = pd.DataFrame({
         'symbol': ['ETH-USD', 'BTC-USD'],
         'price': [Decimal('2615.5400'), Decimal('43210.1234')],
         'volume': [Decimal('1234.56789012'), Decimal('98.76543210')]
     })
-    
+
     with Sender.from_conf(conf) as sender:
         sender.dataframe(
-            df, 
+            df,
             table_name='trades',
             symbols='symbol',
             at=TimestampNanos.now())
@@ -419,7 +421,7 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
     import pandas as pd
     import pyarrow as pa
     from decimal import Decimal
-    
+
     # Create DataFrame with Arrow decimal types
     df = pd.DataFrame({
         'prices': pd.array(
@@ -427,7 +429,7 @@ version is auto-negotiated. For TCP connections, you must explicitly specify
             dtype=pd.ArrowDtype(pa.decimal128(18, 2))
         )
     })
-    
+
     with Sender.from_conf(conf) as sender:
         sender.dataframe(df, table_name='prices', at=TimestampNanos.now())
 
@@ -765,7 +767,7 @@ Breaking Changes
 
   The old behaviour can be still be achieved by tweaking the auto-flush
   settings.
-  
+
   .. list-table::
     :header-rows: 1
 
@@ -809,7 +811,7 @@ The following example shows how to migrate to the new API.
     from questdb import Sender
 
     auth = (
-        'testUser1', 
+        'testUser1',
         '5UjEMuA0Pj5pjK8a-fa24dyIf-Es5mYny3oE_Wmus48',
         'token_x=fLKYEaoEb9lrn3nkwLDA-M_xnuFOdSt9y0Z7_vWSHLU',
         'token_y=Dt5tbS1dEDMSYfym3fgMv0B99szno-dFc1rYF9t0aac')
@@ -841,7 +843,7 @@ The following example shows how to migrate to the new API.
             'test_table',
             symbols={'sym': 'AAPL'},
             columns={'price': 100.0},
-            at=ServerTimestamp)  
+            at=ServerTimestamp)
 
 **Equivalent questdb 2.x code with configuration string**
 
