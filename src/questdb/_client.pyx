@@ -5508,6 +5508,13 @@ cdef void _direct_conn_close(
         else:
             questdb_db_return_direct_sender(src.db, conn)
     elif force_drop:
+        # Destroying a poolless sender after a failure must discard its
+        # uncommitted pipelined frames, and `qwp_direct_sender_free`
+        # commits them best-effort, so the drop entry point is the only
+        # bound way to get that. It ignores its `db` argument
+        # (`qwp_sender.h`: "`db` is currently ignored - the sender
+        # carries its own reference to the pool"), which is what makes
+        # NULL safe for a handle that never came from a pool.
         questdb_db_drop_direct_sender(NULL, conn)
     else:
         qwp_direct_sender_free(conn)
