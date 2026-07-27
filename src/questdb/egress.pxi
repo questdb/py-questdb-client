@@ -2105,9 +2105,18 @@ cdef class _NumpyBatchIter:
                             QuestDBErrorCode.FailoverWouldDuplicate,
                             'mid-query failover would duplicate already-'
                             'delivered batches; re-issue the query')
-                    # Pre-delivery failover replays batch-0 transparently;
-                    # re-pin to the new stream and keep going.
+                    # Pre-delivery failover replays batch-0 transparently:
+                    # re-pin to the new stream and drop the accumulated
+                    # schema and symbol dictionary. The replayed stream
+                    # restarts its query-scoped dictionary at entry 0, so
+                    # its codes only decode against categories rebuilt
+                    # from that stream.
                     self.seen_seq = self.handle._reset_seq
+                    self.first = True
+                    self.has_symbol = False
+                    self.prev_dict_n = 0
+                    self.symbol_categories = []
+                    self.symbol_dtype = None
                 if batch == NULL:
                     self.done = True
                     if err != NULL:
@@ -2133,16 +2142,21 @@ cdef class _NumpyBatchIter:
                         self.prev_dict_n = sd.entry_count
                 batch_chunks, batch_masks = _numpy_batch_columns(
                     batch, self.col_kinds, n_cols, row_count, self.np)
+            # Assembly needs no cursor state, so it runs off the lock —
+            # but inside the try, so a failure here ends the iterator and
+            # frees the cursor like every other error path. Resuming
+            # after it would step onto a consumed batch carrying a
+            # half-built schema.
+            col_chunks = [[c] for c in batch_chunks]
+            col_masks = [[m] for m in batch_masks]
+            frame = _numpy_assemble_frame(
+                self.col_names, self.col_kinds, self.col_scales,
+                self.col_precision, col_chunks, self.symbol_categories,
+                self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
         except:
             self.done = True
             self.handle._free()
             raise
-        col_chunks = [[c] for c in batch_chunks]
-        col_masks = [[m] for m in batch_masks]
-        frame = _numpy_assemble_frame(
-            self.col_names, self.col_kinds, self.col_scales,
-            self.col_precision, col_chunks, self.symbol_categories,
-            self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
         self.delivered = True
         return frame
 
