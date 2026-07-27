@@ -1374,6 +1374,40 @@ class TestPandasBase:
                 except Exception as ex:
                     self.fail(f'Failed to serialize {decimal}: {ex}')
 
+        def test_decimal_pyobj_null_cell(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            df = pd.DataFrame({
+                'dec': pd.Series([Decimal('1.5'), None], dtype=object),
+                'other': [1, 2]})
+            lines = _dataframe(
+                self.version, df, table_name='tbl',
+                at=qi.ServerTimestamp).splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn(b'dec=', lines[0])
+            self.assertIn(b'other=1i', lines[0])
+            self.assertNotIn(b'dec=', lines[1])
+            self.assertIn(b'other=2i', lines[1])
+
+        def test_decimal_pyobj_mixed_cell_types(self):
+            if self.version < 3:
+                self.skipTest('decimal datatype requires ILP version 3 or later')
+            for bad_cell in ('oops', 3.0, [1]):
+                with self.subTest(bad_cell=bad_cell):
+                    df = pd.DataFrame({
+                        'dec': pd.Series(
+                            [Decimal('1.5'), bad_cell], dtype=object)})
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            'Expected an object of type Decimal') as raised:
+                        _dataframe(
+                            self.version, df, table_name='tbl',
+                            at=qi.ServerTimestamp)
+                    self.assertIs(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.BadDataFrame)
+                    self.assertIn('row index 1', str(raised.exception))
+
         def test_decimal_pyobj_trailing_zeros_and_integer(self):
             if self.version < 3:
                 self.skipTest('decimal datatype requires ILP version 3 or later')
@@ -2768,7 +2802,44 @@ class TestPandasBase:
                     b'tbl1 a=' + _array_binary_bytes(np.array([1.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([2.0], np.float64)) + b'\n' +
                     b'tbl1 a=' + _array_binary_bytes(np.array([3.0], np.float64)) + b'\n')
-                
+
+        def test_f64_np_array_null_cell(self):
+            if self.version == 1:
+                self.skipTest('Protocol version v1 does not support arrays')
+            df = pd.DataFrame({
+                'a': pd.Series(
+                    [np.array([1.0], np.float64), None], dtype=object),
+                'other': [1, 2]})
+            buf = _dataframe(
+                self.version, df, table_name='tbl1',
+                at=qi.ServerTimestamp)
+            self.assertEqual(
+                buf,
+                b'tbl1 a=' +
+                _array_binary_bytes(np.array([1.0], np.float64)) +
+                b',other=1i\n'
+                b'tbl1 other=2i\n')
+
+        def test_f64_np_array_mixed_cell_types(self):
+            if self.version == 1:
+                self.skipTest('Protocol version v1 does not support arrays')
+            for bad_cell in ('oops', [2.0], 3.0):
+                with self.subTest(bad_cell=bad_cell):
+                    df = pd.DataFrame({
+                        'a': pd.Series([
+                            np.array([1.0], np.float64),
+                            bad_cell], dtype=object)})
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            'Expected an object of type numpy.ndarray') as raised:
+                        _dataframe(
+                            self.version, df, table_name='tbl1',
+                            at=qi.ServerTimestamp)
+                    self.assertIs(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.BadDataFrame)
+                    self.assertIn('row index 1', str(raised.exception))
+
         def test_numpy_micros_col(self):
             df = pd.DataFrame({
                 'x': [1, 2, 3],

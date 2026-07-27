@@ -2795,9 +2795,17 @@ cdef void_int _dataframe_serialize_cell_column_arr_f64__arr_f64_numpyobj(
         col_t* col) except -1:
     cdef PyObject** access = <PyObject**>col.cursor.chunk.buffers[1]
     cdef PyObject* cell = access[col.cursor.offset]
-    cdef PyArrayObject* arr = <PyArrayObject*> cell
-    cdef npy_int arr_type = PyArray_TYPE(arr)
+    cdef PyArrayObject* arr
+    cdef npy_int arr_type
     cdef cnp.dtype arr_descr
+    if _dataframe_is_null_pyobj(cell):
+        return 0
+    if not PyArray_CheckExact(cell):
+        raise ValueError(
+            'Expected an object of type numpy.ndarray, got an object of type ' +
+            _fqn(type(<object>cell)) + '.')
+    arr = <PyArrayObject*>cell
+    arr_type = PyArray_TYPE(arr)
     if arr_type != NPY_DOUBLE:
         arr_descr = cnp.PyArray_DescrFromType(arr_type)
         raise QuestDBError(
@@ -2835,6 +2843,11 @@ cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_colu
     cdef unsigned int scale = 0
     cdef uint8_t[32] unscaled
     cdef int unscaled_length
+
+    if not isinstance(<object>value, Decimal):
+        raise ValueError(
+            'Expected an object of type Decimal, got an object of type ' +
+            _fqn(type(<object>value)) + '.')
 
     unscaled_length = decimal_pyobj_to_binary(
         value,
