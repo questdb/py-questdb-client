@@ -107,6 +107,9 @@ def main(args):
 
     try_pip_install('fastparquet>=2023.10.1')
     try_pip_install('pyarrow')
+    try_pip_install('polars')
+    try_pip_install('psutil')
+
     # For the questdb.auth OIDC tests: the behavioural TLS-rejection test
     # (test_untrusted_server_certificate_is_rejected) generates a self-signed
     # cert at runtime and skips without `cryptography`. Install it so the real

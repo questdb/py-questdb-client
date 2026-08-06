@@ -36,3 +36,10 @@ cdef extern from "arrow_c_data_interface.h":
         void (*release)(ArrowArray*)
         # Opaque producer-specific data
         void* private_data
+
+    cdef struct ArrowArrayStream:
+        int (*get_schema)(ArrowArrayStream*, ArrowSchema* out) noexcept
+        int (*get_next)(ArrowArrayStream*, ArrowArray* out) noexcept
+        const char* (*get_last_error)(ArrowArrayStream*) noexcept
+        void (*release)(ArrowArrayStream*) noexcept
+        void* private_data

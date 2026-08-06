@@ -16,6 +16,7 @@ Contents
    conf
    auth
    examples
+   migration
    api
    troubleshooting
    community

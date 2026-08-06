@@ -59,42 +59,52 @@ stages:
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
-          - script: |
-              git clone --depth 1 https://github.com/questdb/questdb.git
-            displayName: git clone questdb master
-            condition: eq(variables.vsQuestDbMaster, true)
-          # Decide whether to build java-questdb-client from the bundled
-          # submodule (-P local-client, for a -SNAPSHOT client not on Maven
-          # Central) or resolve it from Maven Central. Sets $(CLIENT_PROFILE).
-          - template: templates/detect-local-client.yml
+          - template: templates/clone_questdb.yaml
             parameters:
-              qdbRepoPath: questdb
               condition: eq(variables.vsQuestDbMaster, true)
-          # The Maven@3 task crashes parsing JDK 25 ("Cannot read properties of
-          # null (reading 'major')") since its JDK support tops out at 21, so
-          # invoke Maven directly on the preinstalled JDK 25 instead. Mirrors the
-          # task's defaults: POM questdb/pom.xml, goal "package".
           - bash: |
-              set -eu
-              export JAVA_HOME="$(JAVA_HOME_25_X64)"
-              export PATH="$JAVA_HOME/bin:$PATH"
-              java -version
-              mvn -B -f questdb/pom.xml package -DskipTests -Pbuild-web-console $(CLIENT_PROFILE)
+              set -euo pipefail
+              JDK_HOME="${JAVA_HOME_25_X64:-}"
+              if [ -z "$JDK_HOME" ] || [ ! -x "$JDK_HOME/bin/javac" ]; then
+                JDK_HOME="/opt/jdk25"
+                sudo mkdir -p "$JDK_HOME"
+                curl -fsSL "https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jdk/hotspot/normal/eclipse" |
+                  sudo tar -xz -C "$JDK_HOME" --strip-components=1
+              fi
+              # Azure parses ##vso logging commands on both stdout and stderr.
+              # Keep xtrace off here so bash never emits a quoted stderr copy.
+              set +x
+              echo "##vso[task.setvariable variable=JAVA_HOME]$JDK_HOME"
+              echo "##vso[task.prependpath]$JDK_HOME/bin"
+            displayName: "Resolve JDK 25"
+            condition: eq(variables.vsQuestDbMaster, true)
+          # jdkVersionOption tops out at 21 and crashes the task on JDK 25
+          # ("Cannot read properties of null (reading 'major')"), so point the
+          # task at the JDK resolved above instead of naming a version.
+          # $(CLIENT_PROFILE) is set by templates/clone_questdb.yaml.
+          - task: Maven@3
             displayName: "Compile QuestDB master"
+            inputs:
+              mavenPOMFile: "questdb/pom.xml"
+              javaHomeOption: "Path"
+              jdkDirectory: "$(JAVA_HOME)"
+              options: "-DskipTests -Pbuild-web-console$(CLIENT_PROFILE)"
             condition: eq(variables.vsQuestDbMaster, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
-              JAVA_HOME: $(JAVA_HOME_17_X64)
+              JAVA_HOME: $(JAVA_HOME_25_X64)
           - script: python3 proj.py test 1
             displayName: "Test vs master"
             env:
-              JAVA_HOME: $(JAVA_HOME_25_X64)
+              JAVA_HOME: $(JAVA_HOME)
               QDB_REPO_PATH: "./questdb"
               # QuestDB master runs as the io.questdb JPMS module and needs these
               # JDK 25 access flags (mirrors questdb.sh). The test fixture launches
               # questdb.jar directly rather than via questdb.sh, so feed them to the
-              # java launcher through JDK_JAVA_OPTIONS.
+              # java launcher through JDK_JAVA_OPTIONS. The fixture already passes
+              # --add-exports itself; repeating it here is harmless and keeps the
+              # set matching questdb.sh.
               JDK_JAVA_OPTIONS: >-
                 --sun-misc-unsafe-memory-access=allow
                 --enable-native-access=io.questdb

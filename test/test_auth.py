@@ -26,9 +26,11 @@
 """
 Standalone unit tests for ``questdb.auth``.
 
-These do not require the compiled ``questdb.ingress`` extension; they exercise
-the device flow, discovery, caching, refresh and the REST adapter against an
-in-process mock IdP + mock QuestDB server.
+These need no network access and no running QuestDB: they exercise the device
+flow, discovery, caching, refresh and the REST adapter against an in-process
+mock IdP + mock QuestDB server. ``questdb.auth`` itself pulls in nothing beyond
+the standard library, but importing it initialises the parent ``questdb``
+package, so the compiled ``questdb._client`` extension must have been built.
 
 Run directly::
 

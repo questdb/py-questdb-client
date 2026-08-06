@@ -1,6 +1,98 @@
+- name: qwpws
+  lang: python
+  path: examples/connect_basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb pandas
+    ```
+  addr:
+    host: localhost
+    port: 9000
+- name: qwpws-query
+  lang: python
+  path: examples/connect_query.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb pandas
+    ```
+  addr:
+    host: localhost
+    port: 9000
+- name: qwpws-dataframe
+  lang: python
+  path: examples/connect_dataframe.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb pandas
+    ```
+  addr:
+    host: localhost
+    port: 9000
+- name: qwpws-polars
+  lang: python
+  path: examples/polars_basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U 'questdb[dataframe]' polars
+    ```
+  conf: ws::addr=localhost:9000;
+- name: qwpws-pyarrow
+  lang: python
+  path: examples/pyarrow_basic.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U 'questdb[dataframe]'
+    ```
+  conf: ws::addr=localhost:9000;
+- name: qwpudp
+  lang: python
+  path: examples/qwp_udp.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    See more [examples](https://py-questdb-client.readthedocs.io/en/latest/examples.html),
+    including ingesting data from Pandas dataframes.
+
+    ```
+    python3 -m pip install -U questdb
+    ```
+  addr:
+    host: localhost
+    port: 9007
 - name: ilp
   lang: python
-  path: examples/basic.py
+  path: examples/tcp_basic.py
   header: |-
     Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
     and [repo](https://github.com/questdb/py-questdb-client).
@@ -13,7 +105,7 @@
     ```
 - name: ilp-auth
   lang: python
-  path: examples/auth.py
+  path: examples/tcp_auth.py
   header: |-
     Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
     and [repo](https://github.com/questdb/py-questdb-client).
@@ -34,7 +126,7 @@
     port: 9009
 - name: ilp-auth-tls
   lang: python
-  path: examples/auth_and_tls.py
+  path: examples/tcp_auth_tls.py
   header: |-
     Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
     and [repo](https://github.com/questdb/py-questdb-client).
@@ -52,7 +144,7 @@
     port: 9009
 - name: ilp-from-conf
   lang: python
-  path: examples/from_conf.py
+  path: examples/http_from_conf.py
   header: |-
     Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
     and [repo](https://github.com/questdb/py-questdb-client).
@@ -61,4 +153,3 @@
     python3 -m pip install -U questdb
     ```
   conf: http::addr=localhost:9000;
-

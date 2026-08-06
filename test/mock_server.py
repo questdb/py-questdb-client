@@ -3,6 +3,7 @@ import socket
 import select
 import re
 import http.server as hs
+import socketserver
 import sys
 import threading
 import time
@@ -122,7 +123,13 @@ SETTINGS_WITH_PROTOCOL_VERSION_V4 = '{"config":{"release.type":"OSS","release.ve
 SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1,2,3],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITHOUT_PROTOCOL_VERSION = '{ "release.type": "OSS", "release.version": "[DEVELOPMENT]", "acl.enabled": false, "posthog.enabled": false, "posthog.api.key": null }'
 
-class _QuietHTTPServer(hs.HTTPServer):
+class _NoReverseDnsHTTPServer(hs.HTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class _QuietHTTPServer(_NoReverseDnsHTTPServer):
     """HTTPServer that stays quiet when a client disconnects abruptly.
 
     Several tests (e.g. the request-timeout and min-throughput cases) drop the

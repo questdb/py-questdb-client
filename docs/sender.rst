@@ -1,34 +1,32 @@
 .. _sender:
 
-=====================
-Sending Data over ILP
-=====================
+============
+Sending Data
+============
 
 Overview
 ========
 
-The :class:`Sender <questdb.ingress.Sender>` class is a client that inserts
-rows into QuestDB via the
-`ILP protocol <https://questdb.com/docs/reference/api/ilp/overview/>`_, with
-support for both ILP over TCP and the newer and recommended ILP over HTTP.
-The sender also supports TLS and authentication.
+Start at the deployment level: one :class:`QuestDB <questdb.QuestDB>` handle
+covers row ingestion, whole-dataframe ingestion, and queries. The handle owns
+the connection pools; ``db.sender()`` lends a row-building sender and
+``db.dataframe()`` keeps whole sources on the direct columnar path.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    import questdb
+    from questdb import TimestampNanos
     import pandas as pd
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        # Adding by rows
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
-            at=TimestampNanos.now())
-        # It is highly recommended to auto-flush or to flush in batches,
-        # rather than for every row
-        sender.flush()
+    conf = 'ws::addr=localhost:9000;'
+    with questdb.connect(conf) as db:
+        with db.sender() as sender:
+            sender.row(
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={'price': 2615.54, 'amount': 0.00044},
+                at=TimestampNanos.now())
+            sender.flush(wait=True)
 
         # Whole dataframes at once
         df = pd.DataFrame({
@@ -38,10 +36,57 @@ The sender also supports TLS and authentication.
             'amount': [0.00044, 0.001],
             'timestamp': pd.to_datetime(['2021-01-01', '2021-01-02'])})
 
-        sender.dataframe(df, table_name='trades', at='timestamp')
+        db.dataframe(df, table_name='trades', at='timestamp')
 
-The ``Sender`` object holds an internal buffer which will be flushed and sent
-at when the ``with`` block ends.
+The pooled sender holds an internal QWP buffer. A successful ``with`` block
+publishes pending rows when it returns the lease to the pool. Row appends also
+auto-flush by default; the thresholds are configured on the parent handle.
+
+.. _sender_api_layers:
+
+Two API layers
+--------------
+
+The package has two API layers:
+
+* **Deployment level** — :func:`questdb.connect` returns a
+  :class:`QuestDB <questdb.QuestDB>` handle that addresses a whole
+  deployment: ``addr`` lists every cluster node, the handle owns the
+  ingestion and reader connection pools, and its methods are database
+  operations (``sender()``, ``dataframe()``, ``query()``, ``reader()``,
+  ``server_info()``).
+
+* **Connection level** — the standalone :class:`Sender <questdb.Sender>`
+  drives exactly one connection (one sender = one connection). It covers
+  the legacy ILP transports (HTTP/TCP) — including
+  :ref:`ILP/HTTP transactions <sender_transaction>`, which are HTTP-only —
+  fire-and-forget :ref:`QWP/UDP datagrams <sender_qwp_udp>`, and
+  :ref:`manual control of a single ws connection <sender_qwp_ws>`
+  (progress driving, explicit buffers and draining).
+
+Default to the deployment level; drop down only when you need a
+connection-level capability:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 62 38
+
+   * - You need
+     - Use
+   * - Pooled row ingestion, DataFrame bulk loads, queries — the default
+       for new code
+     - :func:`questdb.connect` → :class:`QuestDB <questdb.QuestDB>`
+   * - HTTP transactions, UDP datagrams, ILP/TCP, or manual progress /
+       buffer control over one ws connection
+     - standalone :class:`Sender <questdb.Sender>`
+
+Over ``ws::`` / ``wss::`` specifically, prefer :func:`questdb.connect` and
+``db.sender()`` — the pooled lease carries the full ws delivery surface
+(FSN receipts, ack barriers, rejection polling); the standalone ws sender
+exists only for manual progress mode and explicit buffer control (see
+:ref:`sender_qwp_ws`), and its ``dataframe()`` opens a fresh direct
+connection per call. Moving from 4.x? See the :doc:`5.0 migration guide
+<migration>`.
 
 You can read more on :ref:`sender_preparing_data` and :ref:`sender_flushing`.
 
@@ -56,7 +101,7 @@ The ``Sender`` class is generally initialized from a
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
@@ -73,13 +118,13 @@ You can also initialize the sender from an environment variable::
 
 The content of the environment variable is the same
 :ref:`configuration string <sender_conf>` as taken by the
-:func:`Sender.from_conf <questdb.ingress.Sender.from_conf>` method,
+:func:`Sender.from_conf <questdb.Sender.from_conf>` method,
 but moving it to an environment variable is more secure and allows you to avoid
 hardcoding sensitive information such as passwords and tokens in your code.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     with Sender.from_env() as sender:
         ...
@@ -98,14 +143,15 @@ Preparing Data
 Appending Rows
 --------------
 
-You can append as many rows as you like by calling the
-:func:`Sender.row <questdb.ingress.Sender.row>` method. The full method arguments are
-documented in the :func:`Buffer.row <questdb.ingress.Buffer.row>` method.
+You can append as many rows as you like through
+:meth:`QuestDB.sender <questdb.QuestDB.sender>`. The row arguments match
+:meth:`Sender.row <questdb.Sender.row>`.
 
 Appending Pandas Dataframes
 ---------------------------
 
-The sender can also append data from a Pandas dataframe.
+Use :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` to ingest a Pandas
+dataframe directly.
 
 This is `orders of magnitude <https://github.com/questdb/py-tsbs-benchmark/blob/main/README.md>`_
 faster than appending rows one by one.
@@ -113,9 +159,8 @@ faster than appending rows one by one.
 .. literalinclude:: ../examples/pandas_basic.py
    :language: python
 
-For more details see :func:`Sender.dataframe <questdb.ingress.Sender.dataframe>`
-and for full argument options see
-:func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>`.
+For how the 4.x row-buffer dataframe methods map onto the 5.0 API, see the
+:doc:`5.0 migration guide <migration>`.
 
 String vs Symbol Columns
 ------------------------
@@ -124,16 +169,15 @@ categorical data (identifiers). Internally, symbols are deduplicated and
 stored as integers.
 
 When sending data, you can specify a column as a symbol by using the
-``symbols`` parameter of the ``row`` or ``dataframe`` methods.
+``symbols`` parameter of the ``row`` or ``dataframe`` methods. String values
+passed through the ``columns`` parameter are stored as ``VARCHAR`` instead —
+use that for one-off strings that should not be interned.
 
-Alternatively, if a column is expected to hold a collection of one-off strings,
-you can use the ``strings`` parameter.
-
-Here is an example of sending a row with a symbol and a string:
+Here is an example of sending a row with two symbols and two regular columns:
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender
     import datetime
 
     conf = 'http::addr=localhost:9000;'
@@ -144,8 +188,9 @@ Here is an example of sending a row with a symbol and a string:
                 'symbol': 'ETH-USD', 'side': 'sell'},
             columns={
                 'price': 2615.54,
-                'amount': 0.00044}
-            at=datetime.datetime(2021, 1, 1, 12, 0, 0))
+                'amount': 0.00044},
+            at=datetime.datetime(
+                2021, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc))
 
 Decimal Columns
 ---------------
@@ -164,13 +209,16 @@ Unlike other column types, ``DECIMAL`` columns cannot be auto-created and must b
 and :ref:`troubleshooting guide <troubleshooting-flushing>` for more details.
 
 To send decimal values, use Python's :class:`decimal.Decimal` type in the
-``row`` method or pandas DataFrames:
+``row`` method or DataFrames (decimal support is negotiated automatically
+over ``ws`` / ``wss``):
 
 .. code-block:: python
 
     from decimal import Decimal
-    from questdb.ingress import Sender, TimestampNanos
+
     import pandas as pd
+    import questdb
+    from questdb import TimestampNanos
 
     # CREATE TABLE prices (
     #     symbol SYMBOL,
@@ -178,32 +226,42 @@ To send decimal values, use Python's :class:`decimal.Decimal` type in the
     #     timestamp TIMESTAMP_NS
     # ) TIMESTAMP(timestamp) PARTITION BY DAY;
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'prices',
-            symbols={'symbol': 'BTC-USD'},
-            columns={'price': Decimal('50123.456789')},
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.sender() as sender:
+            sender.row(
+                'prices',
+                symbols={'symbol': 'BTC-USD'},
+                columns={'price': Decimal('50123.456789')},
+                at=TimestampNanos.now())
+            sender.flush(wait=True)
+
+        db.dataframe(
+            pd.DataFrame({
+                # Categorical (or string[pyarrow]) columns can be sent as
+                # SYMBOL on the columnar path.
+                'symbol': pd.Categorical(['BTC-USD', 'ETH-USD']),
+                'price': [Decimal('50123.456789'), Decimal('2615.123456')],
+            }),
+            table_name='prices',
+            symbols=['symbol'],
             at=TimestampNanos.now())
-        
-        df = pd.DataFrame({
-            'symbol': ['BTC-USD', 'ETH-USD'],
-            'price': [Decimal('50123.456789'), Decimal('2615.123456')]
-        })
-        sender.dataframe(df, table_name='prices', symbols=['symbol'],
-                        at=TimestampNanos.now())
+
+Loading ``object``-dtype ``Decimal`` columns through ``db.dataframe(...)``
+requires ``pyarrow``: each such column is re-exported through Arrow to infer
+its decimal width and scale.
 
 When using pandas DataFrames, you can also use PyArrow decimal types for better
 performance:
 
 .. code-block:: python
 
+    import pandas as pd
     import pyarrow as pa
 
     df = pd.DataFrame({
-        'symbol': ['BTC-USD', 'ETH-USD'],
+        'symbol': pd.Categorical(['BTC-USD', 'ETH-USD']),
         'price': pd.Series([50123.456789, 2615.123456],
-                          dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
+                           dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
     })
 
 Populating Designated Timestamps
@@ -213,13 +271,13 @@ The ``at`` parameter of the ``row`` and ``dataframe`` methods is used to specify
 the `designated timestamp <https://questdb.com/docs/concept/designated-timestamp/>`_
 of the rows. The designated timestamp column determines the order in which data
 is stored as rows and is used for
-`partitioning <https://questdb.com/docs/concept/partitions/>`.
+`partitioning <https://questdb.com/docs/concept/partitions/>`_.
 
 Set by client
 ~~~~~~~~~~~~~
 
-It can be either a :class:`TimestampNanos <questdb.ingress.TimestampNanos>`
-object, a :class:`TimestampMicros <questdb.ingress.TimestampMicros>` object or a
+It can be either a :class:`TimestampNanos <questdb.TimestampNanos>`
+object, a :class:`TimestampMicros <questdb.TimestampMicros>` object or a
 `datetime.datetime <https://docs.python.org/3/library/datetime.html>`_ object.
 
 In case of dataframes you can also specify the timestamp column name or index.
@@ -230,6 +288,14 @@ QuestDB stores timestamps as either microseconds (``TIMESTAMP`` QuestDB column
 type) or nanoseconds (``TIMESTAMP_NS`` QuestDB column type) as a numeric value
 from unix epoch in UTC. Any timezone information is dropped when sent to
 the database.
+
+.. note::
+
+    Naive (timezone-unaware) timestamps are interpreted as UTC everywhere:
+    DataFrame column cells, scalar ``at=`` values, ``row()`` values and
+    query binds. Beware that ``datetime.now()`` is your local wall clock —
+    for "now", use ``TimestampNanos.now()`` or
+    ``datetime.now(timezone.utc)``.
 
 .. note::
 
@@ -246,15 +312,17 @@ received by the server.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, ServerTimestamp
+    import questdb
+    from questdb import ServerTimestamp
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
-            at=ServerTimestamp)  # Legacy feature, not recommended.
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.sender() as sender:
+            sender.row(
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={'price': 2615.54, 'amount': 0.00044},
+                at=ServerTimestamp)  # Legacy feature, not recommended.
+            sender.flush(wait=True)
 
 .. warning::
 
@@ -268,7 +336,7 @@ Flushing
 ========
 
 The sender accumulates data into an internal buffer. Calling
-:func:`Sender.flush <questdb.ingress.Sender.flush>` will send the buffered data
+:func:`Sender.flush <questdb.Sender.flush>` will send the buffered data
 to QuestDB, and clear the buffer.
 
 Flushing can be done explicitly or automatically.
@@ -276,75 +344,116 @@ Flushing can be done explicitly or automatically.
 Explicit Flushing
 -----------------
 
-An explicit call to :func:`Sender.flush <questdb.ingress.Sender.flush>` will
+An explicit call to :func:`Sender.flush <questdb.Sender.flush>` will
 send any pending data immediately.
 
 .. code-block:: python
 
-    conf = 'http::addr=localhost:9000;'
-    with Sender.from_conf(conf) as sender:
-        sender.row(
-            'trades',
-            symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-            columns={'price': 2615.54, 'amount': 0.00044},
-            at=TimestampNanos.now())
-        sender.flush()
-        sender.row(
-            'trades',
-            symbols={'symbol': 'BTC-USD', 'side': 'sell'},
-            columns={'price': 39269.98, 'amount': 0.001},
-            at=TimestampNanos.now())
-        sender.flush()
+    import questdb
+    from questdb import TimestampNanos
 
-Note that the last `sender.flush()` is entirely optional as flushing
-also happens at the end of the ``with`` block.
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.sender() as sender:
+            sender.row(
+                'trades',
+                symbols={'symbol': 'ETH-USD', 'side': 'sell'},
+                columns={'price': 2615.54, 'amount': 0.00044},
+                at=TimestampNanos.now())
+            sender.flush()
+            sender.row(
+                'trades',
+                symbols={'symbol': 'BTC-USD', 'side': 'sell'},
+                columns={'price': 39269.98, 'amount': 0.001},
+                at=TimestampNanos.now())
+            sender.flush()
+
+Note that the last ``sender.flush()`` is entirely optional as the pooled
+sender publishes any pending rows when the ``with`` block returns it to
+the pool (pass ``wait=True`` on the final flush to also await the server
+acknowledgement).
 
 .. _sender_auto_flush:
 
 Auto-flushing
 -------------
 
-To avoid accumulating very large buffers, the sender will - by default -
-occasionally flush the buffer automatically.
+Both the standalone :class:`Sender <questdb.Sender>` and pooled QWP row
+senders auto-flush by default to avoid accumulating large or stale batches.
+Their defaults reflect the different protocols:
+
+* A standalone sender publishes at 75,000 rows over HTTP, or 600 rows over
+  TCP and QWP, and after 1 second.
+
+* A pooled QWP sender publishes at 1,000 rows, after 100 milliseconds, or when
+  its estimated encoded size reaches 90% of the current frame limit. Before a
+  server limit is known, it uses the lower of 8 MiB and 90% of the local queue
+  limit. Explicit byte thresholds above that 90% limit are clamped. The
+  estimate is a batching heuristic; the exact encoded size is checked when
+  publishing, particularly for symbol dictionaries.
 
 Auto-flushing is triggered when:
 
 * appending a row to the internal sender buffer
 
-* and the buffer either:
+* and the buffer reaches its row or byte threshold, or its interval has
+  elapsed (there is no background timer).
 
-    * Reaches 75'000 rows (for HTTP) or 600 rows (for TCP).
-
-    * Hasn't been flushed for 1 second (there are no timers).
-
-Here is an example :ref:`configuration string <sender_conf>` that auto-flushes
-sets up a sender to flush every 10 rows and disables
-the interval-based auto-flushing logic.
+Here is an example :ref:`configuration string <sender_conf>` that sets up a
+sender to flush every 10 rows and disables the interval-based auto-flushing
+logic.
 
 ``http::addr=localhost:9000;auto_flush_rows=10;auto_flush_interval=off;``
+
+The equivalent pooled configuration uses QWP/WebSocket. The mode belongs to
+the :class:`QuestDB <questdb.QuestDB>` handle and is shared by all leases; the
+interval starts when the first row enters an empty lease buffer.
+
+``ws::addr=localhost:9000;auto_flush_rows=10;auto_flush_interval=off;``
+
+A pooled auto-flush only publishes into the store-and-forward path; it does
+not wait for an acknowledgement. Keep acknowledgement barriers explicit with
+``sender.flush(wait=True)`` or ``sender.wait()``. Errors encountered while
+auto-publishing propagate from ``PooledSender.row()``. An oversized single row
+is removed; if a multi-row batch exceeds the exact frame limit, the whole batch
+remains buffered. If every explicit
+``flush_and_get_fsn()`` must return the receipt for one complete application
+batch, configure ``auto_flush=off``; otherwise an earlier auto-flush may have
+already published and cleared some or all of that batch.
 
 Here is a configuration string with auto-flushing
 completely disabled:
 
 ``http::addr=localhost:9000;auto_flush=off;``
 
-See the :ref:`sender_conf_auto_flush` section for more details. and note that
+For a pooled sender, use:
+
+``ws::addr=localhost:9000;auto_flush=off;``
+
+See the :ref:`sender_conf_auto_flush` section for more details, and note that
 ``auto_flush_interval`` :ref:`does NOT start a timer <sender_conf_auto_flush_interval>`.
 
 Error Reporting
 ===============
 
-**TL;DR: Use HTTP for better error reporting**
+**TL;DR: QWP/WebSocket has the richest error reporting; among the legacy
+ILP transports, use HTTP.**
 
-The sender will do its best to check for errors before sending data to the
-server.
+Over QWP/WebSocket every server rejection is delivered as a structured
+:class:`SenderError <questdb.SenderError>` — pushed to the pool's
+``error_handler`` (or logged through the ``questdb`` logger by
+default), while terminal rejections also raise
+:class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`
+from the affected sender. See :ref:`sender_qwp_ws`.
+
+For the legacy ILP transports, the sender will do its best to check for
+errors before sending data to the server.
 
 When using the HTTP protocol, the server will send back an error message if
 the data is invalid or if there is a problem with the server. This will be
-raised as an :class:`IngressError <questdb.ingress.IngressError>` exception.
+raised as an :class:`QuestDBError <questdb.QuestDBError>` exception.
 
 The HTTP layer will also attempt retries, configurable via the
-:ref:`retry_timeout <sender_conf_request>` parameter.`
+:ref:`retry_timeout <sender_conf_request>` parameter.
 
 When using the TCP protocol errors are *not* sent back from the server and
 must be searched for in the logs. See the :ref:`troubleshooting-flushing`
@@ -362,26 +471,29 @@ rows as a single transaction.
 
 .. code-block:: python
 
+    from questdb import Sender, TimestampNanos
+
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
-        with sender.transaction('weather_sensor') as txn:
+        with sender.transaction('trades') as txn:
             txn.row(
-                'trades',
                 symbols={'symbol': 'ETH-USD', 'side': 'sell'},
                 columns={'price': 2615.54, 'amount': 0.00044},
                 at=TimestampNanos.now())
             txn.row(
-                'trades',
                 symbols={'symbol': 'BTC-USD', 'side': 'sell'},
                 columns={'price': 39269.98, 'amount': 0.001},
                 at=TimestampNanos.now())
+
+The table name is set once on the transaction; ``txn.row()`` takes no table
+argument.
 
 If auto-flushing is enabled, any pending data will be flushed before the
 transaction is started.
 
 Auto-flushing is disabled during the scope of the transaction.
 
-The transaction is automatically completed a the end
+The transaction is automatically completed at the end
 of the ``with`` block.
 
 * If the there are no errors, the transaction is committed and sent to the
@@ -390,12 +502,12 @@ of the ``with`` block.
 * If an exception is raised with the block, the transaction is rolled back and
   the exception is propagated.
 
-You can also terminate a transaction explicity by calling the
-:func:`commit <questdb.ingress.SenderTransaction.commit>` or the
-:func:`rollback <questdb.ingress.SenderTransaction.rollback>` methods.
+You can also terminate a transaction explicitly by calling the
+:func:`commit <questdb.SenderTransaction.commit>` or the
+:func:`rollback <questdb.SenderTransaction.rollback>` methods.
 
 While transactions that span multiple tables are not supported by QuestDB, you
-can reuse the same sender for mutliple tables.
+can reuse the same sender for multiple tables.
 
 You can also create parallel transactions by creating multiple sender objects
 across multiple threads.
@@ -453,30 +565,54 @@ Always specify your own timestamps using the ``at`` parameter.
 If you use the ``ServerTimestamp`` option, QuestDB will not be able to
 deduplicate rows, should you ever need to send them again.
 
-Instead, if you don't have an a timestamp immediately available, use
+Instead, if you don't have a timestamp immediately available, use
 ``TimestampNanos.now()`` to set the timestamp to the current time.
 
 This is lighter-weight than using a fully-fledged ``datetime.datetime`` object.
 
-Prefer ILP/HTTP
----------------
+Default to the deployment level
+-------------------------------
 
-Use the ILP/HTTP protocol instead of ILP/TCP for better error reporting and
-transaction control.
+New code should connect through :func:`questdb.connect`: QWP/WebSocket
+combines acknowledged delivery, structured server rejections, queries, and
+connection pooling in one handle. Drop to the connection-level
+:class:`Sender <questdb.Sender>` when you need one of its point-to-point
+capabilities (see :ref:`sender_api_layers`): ILP/HTTP for transactions and
+the best error reporting among the legacy ILP transports, QWP/UDP for
+fire-and-forget, lowest-latency ingestion that can tolerate potential data
+loss, or ILP/TCP for servers that predate ILP/HTTP support.
 
 .. _sender_tips_connection_reuse:
 
-Reuse Sender Objects
---------------------
+Reuse the connection-owning object
+----------------------------------
 
-Create longer-lived sender objects, as these are not automatically pooled.
-
-Instead of creating a new sender object for every request, create a single
-sender object and reuse it across multiple requests.
+Over QWP/WebSocket the long-lived object is the :class:`QuestDB
+<questdb.QuestDB>` handle: create one per process and share it across
+threads — it owns the connection pools. Sender leases are cheap by design:
+borrow one per unit of work (one per thread), flush, and leave the ``with``
+block so the pooled connection is returned.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    import questdb
+
+    db = questdb.connect('ws::addr=localhost:9000;')  # long-lived
+
+    def handle_batch(rows):
+        # Short-lived lease over a pooled, already-open connection.
+        with db.sender() as sender:
+            for table, symbols, columns, at in rows:
+                sender.row(table, symbols=symbols, columns=columns, at=at)
+            sender.flush(wait=True)
+
+At the connection level there is no pool: create longer-lived standalone
+``Sender`` objects and reuse them across requests instead of constructing
+one per request.
+
+.. code-block:: python
+
+    from questdb import Sender
 
     conf = 'http::addr=localhost:9000;'
     with Sender.from_conf(conf) as sender:
@@ -505,9 +641,9 @@ Tune for Performance
 If you need better performance:
 
 * Tune for larger batches of rows. Tweak the auto-flush settings, or
-  call :func:`Sender.flush <questdb.ingress.Sender.flush>` less frequently.
+  call :func:`Sender.flush <questdb.Sender.flush>` less frequently.
 
-* Use the :func:`Sender.dataframe <questdb.ingress.Sender.dataframe>` method To
+* Use the :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` method to
   send dataframes instead of appending rows one by one.
 
 * Try multi-threading: The ``Sender`` logic is designed to release the Python
@@ -527,36 +663,29 @@ If you need better performance:
 Advanced Usage
 ==============
 
-Independent Buffers
--------------------
+Independent Buffers (legacy)
+----------------------------
 
-All examples so far have shown appending data to the sender's internal buffer.
-
-You can also create independent buffers and send them independently.
-
-This is useful for more complex applications whishing to decouple the
-serialisation logic from the sending logic.
-
-Note that the sender's auto-flushing logic will not apply to independent
-buffers.
+Buffers are managed internally by senders and are not part of the top-level
+5.0 API. Legacy ILP/HTTP and ILP/TCP code that builds buffers explicitly and
+flushes them with ``sender.flush(buffer)`` — including the multi-database
+``flush(buf, clear=False)`` fan-out pattern — keeps working through the
+deprecated ``questdb.ingress`` compatibility shim:
 
 .. code-block:: python
 
     from questdb.ingress import Buffer, Sender, TimestampNanos
 
-    buf = Buffer()
+    buf = Buffer(protocol_version=2)
     buf.row(
         'trades',
         symbols={'symbol': 'ETH-USD', 'side': 'sell'},
         columns={'price': 2615.54, 'amount': 0.00044},
         at=TimestampNanos.now())
-    buf.row(
-        'trades',
-        symbols={'symbol': 'BTC-USD', 'side': 'sell'},
-        columns={'price': 39269.98, 'amount': 0.001},
-        at=TimestampNanos.now())
 
-    conf = 'http::addr=localhost:9000;'
+    # Pin the sender to the buffer's protocol version: HTTP would otherwise
+    # negotiate a newer one and refuse the explicitly-versioned buffer.
+    conf = 'http::addr=localhost:9000;protocol_version=2;'
     with Sender.from_conf(conf) as sender:
         sender.flush(buf, transactional=True)
 
@@ -564,46 +693,18 @@ The ``transactional`` parameter is optional and defaults to ``False``.
 When set to ``True``, the buffer is guaranteed to be committed as a single
 transaction, but must only contain rows for a single table.
 
-You should not mix using a transaction block with flushing an independent buffer transactionally.
-
-Multiple Databases
-------------------
-
-Handling buffers explicitly is also useful when sending data to multiple
-databases via the ``.flush(buf, clear=False)`` option.
-
-.. code-block:: python
-
-    from questdb.ingress import Buffer, Sender, TimestampNanos
-
-    buf = Buffer()
-    buf.row(
-        'trades',
-        symbols={'symbol': 'ETH-USD', 'side': 'sell'},
-        columns={'price': 2615.54, 'amount': 0.00044},
-        at=TimestampNanos.now())
-
-    conf1 = 'http::addr=db1.host.com:9000;'
-    conf2 = 'http::addr=db2.host.com:9000;'
-    with Sender.from_conf(conf1) as sender1, Sender.from_conf(conf2) as sender2:
-        sender1.flush(buf1, clear=False)
-        sender2.flush(buf2, clear=False)
-
-    buf.clear()
-
-This uses the ``clear=False`` parameter which otherwise defaults to ``True``.
+For new code, decouple serialization from sending by borrowing one sender per
+thread from a :func:`questdb.connect` pool instead of sharing buffers.
 
 Threading Considerations
 ------------------------
 
-Neither buffer API nor the sender object are thread-safe, but can be shared
-between threads if you take care of exclusive access (such as using a lock)
-yourself.
+A sender object is not thread-safe, but can be shared between threads if you
+take care of exclusive access (such as using a lock) yourself.
 
-Independent buffers also allows you to prepare separate buffers in different
-threads and then send them later through a single exclusively locked sender.
-
-Alternatively you can also create multiple senders, one per thread.
+The simplest concurrency rule: borrow (or create) one sender per thread. With
+QWP/WebSocket, :meth:`QuestDB.sender <questdb.QuestDB.sender>` makes this
+cheap — each borrow leases a pooled connection.
 
 Notice that the ``questdb`` python module is mostly implemented in native code
 and is designed to release the Python GIL whenever possible, so you can expect
@@ -633,7 +734,7 @@ sender objects in parallel.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    from questdb import Sender, TimestampNanos
     import pandas as pd
     from concurrent.futures import ThreadPoolExecutor
     import datetime
@@ -670,7 +771,7 @@ sender objects in parallel.
         for future in futures:
             future.result()
 
-For maxium performance you should also cache the sender objects and reuse them
+For maximum performance you should also cache the sender objects and reuse them
 across multiple requests, since internally they maintain a connection pool.
 
 Sender Lifetime Control
@@ -681,7 +782,7 @@ control the lifetime of the sender object.
 
 .. code-block:: python
 
-    from questdb.ingress import Sender
+    from questdb import Sender
 
     conf = 'http::addr=localhost:9000;'
     sender = Sender.from_conf(conf)
@@ -689,8 +790,8 @@ control the lifetime of the sender object.
     # ...
     sender.close()
 
-The :func:`establish <questdb.ingress.Sender.establish>` method is needs to be
-called exactly once, but the :func:`close <questdb.ingress.Sender.close>` method
+The :func:`establish <questdb.Sender.establish>` method needs to be
+called exactly once, but the :func:`close <questdb.Sender.close>` method
 is idempotent and can be called multiple times.
 
 
@@ -739,7 +840,7 @@ You can also specify the configuration parameters programmatically:
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, Protocol
+    from questdb import Sender, Protocol
     from datetime import timedelta
 
     with Sender(Protocol.Tcp, 'localhost', 9009,
@@ -785,7 +886,7 @@ auto-flush interval::
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, Protocol
+    from questdb import Sender, Protocol
     from datetime import timedelta
 
     with Sender.from_env(auto_flush_interval=timedelta(seconds=10)) as sender:
@@ -835,38 +936,143 @@ See the :ref:`sender_conf_protocol_version` section for more details.
 
 .. _sender_which_protocol:
 
-ILP/TCP or ILP/HTTP
-===================
+Which protocol?
+===============
 
-The sender supports ``tcp``, ``tcps``, ``http``, and ``https`` protocols.
+The sender supports ``tcp``, ``tcps``, ``http``, ``https``, ``udp``,
+``ws``, and ``wss`` protocols.
 
-**You should prefer to use the new ILP/HTTP protocol instead of ILP/TCP in most
-cases as it provides better feedback on errors and transaction control.**
+**Default to the deployment level:** connect through :func:`questdb.connect`
+over QWP/WebSocket (``ws`` / ``wss``) for acknowledged delivery, structured
+server rejections, queries and connection pooling in one handle. The other
+protocols belong to the connection-level standalone
+:class:`Sender <questdb.Sender>` (see :ref:`sender_api_layers`); among the
+legacy ILP transports, prefer ILP/HTTP for better error feedback and
+transaction control.
+
+.. _sender_qwp_ws:
+
+QWP/WebSocket
+-------------
+
+QWP/WebSocket (``ws``, or ``wss`` for TLS) is an acknowledged streaming
+transport. For general ingestion use :func:`questdb.connect` and
+``db.sender()`` — the pooled path described throughout this guide, whose
+lease carries the same delivery surface: the FSN receipts
+(``flush_and_get_fsn``, ``flush_and_keep_and_get_fsn``,
+``published_fsn`` / ``acked_fsn``, ``await_acked_fsn``) and rejection
+polling (``poll_error``, ``error_events_dropped``). A *standalone*
+``Sender.from_conf('ws::...')`` additionally offers manual progress mode
+and explicit buffer control, described below.
+
+Each flush publishes a frame identified by a monotonically
+increasing **frame sequence number (FSN)**; the server acknowledges frames as
+it durably applies them, so the client can confirm delivery.
+
+* **Confirming delivery.** :func:`Sender.flush_and_get_fsn <questdb.Sender.flush_and_get_fsn>` flushes and returns
+  the FSN of the published frame; :func:`Sender.flush_and_keep_and_get_fsn <questdb.Sender.flush_and_keep_and_get_fsn>`
+  does the same without clearing the buffer. :func:`Sender.await_acked_fsn <questdb.Sender.await_acked_fsn>`
+  blocks until a given FSN is acknowledged (or a timeout elapses), and
+  :func:`Sender.acked_fsn <questdb.Sender.acked_fsn>` / :func:`Sender.published_fsn <questdb.Sender.published_fsn>` report progress
+  without blocking.
+
+* **Progress modes.** With the default ``qwp_ws_progress=background``,
+  acknowledgements are progressed on a background thread. With
+  ``qwp_ws_progress=manual``, the application must call
+  :func:`Sender.drive_once <questdb.Sender.drive_once>` (or one of the flush/await methods) to pump the
+  connection.
+
+* **Server diagnostics.** Per-frame server feedback is delivered to the
+  ``error_handler`` callback, or polled via
+  :func:`Sender.poll_error <questdb.Sender.poll_error>` as :class:`SenderError <questdb.SenderError>` values
+  (:func:`Sender.error_events_dropped <questdb.Sender.error_events_dropped>` reports how many were dropped when no
+  handler kept up). A diagnostic with a terminal policy halts the sender: the next
+  sender call raises :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`. The handler must
+  not call back into the same sender, must be cheap and non-blocking, and —
+  under ``qwp_ws_progress=background`` — may run on a background thread.
+  The pooled :class:`QuestDB <questdb.QuestDB>` handle delivers the same
+  diagnostics through the ``error_handler`` passed to
+  :func:`questdb.connect`, on a dedicated dispatcher thread.
+
+* **Draining on close.** :func:`Sender.close_drain <questdb.Sender.close_drain>` waits for outstanding
+  frames to be acknowledged before closing.
+
+* **DataFrame bulk loads.** A standalone ws/wss ``Sender.dataframe()`` does
+  not serialize into the sender's row stream: it opens (and closes) its own
+  poolless direct columnar connection per call, built from the sender's own
+  configuration (carrying its auth/TLS), and commits before returning. It
+  has no ordering relationship with rows buffered via ``row()`` and does
+  not flush them. Per-call connection setup is not free — batch your frames
+  accordingly, or use :func:`questdb.connect` / :class:`QuestDB
+  <questdb.QuestDB>` for repeated loads (its ``dataframe()`` borrows a
+  pooled direct connection instead).
+
+.. _sender_qwp_udp:
+
+QWP/UDP
+-------
+
+QWP/UDP (``udp``) uses fire-and-forget UDP datagrams for lowest-latency
+ingestion. It does not support authentication, TLS, or transactions. The
+default port is 9007. See the :ref:`qwp_udp_example` example.
+
+Key differences from ILP:
+
+* **No delivery guarantee.** UDP datagrams may be dropped under load or network
+  congestion. There is no retry mechanism and the server sends no
+  acknowledgement. Use ILP/HTTP if you need reliable delivery.
+
+* **No error feedback.** If a row contains invalid data (e.g. wrong column type
+  for an existing table), the server silently drops it. With ILP/HTTP you would
+  get an error response.
+
+* **Buffer inspection.** ``bytes(sender)`` returns ``b''`` because QWP encoding
+  is deferred to flush. ``len(sender)`` returns an estimated size hint, not the
+  exact serialized byte count.
+
+* **Auto-flush.** ``auto_flush_bytes`` defaults to ``max_datagram_size`` (1400
+  by default) so that rows are flushed when the buffer approaches a single
+  datagram's worth of data. Rows and interval thresholds work the same as ILP.
+
+* **Datagram size limit.** A single row that exceeds ``max_datagram_size`` will
+  raise :class:`QuestDBError <questdb.QuestDBError>` at flush time. Configure ``max_datagram_size`` via
+  the constructor or :ref:`configuration string <sender_conf>`.
+
+* **No protocol version.** QWP has its own versioning. The ``protocol_version``
+  parameter and property are not applicable and will raise an error.
+
+.. _sender_ilp_http_tcp:
+
+ILP/HTTP and ILP/TCP
+--------------------
 
 ILP/HTTP is available from:
 
 * QuestDB 7.3.10 and later.
 * QuestDB Enterprise 1.2.7 and later.
 
-ILP/HTTP Also supports :ref:`protocol version <sender_protocol_version>`
+ILP/HTTP also supports :ref:`protocol version <sender_protocol_version>`
 auto-detection.
 
 +----------------+--------------------------------------------------------------+
 | Protocol       | Protocol version auto-detection                              |
 +================+==============================================================+
-| ILP/HTTP       | **Yes**: The client will communcate to the server using the  |
-|                | latest version supported by both client and the server.      |
+| ILP/HTTP       | **Yes**: The client will communicate with the server using   |
+|                | the latest version supported by both client and the server.  |
 +----------------+--------------------------------------------------------------+
 | ILP/TCP        | **No**: You need to                                          |
 |                | :ref:`configure <sender_conf_protocol_version>`              |
-|                | ``protocol_version=N`` to to match a version supported by    |
+|                | ``protocol_version=N`` to match a version supported by       |
 |                | the server.                                                  |
++----------------+--------------------------------------------------------------+
+| QWP/UDP        | **N/A**: QWP uses its own wire format. The                   |
+|                | ``protocol_version`` setting is not applicable.              |
 +----------------+--------------------------------------------------------------+
 
 .. note::
 
     The client will disable features that require a newer
-    protocol versions than the one used to communicate with the server.
+    protocol version than the one used to communicate with the server.
 
 
 Since TCP does not block for a response it is useful for high-throughput
@@ -880,6 +1086,100 @@ Either way, you can easily switch between the two protocols by changing:
 
 * The ``<protocol>`` part of the :ref:`configuration string <sender_conf>`.
 
-* The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000).
+* The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000,
+  QWP/UDP default is 9007).
 
+.. _query_egress:
+
+Querying data
+=============
+
+:class:`QuestDB <questdb.QuestDB>` reads query results back over the QWP/WebSocket read endpoint.
+:meth:`QuestDB.query <questdb.QuestDB.query>` returns a single-use :class:`QueryResult <questdb.QueryResult>` that streams rows
+as Arrow record batches::
+
+    with questdb.connect('ws::addr=localhost:9000;') as db:
+        with db.query('SELECT * FROM trades WHERE ts > $1',
+                      [datetime.datetime(2026, 7, 1)]) as result:
+            df = result.to_pandas()
+
+Statements with nothing to return — DDL, ``INSERT`` — go through
+:meth:`QuestDB.execute <questdb.QuestDB.execute>` instead: it runs the
+SQL, drains the result and returns the pooled connection in one call
+(:class:`PooledReader <questdb.PooledReader>` offers the same verb)::
+
+    db.execute('CREATE TABLE IF NOT EXISTS trades ('
+               '  timestamp TIMESTAMP, symbol SYMBOL, price DOUBLE'
+               ') TIMESTAMP(timestamp) PARTITION BY DAY WAL')
+
+Statement output (a ``COPY`` status row, admin-function rows, a stray
+``SELECT``) is discarded — use ``query()`` when you want it.
+
+Positional bind parameters fill the ``$1``..``$N`` placeholders — always
+prefer them over interpolating values into the SQL text. Supported bind
+types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
+``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`,
+:class:`TimestampNanos <questdb.TimestampNanos>`, and ``uuid.UUID``.
+
+A :class:`QueryResult <questdb.QueryResult>` can be materialised with ``to_arrow`` / ``to_pandas`` or
+streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
+``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
+``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
+are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
+(``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
+``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
+Each result is consumed once. Fully drain it, use it as a context manager
+(``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
+partially-consumed result cannot return its connection to the pool — closing
+it drops the connection and the pool refills on demand. To stop streaming
+while preserving the connection, call
+:func:`QueryResult.cancel <questdb.QueryResult.cancel>`, which blocks while
+draining to a terminal reply, then close the result (or leave its context
+manager).
+
+``SYMBOL`` columns: ``to_polars`` / ``to_pandas`` build the categorical directly
+(connection dictionary interned once, no per-row remap). ``to_arrow`` /
+``iter_arrow`` / ``__arrow_c_stream__`` emit a generic Arrow form whose
+per-batch ``SYMBOL`` dictionary is compacted to the values each batch uses,
+which a generic consumer reconciles. So when the target is a polars / pandas
+frame, the dedicated methods avoid the re-reconciliation that
+``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+``SYMBOL``-heavy results.
+
+For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a
+**reader lease** — the read-side twin of :meth:`QuestDB.sender <questdb.QuestDB.sender>`. The
+lease borrows one reader connection from the pool for its lifetime and runs
+queries on it sequentially::
+
+    with db.reader() as r:
+        r1 = r.query('SELECT * FROM t1').to_pandas()
+        r2 = r.query('SELECT * FROM t2',
+                     reset_symbol_dict=False).to_pandas()
+
+Each query skips the per-call pool round-trip, and because they share one
+connection, ``reset_symbol_dict=False`` on follow-up queries keeps the
+connection's ``SYMBOL`` dictionary warm across them — skipping the
+re-interning of symbols the connection already knows. The default
+(``True``) keeps each result's dictionary exactly as large as the values
+it uses, so materialising ``SYMBOL`` columns into pandas or polars
+categoricals stays compact. Queries on a lease are
+strictly sequential: fully drain (or close) each :class:`QueryResult <questdb.QueryResult>` before
+the next ``r.query()`` call. Closing a result before draining it tears down
+the lease's connection, after which the lease is terminal — close it and take
+a fresh one. To abandon a result without losing the lease, call ``cancel()``
+and then ``close()``; cancellation drains to terminal, so the next query can
+reuse the connection. A lease has thread affinity: use one lease per thread,
+on the thread that created it (threads sharing a
+:class:`QuestDB <questdb.QuestDB>` handle each take their own lease).
+
+The same :class:`QuestDB <questdb.QuestDB>` can ingest dataframes through the pooled columnar QWP
+path with :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. Dataframe ingestion always uses the direct
+(non-store-and-forward) column sender, independent of ``sf_dir``, and returns
+once the whole frame is committed (``AckLevel::Ok``). On a transient connection
+failure the frame is re-sent from the caller's DataFrame only when the failed
+operation is provably not delivered. If the native client reports delivery as
+in doubt, or an intermediate commit checkpoint on a large frame has already
+landed, the error surfaces immediately and a committed prefix may remain in the
+table. Retrying an in-doubt operation can duplicate rows unless the table has
+appropriate ``DEDUP UPSERT KEYS``.
 * Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.
