@@ -5992,8 +5992,21 @@ class TestFileTokenStore(unittest.TestCase):
             'FileTokenStore.at(sys.argv[1]).save(k, PersistedToken(\n'
             '    access_token="AT", id_token="IT", refresh_token="XPROC-RT",\n'
             '    expires_at=1003600.0, token_ttl=3600.0))\n')
+        import questdb  # parent already imported questdb.auth, so _client is loaded
+        # Point the child at the questdb the PARENT resolved (whose compiled
+        # _client extension is importable), not the whole sys.path. patch_path
+        # appends the src/ source tree to sys.path; in a wheel test that tree has
+        # no built _client, and copying all of sys.path into the child's
+        # PYTHONPATH lets it shadow the installed package in the fresh
+        # interpreter -- so `from questdb import _client` (run when the child
+        # imports the questdb.auth subpackage) fails with a misleading circular-
+        # import error. Prepending the resolved package root keeps the working
+        # copy ahead of any un-built src/ tree.
+        pkg_root = os.path.dirname(
+            os.path.dirname(os.path.abspath(questdb.__file__)))
         env = dict(os.environ)
-        env['PYTHONPATH'] = os.pathsep.join(p for p in sys.path if p)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [pkg_root] + [p for p in sys.path if p])
         res = subprocess.run(
             [sys.executable, '-c', script, self.dir],
             env=env, timeout=60, capture_output=True, text=True)

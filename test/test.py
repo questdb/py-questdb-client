@@ -46,12 +46,14 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
 
 from fixture import _parse_version
 
-# OIDC auth tests. These test cases are themselves pure-Python and import no
-# compiled extension, so they can be run standalone against an unbuilt checkout
-# with ``PYTHONPATH=src python -m unittest test_auth``. They are imported here
-# only so ``unittest.main()`` picks them up in the CI run alongside the ingress
-# tests (this module imports ``questdb.ingress`` above, so the aggregated run
-# does build the extension; the standalone invocation above does not).
+# OIDC auth tests. Their runtime logic uses only the standard library, but
+# importing them runs ``from questdb.auth import ...``, and ``questdb.auth`` is a
+# subpackage of the compiled ``questdb`` package -- so the import triggers
+# ``questdb/__init__.py`` (``from questdb import _client``) and therefore
+# requires the compiled extension to have been built. Run them standalone with
+# ``PYTHONPATH=src python -m unittest test_auth`` only after building the
+# extension in place. They are imported here so ``unittest.main()`` picks them
+# up in the aggregated CI run alongside the ingress tests.
 from test_auth import (
     TestDeviceFlow,
     TestNonInteractive,
