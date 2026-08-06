@@ -1552,6 +1552,34 @@ class TestDeviceFlow(AuthTestBase):
                 'verification_uri': 'https://idp.example.com/device'})
             opener.assert_called_once_with('https://idp.example.com/device')
 
+    def test_open_browser_ignores_divergent_host_complete(self):
+        # M1: a safe-but-DIFFERENT-host verification_uri_complete must not be
+        # opened. complete is auto-opened / QR'd / one-click-linked but the user
+        # never reads its host (in Jupyter its label is fixed text), so a tampered
+        # response pairing a trusted-looking verification_uri with a complete on
+        # an attacker host could silently drive the browser off-origin while the
+        # shown link still reads as the trusted host. Require a shared origin;
+        # otherwise open the verification_uri that is actually displayed.
+        auth = self.make_auth(open_browser=True)
+        with mock.patch('webbrowser.open') as opener:
+            auth._maybe_open_browser({
+                'verification_uri': 'https://login.questdb.io/device',
+                'verification_uri_complete':
+                    'https://questdb-verify.io/go?code=WDJB-MJHT'})
+            opener.assert_called_once_with('https://login.questdb.io/device')
+
+    def test_open_browser_uses_same_origin_complete(self):
+        # The legitimate RFC 8628 case: complete is verification_uri + the user
+        # code on the SAME origin, so it is preferred (spares typing the code).
+        auth = self.make_auth(open_browser=True)
+        with mock.patch('webbrowser.open') as opener:
+            auth._maybe_open_browser({
+                'verification_uri': 'https://login.questdb.io/device',
+                'verification_uri_complete':
+                    'https://login.questdb.io/device?user_code=WDJB-MJHT'})
+            opener.assert_called_once_with(
+                'https://login.questdb.io/device?user_code=WDJB-MJHT')
+
     def test_open_browser_default_is_true(self):
         # We try to open the browser by default ("always when possible"), via
         # both the explicit constructor and discovery.
@@ -1792,6 +1820,45 @@ class TestRefresh(AuthTestBase):
         auth.token()
         self.assertEqual(auth._tokens.refresh_token, 'REFRESH-2')
         self.assertEqual(self.state.device_requests, 0)  # no re-prompt
+
+    def test_stale_instance_adopts_cache_rotated_refresh_token(self):
+        # M2: two long-lived OidcDeviceAuth instances for one identity share only
+        # the process-global MemoryCache (no token store). A peer refreshed and
+        # the IdP ROTATED the refresh token, writing {new-access, RT1} to the
+        # shared cache; this instance still holds a STALE local {old-access, RT0}.
+        # When both the local and the cached access tokens have expired, this
+        # instance must refresh with the cache's newer RT1 (the peer-rotated live
+        # token), NOT replay its own now-spent RT0 -- which a reuse-detecting IdP
+        # would treat as a breach and revoke the whole family (peer included).
+        clock = FakeClock()
+        auth_a = self.make_auth(clock=clock)
+        auth_b = self.make_auth(clock=clock)   # identical config => shared cache
+
+        # auth_b's stale local view: RT0, access token already expired.
+        auth_b._tokens = TokenSet(
+            access_token='old-access', id_token='old-id', refresh_token='RT0',
+            expires_at=clock.now() - 10)
+        # The shared cache holds the peer-rotated RT1, its access token ALSO
+        # expired (so the is_valid() adoption arm alone would refuse it and the
+        # new _cache_has_fresher_refresh arm is what adopts it).
+        auth_a._cache.store(auth_a.cache_key, TokenSet(
+            access_token='new-access', id_token='new-id', refresh_token='RT1',
+            expires_at=clock.now() - 5))
+
+        # A rotating IdP: refreshing RT1 mints RT2.
+        self.state.refresh_response = (200, {
+            'access_token': ACCESS_TOKEN, 'id_token': ID_TOKEN,
+            'refresh_token': 'RT2', 'token_type': 'Bearer', 'expires_in': 3600})
+
+        auth_b.token()
+
+        self.assertEqual(self.state.refresh_requests, 1)
+        # Refreshed with the cache's live RT1, never the stale/spent RT0.
+        self.assertEqual(self.state.refresh_forms[-1]['refresh_token'], 'RT1')
+        self.assertNotIn(
+            'RT0', [f['refresh_token'] for f in self.state.refresh_forms])
+        self.assertEqual(self.state.device_requests, 0)   # no re-prompt
+        self.assertEqual(auth_b._tokens.refresh_token, 'RT2')
 
     def test_refresh_without_id_token_falls_back_to_device_flow(self):
         # groups_in_token=True but the IdP's refresh omits the id_token: the
@@ -5097,6 +5164,77 @@ class TestRendererSecurity(unittest.TestCase):
         })
         self.assertIn('<a href="https://idp.example.com/device"',
                       captured['html'])
+
+    def test_divergent_complete_host_is_not_rendered(self):
+        # M1: a verification_uri_complete on a DIFFERENT host than the shown
+        # verification_uri (both individually https-safe) must never become the
+        # one-click link, the QR, or the terminal "open directly" line -- the user
+        # does not read complete's host, so a diverging complete would silently
+        # point the click/scan at an attacker host while the shown link still
+        # reads as the trusted host. Everything falls back to verification_uri.
+        from questdb.auth._render import (
+            JupyterRenderer, TerminalRenderer, format_prompt,
+            _verification_target, _matched_complete)
+        resp = {
+            'user_code': 'WDJB-MJHT',
+            'verification_uri': 'https://login.questdb.io/device',
+            'verification_uri_complete':
+                'https://questdb-verify.io/go?code=WDJB-MJHT',
+            'expires_in': 600, 'interval': 5,
+        }
+        self.assertIsNone(_matched_complete(resp))
+        self.assertEqual(
+            _verification_target(resp), 'https://login.questdb.io/device')
+
+        captured = {}
+
+        class _Cap(JupyterRenderer):
+            def _display(self, html_str):
+                captured['html'] = html_str
+
+        _Cap(qr=True).on_prompt(resp)
+        html = captured['html']
+        self.assertNotIn('questdb-verify.io', html)     # attacker host absent
+        self.assertIn('login.questdb.io', html)         # trusted host shown
+        # No fixed-label one-click link to the (hidden-host) diverging complete.
+        self.assertNotIn('Click here to authorize directly', html)
+
+        text = format_prompt(resp)
+        self.assertNotIn('questdb-verify.io', text)
+        self.assertNotIn('open directly', text)
+        self.assertIn('login.questdb.io', text)
+
+        buf = io.StringIO()
+        TerminalRenderer(stream=buf, qr=True).on_prompt(resp)
+        out = buf.getvalue()
+        self.assertNotIn('questdb-verify.io', out)
+        self.assertIn('login.questdb.io', out)
+
+    def test_same_origin_complete_is_still_used(self):
+        # The legitimate RFC 8628 pairing (complete == verification_uri + the
+        # user code, same origin) must still be preferred: the one-click link and
+        # the single vetted target use it, so the fix costs nothing for a
+        # well-behaved IdP.
+        from questdb.auth._render import JupyterRenderer, _verification_target
+        resp = {
+            'user_code': 'WDJB-MJHT',
+            'verification_uri': 'https://login.questdb.io/device',
+            'verification_uri_complete':
+                'https://login.questdb.io/device?user_code=WDJB-MJHT',
+            'expires_in': 600, 'interval': 5,
+        }
+        self.assertEqual(
+            _verification_target(resp),
+            'https://login.questdb.io/device?user_code=WDJB-MJHT')
+        captured = {}
+
+        class _Cap(JupyterRenderer):
+            def _display(self, html_str):
+                captured['html'] = html_str
+
+        _Cap().on_prompt(resp)
+        self.assertIn('Click here to authorize directly', captured['html'])
+        self.assertIn('user_code=WDJB-MJHT', captured['html'])
 
     def test_jupyter_qr_suppressed_for_dangerous_url(self):
         # With qr=True, a dangerous (javascript:/data:) verification URL must NOT

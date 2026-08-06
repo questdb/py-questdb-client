@@ -61,10 +61,9 @@ from ._store import (
 )
 from ._render import (
     Renderer,
-    _safe_target,
     _strip_control,
+    _verification_target,
     _verification_uri,
-    _verification_uri_complete,
     detect_interactive,
     in_ipython_kernel,
     make_renderer,
@@ -942,7 +941,13 @@ class OidcDeviceAuth:
                     if cached is not None and (
                             self._tokens is None
                             or (cached.is_valid(self._now())
-                                and self._has_required_token(cached))):
+                                and self._has_required_token(cached))
+                            # ...or the shared cache carries a refresh token a
+                            # peer rotated in (see _cache_has_fresher_refresh):
+                            # adopt it even if its access token has expired, so we
+                            # refresh with the live token rather than replay our
+                            # own now-spent one.
+                            or self._cache_has_fresher_refresh(cached)):
                         self._tokens = cached
                         # Adopting a token from the shared cache must also move the
                         # "last persisted" marker, exactly as _adopt does for a disk
@@ -992,6 +997,35 @@ class OidcDeviceAuth:
                 and self._has_required_token(tokens)):
             return tokens
         return None
+
+    def _cache_has_fresher_refresh(self, cached: TokenSet) -> bool:
+        # Adopt a shared-cache entry whose refresh_token differs from this
+        # instance's own copy even when the cache's ACCESS token has expired.
+        #
+        # Without a token store, two long-lived OidcDeviceAuth instances for one
+        # identity share only the process-global MemoryCache. When a peer
+        # refreshes and the IdP ROTATES the refresh token, the peer writes the
+        # rotated token to the shared cache but not into THIS instance's
+        # self._tokens. If the cache's access token then also expires before we
+        # look, the is_valid() arm of the promotion gate would refuse it and
+        # _acquire would refresh with our OWN older, already-rotated (spent)
+        # refresh token — which an IdP with refresh-token reuse detection treats
+        # as a breach, revoking the whole family (including the peer's live
+        # session) and forcing both instances to re-authenticate. Adopt the
+        # cache's live refresh token instead.
+        #
+        # A DIFFERING value in the shared cache is always the authoritative
+        # (peer-written) one, never an older regression: the cache is written
+        # only through a successful generation CAS, and a dropped CAS (a
+        # concurrent clear()) leaves the entry EMPTY — load() returns None, caught
+        # by the `cached is not None` guard at the call site — not stale. A
+        # single-instance process keeps self._tokens and the cache in lock-step,
+        # so the two match and this predicate is False (no behavioural change).
+        local = self._tokens
+        return (
+            local is not None
+            and bool(cached.refresh_token)
+            and cached.refresh_token != local.refresh_token)
 
     def _acquire(
             self, generation: int, *,
@@ -1757,16 +1791,13 @@ class OidcDeviceAuth:
         # kernel host isn't the user's machine. Suppress with open_browser=False.
         if not self.open_browser or in_ipython_kernel():
             return
-        # Open the SAME _strip_control'd, vetted target the prompt shows — not the
-        # raw response value — so a char stripped from the on-screen link can't
-        # survive into the opened URL, and a javascript:/data: scheme (or
-        # userinfo / non-ASCII host) is never opened. Vet each field
-        # independently and fall back, exactly as the renderers do (_safe_target
-        # per field, complete-then-plain), so a truthy-but-unsafe
-        # verification_uri_complete can't shadow a usable verification_uri and
-        # make the browser diverge from the displayed link / QR.
-        target = (_safe_target(_verification_uri_complete(resp))
-                  or _safe_target(_verification_uri(resp)))
+        # Open the SAME single vetted target the prompt shows / encodes (see
+        # _verification_target) — not the raw response value — so a char stripped
+        # from the on-screen link can't survive into the opened URL, a
+        # javascript:/data: scheme (or userinfo / non-ASCII host) is never
+        # opened, and a verification_uri_complete on a different host than the
+        # shown link can't make the browser diverge from the displayed link / QR.
+        target = _verification_target(resp)
         if target:
             try:
                 webbrowser.open(target)

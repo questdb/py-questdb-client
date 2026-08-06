@@ -217,6 +217,57 @@ def _safe_target(value: Optional[str]) -> Optional[str]:
     return _safe_link_url(_strip_control(value))
 
 
+def _same_origin(a: str, b: str) -> bool:
+    """True if two already-``_safe_target``-vetted URLs share an origin
+    (scheme + host + port).
+
+    Both are guaranteed ``http(s)`` with an ASCII host, no userinfo, and a
+    parseable in-range port (:func:`_safe_link_url` rejects anything else), so a
+    plain origin comparison is meaningful and cannot raise on ``.port``.
+    """
+    pa = urllib.parse.urlparse(a)
+    pb = urllib.parse.urlparse(b)
+    return (
+        pa.scheme.lower() == pb.scheme.lower()
+        and (pa.hostname or '').lower() == (pb.hostname or '').lower()
+        and pa.port == pb.port)
+
+
+def _matched_complete(resp: Dict[str, Any]) -> Optional[str]:
+    """The vetted ``verification_uri_complete`` when it shares
+    ``verification_uri``'s origin, else ``None``.
+
+    ``complete`` is a target the user does NOT read character-by-character: it is
+    auto-opened, encoded into the QR, and (in Jupyter) backs the fixed-label
+    "Click here to authorize directly" link, whose host is never shown.
+    ``verification_uri`` is the host shown IDNA-normalized in the primary prompt
+    line — the host the user is meant to read and trust. RFC 8628 §3.3.1 makes
+    ``complete`` the same URL as ``verification_uri`` with the user code added,
+    so a legitimate pair shares an origin. A tampered/hostile device response
+    could instead pair a trusted-looking ``verification_uri`` with a ``complete``
+    on a DIFFERENT host, silently steering the opened/scanned/clicked target off
+    to the attacker while the displayed host still looks right. So a ``complete``
+    whose origin diverges is treated as absent everywhere (not shown, not made
+    actionable), and only ``verification_uri`` is used.
+    """
+    safe_uri = _safe_target(_verification_uri(resp))
+    safe_complete = _safe_target(_verification_uri_complete(resp))
+    if (safe_complete is not None and safe_uri is not None
+            and _same_origin(safe_complete, safe_uri)):
+        return safe_complete
+    return None
+
+
+def _verification_target(resp: Dict[str, Any]) -> Optional[str]:
+    """The single URL to auto-open, encode as a QR, or make a one-click link:
+    the origin-matched ``verification_uri_complete`` when usable (see
+    :func:`_matched_complete`), else the vetted ``verification_uri`` — so the
+    target opened/scanned/clicked can never diverge from the host shown in the
+    link the user actually reads.
+    """
+    return _matched_complete(resp) or _safe_target(_verification_uri(resp))
+
+
 def _ascii_visible(text: str) -> str:
     """
     Escape every non-ASCII char to a visible ``\\uXXXX`` so a confusable /
@@ -433,13 +484,17 @@ def format_prompt(resp: Dict[str, Any]) -> str:
     # homoglyph / user@host can't spoof the host in the plain-text prompt either.
     uri = _display_url(_verification_uri(resp))
     code = _strip_control(str(resp.get('user_code', '')))
-    complete = _display_url(_verification_uri_complete(resp))
+    # Only offer the pre-filled "open directly" URL when it shares the shown
+    # link's origin (see _matched_complete); a complete on a different host is
+    # dropped rather than shown, so the convenience URL can't point somewhere the
+    # primary link does not.
+    complete = _matched_complete(resp)
     lines = [
         '🔐 Sign in to QuestDB',
         f'   Open {uri}  and enter code:  {code}',
     ]
     if complete:
-        lines.append(f'   (or open directly: {complete})')
+        lines.append(f'   (or open directly: {_display_url(complete)})')
     return '\n'.join(lines)
 
 
@@ -537,12 +592,13 @@ class TerminalRenderer(Renderer):
     def on_prompt(self, resp: Dict[str, Any]) -> None:
         self._write(format_prompt(resp) + '\n')
         if self._qr:
-            # Encode the SAME _strip_control'd, vetted target the prompt displays
-            # (via _safe_target), not the raw response value — so a char stripped
-            # from the on-screen URL can't survive into the scanned QR, and a
-            # javascript:/data: scheme is never encoded.
-            target = (_safe_target(_verification_uri_complete(resp))
-                      or _safe_target(_verification_uri(resp)))
+            # Encode the SAME single vetted target the prompt displays (see
+            # _verification_target), not the raw response value — so a char
+            # stripped from the on-screen URL can't survive into the scanned QR,
+            # a javascript:/data: scheme is never encoded, and a
+            # verification_uri_complete on a different host than the shown link is
+            # never scanned.
+            target = _verification_target(resp)
             art = _qr_ascii(target) if target else None
             if art:
                 self._write(art + '\n')
@@ -617,26 +673,32 @@ class JupyterRenderer(Renderer):
             f'<div style="font-size:1.6em;font-family:monospace;'
             f'letter-spacing:2px;margin:6px 0">{code}</div>',
         ]
-        if _safe_target(raw_complete):
+        # Offer the one-click "authorize directly" link only when the pre-filled
+        # complete shares the shown link's origin (see _matched_complete): its
+        # label is fixed text, so its host is never shown, and a complete on a
+        # different host would silently send the click to the attacker while the
+        # primary link above still reads as the trusted host.
+        matched = _matched_complete(resp)
+        if matched:
             body.append(
                 '<div>' + _render_link(
-                    raw_complete, text='Click here to authorize directly →')
+                    matched, text='Click here to authorize directly →')
                 + '</div>')
         if self._qr:
-            qr_html = self._qr_img(raw_complete, raw_uri)
+            qr_html = self._qr_img(_verification_target(resp))
             if qr_html:
                 body.append(qr_html)
         return body, raw_uri, raw_complete
 
-    def _qr_img(self, complete: Optional[str], uri: str) -> str:
+    def _qr_img(self, target: Optional[str]) -> str:
         """The QR ``<img>`` for the verification URL, built once and cached.
 
+        ``target`` is the single vetted URL to encode (see _verification_target).
         Returns ``''`` when there is no scheme-valid target or ``qrcode`` is not
         installed. Generated lazily on the first render and reused thereafter, so
         the countdown re-renders neither drop the QR nor regenerate the PNG.
         """
         if self._qr_html is None:
-            target = _safe_target(complete) or _safe_target(uri)
             data_uri = _qr_data_uri(target) if target else None
             self._qr_html = (
                 f'<img alt="QR code" src="{data_uri}" '
