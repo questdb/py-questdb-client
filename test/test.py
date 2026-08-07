@@ -374,16 +374,18 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.QuestDB.from_conf('ws::sender_pool_min=1;')
 
     def test_removed_qwp_flight_window_keys_are_rejected(self):
-        for key in ('max_in_flight', 'in_flight_window'):
-            with self.subTest(key=key):
-                with self.assertRaisesRegex(
-                        qi.QuestDBError,
-                        f'Unknown config key "{key}"') as cm:
-                    qi.Sender.from_conf(
-                        f'ws::addr=127.0.0.1:1;lazy_connect=true;{key}=1;')
-                self.assertIs(
-                    cm.exception.code,
-                    qi.QuestDBErrorCode.ConfigError)
+        for scheme in ('ws', 'wss'):
+            for key in ('max_in_flight', 'in_flight_window'):
+                with self.subTest(scheme=scheme, key=key):
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            f'Unknown config key "{key}"') as cm:
+                        qi.Sender.from_conf(
+                            f'{scheme}::addr=127.0.0.1:1;'
+                            f'lazy_connect=true;{key}=1;')
+                    self.assertIs(
+                        cm.exception.code,
+                        qi.QuestDBErrorCode.ConfigError)
 
     def test_client_close_is_idempotent(self):
         client = qi.QuestDB.__new__(qi.QuestDB)

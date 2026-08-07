@@ -3282,9 +3282,9 @@ class TestEgressPool(unittest.TestCase):
             ('private_data', ctypes.c_void_p),
         ]
         ArrowSchema._fields_ = [
-            ('format', ctypes.c_char_p),
-            ('name', ctypes.c_char_p),
-            ('metadata', ctypes.c_char_p),
+            ('format', ctypes.c_void_p),
+            ('name', ctypes.c_void_p),
+            ('metadata', ctypes.c_void_p),
             ('flags', ctypes.c_int64),
             ('n_children', ctypes.c_int64),
             ('children', ctypes.POINTER(ctypes.POINTER(ArrowSchema))),

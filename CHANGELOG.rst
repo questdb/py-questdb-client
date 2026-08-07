@@ -16,6 +16,7 @@ Changelog
   repeated text in full. Repeated values do not grow it, but a long-lived
   connection fills it after 2,000,000 distinct values or 256 MiB of symbol
   text. The client then raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.SymbolDictFull``. Pooled clients replace the connection;
   standalone senders should call ``close_drain()`` and reconnect. Before
   retrying, check ``err.in_doubt``; when it is true, some rows may already be
@@ -28,7 +29,8 @@ Changelog
   timeout and recovery is safer after a crash or an incomplete final write.
 - If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
   ``in_flight_window``, remove it. These options are no longer supported and now
-  raise ``QuestDBErrorCode.ConfigError`` during startup.
+  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ConfigError`` during startup.
 
 5.0.0 (2026-07-27)
 ------------------
