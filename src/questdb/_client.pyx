@@ -72,7 +72,8 @@ from cpython.datetime cimport (
     PyDateTime_DATE_GET_SECOND, PyDateTime_DATE_GET_MICROSECOND,
 )
 from cpython.bool cimport bool
-from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
+from cpython.ref cimport Py_XDECREF
+from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
@@ -1335,12 +1336,14 @@ cdef class Buffer:
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
     cdef inline void_int _may_trigger_row_complete(self) except -1:
-        cdef line_sender_error* err = NULL
         cdef PyObject* sender = NULL
         if self._row_complete_sender != None:
-            sender = PyWeakref_GetObject(self._row_complete_sender)
-            if sender != NULL and <object>sender is not None:
-                may_flush_on_row_complete(self, <Sender><object>sender)
+            if PyWeakref_GetRef(self._row_complete_sender, &sender):
+                try:
+                    may_flush_on_row_complete(
+                        self, <Sender><object>sender)
+                finally:
+                    Py_XDECREF(sender)
 
     cdef inline void_int _at_ts_us(self, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
