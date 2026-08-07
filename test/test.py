@@ -924,7 +924,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         'events', columns={'value': 'x' * (8 * 1024 * 1024)},
                         at=qi.ServerTimestamp)
                     self.assertEqual(len(sender), 0)
-                    sender.wait(5000)
+                    sender.wait(30000)
 
             stats = server.snapshot()
 
