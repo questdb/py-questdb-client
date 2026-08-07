@@ -99,6 +99,7 @@ class QuestDBErrorCode(Enum):
     ArrowExport = ...
     BatchTooLarge = ...
     StoreResendRequired = ...
+    SymbolDictFull = ...
     BadDataFrame = ...
 
 
@@ -1200,6 +1201,18 @@ class QuestDB:
     ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
+
+        Ingestion always uses the direct (non-store-and-forward) column
+        sender, independent of ``sf_dir``. On success, the call returns only
+        after every DataFrame batch has been committed. Most loads queue their
+        batches and commit once at the end. Large Arrow inputs checkpoint about
+        every 100 batches to keep memory bounded. The client may checkpoint
+        earlier if the connection cannot queue another batch or if a batch must
+        be split to fit. If a later batch fails, the exception means that the
+        load did not finish, not necessarily that no rows landed. Any already
+        committed prefix from this call remains, and retrying the whole
+        DataFrame can duplicate it unless the destination table uses suitable
+        ``DEDUP UPSERT KEYS``.
 
         ``at`` names the designated timestamp column (by name or index),
         or a fixed ``TimestampNanos`` / ``datetime`` shared by every row,

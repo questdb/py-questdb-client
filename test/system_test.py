@@ -3252,6 +3252,175 @@ class TestEgressPool(unittest.TestCase):
                 f'expected 1 idle reader cached across 5 queries; '
                 f'got in_use={in_use}, idle={idle}')
 
+    def test_arrow_capsule_callbacks_migrate_between_workers(self):
+        """Drive one Arrow C stream through two synchronized worker
+        threads: worker A fetches schema + the first batch, worker B
+        drains and releases it. This pins the actual third-party callback
+        route, including foreign-thread ``qwp_reader_cursor_free``.
+        """
+        import ctypes
+
+        class ArrowArray(ctypes.Structure):
+            pass
+
+        class ArrowSchema(ctypes.Structure):
+            pass
+
+        class ArrowArrayStream(ctypes.Structure):
+            pass
+
+        ArrowArray._fields_ = [
+            ('length', ctypes.c_int64),
+            ('null_count', ctypes.c_int64),
+            ('offset', ctypes.c_int64),
+            ('n_buffers', ctypes.c_int64),
+            ('n_children', ctypes.c_int64),
+            ('buffers', ctypes.POINTER(ctypes.c_void_p)),
+            ('children', ctypes.POINTER(ctypes.POINTER(ArrowArray))),
+            ('dictionary', ctypes.POINTER(ArrowArray)),
+            ('release', ctypes.c_void_p),
+            ('private_data', ctypes.c_void_p),
+        ]
+        ArrowSchema._fields_ = [
+            ('format', ctypes.c_char_p),
+            ('name', ctypes.c_char_p),
+            ('metadata', ctypes.c_char_p),
+            ('flags', ctypes.c_int64),
+            ('n_children', ctypes.c_int64),
+            ('children', ctypes.POINTER(ctypes.POINTER(ArrowSchema))),
+            ('dictionary', ctypes.POINTER(ArrowSchema)),
+            ('release', ctypes.c_void_p),
+            ('private_data', ctypes.c_void_p),
+        ]
+        ArrowArrayStream._fields_ = [
+            ('get_schema', ctypes.c_void_p),
+            ('get_next', ctypes.c_void_p),
+            ('get_last_error', ctypes.c_void_p),
+            ('release', ctypes.c_void_p),
+            ('private_data', ctypes.c_void_p),
+        ]
+
+        stream_ptr_t = ctypes.POINTER(ArrowArrayStream)
+        get_schema_t = ctypes.CFUNCTYPE(
+            ctypes.c_int,
+            stream_ptr_t,
+            ctypes.POINTER(ArrowSchema))
+        get_next_t = ctypes.CFUNCTYPE(
+            ctypes.c_int,
+            stream_ptr_t,
+            ctypes.POINTER(ArrowArray))
+        stream_release_t = ctypes.CFUNCTYPE(None, stream_ptr_t)
+        schema_release_t = ctypes.CFUNCTYPE(
+            None, ctypes.POINTER(ArrowSchema))
+        array_release_t = ctypes.CFUNCTYPE(
+            None, ctypes.POINTER(ArrowArray))
+
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            capsule = result.__arrow_c_stream__()
+            capsule_get = ctypes.pythonapi.PyCapsule_GetPointer
+            capsule_get.argtypes = [ctypes.py_object, ctypes.c_char_p]
+            capsule_get.restype = ctypes.c_void_p
+            stream_addr = capsule_get(capsule, b'arrow_array_stream')
+            self.assertTrue(stream_addr)
+            stream = ctypes.cast(stream_addr, stream_ptr_t)
+
+            ready = threading.Event()
+            finished = threading.Event()
+            errors = []
+            worker_ids = []
+            row_counts = []
+
+            def release_schema(schema):
+                if schema.release:
+                    schema_release_t(schema.release)(
+                        ctypes.byref(schema))
+
+            def release_array(array):
+                if array.release:
+                    array_release_t(array.release)(
+                        ctypes.byref(array))
+
+            def worker_a():
+                worker_ids.append(('a', threading.get_ident()))
+                try:
+                    schema = ArrowSchema()
+                    get_schema = get_schema_t(
+                        stream.contents.get_schema)
+                    rc = get_schema(stream, ctypes.byref(schema))
+                    if rc != 0:
+                        raise RuntimeError(f'get_schema returned {rc}')
+                    if not schema.release:
+                        raise RuntimeError(
+                            'get_schema returned no release callback')
+                    release_schema(schema)
+
+                    array = ArrowArray()
+                    get_next = get_next_t(stream.contents.get_next)
+                    rc = get_next(stream, ctypes.byref(array))
+                    if rc != 0:
+                        raise RuntimeError(f'first get_next returned {rc}')
+                    if array.release:
+                        row_counts.append(array.length)
+                        release_array(array)
+                except BaseException as exc:
+                    errors.append(('a', repr(exc)))
+                finally:
+                    ready.set()
+                    finished.wait(timeout=30)
+
+            def worker_b():
+                if not ready.wait(timeout=30):
+                    errors.append(('b', 'worker A did not publish'))
+                    finished.set()
+                    return
+                worker_ids.append(('b', threading.get_ident()))
+                try:
+                    if not errors:
+                        get_next = get_next_t(stream.contents.get_next)
+                        while True:
+                            array = ArrowArray()
+                            rc = get_next(stream, ctypes.byref(array))
+                            if rc != 0:
+                                raise RuntimeError(
+                                    f'drain get_next returned {rc}')
+                            if not array.release:
+                                break
+                            row_counts.append(array.length)
+                            release_array(array)
+                except BaseException as exc:
+                    errors.append(('b', repr(exc)))
+                finally:
+                    if stream.contents.release:
+                        stream_release_t(stream.contents.release)(stream)
+                    finished.set()
+
+            thread_a = threading.Thread(target=worker_a)
+            thread_b = threading.Thread(target=worker_b)
+            thread_a.start()
+            thread_b.start()
+            thread_a.join(timeout=30)
+            thread_b.join(timeout=30)
+            self.assertFalse(thread_a.is_alive(), 'worker A hung')
+            self.assertFalse(thread_b.is_alive(), 'worker B hung')
+            self.assertEqual(errors, [])
+            self.assertEqual(sum(row_counts), 64)
+            self.assertEqual(len(worker_ids), 2)
+            self.assertNotEqual(worker_ids[0][1], worker_ids[1][1])
+            self.assertNotIn(
+                threading.get_ident(), [ident for _, ident in worker_ids])
+
+            # Worker B released the producer and returned the clean reader.
+            # The capsule destructor now only frees its tiny stream struct.
+            result.close()
+            del capsule
+            self.assertEqual(
+                qi._debug_egress_pool_stats(client), (0, 1))
+            after = client.query(
+                f'SELECT count() FROM {table}').to_arrow()
+            self.assertEqual(after.column(0).to_pylist(), [64])
+
     def test_server_info_recycles_pooled_reader(self):
         """server_info() borrows a pristine reader (no cursor, no wire
         traffic) and must return it to the pool, not drop it."""
@@ -3403,30 +3572,52 @@ class TestEgressPool(unittest.TestCase):
     def test_gc_abandoned_result_warns_and_releases(self):
         """A never-consumed ``QueryResult`` abandoned inside a
         reference cycle holds its reader until the garbage collector
-        runs; the ``__del__`` backstop then emits a ``ResourceWarning``
-        and releases the reader. The cycle keeps refcounting from
-        cleaning it up early, so this observes the true GC-timed path.
+        runs on a worker thread; the ``__del__`` backstop then emits a
+        ``ResourceWarning`` and releases the reader on that worker. The
+        cycle keeps refcounting from cleaning it up early, so this
+        observes the true GC-timed cross-thread path.
         """
         import gc
         import warnings
         table = self._seed_table(n_rows=64)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            result = client.query(f'SELECT x FROM {table} ORDER BY x')
-            result._cycle = result
-            in_use, _ = qi._debug_egress_pool_stats(client)
-            self.assertEqual(in_use, 1)
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
-                del result
+            gc_was_enabled = gc.isenabled()
+            gc.disable()
+            try:
+                result = client.query(
+                    f'SELECT x FROM {table} ORDER BY x')
+                result._cycle = result
                 in_use, _ = qi._debug_egress_pool_stats(client)
-                self.assertEqual(
-                    in_use, 1,
-                    'the cycle should defer release until gc runs')
-                gc.collect()
+                self.assertEqual(in_use, 1)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    del result
+                    in_use, _ = qi._debug_egress_pool_stats(client)
+                    self.assertEqual(
+                        in_use, 1,
+                        'the cycle should defer release until gc runs')
+                    collector_threads = []
+
+                    def collect_abandoned():
+                        collector_threads.append(threading.get_ident())
+                        gc.collect()
+
+                    collector = threading.Thread(target=collect_abandoned)
+                    collector.start()
+                    collector.join(timeout=30)
+                    self.assertFalse(
+                        collector.is_alive(), 'worker gc.collect() hung')
+            finally:
+                if gc_was_enabled:
+                    gc.enable()
+
+            self.assertEqual(len(collector_threads), 1)
+            self.assertNotEqual(
+                collector_threads[0], threading.get_ident())
             in_use, idle = qi._debug_egress_pool_stats(client)
             self.assertEqual(
                 (in_use, idle), (0, 0),
-                f'gc backstop did not release the reader; '
+                f'worker GC backstop did not release the reader; '
                 f'got in_use={in_use}, idle={idle}')
             resource_warnings = [
                 w for w in caught
@@ -3437,6 +3628,12 @@ class TestEgressPool(unittest.TestCase):
             self.assertIn(
                 'neither drained nor closed',
                 str(resource_warnings[0].message))
+
+            # The foreign-thread finalizer dropped the partial connection;
+            # the next query must open a fresh one successfully.
+            after = client.query(
+                f'SELECT count() FROM {table}').to_arrow()
+            self.assertEqual(after.column(0).to_pylist(), [64])
 
     def test_abandoned_iterator_releases_reader_on_del(self):
         """Abandoning a partially-consumed stream releases the reader
@@ -3547,6 +3744,44 @@ class TestEgressPool(unittest.TestCase):
                 (in_use, idle), (0, 1),
                 f'close() must return the drained reader to the pool; '
                 f'got in_use={in_use}, idle={idle}')
+
+    def test_query_lease_result_handoff_to_worker_then_next_query(self):
+        """The lease stays on its creating thread while one result moves
+        to a worker. Joining that worker publishes the drained cursor
+        before the lease starts its next query on the same reader.
+        """
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.reader() as lease:
+                result = lease.query(
+                    f'SELECT x FROM {table} ORDER BY x')
+                worker_values = []
+                worker_errors = []
+                worker_ids = []
+
+                def consume_result():
+                    worker_ids.append(threading.get_ident())
+                    try:
+                        worker_values.extend(
+                            result.to_arrow().column('x').to_pylist())
+                    except BaseException as exc:
+                        worker_errors.append(repr(exc))
+
+                worker = threading.Thread(target=consume_result)
+                worker.start()
+                worker.join(timeout=30)
+                self.assertFalse(worker.is_alive(), 'result worker hung')
+                self.assertEqual(worker_errors, [])
+                self.assertNotEqual(
+                    worker_ids, [threading.get_ident()])
+                self.assertEqual(worker_values, list(range(64)))
+
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+
+            self.assertEqual(
+                qi._debug_egress_pool_stats(client), (0, 1))
 
     def test_query_lease_reset_symbol_dict_false(self):
         """A follow-up lease query with ``reset_symbol_dict=False``

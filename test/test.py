@@ -308,6 +308,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(
             qi.QuestDBErrorCode.StoreResendRequired.value,
             36)
+        self.assertEqual(qi.QuestDBErrorCode.SymbolDictFull.value, 37)
+        self.assertIs(
+            qi._debug_error_code_to_py(37),
+            qi.QuestDBErrorCode.SymbolDictFull)
 
     def test_default_max_chunk_rows_matches_core_literal(self):
         # Pinned to the Rust core's DEFAULT_MAX_CHUNK_ROWS. Both sides hardcode
@@ -368,6 +372,18 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 qi.QuestDBError,
                 'Missing "addr" parameter'):
             qi.QuestDB.from_conf('ws::sender_pool_min=1;')
+
+    def test_removed_qwp_flight_window_keys_are_rejected(self):
+        for key in ('max_in_flight', 'in_flight_window'):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        f'Unknown config key "{key}"') as cm:
+                    qi.Sender.from_conf(
+                        f'ws::addr=127.0.0.1:1;lazy_connect=true;{key}=1;')
+                self.assertIs(
+                    cm.exception.code,
+                    qi.QuestDBErrorCode.ConfigError)
 
     def test_client_close_is_idempotent(self):
         client = qi.QuestDB.__new__(qi.QuestDB)
@@ -1377,11 +1393,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
         rejection stream must overflow the inbox and count drops.
 
         Status 0x0C (not-writable) maps to the RetriableOther policy,
-        which replays the frame with no backoff — every replay is
-        rejected again, so events flow while the handler is blocked.
-        The stream is bounded by the native max_frame_rejections
-        default (4 strikes, then a terminal event): one event more than
-        the 3 a drop needs, so a lower default would starve this test.
+        so the same frame is replayed without consuming poison strikes.
+        A 1 ms reconnect backoff keeps that replay deterministic and fast
+        while the handler remains blocked.
         """
         release = threading.Event()
         first_delivered = threading.Event()
@@ -1397,6 +1411,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 'sender_pool_max=1;'
                 'pool_reap=manual;'
                 'close_flush_timeout_millis=0;')
+            conf += (
+                'reconnect_initial_backoff_millis=1;'
+                'reconnect_max_backoff_millis=1;')
             with qi.QuestDB.from_conf(
                     conf,
                     error_handler=on_error,
@@ -1428,23 +1445,23 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_standalone_sender_error_ring_overflow_counts_drops(self):
         """A standalone ws sender's per-connection diagnostic ring
         (``error_inbox_capacity``, minimum 16) must evict oldest un-polled
-        diagnostics and count them once a rejection storm outruns polling.
-        Status 0x0C replays each frame up to 4 strikes before its terminal
-        event, so 8 frames yield well over 16 diagnostics."""
+        diagnostics and count them once a replayable rejection outruns
+        polling. Status 0x0C is strike-exempt, so one frame is enough."""
         with QwpAckServer(error_status=0x0C) as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'error_inbox_capacity=16;'
                 'close_flush_timeout_millis=0;'
+                'reconnect_initial_backoff_millis=1;'
+                'reconnect_max_backoff_millis=1;'
                 'reconnect_max_duration_millis=30000;')
             sender = qi.Sender.from_conf(conf)
             try:
                 sender.establish()
-                for i in range(8):
-                    sender.row(
-                        'events', columns={'value': i},
-                        at=qi.ServerTimestamp)
-                    sender.flush()
+                sender.row(
+                    'events', columns={'value': 1},
+                    at=qi.ServerTimestamp)
+                sender.flush()
                 deadline = time.monotonic() + 15
                 while sender.error_events_dropped() < 1:
                     self.assertLess(

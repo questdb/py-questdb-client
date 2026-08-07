@@ -202,6 +202,7 @@ class QuestDBErrorCode(Enum):
     ArrowExport = line_sender_error_arrow_export
     BatchTooLarge = line_sender_error_batch_too_large
     StoreResendRequired = line_sender_error_store_resend_required
+    SymbolDictFull = line_sender_error_symbol_dict_full
     # Python-only sentinel with no backing FFI code: raised by the Cython
     # DataFrame-shape validation path. Sits in a reserved high band, disjoint
     # from the contiguous FFI code space, so an appended FFI variant can never
@@ -384,8 +385,15 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.BatchTooLarge
     elif code == line_sender_error_store_resend_required:
         return QuestDBErrorCode.StoreResendRequired
+    elif code == line_sender_error_symbol_dict_full:
+        return QuestDBErrorCode.SymbolDictFull
     else:
         raise ValueError('Internal error converting error code.')
+
+
+def _debug_error_code_to_py(int raw_code):
+    """Internal ABI test hook for the native-to-Python error mapping."""
+    return c_err_code_to_py(<line_sender_error_code>raw_code)
 
 
 cdef inline object c_sender_error_view_to_raw(
@@ -6306,18 +6314,21 @@ cdef class QuestDB:
         Ingest a dataframe through the pooled columnar QWP path.
 
         Ingestion always uses the direct (non-store-and-forward) column
-        sender, independent of ``sf_dir``, and returns once the whole frame
-        is committed (``AckLevel::Ok``). On a transient connection failure
-        the frame is re-sent from the caller's DataFrame within the pool's
-        reconnect budget — unless the native client reports delivery as in
-        doubt, or an intermediate commit checkpoint (emitted every ~100 batches
-        on large frames) has already landed. In either case the error is raised
-        immediately and a committed prefix may remain in the table, since a
-        blind re-send would duplicate it. Delivery is
-        at-least-once: a re-sent frame can duplicate already-committed rows
-        (including the first chunk, which commits eagerly on a fresh
-        connection) unless the table has ``DEDUP UPSERT KEYS``. Server-side
-        rejections (e.g. a schema mismatch) surface as a plain
+        sender, independent of ``sf_dir``. On success, the call returns only
+        after every DataFrame batch has been committed. Most loads queue their
+        batches and commit once at the end. Large Arrow inputs checkpoint about
+        every 100 batches to keep memory bounded. The client may checkpoint
+        earlier if the connection cannot queue another batch or if a batch must
+        be split to fit. If a later batch fails, the exception means that the
+        load did not finish, not necessarily that no rows landed. Any already
+        committed prefix from this call remains, and retrying the whole
+        DataFrame can duplicate it unless the destination table uses suitable
+        ``DEDUP UPSERT KEYS``.
+
+        On a transient connection failure, the client re-sends from the
+        original DataFrame only when it knows that no rows landed. Otherwise it
+        raises instead of risking a blind retry. Server-side rejections (e.g. a
+        schema mismatch) surface as a plain
         :class:`QuestDBError`; the structured ``sender_error`` diagnostic
         is attached only by the store-and-forward senders.
 
@@ -8896,7 +8907,10 @@ cdef class PooledReader:
 
     The lease counts as an active use of the :class:`QuestDB` handle
     (``QuestDB.close()`` waits for it) and has thread affinity: use one
-    lease per thread, on the thread that created it.
+    lease per thread, on the thread that created it. A
+    :class:`QueryResult` returned by the lease may be handed to a worker
+    under that result's thread hand-off rules; wait for it to finish
+    before using the lease again.
     """
     cdef QuestDB _handle
     cdef _ReaderHandle _reader
@@ -8969,7 +8983,7 @@ cdef class PooledReader:
             self._check_open('query')
             last = self._last_cursor
             if last is not None:
-                if last._cursor != NULL:
+                if last._is_live():
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall,
                         'the previous QueryResult is still open: drain '
@@ -8984,8 +8998,7 @@ cdef class PooledReader:
                         'this lease and obtain a new one with '
                         'QuestDB.reader().')
             cursor_handle = _execute_query(
-                self._reader, sql, binds, reset_symbol_dict)
-            cursor_handle._owns_reader = False
+                self._reader, sql, binds, reset_symbol_dict, False)
             self._last_cursor = cursor_handle
         return QueryResult(cursor_handle)
 
