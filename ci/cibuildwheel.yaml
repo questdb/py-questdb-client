@@ -284,7 +284,10 @@ stages:
             displayName: Build wheels
             env:
               CIBW_ENVIRONMENT: "MSSdk=1 DISTUTILS_USE_SDK=1 SETUP_DO_GIT_SUBMODULE_INIT=1"
-              CIBW_BUILD: "*win32*"
+              # List versions explicitly, as the other jobs do. A `*win32*`
+              # wildcard also matches pre-release Pythons, which cibuildwheel
+              # starts building at the first release candidate.
+              CIBW_BUILD: "cp310-win32 cp311-win32 cp312-win32 cp313-win32 cp314-win32"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
@@ -313,7 +316,12 @@ stages:
               cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
-              CIBW_BUILD: "*win_amd64*"
+              # List versions explicitly, as the other jobs do. A `*win_amd64*`
+              # wildcard also matches pre-release Pythons, which cibuildwheel
+              # starts building at the first release candidate.
+              # `cp314t-win_amd64` is left out: it was blocked by missing
+              # pandas wheels, which now exist, so it can be added and tested.
+              CIBW_BUILD: "cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64"
               CIBW_ENVIRONMENT: "MSSdk=1 DISTUTILS_USE_SDK=1 SETUP_DO_GIT_SUBMODULE_INIT=1"
               CIBW_BUILD_VERBOSITY: "3"
               DISTUTILS_DEBUG: "1"
