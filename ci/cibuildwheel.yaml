@@ -204,6 +204,11 @@ stages:
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp310-* cp311-*"
+              # Log the resolved test environment and emit all Python thread
+              # stacks if the test suite stops making progress.
+              CIBW_TEST_COMMAND: >-
+                python {project}/ci/run_tests_with_watchdog.py
+                {project}/test/test.py -v
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: wheelhouse}
 
