@@ -128,15 +128,16 @@ cdef class _CursorHandle:
         self._lock = threading.RLock()
         self._reset_seq = 0
 
-    cdef _attach(
+    cdef void _attach(
             self,
             qwp_reader_cursor* cursor,
             _ReaderHandle reader_ref,
-            bint owns_reader):
-        with self._lock:
-            self._cursor = cursor
-            self._reader_ref = reader_ref
-            self._owns_reader = owns_reader
+            bint owns_reader) noexcept:
+        # The handle is new and has not been published yet, so adopting the
+        # cursor needs no lock and must not introduce a failure point.
+        self._cursor = cursor
+        self._reader_ref = reader_ref
+        self._owns_reader = owns_reader
 
     cdef bint _is_live(self):
         with self._lock:
