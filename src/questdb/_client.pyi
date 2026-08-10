@@ -99,6 +99,7 @@ class QuestDBErrorCode(Enum):
     ArrowExport = ...
     BatchTooLarge = ...
     StoreResendRequired = ...
+    SymbolDictFull = ...
     BadDataFrame = ...
 
 
@@ -1201,6 +1202,18 @@ class QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
 
+        Ingestion always uses the direct (non-store-and-forward) column
+        sender, independent of ``sf_dir``. On success, the call returns only
+        after every DataFrame batch has been committed. Most loads queue their
+        batches and commit once at the end. Large Arrow inputs checkpoint about
+        every 100 batches to keep memory bounded. The client may checkpoint
+        earlier if the connection cannot queue another batch or if a batch must
+        be split to fit. If a later batch fails, the exception means that the
+        load did not finish, not necessarily that no rows landed. Any already
+        committed prefix from this call remains, and retrying the whole
+        DataFrame can duplicate it unless the destination table uses suitable
+        ``DEDUP UPSERT KEYS``.
+
         ``at`` names the designated timestamp column (by name or index),
         or a fixed ``TimestampNanos`` / ``datetime`` shared by every row,
         or the explicit ``ServerTimestamp`` sentinel to let the server
@@ -1234,12 +1247,14 @@ class QuestDB:
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded
         by it. Each batch is one unit of client memory and server-side
-        apply, and a commit checkpoint fires every ~100 batches, so
-        ``max_rows_per_batch * 100`` rows is the replay window on a
-        transient failover. Raise it for narrow numeric rows; lower it
-        for very wide rows or tight memory. Streaming Arrow input
-        (``pa.RecordBatchReader``) is not re-batched — the producer's
-        batch size governs.
+        apply. Sliceable Arrow inputs checkpoint about every 100 batches,
+        so ``max_rows_per_batch * 100`` rows approximates their periodic
+        replay window. The NumPy planner normally commits once after the
+        whole frame. Either path may checkpoint earlier when deferred
+        capacity fills. Raise ``max_rows_per_batch`` for narrow numeric
+        rows; lower it for very wide rows or tight memory. Streaming Arrow
+        input (``pa.RecordBatchReader``) is not re-batched — the producer's
+        batch size governs its checkpoint window.
         """
 
     def query(

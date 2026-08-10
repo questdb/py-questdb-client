@@ -89,17 +89,24 @@ handle; the sender variants exist as conveniences and share the same path:
     with Sender.from_conf('ws::addr=localhost:9000;') as sender:
         sender.dataframe(frame, table_name='weather', at='ts')
 
-All commit the whole source before returning, are independent of ``sf_dir``,
-and re-send from your DataFrame on transient failures (raising with
-``in_doubt`` set when a blind re-send could duplicate rows); none converts
-the dataframe into row calls. ``dataframe()`` opens a direct connection just
-for that call (borrowed from the pool for a pooled sender, opened from the
-sender's own configuration — carrying its auth/TLS — for a standalone one)
-and commits immediately — it has **no ordering relationship** with rows
-buffered on a sender via ``row()`` and does not flush them; publish those
-with ``flush()``. This works for any standalone ws sender, whether built
-via ``Sender.from_conf`` / ``Sender.from_env`` or the ``Sender(...)``
-constructor.
+On success, each call returns only after every row in the source has been
+committed. Most loads queue their batches and commit once at the end. To keep
+memory bounded, a very large Arrow load checkpoints about every 100 batches.
+The client may checkpoint earlier if the connection cannot queue another batch
+or if a batch must be split to fit. If a later batch fails, the exception means
+that the load did not finish, not necessarily that no rows landed. Any already
+committed prefix from that call remains in the table, and retrying the entire
+DataFrame can duplicate it unless the table uses suitable
+``DEDUP UPSERT KEYS``.
+
+These calls are independent of ``sf_dir``, and none converts the DataFrame
+into row calls. ``dataframe()`` opens a direct connection just for that call
+(borrowed from the pool for a pooled sender, opened from the sender's own
+configuration — carrying its auth/TLS — for a standalone one). It has **no
+ordering relationship** with rows buffered on a sender via ``row()`` and does
+not flush them; publish those with ``flush()``. This works for any standalone
+ws sender, whether built via ``Sender.from_conf`` / ``Sender.from_env`` or the
+``Sender(...)`` constructor.
 
 Over ILP/HTTP, ILP/TCP and QWP/UDP, ``sender.dataframe()`` is unchanged and
 fully supported (over UDP it serializes row by row into fire-and-forget
@@ -128,6 +135,11 @@ through one sender, borrow one pooled sender per thread instead.
 
 Behavioural changes to watch for
 ================================
+
+* **Removed QWP flight-window keys.** ``max_in_flight`` and
+  ``in_flight_window`` are no longer accepted. Remove them from ws/wss
+  configuration strings; the client raises ``QuestDBError(ConfigError)``
+  instead of silently ignoring an obsolete setting.
 
 * **Broader** ``except IngressError``. ``IngressError`` is an alias of the
   unified :class:`QuestDBError <questdb.QuestDBError>`, so handlers written

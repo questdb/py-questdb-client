@@ -309,9 +309,6 @@ Advanced QWP tuning
 
 Rarely needed; the defaults suit most deployments.
 
-* ``max_in_flight`` - ``int``: Published-but-unacknowledged frame window
-  per connection. Default: 128.
-
 * ``max_frame_rejections`` - ``int``: Consecutive no-progress rejections of
   the same frame before the client stops retrying it and turns terminal.
   Default: 4.

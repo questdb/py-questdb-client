@@ -72,7 +72,8 @@ from cpython.datetime cimport (
     PyDateTime_DATE_GET_SECOND, PyDateTime_DATE_GET_MICROSECOND,
 )
 from cpython.bool cimport bool
-from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject
+from cpython.ref cimport Py_XDECREF
+from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
@@ -202,6 +203,7 @@ class QuestDBErrorCode(Enum):
     ArrowExport = line_sender_error_arrow_export
     BatchTooLarge = line_sender_error_batch_too_large
     StoreResendRequired = line_sender_error_store_resend_required
+    SymbolDictFull = line_sender_error_symbol_dict_full
     # Python-only sentinel with no backing FFI code: raised by the Cython
     # DataFrame-shape validation path. Sits in a reserved high band, disjoint
     # from the contiguous FFI code space, so an appended FFI variant can never
@@ -384,8 +386,15 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.BatchTooLarge
     elif code == line_sender_error_store_resend_required:
         return QuestDBErrorCode.StoreResendRequired
+    elif code == line_sender_error_symbol_dict_full:
+        return QuestDBErrorCode.SymbolDictFull
     else:
         raise ValueError('Internal error converting error code.')
+
+
+def _debug_error_code_to_py(int raw_code):
+    """Internal ABI test hook for the native-to-Python error mapping."""
+    return c_err_code_to_py(<line_sender_error_code>raw_code)
 
 
 cdef inline object c_sender_error_view_to_raw(
@@ -1327,12 +1336,14 @@ cdef class Buffer:
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
     cdef inline void_int _may_trigger_row_complete(self) except -1:
-        cdef line_sender_error* err = NULL
         cdef PyObject* sender = NULL
         if self._row_complete_sender != None:
-            sender = PyWeakref_GetObject(self._row_complete_sender)
-            if sender != NULL and <object>sender is not None:
-                may_flush_on_row_complete(self, <Sender><object>sender)
+            if PyWeakref_GetRef(self._row_complete_sender, &sender):
+                try:
+                    may_flush_on_row_complete(
+                        self, <Sender><object>sender)
+                finally:
+                    Py_XDECREF(sender)
 
     cdef inline void_int _at_ts_us(self, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
@@ -6306,18 +6317,21 @@ cdef class QuestDB:
         Ingest a dataframe through the pooled columnar QWP path.
 
         Ingestion always uses the direct (non-store-and-forward) column
-        sender, independent of ``sf_dir``, and returns once the whole frame
-        is committed (``AckLevel::Ok``). On a transient connection failure
-        the frame is re-sent from the caller's DataFrame within the pool's
-        reconnect budget — unless the native client reports delivery as in
-        doubt, or an intermediate commit checkpoint (emitted every ~100 batches
-        on large frames) has already landed. In either case the error is raised
-        immediately and a committed prefix may remain in the table, since a
-        blind re-send would duplicate it. Delivery is
-        at-least-once: a re-sent frame can duplicate already-committed rows
-        (including the first chunk, which commits eagerly on a fresh
-        connection) unless the table has ``DEDUP UPSERT KEYS``. Server-side
-        rejections (e.g. a schema mismatch) surface as a plain
+        sender, independent of ``sf_dir``. On success, the call returns only
+        after every DataFrame batch has been committed. Most loads queue their
+        batches and commit once at the end. Large Arrow inputs checkpoint about
+        every 100 batches to keep memory bounded. The client may checkpoint
+        earlier if the connection cannot queue another batch or if a batch must
+        be split to fit. If a later batch fails, the exception means that the
+        load did not finish, not necessarily that no rows landed. Any already
+        committed prefix from this call remains, and retrying the whole
+        DataFrame can duplicate it unless the destination table uses suitable
+        ``DEDUP UPSERT KEYS``.
+
+        On a transient connection failure, the client re-sends from the
+        original DataFrame only when it knows that no rows landed. Otherwise it
+        raises instead of risking a blind retry. Server-side rejections (e.g. a
+        schema mismatch) surface as a plain
         :class:`QuestDBError`; the structured ``sender_error`` diagnostic
         is attached only by the store-and-forward senders.
 
@@ -6417,12 +6431,14 @@ cdef class QuestDB:
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded
         by it. Each batch is one unit of client memory and server-side
-        apply, and a commit checkpoint fires every ~100 batches, so
-        ``max_rows_per_batch * 100`` rows is the replay window on a
-        transient failover. Raise it for narrow numeric rows; lower it
-        for very wide rows or tight memory. Streaming Arrow input
-        (``pa.RecordBatchReader``) is not re-batched — the producer's
-        batch size governs.
+        apply. Sliceable Arrow inputs checkpoint about every 100 batches,
+        so ``max_rows_per_batch * 100`` rows approximates their periodic
+        replay window. The NumPy planner normally commits once after the
+        whole frame. Either path may checkpoint earlier when deferred
+        capacity fills. Raise ``max_rows_per_batch`` for narrow numeric
+        rows; lower it for very wide rows or tight memory. Streaming Arrow
+        input (``pa.RecordBatchReader``) is not re-batched — the producer's
+        batch size governs its checkpoint window.
         """
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         cdef dataframe_plan_t plan = dataframe_plan_blank()
@@ -8896,7 +8912,10 @@ cdef class PooledReader:
 
     The lease counts as an active use of the :class:`QuestDB` handle
     (``QuestDB.close()`` waits for it) and has thread affinity: use one
-    lease per thread, on the thread that created it.
+    lease per thread, on the thread that created it. A
+    :class:`QueryResult` returned by the lease may be handed to a worker
+    under that result's thread hand-off rules; wait for it to finish
+    before using the lease again.
     """
     cdef QuestDB _handle
     cdef _ReaderHandle _reader
@@ -8969,7 +8988,7 @@ cdef class PooledReader:
             self._check_open('query')
             last = self._last_cursor
             if last is not None:
-                if last._cursor != NULL:
+                if last._is_live():
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall,
                         'the previous QueryResult is still open: drain '
@@ -8984,8 +9003,7 @@ cdef class PooledReader:
                         'this lease and obtain a new one with '
                         'QuestDB.reader().')
             cursor_handle = _execute_query(
-                self._reader, sql, binds, reset_symbol_dict)
-            cursor_handle._owns_reader = False
+                self._reader, sql, binds, reset_symbol_dict, False)
             self._last_cursor = cursor_handle
         return QueryResult(cursor_handle)
 

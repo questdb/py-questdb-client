@@ -28,6 +28,12 @@ jobs:
         env:
           CIBW_ARCHS_MACOS: arm64
           MACOSX_DEPLOYMENT_TARGET: "11.0"
+          # List versions explicitly, as the Azure jobs do. cibuildwheel
+          # builds a new CPython as soon as it reaches its first release
+          # candidate, so a wildcard here pulls in pre-release Pythons on a
+          # cibuildwheel upgrade. Add a version here once it is GA and its
+          # dependencies publish wheels.
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-arm64

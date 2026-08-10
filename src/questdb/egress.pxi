@@ -85,10 +85,16 @@ cdef class _ReaderHandle:
 cdef class _CursorHandle:
     """Owns a ``qwp_reader_cursor*`` + back-ref to its reader.
 
-    ``_free()`` releases both: the cursor is freed and the reader
-    closed (returned to its pool or dropped) in the same locked
-    section. The drain / close / consumer-teardown paths call it
-    eagerly; ``__dealloc__`` is the backstop.
+    The re-entrant lock is the publication boundary for every native
+    cursor field. It serialises cursor operations, close, Arrow consumer
+    callbacks, and GC finalisation, and supplies the happens-before edge
+    required when those operations move between threads. Concurrent
+    public operations are still unsupported.
+
+    ``_free()`` releases both: the cursor is freed and the reader closed
+    (returned to its pool or dropped) in the same locked section. The
+    drain / close / consumer-teardown paths call it eagerly;
+    ``__dealloc__`` is the backstop.
 
     ``_owns_reader`` selects who releases the reader. The one-shot
     ``QuestDB.query(sql)`` path leaves it ``True``: the cursor is the
@@ -119,12 +125,35 @@ cdef class _CursorHandle:
         self._cursor = NULL
         self._reader_ref = None
         self._owns_reader = True
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._reset_seq = 0
 
-    cdef _attach(self, qwp_reader_cursor* cursor, _ReaderHandle reader_ref):
+    cdef void _attach(
+            self,
+            qwp_reader_cursor* cursor,
+            _ReaderHandle reader_ref,
+            bint owns_reader) noexcept:
+        # The handle is new and has not been published yet, so adopting the
+        # cursor needs no lock and must not introduce a failure point.
         self._cursor = cursor
         self._reader_ref = reader_ref
+        self._owns_reader = owns_reader
+
+    cdef bint _is_live(self):
+        with self._lock:
+            return self._cursor != NULL
+
+    cdef int _reset_sequence(self):
+        with self._lock:
+            return self._reset_seq
+
+    cdef bint _abandonment_needs_warning(self):
+        with self._lock:
+            return (
+                self._cursor != NULL
+                and (
+                    self._reader_ref is None
+                    or self._reader_ref._must_close))
 
     cdef void _free(self) noexcept:
         cdef PyThreadState* gs = NULL
@@ -211,17 +240,19 @@ cdef tuple _fetch_all_record_batches(
     the cursor is freed and the reader marked drained on clean
     end-of-stream.
     """
-    cdef int seen_seq = handle._reset_seq
+    cdef int seen_seq = handle._reset_sequence()
+    cdef int current_seq
     cdef object schema = None
     cdef list batches = []
     cdef object batch
     try:
         while True:
             batch = _fetch_one_batch(handle, pa_module, compact)
-            if handle._reset_seq != seen_seq:
+            current_seq = handle._reset_sequence()
+            if current_seq != seen_seq:
                 # Mid-query failover replayed from batch-0: drop the
                 # pre-failover accumulation and re-pin the schema.
-                seen_seq = handle._reset_seq
+                seen_seq = current_seq
                 batches = []
                 schema = None
             if batch is None:
@@ -232,8 +263,10 @@ cdef tuple _fetch_all_record_batches(
     except:
         handle._free()
         raise
-    _mark_reader_drained(handle)
-    handle._free()
+    try:
+        _mark_reader_drained(handle)
+    finally:
+        handle._free()
     return (schema, batches)
 
 
@@ -254,15 +287,17 @@ cdef object _build_record_batch_reader(
         # No result set (a non-SELECT statement ends with EXEC_DONE and
         # ships no RESULT_BATCH), so there is no schema to surface; an
         # empty SELECT still ships a zero-row batch carrying the schema.
-        _mark_reader_drained(cursor_handle)
-        cursor_handle._free()
+        try:
+            _mark_reader_drained(cursor_handle)
+        finally:
+            cursor_handle._free()
         empty = pa.table({})
         return empty.to_reader()
 
     # Pin the sequence after the first batch: a pre-delivery failover
     # replays batch-0 transparently into ``first``, so only resets that
     # happen once batches are flowing can duplicate already-yielded data.
-    cdef int seen_seq = cursor_handle._reset_seq
+    cdef int seen_seq = cursor_handle._reset_sequence()
     schema = first.schema
 
     def _gen(compact):
@@ -270,7 +305,7 @@ cdef object _build_record_batch_reader(
             yield first
             while True:
                 nxt = _fetch_one_batch(cursor_handle, pa, compact)
-                if cursor_handle._reset_seq != seen_seq:
+                if cursor_handle._reset_sequence() != seen_seq:
                     # Mid-query failover after batches were already
                     # yielded: the replayed batch-0 would duplicate what
                     # the consumer holds. Streaming can't discard it, so
@@ -290,7 +325,8 @@ cdef object _build_record_batch_reader(
     return pa.RecordBatchReader.from_batches(schema, _gen(compact))
 
 
-cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
+cdef void_int _mark_reader_drained(
+        _CursorHandle cursor_handle) except -1:
     """Tell the reader handle it's safe to return to its pool on dealloc.
 
     The Rust Cursor::Drop closes the underlying transport whenever
@@ -299,10 +335,13 @@ cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
     borrower would see a broken pipe.
     """
     if cursor_handle is None:
-        return
-    cdef _ReaderHandle reader = cursor_handle._reader_ref
-    if reader is not None:
-        reader._must_close = False
+        return 0
+    cdef _ReaderHandle reader
+    with cursor_handle._lock:
+        reader = cursor_handle._reader_ref
+        if reader is not None:
+            reader._must_close = False
+    return 0
 
 
 cdef void_int _drain_cursor(_CursorHandle handle) except -1:
@@ -321,8 +360,10 @@ cdef void_int _drain_cursor(_CursorHandle handle) except -1:
             if err != NULL:
                 raise _reader_err_to_py(err)
             break
-    _mark_reader_drained(handle)
-    handle._free()
+    try:
+        _mark_reader_drained(handle)
+    finally:
+        handle._free()
 
 
 cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
@@ -413,8 +454,11 @@ cdef void _failover_reset_trampoline(
     # arrives. Honour the C reentrancy contract: no reentrant FFI on the
     # reader/query/cursor, no exception escapes, non-blocking. user_data is
     # a raw int* at the cursor's _reset_seq counter; bumping it is a plain
-    # pointer write (no GIL, no Python object touched), which the
-    # materialise-whole accumulator polls to discard its pre-failover batches.
+    # pointer write (no GIL, no Python object touched). Once the handle is
+    # published, every cursor drive call holds its RLock, so this write is
+    # covered by the same cross-thread hand-off boundary as the native call.
+    # The materialise-whole accumulator polls it to discard its pre-failover
+    # batches.
     if user_data == NULL:
         return
     (<int*>user_data)[0] += 1
@@ -484,7 +528,7 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
 
 cdef _CursorHandle _execute_query(
         _ReaderHandle reader_handle, str sql, object binds,
-        bint reset_symbol_dict=True):
+        bint reset_symbol_dict=True, bint owns_reader=True):
     """Execute a SQL query and return a _CursorHandle.
 
     The query is prepared with an ``on_failover_reset`` trampoline that
@@ -552,7 +596,7 @@ cdef _CursorHandle _execute_query(
                 'qwp_reader_query_execute returned NULL without setting err')
         raise _reader_err_to_py(err)
 
-    handle._attach(cursor, reader_handle)
+    handle._attach(cursor, reader_handle, owns_reader)
     return handle
 
 
@@ -764,6 +808,7 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
     cdef questdb_error_code code
     cdef object py_msg
     cdef bytes full
+    cdef int current_seq
     if prod.exhausted:
         # A prior error left a diagnostic pinned; keep surfacing it rather
         # than reporting a clean end-of-stream to a consumer that pulls again.
@@ -786,7 +831,8 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
             result = qwp_reader_cursor_next_arrow_batch_compact(
                 cursor, &local_array, &local_schema, &err)
     if result == qwp_reader_arrow_batch_ok:
-        if prod.cursor_handle._reset_seq != prod.seen_seq:
+        current_seq = prod.cursor_handle._reset_sequence()
+        if current_seq != prod.seen_seq:
             if prod.delivered:
                 # Mid-query failover replayed from batch-0 after batches
                 # were already handed to the consumer; this one would
@@ -811,7 +857,7 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
                 return -1
             # Pre-delivery failover: nothing reached the consumer yet, so
             # re-pin to the replayed stream and restart from this batch-0.
-            prod.seen_seq = prod.cursor_handle._reset_seq
+            prod.seen_seq = current_seq
             prod._free_cached()
         if not prod.has_cached_schema:
             memcpy(&prod.cached_schema, &local_schema, sizeof(ArrowSchema))
@@ -826,8 +872,7 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
         return 0
     if result == qwp_reader_arrow_batch_end:
         prod.exhausted = True
-        if prod.cursor_handle._reader_ref is not None:
-            prod.cursor_handle._reader_ref._must_close = False
+        _mark_reader_drained(prod.cursor_handle)
         return 0
     if err != NULL:
         code = questdb_error_get_code(err)
@@ -959,7 +1004,7 @@ cdef object _make_query_stream_capsule(_CursorHandle handle):
     cdef ArrowArrayStream* stream
     prod = _QueryStreamProducer()
     prod.cursor_handle = handle
-    prod.seen_seq = handle._reset_seq
+    prod.seen_seq = handle._reset_sequence()
     stream = <ArrowArrayStream*>calloc(1, sizeof(ArrowArrayStream))
     if stream == NULL:
         raise MemoryError()
@@ -1776,9 +1821,9 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     cdef bint has_symbol = False
     cdef int seen_seq
 
-    if handle is None or handle._cursor == NULL:
+    if handle is None or not handle._is_live():
         raise QuestDBError(QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
-    seen_seq = handle._reset_seq
+    seen_seq = handle._reset_sequence()
 
     col_names = []
     col_kinds = []
@@ -1836,8 +1881,10 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
         handle._free()
         raise
 
-    _mark_reader_drained(handle)
-    handle._free()
+    try:
+        _mark_reader_drained(handle)
+    finally:
+        handle._free()
 
     if first:
         return pd.DataFrame()
@@ -2072,7 +2119,8 @@ cdef class _NumpyBatchIter:
         self.prev_dict_n = 0
         self.symbol_categories = []
         self.symbol_dtype = None
-        self.seen_seq = handle._reset_seq if handle is not None else 0
+        self.seen_seq = (
+            handle._reset_sequence() if handle is not None else 0)
         self.delivered = False
 
     def __iter__(self):
@@ -2085,7 +2133,10 @@ cdef class _NumpyBatchIter:
         cdef qwp_reader_symbol_dict sd
         cdef size_t row_count
         cdef size_t n_cols
-        if self.done or self.handle is None or self.handle._cursor == NULL:
+        if (
+                self.done
+                or self.handle is None
+                or not self.handle._is_live()):
             raise StopIteration
         try:
             with self.handle._lock:
@@ -2208,7 +2259,7 @@ def _debug_egress_pool_stats(client):
 
 
 cdef bint _cursor_handle_is_live(_CursorHandle h):
-    return h is not None and h._cursor != NULL
+    return h is not None and h._is_live()
 
 
 class QueryResult:
@@ -2225,11 +2276,11 @@ class QueryResult:
     Closing a partial result drops its connection. Call :meth:`cancel`
     before closing to preserve it.
 
-    **Thread affinity**: the underlying cursor is bound to the thread that
-    created it (via ``QuestDB.query``). Create, consume, ``cancel``,
-    ``close``, and drop the ``QueryResult`` on that same thread; handing it
-    to another thread is undefined behaviour even with external
-    synchronisation.
+    **Thread hand-off**: a ``QueryResult`` may be transferred to another
+    thread and consumed, cancelled, closed, or dropped there. Use a normal
+    synchronisation hand-off (for example, ``Thread.start`` / ``join`` or a
+    thread-safe queue), and access it from only one thread at a time.
+    Concurrent operations on one result are unsupported.
 
     ``__arrow_c_stream__`` is native — the cursor's record batches are
     exposed directly through the Arrow C Data Interface, so polars /
@@ -2286,11 +2337,10 @@ class QueryResult:
         it references — so a consumer that unifies per-batch dictionaries
         (e.g. ``polars.from_arrow``) reconciles them.
 
-        The returned stream wraps the query cursor, which has thread
-        affinity in the underlying FFI: consume it from one thread at a
-        time, preferably the thread that ran the query. Cross-thread
-        consumption is currently serialised by an internal lock, but the
-        FFI contract does not guarantee that indefinitely.
+        The returned stream may be handed to a consumer worker thread.
+        Stream callbacks are serialised by the same cursor lock, but the
+        Arrow C stream itself must still be consumed by only one thread at
+        a time; concurrent ``get_next`` / ``release`` calls are unsupported.
         """
         if requested_schema is not None:
             raise NotImplementedError(
@@ -2474,7 +2524,7 @@ class QueryResult:
         cdef bint ok
         cdef bint reusable
         cdef qwp_reader_cursor* cursor
-        cdef object exc
+        cdef object exc = None
         if handle is None:
             return
         with handle._lock:
@@ -2484,16 +2534,24 @@ class QueryResult:
             with nogil:
                 ok = qwp_reader_cursor_cancel(cursor, &err)
                 reusable = qwp_reader_cursor_connection_reusable(cursor)
-        if reusable:
-            _mark_reader_drained(handle)
         if not ok:
             if err != NULL:
                 exc = _reader_err_to_py(err)
+                err = NULL
             else:
                 exc = QuestDBError(
                     QuestDBErrorCode.ServerFlushError,
                     'qwp_reader_cursor_cancel returned false '
                     'without setting err_out')
+        if reusable:
+            try:
+                _mark_reader_drained(handle)
+            except BaseException as mark_exc:
+                self.close()
+                if exc is not None:
+                    raise exc from mark_exc
+                raise
+        if exc is not None:
             self.close()
             raise exc
 
@@ -2520,13 +2578,11 @@ class QueryResult:
 
     def __del__(self):
         cdef _CursorHandle handle
-        cdef _ReaderHandle reader
         try:
             handle = self._cursor_handle
             if not _cursor_handle_is_live(handle):
                 return
-            reader = handle._reader_ref
-            if reader is None or reader._must_close:
+            if handle._abandonment_needs_warning():
                 warnings.warn(
                     'QueryResult was neither drained nor closed; its '
                     'pooled connection is being released by the garbage '
