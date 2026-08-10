@@ -57,7 +57,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_failover_retry,
         line_sender_error_role_mismatch,
         line_sender_error_connect_timeout,
-        # Query / reader (egress) categories, unified into this enum (20..37).
+        # Query / reader error codes (20..34).
         line_sender_error_handshake_error,
         line_sender_error_unsupported_server,
         line_sender_error_protocol_error,
@@ -73,6 +73,7 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_schema_drift,
         line_sender_error_no_schema,
         line_sender_error_arrow_export,
+        # Client-side QWP/WebSocket sender error codes (35..37).
         line_sender_error_batch_too_large,
         line_sender_error_store_resend_required,
         line_sender_error_symbol_dict_full
