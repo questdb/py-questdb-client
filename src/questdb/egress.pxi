@@ -263,8 +263,10 @@ cdef tuple _fetch_all_record_batches(
     except:
         handle._free()
         raise
-    _mark_reader_drained(handle)
-    handle._free()
+    try:
+        _mark_reader_drained(handle)
+    finally:
+        handle._free()
     return (schema, batches)
 
 
@@ -285,8 +287,10 @@ cdef object _build_record_batch_reader(
         # No result set (a non-SELECT statement ends with EXEC_DONE and
         # ships no RESULT_BATCH), so there is no schema to surface; an
         # empty SELECT still ships a zero-row batch carrying the schema.
-        _mark_reader_drained(cursor_handle)
-        cursor_handle._free()
+        try:
+            _mark_reader_drained(cursor_handle)
+        finally:
+            cursor_handle._free()
         empty = pa.table({})
         return empty.to_reader()
 
@@ -321,7 +325,8 @@ cdef object _build_record_batch_reader(
     return pa.RecordBatchReader.from_batches(schema, _gen(compact))
 
 
-cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
+cdef void_int _mark_reader_drained(
+        _CursorHandle cursor_handle) except -1:
     """Tell the reader handle it's safe to return to its pool on dealloc.
 
     The Rust Cursor::Drop closes the underlying transport whenever
@@ -330,12 +335,13 @@ cdef void _mark_reader_drained(_CursorHandle cursor_handle) noexcept:
     borrower would see a broken pipe.
     """
     if cursor_handle is None:
-        return
+        return 0
     cdef _ReaderHandle reader
     with cursor_handle._lock:
         reader = cursor_handle._reader_ref
         if reader is not None:
             reader._must_close = False
+    return 0
 
 
 cdef void_int _drain_cursor(_CursorHandle handle) except -1:
@@ -354,8 +360,10 @@ cdef void_int _drain_cursor(_CursorHandle handle) except -1:
             if err != NULL:
                 raise _reader_err_to_py(err)
             break
-    _mark_reader_drained(handle)
-    handle._free()
+    try:
+        _mark_reader_drained(handle)
+    finally:
+        handle._free()
 
 
 cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
@@ -1873,8 +1881,10 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
         handle._free()
         raise
 
-    _mark_reader_drained(handle)
-    handle._free()
+    try:
+        _mark_reader_drained(handle)
+    finally:
+        handle._free()
 
     if first:
         return pd.DataFrame()
@@ -2514,7 +2524,7 @@ class QueryResult:
         cdef bint ok
         cdef bint reusable
         cdef qwp_reader_cursor* cursor
-        cdef object exc
+        cdef object exc = None
         if handle is None:
             return
         with handle._lock:
@@ -2524,16 +2534,24 @@ class QueryResult:
             with nogil:
                 ok = qwp_reader_cursor_cancel(cursor, &err)
                 reusable = qwp_reader_cursor_connection_reusable(cursor)
-        if reusable:
-            _mark_reader_drained(handle)
         if not ok:
             if err != NULL:
                 exc = _reader_err_to_py(err)
+                err = NULL
             else:
                 exc = QuestDBError(
                     QuestDBErrorCode.ServerFlushError,
                     'qwp_reader_cursor_cancel returned false '
                     'without setting err_out')
+        if reusable:
+            try:
+                _mark_reader_drained(handle)
+            except BaseException as mark_exc:
+                self.close()
+                if exc is not None:
+                    raise exc from mark_exc
+                raise
+        if exc is not None:
             self.close()
             raise exc
 
