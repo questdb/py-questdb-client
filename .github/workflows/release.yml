@@ -28,6 +28,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       release_sha: ${{ steps.release.outputs.release_sha }}
+      pr_head_sha: ${{ steps.release.outputs.pr_head_sha }}
     steps:
       - name: Validate dispatch and release pull request
         id: release
@@ -62,10 +63,12 @@ jobs:
               exit 1
             }
           release_sha="$(jq -er '.merge_commit_sha | select(test("^[0-9a-f]{40}$"))' <<<"$pr_json")"
+          pr_head_sha="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' <<<"$pr_json")"
           {
             echo "version=$RELEASE_VERSION"
             echo "tag=v$RELEASE_VERSION"
             echo "release_sha=$release_sha"
+            echo "pr_head_sha=$pr_head_sha"
           } >>"$GITHUB_OUTPUT"
 
       - name: Check out the release commit
@@ -135,6 +138,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_PR: ${{ inputs.release_pr }}
+          PR_HEAD_SHA: ${{ steps.release.outputs.pr_head_sha }}
         run: |
           set -Eeuo pipefail
           source_root="$RUNNER_TEMP/release-sources/github-macos-arm64"
@@ -146,16 +150,17 @@ jobs:
             "/repos/$GITHUB_REPOSITORY/actions/workflows/macos-arm64-wheels.yml/runs?event=pull_request&status=success&per_page=100" \
             --jq '.workflow_runs[]' \
             >"$RUNNER_TEMP/macos-runs.jsonl"
-          run_json="$(jq -cs --argjson pr "$RELEASE_PR" '
+          run_json="$(jq -cs --argjson pr "$RELEASE_PR" --arg head "$PR_HEAD_SHA" '
             [.[]
              | select(.event == "pull_request"
                       and .status == "completed"
                       and .conclusion == "success"
+                      and .head_sha == $head
                       and any(.pull_requests[]?; .number == $pr))]
             | sort_by(.created_at, .id) | reverse | .[0] // empty
           ' "$RUNNER_TEMP/macos-runs.jsonl")"
           [[ -n "$run_json" ]] || {
-            echo "No successful macOS arm64 pull_request run found for PR $RELEASE_PR" >&2
+            echo "No successful macOS arm64 pull_request run found for PR $RELEASE_PR head $PR_HEAD_SHA" >&2
             exit 1
           }
           run_id="$(jq -er '.id' <<<"$run_json")"
@@ -164,9 +169,14 @@ jobs:
           artifacts="$(gh api \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?name=wheels-macos-arm64&per_page=100")"
-          artifact="$(jq -c '[.artifacts[] | select(.name == "wheels-macos-arm64")] |
-            if length == 1 then .[0] else error("expected exactly one wheels-macos-arm64 artifact") end' \
-            <<<"$artifacts")"
+          artifact="$(jq -c --arg head "$PR_HEAD_SHA" '
+            [.artifacts[]
+             | select(.name == "wheels-macos-arm64"
+                      and .workflow_run.head_sha == $head)]
+            | if length == 1 then .[0]
+              else error("expected exactly one wheels-macos-arm64 artifact for validated PR head")
+              end
+          ' <<<"$artifacts")"
           jq -e '.expired == false' <<<"$artifact" >/dev/null || {
             echo "wheels-macos-arm64 artifact for run $run_id is expired" >&2
             exit 1
@@ -187,6 +197,7 @@ jobs:
         env:
           AZURE_DEVOPS_TOKEN: ${{ secrets.AZURE_DEVOPS_TOKEN }}
           RELEASE_PR: ${{ inputs.release_pr }}
+          PR_HEAD_SHA: ${{ steps.release.outputs.pr_head_sha }}
         run: |
           set -Eeuo pipefail
           source_root="$RUNNER_TEMP/release-sources/azure-drop"
@@ -206,17 +217,22 @@ jobs:
             --data-urlencode '$top=10' \
             --data-urlencode 'api-version=7.1' \
             "$builds_url")"
-          build="$(jq -c --arg branch "$branch" '
+          build="$(jq -c \
+            --arg branch "$branch" \
+            --arg head "$PR_HEAD_SHA" \
+            --arg pr "$RELEASE_PR" '
             [.value[]
              | select(.definition.id == 21
                       and .sourceBranch == $branch
                       and .reason == "pullRequest"
                       and .status == "completed"
-                      and .result == "succeeded")]
+                      and .result == "succeeded"
+                      and .triggerInfo["pr.sourceSha"] == $head
+                      and .triggerInfo["pr.number"] == $pr)]
             | sort_by(.finishTime, .id) | reverse | .[0] // empty
           ' <<<"$builds_json")"
           [[ -n "$build" ]] || {
-            echo "No successful Azure definition 21 build found for $branch" >&2
+            echo "No successful Azure definition 21 build found for $branch head $PR_HEAD_SHA" >&2
             exit 1
           }
           build_id="$(jq -er '.id' <<<"$build")"
