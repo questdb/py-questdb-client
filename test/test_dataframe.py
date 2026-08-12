@@ -173,12 +173,14 @@ class TestPandasBase:
         def test_row_path_rejects_columnar_only_object_columns(self):
             import uuid
             import ipaddress
-            cases = {
-                'bytes': b'\x00\x01',
-                'UUID': uuid.uuid4(),
-                'IPv4Address': ipaddress.IPv4Address('1.2.3.4'),
-            }
-            for descr, value in cases.items():
+            cases = (
+                ('bytes/bytearray/memoryview', b'\x00\x01'),
+                ('bytes/bytearray/memoryview', bytearray(b'\x00\x01')),
+                ('bytes/bytearray/memoryview', memoryview(b'\x00\x01')),
+                ('UUID', uuid.uuid4()),
+                ('IPv4Address', ipaddress.IPv4Address('1.2.3.4')),
+            )
+            for descr, value in cases:
                 df = pd.DataFrame({'a': [value]})
                 with self.assertRaisesRegex(
                         qi.QuestDBError,

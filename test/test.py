@@ -6,9 +6,12 @@ import os
 import unittest
 from unittest import mock
 import datetime
+import ipaddress
+import array
 import timeit
 import time
 import threading
+import uuid
 from enum import Enum
 import random
 import pathlib
@@ -2363,6 +2366,448 @@ class TestQwpWebSocketTls(unittest.TestCase):
                 self.assertEqual(server.wait_binary_frames_settled(), 1)
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
+
+
+class TestQwpOnlyRowTypes(unittest.TestCase):
+    UUID_VALUE = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+
+    def test_wrappers_exported(self):
+        import questdb
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            import questdb.ingress as ingress
+        for name in ('Char', 'DateMillis', 'Long256', 'Geohash'):
+            self.assertIn(name, questdb.__all__)
+            self.assertIn(name, ingress.__all__)
+            self.assertIs(getattr(questdb, name), getattr(qi, name))
+            self.assertIs(getattr(ingress, name), getattr(qi, name))
+
+    def test_wrapper_validation(self):
+        for value in ('', 'ab'):
+            with self.subTest(char=value), self.assertRaises(ValueError):
+                qi.Char(value)
+        with self.assertRaisesRegex(ValueError, 'surrogate pair.*cannot fit CHAR'):
+            qi.Char('😀')
+        with self.assertRaises(TypeError):
+            qi.Char(1)
+        self.assertEqual(qi.Char('\x00').value, '\x00')
+        self.assertEqual(qi.Char('\ud800').value, '\ud800')
+
+        for value in (-1, 2 ** 256):
+            with self.subTest(long256=value), self.assertRaises(ValueError):
+                qi.Long256(value)
+        for value in (False, True):
+            with self.subTest(long256_bool=value), self.assertRaises(TypeError):
+                qi.Long256(value)
+        self.assertEqual(qi.Long256(0).value, 0)
+        self.assertEqual(qi.Long256(2 ** 256 - 1).value, 2 ** 256 - 1)
+
+        for value in (False, True):
+            with self.subTest(geohash_bits_bool=value), self.assertRaises(TypeError):
+                qi.Geohash(value, 1)
+            with self.subTest(geohash_precision_bool=value), self.assertRaises(TypeError):
+                qi.Geohash(0, value)
+        for precision in (0, 61):
+            with self.subTest(precision=precision), self.assertRaises(ValueError):
+                qi.Geohash(0, precision)
+        for precision in (1, 5, 60):
+            with self.subTest(excess_bits=precision), self.assertRaises(ValueError):
+                qi.Geohash(2 ** precision, precision)
+        for value in ('', 'x' * 13, 'a', 'i', 'l', 'o', 'ß', 'ſ', 'K'):
+            with self.subTest(geohash=value), self.assertRaises(ValueError):
+                qi.Geohash.from_string(value)
+        upper = qi.Geohash.from_string('U33D8')
+        lower = qi.Geohash.from_string('u33d8')
+        self.assertEqual((upper.bits, upper.precision),
+                         (lower.bits, lower.precision))
+        self.assertEqual(upper.precision, 25)
+
+        for value in (False, True):
+            with self.subTest(date_millis_bool=value), self.assertRaises(TypeError):
+                qi.DateMillis(value)
+        self.assertEqual(qi.DateMillis(-1).value, -1)
+        utc = datetime.timezone.utc
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=utc)
+        self.assertEqual(
+            qi.DateMillis.from_datetime(
+                epoch + datetime.timedelta(microseconds=1999)).value,
+            1)
+        self.assertEqual(
+            qi.DateMillis.from_datetime(
+                epoch - datetime.timedelta(microseconds=1)).value,
+            -1)
+        qi._NAIVE_DATETIME_WARNED = False
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            naive = datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)
+            self.assertEqual(qi.DateMillis.from_datetime(naive).value, -1)
+        self.assertEqual(
+            len([w for w in caught if issubclass(w.category, UserWarning)]),
+            1)
+
+    def test_binary_memoryview_validation_and_ipv6_error(self):
+        buffer = qi.Buffer._new_qwp()
+        for i, value in enumerate((b'', bytearray(b'x'), memoryview(b'yz'))):
+            buffer.row(
+                'binary_values', columns={'value': value},
+                at=qi.TimestampNanos(i + 1))
+
+        before = len(buffer)
+        for value in (
+                memoryview(b'abcd')[::2],
+                memoryview(np.array([1, 2], dtype=np.uint16))):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, 'C-contiguous.*one-byte'):
+                buffer.row(
+                    'binary_values', columns={'value': value},
+                    at=qi.TimestampNanos(10))
+            self.assertEqual(len(buffer), before)
+
+        with self.assertRaisesRegex(
+                TypeError, 'IPv6 is not supported.*no IPv6 column type'):
+            buffer.row(
+                'binary_values',
+                columns={'value': ipaddress.IPv6Address('::1')},
+                at=qi.TimestampNanos(10))
+        self.assertEqual(len(buffer), before)
+
+        with self.assertRaisesRegex(
+                TypeError, 'Unsupported type: ipaddress.IPv4Interface'):
+            buffer.row(
+                'binary_values',
+                columns={'value': ipaddress.IPv4Interface('192.0.2.1/24')},
+                at=qi.TimestampNanos(10))
+        self.assertEqual(len(buffer), before)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_dataframe_binary_accepts_row_binary_types(self):
+        values = [
+            None,
+            b'',
+            b'bytes-value',
+            bytearray(b'bytearray-value'),
+            memoryview(b'memoryview-value'),
+        ]
+        for value in values[1:]:
+            with self.subTest(first_non_null=type(value).__name__):
+                frame = pd.DataFrame({
+                    'value': pd.Series([None, value], dtype=object)})
+                plan = qi._debug_dataframe_columnar_plan(
+                    frame, table_name='binary_values',
+                    at=qi.ServerTimestamp)
+                self.assertTrue(plan['supported'], plan['failures'])
+
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            frame = pd.DataFrame({
+                'value': pd.Series(values, dtype=object)})
+            with qi.QuestDB.from_conf(conf) as client:
+                client.dataframe(
+                    frame, table_name='binary_values',
+                    at=qi.ServerTimestamp)
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+        for value in values[2:]:
+            self.assertTrue(any(
+                bytes(value) in payload
+                for payload in stats['binary_payloads']))
+
+        payload = next(
+            payload for payload in stats['binary_payloads']
+            if int.from_bytes(payload[6:8], 'little') > 0)
+        pos = 12
+        _delta_start, pos = _read_qwp_varint(payload, pos)
+        delta_count, pos = _read_qwp_varint(payload, pos)
+        for _ in range(delta_count):
+            entry_len, pos = _read_qwp_varint(payload, pos)
+            pos += entry_len
+        table_len, pos = _read_qwp_varint(payload, pos)
+        pos += table_len
+        row_count, pos = _read_qwp_varint(payload, pos)
+        column_count, pos = _read_qwp_varint(payload, pos)
+        self.assertEqual((row_count, column_count), (len(values), 1))
+        column_name_len, pos = _read_qwp_varint(payload, pos)
+        pos += column_name_len
+        self.assertEqual(payload[pos], 0x17)  # QWP BINARY
+        pos += 1
+
+        self.assertEqual(payload[pos], 1)  # nullable column
+        pos += 1
+        self.assertEqual(payload[pos], 0b00000001)  # only row 0 is NULL
+        pos += 1
+        encoded_values = [bytes(value) for value in values[1:]]
+        expected_offsets = [0]
+        for value in encoded_values:
+            expected_offsets.append(expected_offsets[-1] + len(value))
+        actual_offsets = [
+            int.from_bytes(payload[pos + 4 * i:pos + 4 * (i + 1)], 'little')
+            for i in range(len(expected_offsets))]
+        self.assertEqual(actual_offsets, expected_offsets)
+        pos += 4 * len(expected_offsets)
+        self.assertEqual(payload[pos:], b''.join(encoded_values))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_dataframe_binary_rejects_invalid_memoryviews_and_buffers(self):
+        invalid_values = (
+            memoryview(b'abcd')[::2],
+            memoryview(np.array([1, 2], dtype=np.uint16)),
+        )
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                for value in invalid_values:
+                    frame = pd.DataFrame({
+                        'value': pd.Series([b'ok', value], dtype=object)})
+                    with self.subTest(value=value), self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            "Bad column 'value' at row 1: memoryview BINARY "
+                            'values must be C-contiguous with one-byte items'):
+                        client.dataframe(
+                            frame, table_name='binary_values',
+                            at=qi.ServerTimestamp)
+
+                generic_buffer = array.array('B', [1, 2])
+                frame = pd.DataFrame({
+                    'value': pd.Series([generic_buffer], dtype=object)})
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        'Unsupported object column.*array.array'):
+                    client.dataframe(
+                        frame, table_name='binary_values',
+                        at=qi.ServerTimestamp)
+            stats = server.snapshot()
+
+        self.assertEqual(stats['binary_frames'], 0)
+        self.assertEqual(stats['errors'], [])
+
+    def _assert_ilp_rejections(self, sender):
+        values = (
+            ('UUID', self.UUID_VALUE),
+            ('IPV4', ipaddress.IPv4Address('192.0.2.1')),
+            ('BINARY', b'abc'),
+            ('CHAR', qi.Char('Q')),
+            ('DATE', qi.DateMillis(-1)),
+            ('LONG256', qi.Long256(42)),
+            ('GEOHASH', qi.Geohash.from_string('u33d8')),
+        )
+        for type_name, value in values:
+            with self.subTest(type_name=type_name):
+                buffer = sender.new_buffer()
+                before = len(buffer)
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    buffer.row(
+                        'wrong_transport', columns={'value': value},
+                        at=qi.ServerTimestamp)
+                self.assertEqual(cm.exception.code,
+                                 qi.QuestDBErrorCode.InvalidApiCall)
+                message = str(cm.exception)
+                self.assertIn(type_name, message)
+                for protocol in ("'udp'", "'ws'", "'wss'"):
+                    self.assertIn(protocol, message)
+                self.assertEqual(len(buffer), before)
+                buffer.row(
+                    'wrong_transport', columns={'value': 1},
+                    at=qi.ServerTimestamp)
+                self.assertGreater(len(buffer), before)
+
+    def test_ilp_http_and_tcp_reject_qwp_only_types_atomically(self):
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            self._assert_ilp_rejections(sender)
+
+        with Server() as server, qi.Sender(
+                qi.Protocol.Tcp, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            server.accept()
+            self._assert_ilp_rejections(sender)
+
+    def test_transaction_rejects_uuid_and_preserves_buffer(self):
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            with sender.transaction('transaction_types') as txn:
+                before = bytes(sender)
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, 'UUID columns require a QWP sender'):
+                    txn.row(
+                        columns={'value': self.UUID_VALUE},
+                        at=qi.ServerTimestamp)
+                self.assertEqual(bytes(sender), before)
+                txn.row(columns={'value': 1}, at=qi.ServerTimestamp)
+                self.assertGreater(len(sender), len(before))
+                txn.rollback()
+
+    def test_qwp_websocket_accepts_all_row_types(self):
+        with QwpAckServer(record_payloads=True) as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
+                    auto_flush=False) as sender:
+                sender.row(
+                    'qwp_row_types',
+                    columns={
+                        'uuid_col': self.UUID_VALUE,
+                        'ipv4_col': ipaddress.IPv4Address('192.0.2.1'),
+                        'binary_col': b'',
+                        'char_col': qi.Char('Q'),
+                        'date_col': qi.DateMillis(-1),
+                        'long256_col': qi.Long256(2 ** 255 + 7),
+                        'geohash_col': qi.Geohash.from_string('u33d8'),
+                    },
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+                fsn = sender.flush_and_get_fsn()
+                self.assertTrue(sender.await_acked_fsn(fsn, 10000))
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_row_uuid_wire_bytes_match_dataframe_object_column(self):
+        expected = self.UUID_VALUE.int.to_bytes(16, 'little')
+
+        with QwpAckServer(record_payloads=True) as row_server:
+            conf = (
+                f'ws::addr=127.0.0.1:{row_server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        'uuid_wire', columns={'value': self.UUID_VALUE},
+                        at=qi.ServerTimestamp)
+                    sender.flush(wait=True)
+            row_payload = row_server.snapshot()['binary_payloads'][0]
+
+        with QwpAckServer(record_payloads=True) as dataframe_server:
+            conf = (
+                f'ws::addr=127.0.0.1:{dataframe_server.port};'
+                'lazy_connect=true;sender_pool_min=1;sender_pool_max=1;'
+                'pool_reap=manual;')
+            frame = pd.DataFrame({
+                'value': pd.Series([self.UUID_VALUE], dtype=object)})
+            with qi.QuestDB.from_conf(conf) as client:
+                client.dataframe(
+                    frame, table_name='uuid_wire', at=qi.ServerTimestamp)
+            dataframe_payload = dataframe_server.snapshot()['binary_payloads'][0]
+
+        row_pos = row_payload.find(expected)
+        dataframe_pos = dataframe_payload.find(expected)
+        self.assertGreaterEqual(row_pos, 0)
+        self.assertGreaterEqual(dataframe_pos, 0)
+        self.assertEqual(
+            row_payload[row_pos:row_pos + 16],
+            dataframe_payload[dataframe_pos:dataframe_pos + 16])
+
+
+if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
+    class TestQwpOnlyRowTypesIntegration(TestWithDatabase):
+        def test_round_trip_sentinels_precisions_and_mixed_precision_error(self):
+            self._require_qwp_ws()
+            table_name = 'qwp_row_types_' + uuid.uuid4().hex[:8]
+            mixed_table = 'qwp_mixed_gh_' + uuid.uuid4().hex[:8]
+            normal_uuid = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+            null_uuid = uuid.UUID('80000000-0000-0000-8000-000000000000')
+            null_long256 = sum(
+                0x8000000000000000 << (64 * limb) for limb in range(4))
+            self.qdb_plain.http_sql_query(
+                f'CREATE TABLE {table_name} ('
+                'u UUID, ip IPV4, bin BINARY, ch CHAR, dt DATE, l LONG256, '
+                'gh1 GEOHASH(1b), gh5 GEOHASH(5b), gh7 GEOHASH(7b), '
+                'gh8 GEOHASH(8b), gh60 GEOHASH(60b), ts TIMESTAMP) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self.qdb_plain.http_sql_query(
+                f'CREATE TABLE {mixed_table} ('
+                'gh GEOHASH(5b), ts TIMESTAMP) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+
+            with tempfile.TemporaryDirectory(prefix='py-qwp-row-types-') as sf_dir:
+                conf = self._mk_qwpws_conf(
+                    'py-row-types-' + uuid.uuid4().hex[:8], sf_dir,
+                    reconnect_max_duration_millis=30000,
+                    close_flush_timeout_millis=30000)
+                sender = qi.Sender.from_conf(conf, auto_flush=False)
+                try:
+                    sender.establish()
+                    sender.row(
+                        table_name,
+                        columns={
+                            'u': normal_uuid,
+                            'ip': ipaddress.IPv4Address('192.0.2.1'),
+                            'bin': b'',
+                            'ch': qi.Char('Q'),
+                            'dt': qi.DateMillis(-1),
+                            'l': qi.Long256(7),
+                            'gh1': qi.Geohash(1, 1),
+                            'gh5': qi.Geohash(31, 5),
+                            'gh7': qi.Geohash(85, 7),
+                            'gh8': qi.Geohash(170, 8),
+                            'gh60': qi.Geohash((1 << 60) - 1, 60),
+                        },
+                        at=qi.TimestampMicros(1))
+                    sender.row(
+                        table_name,
+                        columns={
+                            'u': null_uuid,
+                            'ip': ipaddress.IPv4Address('0.0.0.0'),
+                            'bin': b'x',
+                            'ch': qi.Char('\x00'),
+                            'dt': qi.DateMillis(-(1 << 63)),
+                            'l': qi.Long256(null_long256),
+                            'gh1': qi.Geohash(0, 1),
+                            'gh5': qi.Geohash(0, 5),
+                            'gh7': qi.Geohash(0, 7),
+                            'gh8': qi.Geohash(0, 8),
+                            'gh60': qi.Geohash(0, 60),
+                        },
+                        at=qi.TimestampMicros(2))
+                    fsn = sender.flush_and_get_fsn()
+                    self.assertTrue(sender.await_acked_fsn(fsn, 30000))
+
+                    sender.row(
+                        mixed_table, columns={'gh': qi.Geohash(1, 1)},
+                        at=qi.TimestampMicros(3))
+                    sender.row(
+                        mixed_table, columns={'gh': qi.Geohash(1, 5)},
+                        at=qi.TimestampMicros(4))
+                    with self.assertRaises(qi.QuestDBError):
+                        sender.flush_and_get_fsn()
+                finally:
+                    sender.close(False)
+
+                self.qdb_plain.retry_check_table(table_name, min_rows=2)
+                with qi.QuestDB.from_conf(conf) as client:
+                    rows = client.query(
+                        f'SELECT u, ip, bin, ch, dt, l, gh1, gh5, gh7, '
+                        f'gh8, gh60 FROM {table_name} ORDER BY ts').to_arrow().to_pylist()
+
+            first, second = rows
+            if isinstance(first['u'], bytes):
+                self.assertEqual(int.from_bytes(first['u'], 'little'),
+                                 normal_uuid.int)
+            else:
+                self.assertEqual(first['u'], normal_uuid)
+            self.assertEqual(first['ip'], int(ipaddress.IPv4Address('192.0.2.1')))
+            self.assertEqual(first['bin'], b'')
+            self.assertEqual(first['ch'], ord('Q'))
+            self.assertEqual(first['dt'].timestamp(), -0.001)
+            self.assertEqual(int.from_bytes(first['l'], 'little'), 7)
+            self.assertEqual(
+                [first[name] for name in ('gh1', 'gh5', 'gh7', 'gh8', 'gh60')],
+                [1, 31, 85, 170, (1 << 60) - 1])
+            for name in ('u', 'ip', 'ch', 'dt', 'l'):
+                self.assertIsNone(second[name])
+            self.assertEqual(second['bin'], b'x')
+            self.assertEqual(
+                [second[name] for name in ('gh1', 'gh5', 'gh7', 'gh8', 'gh60')],
+                [0, 0, 0, 0, 0])
 
 
 class TestBases:

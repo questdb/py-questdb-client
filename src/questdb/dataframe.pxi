@@ -228,7 +228,7 @@ cdef dict _PYOBJ_SOURCE_DESCR = {
     col_source_t.col_source_uuid_pyobj: "UUID",
     col_source_t.col_source_ipv4_pyobj: "IPv4Address",
     col_source_t.col_source_datetime_pyobj: "datetime",
-    col_source_t.col_source_bytes_pyobj: "bytes",
+    col_source_t.col_source_bytes_pyobj: "bytes/bytearray/memoryview",
 }
 
 
@@ -1506,7 +1506,9 @@ cdef void_int _dataframe_series_sniff_pyobj(
                         f'Bad column {pandas_col.name!r}: ' +
                         'Unsupported object column containing a numpy array ' +
                         f'of an unsupported element type {arr_type_name}.')
-            elif PyBytes_CheckExact(obj):
+            elif (PyBytes_Check(<object>obj) or
+                  PyByteArray_Check(<object>obj) or
+                  PyMemoryView_Check(<object>obj)):
                 col.setup.source = col_source_t.col_source_bytes_pyobj
             elif isinstance(<object>obj, _uuid.UUID):
                 col.setup.source = col_source_t.col_source_uuid_pyobj

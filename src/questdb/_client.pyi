@@ -25,6 +25,10 @@
 __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
+    "Char",
+    "DateMillis",
+    "Geohash",
+    "Long256",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -53,7 +57,9 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
+from ipaddress import IPv4Address
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from uuid import UUID
 
 import numpy as np
 import pandas as pd
@@ -333,6 +339,56 @@ class TimestampNanos:
     def value(self) -> int:
         """Number of nanoseconds (Unix epoch timestamp, UTC)."""
 
+
+class Char:
+    """A QuestDB CHAR value stored as one UTF-16 code unit."""
+
+    def __init__(self, value: str): ...
+    @property
+    def value(self) -> str: ...
+
+
+class DateMillis:
+    """A QuestDB DATE millisecond timestamp, not a civil date."""
+
+    def __init__(self, millis: int): ...
+    @classmethod
+    def from_datetime(cls, dt: datetime) -> DateMillis: ...
+    @classmethod
+    def now(cls) -> DateMillis: ...
+    @property
+    def value(self) -> int: ...
+
+
+class Long256:
+    """An unsigned 256-bit integer for a QuestDB LONG256 column."""
+
+    def __init__(self, value: int): ...
+    @property
+    def value(self) -> int: ...
+
+
+class Geohash:
+    """A QuestDB GEOHASH value represented by bits and precision."""
+
+    def __init__(self, bits: int, precision: int): ...
+    @classmethod
+    def from_string(cls, value: str) -> Geohash: ...
+    @property
+    def bits(self) -> int: ...
+    @property
+    def precision(self) -> int: ...
+
+
+TransactionColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime,
+    np.ndarray, Decimal]
+RowColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime,
+    np.ndarray, Decimal, UUID, IPv4Address, bytes, bytearray, memoryview, Char,
+    DateMillis, Long256, Geohash]
+
+
 class SenderTransaction:
     """
     A transaction for a specific table.
@@ -357,9 +413,7 @@ class SenderTransaction:
         self,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, TransactionColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> SenderTransaction:
         """
@@ -368,6 +422,9 @@ class SenderTransaction:
         The table name is taken from the transaction.
 
         **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+
+        UUID, IPV4, BINARY, CHAR, DATE, LONG256, and GEOHASH are QWP-only and
+        are not supported by this ILP/HTTP-only transaction API.
         """
 
     def dataframe(
@@ -466,9 +523,7 @@ class Buffer:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> Buffer:
         """
@@ -538,10 +593,32 @@ class Buffer:
               - `TIMESTAMP <https://questdb.com/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``Decimal``
               - `DECIMAL <https://questdb.com/docs/reference/api/ilp/columnset-types#decimal>`_
+            * - ``UUID``
+              - UUID (QWP-only)
+            * - ``IPv4Address``
+              - IPV4 (QWP-only)
+            * - ``bytes``, ``bytearray``, or ``memoryview``
+              - BINARY (QWP-only)
+            * - ``Char``
+              - CHAR (QWP-only)
+            * - ``DateMillis``
+              - DATE (QWP-only)
+            * - ``Long256``
+              - LONG256 (QWP-only)
+            * - ``Geohash``
+              - GEOHASH (QWP-only)
             * - ``None``
               - *Column is skipped and not serialized.*
 
         **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+
+        The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``.
+        UUID/LONG256/CHAR/DATE/GEOHASH require QuestDB 9.4.0+; BINARY/IPV4
+        require 9.4.1+. Their reserved ``NULL`` sentinels are accepted:
+        IPV4 ``0.0.0.0``, CHAR ``'\\x00'``, DATE ``INT64_MIN``, UUID
+        ``80000000-0000-0000-8000-000000000000``, and LONG256 with all four
+        limbs equal to ``0x8000000000000000``. GEOHASH has no collision, and
+        empty BINARY ``b''`` is distinct from ``NULL``.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -977,28 +1054,16 @@ class PooledSender:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[
-                str,
-                Union[
-                    None,
-                    bool,
-                    int,
-                    float,
-                    str,
-                    TimestampMicros,
-                    TimestampNanos,
-                    datetime,
-                    np.ndarray,
-                    Decimal,
-                ],
-            ]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> PooledSender:
         """Append one row to this sender's QWP buffer. If a configured
         auto-flush threshold is breached, this publishes without waiting for
-        an acknowledgement; a publish error propagates from ``row()``."""
+        an acknowledgement; a publish error propagates from ``row()``.
+
+        See :func:`Buffer.row` for supported column types, protocol
+        restrictions, server requirements, and ``NULL``-sentinel behavior.
+        """
 
     def dataframe(
         self,
@@ -1662,9 +1727,7 @@ class Sender:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:
         """
@@ -1673,9 +1736,8 @@ class Sender:
         This may be sent automatically depending on the ``auto_flush`` setting
         in the constructor.
 
-        Refer to the :func:`Buffer.row` documentation for details on arguments.
-
-        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+        See :func:`Buffer.row` for supported column types, protocol
+        restrictions, server requirements, and ``NULL``-sentinel behavior.
         """
 
     def dataframe(

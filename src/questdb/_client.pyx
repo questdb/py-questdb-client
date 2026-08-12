@@ -33,6 +33,10 @@ API for fast data ingestion into and querying from QuestDB.
 __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
+    'Char',
+    'DateMillis',
+    'Geohash',
+    'Long256',
     'PooledReader',
     'PooledSender',
     'Protocol',
@@ -59,7 +63,7 @@ __all__ = [
 ]
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
-from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t, uint32_t, \
+from libc.stdint cimport uint8_t, uint16_t, uint64_t, int64_t, int32_t, uint32_t, \
     uintptr_t, INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, qsort
 from libc.string cimport strncmp, memset, memcpy, strlen
@@ -101,7 +105,10 @@ from enum import Enum
 from typing import List, Dict, Union, Any, Optional
 from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
-                            PyBytes_GET_SIZE, PyBytes_AsString)
+                            PyBytes_GET_SIZE, PyBytes_AsString, PyBytes_Check)
+from cpython.bytearray cimport (PyByteArray_AsString, PyByteArray_Size,
+                               PyByteArray_Check)
+from cpython.memoryview cimport PyMemoryView_Check
 
 import datetime
 import os
@@ -850,6 +857,149 @@ cdef class TimestampNanos:
         return f'TimestampNanos({self.value})'
 
 
+cdef class Char:
+    """A QuestDB CHAR value stored as one UTF-16 code unit.
+
+    ``'\\x00'`` is accepted but reads back from QuestDB as ``NULL``.
+    """
+    cdef uint16_t _value
+
+    def __cinit__(self, value):
+        if not isinstance(value, str):
+            raise TypeError('value must be a str.')
+        if len(value) != 1:
+            raise ValueError('value must contain exactly one code point.')
+        code_point = ord(value)
+        if code_point > 0xFFFF:
+            raise ValueError(
+                'a supplementary character needs a surrogate pair and '
+                'cannot fit CHAR; use str/VARCHAR instead.')
+        self._value = <uint16_t>code_point
+
+    @property
+    def value(self) -> str:
+        """The single Python code point represented by this CHAR."""
+        return chr(self._value)
+
+    def __repr__(self):
+        return f'Char({self.value!r})'
+
+
+cdef class DateMillis:
+    """A QuestDB DATE value in milliseconds since the Unix epoch (UTC).
+
+    QuestDB DATE is a millisecond timestamp, not a civil date. The full signed
+    64-bit range is accepted, including pre-epoch values. ``INT64_MIN`` is
+    accepted but reads back from QuestDB as ``NULL``.
+    """
+    cdef int64_t _value
+
+    def __cinit__(self, millis):
+        if isinstance(millis, bool) or not isinstance(millis, int):
+            raise TypeError('millis must be an int.')
+        if millis < INT64_MIN or millis > INT64_MAX:
+            raise ValueError('millis must fit in a signed 64-bit integer.')
+        self._value = <int64_t>millis
+
+    @classmethod
+    def from_datetime(cls, dt: datetime.datetime):
+        """Construct a ``DateMillis`` by flooring a datetime to milliseconds."""
+        if not isinstance(dt, cp_datetime):
+            raise TypeError('dt must be a datetime object.')
+        return cls(datetime_to_micros(dt) // 1000)
+
+    @classmethod
+    def now(cls):
+        """Construct a ``DateMillis`` from the current time as UTC."""
+        return cls(line_sender_now_micros() // 1000)
+
+    @property
+    def value(self) -> int:
+        """Milliseconds since the Unix epoch (UTC)."""
+        return self._value
+
+    def __repr__(self):
+        return f'DateMillis({self._value})'
+
+
+cdef class Long256:
+    """An unsigned 256-bit integer for a QuestDB LONG256 column.
+
+    The value whose four 64-bit limbs are all ``0x8000000000000000`` is
+    accepted but reads back from QuestDB as ``NULL``.
+    """
+    cdef bytes _bytes
+
+    def __cinit__(self, value):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError('value must be an int.')
+        if value < 0 or value >= (1 << 256):
+            raise ValueError('value must be in the range 0 <= value < 2**256.')
+        self._bytes = value.to_bytes(32, 'little')
+
+    @property
+    def value(self) -> int:
+        """The unsigned integer value."""
+        return int.from_bytes(self._bytes, 'little')
+
+    def __repr__(self):
+        return f'Long256({self.value})'
+
+
+cdef class Geohash:
+    """A QuestDB GEOHASH value represented by bits and precision.
+
+    Precision is pinned per column; mixing precisions for one column fails
+    when the buffer is flushed.
+    """
+    cdef uint64_t _bits
+    cdef uint8_t _precision
+
+    def __cinit__(self, bits, precision):
+        if isinstance(bits, bool) or not isinstance(bits, int):
+            raise TypeError('bits must be an int.')
+        if isinstance(precision, bool) or not isinstance(precision, int):
+            raise TypeError('precision must be an int.')
+        if precision < 1 or precision > 60:
+            raise ValueError('precision must be in the range 1..60.')
+        if bits < 0 or bits >= (1 << precision):
+            raise ValueError('bits must be in the range 0 <= bits < 2**precision.')
+        self._bits = <uint64_t>bits
+        self._precision = <uint8_t>precision
+
+    @classmethod
+    def from_string(cls, value):
+        """Construct a GEOHASH from one to twelve base32 characters."""
+        if not isinstance(value, str):
+            raise TypeError('value must be a str.')
+        if len(value) < 1 or len(value) > 12:
+            raise ValueError('geohash string must contain 1 to 12 characters.')
+        bits = 0
+        for char in value:
+            digit = (
+                '0123456789bcdefghjkmnpqrstuvwxyz'.find(char.lower())
+                if char.isascii() else -1)
+            if digit < 0:
+                raise ValueError(
+                    f'invalid geohash character {char!r}; expected the base32 '
+                    'alphabet 0123456789bcdefghjkmnpqrstuvwxyz.')
+            bits = bits * 32 + digit
+        return cls(bits, 5 * len(value))
+
+    @property
+    def bits(self) -> int:
+        """The packed geohash bits."""
+        return self._bits
+
+    @property
+    def precision(self) -> int:
+        """The precision in bits."""
+        return self._precision
+
+    def __repr__(self):
+        return f'Geohash({self._bits}, {self._precision})'
+
+
 cdef class QuestDB
 cdef class Sender
 cdef class PooledSender
@@ -956,6 +1106,10 @@ cdef class SenderTransaction:
         The table name is taken from the transaction.
 
         **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
+
+        UUID, IPV4, BINARY, CHAR, DATE, LONG256, and GEOHASH columns are
+        QWP-only and are not supported by ``SenderTransaction``, which is
+        ILP/HTTP-only by construction.
         """
         if at is None:
             raise QuestDBError(
@@ -1225,6 +1379,99 @@ cdef class Buffer:
             self, line_sender_column_name c_name, object value) except -1:
         return serialize_decimal_py_obj(self._impl, c_name, <PyObject*>value)
 
+    cdef inline void_int _require_qwp_column(
+            self, str type_name) except -1:
+        if not self._qwp:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{type_name} columns require a QWP sender "
+                "(protocol 'udp', 'ws' or 'wss'); this buffer uses "
+                "the ILP protocol (tcp/tcps/http/https).")
+
+    cdef inline void_int _column_binary(
+            self, line_sender_column_name c_name, object value) except -1:
+        self._require_qwp_column('BINARY')
+        cdef line_sender_error* err = NULL
+        cdef const uint8_t* data
+        cdef size_t data_len
+        cdef Py_buffer view
+        cdef bint release_view = False
+        if isinstance(value, bytes):
+            data = <const uint8_t*>PyBytes_AsString(value)
+            data_len = <size_t>PyBytes_GET_SIZE(value)
+        elif isinstance(value, bytearray):
+            data = <const uint8_t*>PyByteArray_AsString(value)
+            data_len = <size_t>PyByteArray_Size(value)
+        else:
+            if value.itemsize != 1 or not value.c_contiguous:
+                raise ValueError(
+                    'memoryview BINARY values must be C-contiguous with '
+                    'one-byte items.')
+            if PyObject_GetBuffer(value, &view, PyBUF_SIMPLE) < 0:
+                raise ValueError('could not borrow the memoryview buffer.')
+            release_view = True
+            data = <const uint8_t*>view.buf
+            data_len = <size_t>view.len
+        try:
+            if not line_sender_buffer_column_binary(
+                    self._impl, c_name, data, data_len, &err):
+                raise c_err_to_py(err)
+        finally:
+            if release_view:
+                PyBuffer_Release(&view)
+
+    cdef inline void_int _column_uuid(
+            self, line_sender_column_name c_name, object value) except -1:
+        self._require_qwp_column('UUID')
+        cdef line_sender_error* err = NULL
+        cdef object i = value.int
+        cdef uint64_t lo = <uint64_t>(i & 0xFFFFFFFFFFFFFFFF)
+        cdef uint64_t hi = <uint64_t>(i >> 64)
+        if not line_sender_buffer_column_uuid(
+                self._impl, c_name, lo, hi, &err):
+            raise c_err_to_py(err)
+
+    cdef inline void_int _column_ipv4(
+            self, line_sender_column_name c_name, object value) except -1:
+        self._require_qwp_column('IPV4')
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_column_ipv4(
+                self._impl, c_name, <uint32_t>int(value), &err):
+            raise c_err_to_py(err)
+
+    cdef inline void_int _column_char(
+            self, line_sender_column_name c_name, Char value) except -1:
+        self._require_qwp_column('CHAR')
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_column_char(
+                self._impl, c_name, value._value, &err):
+            raise c_err_to_py(err)
+
+    cdef inline void_int _column_date_millis(
+            self, line_sender_column_name c_name, DateMillis value) except -1:
+        self._require_qwp_column('DATE')
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_column_date(
+                self._impl, c_name, value._value, &err):
+            raise c_err_to_py(err)
+
+    cdef inline void_int _column_long256(
+            self, line_sender_column_name c_name, Long256 value) except -1:
+        self._require_qwp_column('LONG256')
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_column_long256(
+                self._impl, c_name,
+                <const uint8_t*>PyBytes_AsString(value._bytes), &err):
+            raise c_err_to_py(err)
+
+    cdef inline void_int _column_geohash(
+            self, line_sender_column_name c_name, Geohash value) except -1:
+        self._require_qwp_column('GEOHASH')
+        cdef line_sender_error* err = NULL
+        if not line_sender_buffer_column_geohash(
+                self._impl, c_name, value._bits, value._precision, &err):
+            raise c_err_to_py(err)
+
     cdef inline void_int _column_i64(
             self, line_sender_column_name c_name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
@@ -1321,7 +1568,28 @@ cdef class Buffer:
             self._column_dt(c_name, value)
         elif isinstance(value, Decimal):
             self._column_decimal(c_name, value)
+        elif isinstance(value, bytes):
+            self._column_binary(c_name, value)
+        elif isinstance(value, bytearray):
+            self._column_binary(c_name, value)
+        elif isinstance(value, memoryview):
+            self._column_binary(c_name, value)
+        elif isinstance(value, uuid.UUID):
+            self._column_uuid(c_name, value)
+        elif type(value) is _ipaddress.IPv4Address:
+            self._column_ipv4(c_name, value)
+        elif isinstance(value, Char):
+            self._column_char(c_name, value)
+        elif isinstance(value, DateMillis):
+            self._column_date_millis(c_name, value)
+        elif isinstance(value, Long256):
+            self._column_long256(c_name, value)
+        elif isinstance(value, Geohash):
+            self._column_geohash(c_name, value)
         else:
+            if isinstance(value, _ipaddress.IPv6Address):
+                raise TypeError(
+                    'IPv6 is not supported; QuestDB has no IPv6 column type.')
             valid = ', '.join((
                 'bool',
                 'int',
@@ -1331,7 +1599,16 @@ cdef class Buffer:
                 'TimestampNanos',
                 'datetime.datetime',
                 'numpy.ndarray',
-                'decimal.Decimal'))
+                'decimal.Decimal',
+                'bytes',
+                'bytearray',
+                'memoryview',
+                'uuid.UUID',
+                'ipaddress.IPv4Address',
+                'Char',
+                'DateMillis',
+                'Long256',
+                'Geohash'))
             raise TypeError(
                 f'Unsupported type: {_fqn(type(value))}. Must be one of: {valid}')
 
@@ -1425,7 +1702,11 @@ cdef class Buffer:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray, Decimal]]
+                Union[None, bool, int, float, str, TimestampMicros,
+                      TimestampNanos, datetime.datetime, numpy.ndarray,
+                      Decimal, uuid.UUID, _ipaddress.IPv4Address, bytes,
+                      bytearray, memoryview, Char, DateMillis, Long256,
+                      Geohash]]
                 ]=None,
             at: Union[ServerTimestampType, TimestampNanos, datetime.datetime]):
         """
@@ -1494,10 +1775,36 @@ cdef class Buffer:
               - `ARRAY <https://questdb.com/docs/reference/api/ilp/columnset-types#array>`_
             * - ``datetime.datetime`` and ``TimestampMicros``
               - `TIMESTAMP <https://questdb.com/docs/reference/api/ilp/columnset-types#timestamp>`_
+            * - ``uuid.UUID``
+              - UUID (QWP-only)
+            * - ``ipaddress.IPv4Address``
+              - IPV4 (QWP-only)
+            * - ``bytes``, ``bytearray``, or ``memoryview``
+              - BINARY (QWP-only)
+            * - ``Char``
+              - CHAR (QWP-only)
+            * - ``DateMillis``
+              - DATE (QWP-only)
+            * - ``Long256``
+              - LONG256 (QWP-only)
+            * - ``Geohash``
+              - GEOHASH (QWP-only)
             * - ``None``
               - *Column is skipped and not serialized.*
 
         **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
+
+        The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``
+        and are rejected by ILP buffers used by ``tcp``, ``tcps``, ``http``,
+        and ``https``. UUID, LONG256, CHAR, DATE, and GEOHASH require QuestDB
+        9.4.0 or newer; BINARY and IPV4 require QuestDB 9.4.1 or newer.
+
+        QuestDB reserves these values as ``NULL`` sentinels, but the client
+        deliberately accepts them: IPV4 ``0.0.0.0``, CHAR ``'\\x00'``, DATE
+        ``INT64_MIN``, UUID ``80000000-0000-0000-8000-000000000000``, and a
+        LONG256 whose four 64-bit limbs are all ``0x8000000000000000``.
+        GEOHASH has no sentinel collision. Empty BINARY ``b''`` is a real
+        empty value and is distinct from ``NULL``.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -3556,6 +3863,9 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
     cdef PyObject* cell
     cdef Py_ssize_t blob_len
     cdef const char* blob_buf
+    cdef object py_cell
+    cdef Py_buffer view
+    cdef bint release_view
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t bytes_cap = 16
     cdef uint8_t* new_bytes
@@ -3576,9 +3886,46 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
 
         for i in range(row_count):
             cell = access[i]
-            if PyBytes_CheckExact(cell):
-                blob_len = PyBytes_GET_SIZE(<object>cell)
-                blob_buf = PyBytes_AsString(<object>cell)
+            release_view = False
+            try:
+                if PyBytes_Check(<object>cell):
+                    blob_len = PyBytes_GET_SIZE(<object>cell)
+                    blob_buf = PyBytes_AsString(<object>cell)
+                elif PyByteArray_Check(<object>cell):
+                    blob_len = PyByteArray_Size(<object>cell)
+                    blob_buf = PyByteArray_AsString(<object>cell)
+                elif PyMemoryView_Check(<object>cell):
+                    py_cell = <object>cell
+                    if py_cell.itemsize != 1 or not py_cell.c_contiguous:
+                        raise QuestDBError(
+                            QuestDBErrorCode.BadDataFrame,
+                            f'Bad column {df_col_name!r} at row {i}: '
+                            'memoryview BINARY values must be C-contiguous '
+                            'with one-byte items.')
+                    try:
+                        if PyObject_GetBuffer(
+                                py_cell, &view, PyBUF_SIMPLE) < 0:
+                            raise ValueError(
+                                'could not borrow the memoryview buffer.')
+                    except (BufferError, ValueError) as exc:
+                        raise QuestDBError(
+                            QuestDBErrorCode.BadDataFrame,
+                            f'Bad column {df_col_name!r} at row {i}: '
+                            f'invalid memoryview BINARY value: {exc}') from exc
+                    release_view = True
+                    blob_len = view.len
+                    blob_buf = <const char*>view.buf
+                elif _dataframe_is_null_pyobj(cell):
+                    b.str_offsets[i + 1] = <int32_t>bytes_used
+                    b.has_nulls = True
+                    continue
+                else:
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
+                        f'Bad column {df_col_name!r} at row {i}: expected '
+                        'bytes, bytearray, or memoryview, '
+                        f'got {_fqn(type(<object>cell))}.')
+
                 if bytes_used + <size_t>blob_len > <size_t>2_147_483_647:
                     raise QuestDBError(
                         QuestDBErrorCode.BadDataFrame,
@@ -3597,14 +3944,9 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
                 b.str_offsets[i + 1] = <int32_t>bytes_used
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
-            elif _dataframe_is_null_pyobj(cell):
-                b.str_offsets[i + 1] = <int32_t>bytes_used
-                b.has_nulls = True
-            else:
-                raise QuestDBError(
-                    QuestDBErrorCode.BadDataFrame,
-                    f'Bad column {df_col_name!r} at row {i}: expected bytes, '
-                    f'got {_fqn(type(<object>cell))}.')
+            finally:
+                if release_view:
+                    PyBuffer_Release(&view)
 
         b.str_bytes_len = bytes_used
         if not b.has_nulls and b.validity != NULL:
@@ -6415,6 +6757,10 @@ cdef class QuestDB:
           byte-identity at this layout; users who want
           ``uuid.UUID.bytes`` (RFC 4122 big-endian) round-trip must
           convert at their boundary.
+        - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
+          C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
+          the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`
+          accepts. Requires QuestDB 9.4.1 or newer.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints
@@ -7784,7 +8130,11 @@ cdef class Sender:
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
                 str,
-                Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime.datetime, numpy.ndarray, Decimal]]]=None,
+                Union[None, bool, int, float, str, TimestampMicros,
+                      TimestampNanos, datetime.datetime, numpy.ndarray,
+                      Decimal, uuid.UUID, _ipaddress.IPv4Address, bytes,
+                      bytearray, memoryview, Char, DateMillis, Long256,
+                      Geohash]]]=None,
             at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
         """
         Write a row to the internal buffer.
@@ -7792,9 +8142,9 @@ cdef class Sender:
         This may be sent automatically depending on the ``auto_flush`` setting
         in the constructor.
 
-        Refer to the :func:`Buffer.row <questdb.ingress.Buffer.row>` documentation for details on arguments.
-
-        **Note**: Support for NumPy arrays (``numpy.array``) requires QuestDB server version 9.0.0 or higher.
+        See :func:`Buffer.row <questdb.ingress.Buffer.row>` for supported
+        column types, protocol restrictions, server requirements, and
+        ``NULL``-sentinel behavior.
         """
         if self._in_txn:
             raise QuestDBError(
@@ -8553,7 +8903,9 @@ cdef class PooledSender:
                 str,
                 Union[None, bool, int, float, str, TimestampMicros,
                       TimestampNanos, datetime.datetime, numpy.ndarray,
-                      Decimal]]] = None,
+                      Decimal, uuid.UUID, _ipaddress.IPv4Address, bytes,
+                      bytearray, memoryview, Char, DateMillis, Long256,
+                      Geohash]]] = None,
             at: Union[ServerTimestampType, TimestampNanos,
                       datetime.datetime]):
         """
@@ -8567,6 +8919,10 @@ cdef class PooledSender:
         :class:`QuestDBErrorCode.BatchTooLarge` is raised. If a multi-row
         batch exceeds the exact encoded limit despite the byte-size estimate,
         the complete batch remains buffered.
+
+        See :func:`Buffer.row <questdb.ingress.Buffer.row>` for supported
+        column types, protocol restrictions, server requirements, and
+        ``NULL``-sentinel behavior.
         """
         cdef bint starts_batch
         cdef bint auto_flush

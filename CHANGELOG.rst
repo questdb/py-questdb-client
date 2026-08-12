@@ -7,6 +7,17 @@ Changelog
 5.0.1 (unreleased)
 ------------------
 
+- ``row()`` on QWP senders now supports UUID, IPV4, BINARY, CHAR, DATE,
+  LONG256, and GEOHASH columns. Pass ``uuid.UUID``,
+  ``ipaddress.IPv4Address``, or bytes-like values directly, and use the new
+  :class:`Char <questdb.Char>`, :class:`DateMillis <questdb.DateMillis>`,
+  :class:`Long256 <questdb.Long256>`, and :class:`Geohash <questdb.Geohash>`
+  wrappers for the rest. BINARY and IPV4 need QuestDB 9.4.1 or newer; the
+  other types need 9.4.0. On ILP senders these values now raise
+  :class:`QuestDBError <questdb.QuestDBError>` (``InvalidApiCall``) instead
+  of ``TypeError``.
+- DataFrame BINARY columns now accept ``bytearray`` and ``memoryview`` cells
+  in addition to ``bytes``.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
