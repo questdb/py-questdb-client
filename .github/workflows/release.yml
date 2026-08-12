@@ -72,7 +72,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Check out the release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ steps.release.outputs.release_sha }}
           fetch-depth: 0
@@ -150,13 +150,13 @@ jobs:
             "/repos/$GITHUB_REPOSITORY/actions/workflows/macos-arm64-wheels.yml/runs?event=pull_request&status=success&per_page=100" \
             --jq '.workflow_runs[]' \
             >"$RUNNER_TEMP/macos-runs.jsonl"
-          run_json="$(jq -cs --argjson pr "$RELEASE_PR" --arg head "$PR_HEAD_SHA" '
+          run_json="$(jq -cs --arg head "$PR_HEAD_SHA" '
             [.[]
-             | select(.event == "pull_request"
+             | select(.path == ".github/workflows/macos-arm64-wheels.yml"
+                      and .event == "pull_request"
                       and .status == "completed"
                       and .conclusion == "success"
-                      and .head_sha == $head
-                      and any(.pull_requests[]?; .number == $pr))]
+                      and .head_sha == $head)]
             | sort_by(.created_at, .id) | reverse | .[0] // empty
           ' "$RUNNER_TEMP/macos-runs.jsonl")"
           [[ -n "$run_json" ]] || {
@@ -277,7 +277,6 @@ jobs:
           from itertools import product
           from pathlib import Path
 
-          from packaging.tags import Tag
           from packaging.utils import (
               canonicalize_name,
               parse_sdist_filename,
@@ -342,6 +341,8 @@ jobs:
                   f"{sdists[0].stat().st_size} bytes"
               )
 
+          # This explicit 46-target CPython matrix duplicates ci/cibuildwheel.yaml and
+          # .github/workflows/macos-arm64-wheels.yml; update it whenever either CI matrix changes.
           interpreters = ("cp310", "cp311", "cp312", "cp313", "cp314", "cp314t")
           expected = set()
           expected.update(product(interpreters, ("manylinux", "musllinux"), ("x86_64", "aarch64")))
@@ -362,7 +363,7 @@ jobs:
                   return "windows", platform, None
               raise ValueError(f"unsupported platform tag {platform!r}")
 
-          def classify_tags(filename, tags):
+          def classify_tags(tags):
               targets = set()
               for tag in tags:
                   if tag.interpreter.startswith("cp"):
@@ -403,7 +404,7 @@ jobs:
                       raise ValueError(
                           f"expected questdb {version}, got {canonicalize_name(name)} {wheel_version}"
                       )
-                  target = classify_tags(wheel.name, tags)
+                  target = classify_tags(tags)
               except Exception as error:
                   raise SystemExit(f"invalid wheel {wheel.name}: {error}") from error
               if target[0].startswith("cp"):
@@ -436,6 +437,64 @@ jobs:
         run: |
           set -Eeuo pipefail
           python -m twine check dist/*
+
+      - name: Verify any pre-existing PyPI files
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          if not local:
+              raise SystemExit("release bundle contains no distributions")
+
+          request = urllib.request.Request(
+              f"https://pypi.org/pypi/questdb/{version}/json",
+              headers={"Accept": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  if response.status != 200:
+                      raise SystemExit(f"PyPI lookup returned unexpected HTTP {response.status}")
+                  payload = json.load(response)
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  print(f"PyPI has no pre-existing files for questdb {version}")
+                  raise SystemExit(0)
+              raise SystemExit(f"PyPI lookup failed with HTTP {error.code}") from error
+          except (OSError, json.JSONDecodeError) as error:
+              raise SystemExit(f"PyPI lookup failed: {error}") from error
+
+          urls = payload.get("urls")
+          if not isinstance(urls, list):
+              raise SystemExit("PyPI response has no file list")
+          seen = set()
+          for entry in urls:
+              name = entry.get("filename") if isinstance(entry, dict) else None
+              digest = entry.get("digests", {}).get("sha256") if isinstance(entry, dict) else None
+              if not isinstance(name, str) or not isinstance(digest, str):
+                  raise SystemExit("PyPI response contains invalid file metadata")
+              if name in seen:
+                  raise SystemExit(f"PyPI response contains duplicate filename {name}")
+              seen.add(name)
+              if name not in local:
+                  raise SystemExit(f"PyPI contains unexpected file for this version: {name}")
+              if digest.lower() != local[name]:
+                  raise SystemExit(f"PyPI SHA-256 mismatch for pre-existing file {name}")
+          print(f"verified {len(seen)} pre-existing PyPI file(s) against the release bundle")
+          PY
 
       - name: Generate release notes
         env:
@@ -492,7 +551,7 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload release bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-bundle
           path: |
@@ -511,13 +570,13 @@ jobs:
       id-token: write
     steps:
       - name: Check out the release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
           fetch-depth: 0
 
       - name: Download release bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-bundle
 
@@ -550,10 +609,87 @@ jobs:
           } >>"$GITHUB_ENV"
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
           skip-existing: true
+
+      - name: Verify complete PyPI publication
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          expected = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          if not expected:
+              raise SystemExit("release bundle contains no distributions")
+          url = f"https://pypi.org/pypi/questdb/{version}/json"
+          deadline = time.monotonic() + 600
+
+          while True:
+              try:
+                  request = urllib.request.Request(url, headers={"Accept": "application/json"})
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      if response.status != 200:
+                          raise SystemExit(
+                              f"PyPI verification returned unexpected HTTP {response.status}"
+                          )
+                      payload = json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code != 404:
+                      raise SystemExit(
+                          f"PyPI verification failed with HTTP {error.code}"
+                      ) from error
+                  payload = {"urls": []}
+              except (OSError, json.JSONDecodeError) as error:
+                  raise SystemExit(f"PyPI verification failed: {error}") from error
+
+              urls = payload.get("urls")
+              if not isinstance(urls, list):
+                  raise SystemExit("PyPI response has no file list")
+              actual = {}
+              for entry in urls:
+                  name = entry.get("filename") if isinstance(entry, dict) else None
+                  digest = entry.get("digests", {}).get("sha256") if isinstance(entry, dict) else None
+                  if not isinstance(name, str) or not isinstance(digest, str):
+                      raise SystemExit("PyPI response contains invalid file metadata")
+                  if name in actual:
+                      raise SystemExit(f"PyPI response contains duplicate filename {name}")
+                  actual[name] = digest.lower()
+
+              extra = sorted(set(actual) - set(expected))
+              mismatched = sorted(
+                  name for name in set(actual) & set(expected)
+                  if actual[name] != expected[name]
+              )
+              if extra or mismatched:
+                  raise SystemExit(
+                      f"PyPI publication mismatch; extra={extra}, hash_mismatch={mismatched}"
+                  )
+              missing = sorted(set(expected) - set(actual))
+              if not missing:
+                  print(f"verified all {len(expected)} PyPI files by SHA-256")
+                  break
+              if time.monotonic() >= deadline:
+                  raise SystemExit(
+                      f"PyPI did not expose the complete release within 10 minutes; missing={missing}"
+                  )
+              print(f"waiting for PyPI propagation; missing={missing}", flush=True)
+              time.sleep(15)
+          PY
 
       - name: Create immutable release tag when absent
         env:
@@ -762,9 +898,18 @@ jobs:
               -H "Authorization: Token $READTHEDOCS_TOKEN" \
               -H 'Accept: application/json' \
               "$api_root/builds/$build_id/")"
-            returned_id="$(jq -er '.id | tostring' <<<"$build_json")"
-            [[ "$returned_id" == "$build_id" ]] || {
-              echo "Read the Docs returned build $returned_id while polling $build_id" >&2
+            jq -e --arg id "$build_id" '
+              def slug:
+                if type == "string" then .
+                elif type == "object" then .slug
+                else null
+                end;
+              (.id | tostring) == $id
+              and (.project | slug) == "py-questdb-client"
+              and (.version | slug) == "latest"
+            ' <<<"$build_json" >/dev/null || {
+              echo "Read the Docs returned the wrong build, project, or version while polling $build_id" >&2
+              jq '{id, project, version}' <<<"$build_json" >&2
               exit 1
             }
             state="$(jq -er '
@@ -788,7 +933,7 @@ jobs:
                 jq '{id, version, state, success, error, commit}' <<<"$build_json" >&2
                 exit 1
                 ;;
-              triggered|building|installing|cloning)
+              triggered|building|installing|cloning|uploading)
                 remaining=$((deadline - SECONDS))
                 (( remaining > 0 )) || break
                 (( remaining < 15 )) && sleep "$remaining" || sleep 15

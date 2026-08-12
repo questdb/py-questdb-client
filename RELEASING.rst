@@ -38,8 +38,9 @@ One-time administrator setup
 This setup is required before the first live release workflow run. It is
 not required to review or merge the workflow code.
 
-1. In the GitHub repository, create an environment named ``pypi`` and
-   configure required reviewers.
+1. In the GitHub repository, create an environment named ``pypi``. Allow
+   deployments only from ``main``, configure required reviewers, and prevent
+   initiators from approving their own runs where the repository plan supports it.
 2. On PyPI, add a Trusted Publisher for:
 
    * repository: ``questdb/py-questdb-client``
@@ -47,9 +48,11 @@ not required to review or merge the workflow code.
    * environment: ``pypi``
 
 3. In the GitHub repository, add repository secret
-   ``AZURE_DEVOPS_TOKEN`` with its Azure DevOps token scoped to Build Read.
+   ``AZURE_DEVOPS_TOKEN`` with an Azure PAT scoped only to Build Read. Assign a
+   named owner responsible for its expiry and rotation.
 4. In the GitHub ``pypi`` environment, add environment secret
-   ``READTHEDOCS_TOKEN``.
+   ``READTHEDOCS_TOKEN``, using a token limited to the
+   ``py-questdb-client`` project.
 
 Prepare the release PR
 ----------------------
@@ -96,9 +99,10 @@ Recover
 -------
 
 1. Fix a transient dependency or configuration failure, then rerun the
-   failed job with the same ``version`` and ``release_pr`` inputs. The
-   publish steps recover completed work and do not replace matching
-   artifacts.
+   failed job with the same ``version`` and ``release_pr`` inputs. Before
+   continuation, the workflow automatically verifies every pre-existing PyPI
+   filename and SHA-256 hash against the validated bundle. The publish steps
+   recover completed work and do not replace matching artifacts.
 2. Never move an existing release tag. If ``vX.Y.Z`` points to a commit
    other than the validated release commit, stop and investigate the
    tag-to-commit mismatch before retrying.
