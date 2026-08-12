@@ -22,6 +22,8 @@ PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 from fixture import \
     QuestDbFixture, install_questdb, install_questdb_from_repo, CA_PATH, AUTH
+from oidc_test_server import OidcTestServer
+from qwp_ws_ack_server import QwpRecordingProxy
 
 
 try:
@@ -33,7 +35,9 @@ except ImportError:
     pyarrow = None
 
 
+import questdb
 import questdb._client as qi
+from questdb.auth import Renderer
 
 
 QUESTDB_VERSION = '9.4.3'
@@ -375,6 +379,50 @@ class TestWithDatabase(unittest.TestCase):
         resp = self.qdb_plain.http_sql_query(
             f"select id, val from '{table_name}' order by id")
         self.assertEqual(resp['dataset'], [[0, 0.0], [1, 0.5], [2, 1.0]])
+
+    def test_oidc_provider_query_and_ingress_round_trip(self):
+        self._require_qwp_ws()
+        table_name = 'oidc_' + uuid.uuid4().hex
+        with OidcTestServer() as oidc_server, QwpRecordingProxy(
+                self.qdb_plain.host,
+                self.qdb_plain.http_server_port) as qwp_proxy:
+            auth = qi.OidcDeviceAuth.from_questdb(
+                oidc_server.url,
+                interactive=True,
+                open_browser=False,
+                renderer=Renderer(),
+                timeout=5)
+            auth.sign_in()
+
+            conf = f'ws::addr=127.0.0.1:{qwp_proxy.port};'
+            with questdb.connect(conf, oidc_auth=auth) as client:
+                selected = client.query('select 42 as value').to_pandas()
+                self.assertEqual(selected['value'].tolist(), [42])
+
+                with client.sender() as sender:
+                    sender.row(
+                        table_name,
+                        columns={'value': 7},
+                        at=qi.ServerTimestamp)
+                    sender.flush(wait=True)
+
+                self.qdb_plain.retry_check_table(table_name, min_rows=1)
+                counted = client.query(
+                    f'select count() as n from {table_name}').to_pandas()
+                self.assertEqual(counted['n'].tolist(), [1])
+
+            self.assertEqual(auth.token(), 'AT-initial')
+            self.assertEqual(len(oidc_server.requests('/device', 'POST')), 1)
+            self.assertEqual(len(oidc_server.requests('/token', 'POST')), 1)
+            qwp = qwp_proxy.snapshot()
+
+        self.assertIn('/read/v1', qwp['upgrade_paths'])
+        self.assertIn('/api/v4/write', qwp['upgrade_paths'])
+        self.assertTrue(qwp['upgrade_authorizations'])
+        self.assertTrue(all(
+            value == 'Bearer AT-initial'
+            for value in qwp['upgrade_authorizations']))
+        self.assertEqual(qwp['errors'], [])
 
     def test_qwp_websocket_dead_endpoint_failover_and_ack_progresses(self):
         self._require_qwp_ws()

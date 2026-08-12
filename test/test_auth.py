@@ -25,6 +25,7 @@
 """Python binding tests for the native OIDC implementation."""
 
 import gc
+import io
 import os
 import sys
 import tempfile
@@ -48,6 +49,8 @@ from questdb.auth._render import (
     in_ipython_kernel,
     make_renderer,
 )
+from oidc_test_server import OidcTestServer
+from qwp_ws_ack_server import QwpAckServer
 
 try:
     import pandas as pd
@@ -63,6 +66,37 @@ def make_auth(**kwargs):
         'https://idp.example/device',
         'https://idp.example/token',
         **options)
+
+
+def make_discovered_auth(server, **kwargs):
+    options = dict(
+        interactive=True, open_browser=False, timeout=5,
+        renderer=Renderer())
+    options.update(kwargs)
+    return OidcDeviceAuth.from_questdb(server.url, **options)
+
+
+class RecordingRenderer(Renderer):
+    def __init__(self):
+        self.prompts = []
+        self.waiting = []
+        self.successes = []
+        self.failures = []
+
+    def on_prompt(self, response):
+        self.prompts.append(response)
+
+    def on_waiting(self, seconds_left):
+        self.waiting.append(seconds_left)
+
+    def on_success(self, identity, expires_in):
+        self.successes.append((identity, expires_in))
+
+    def on_failure(self, message):
+        self.failures.append(message)
+
+
+EXPIRED_ACCESS_TOKEN = 'e30.eyJleHAiOjF9.'
 
 
 class NativeOidcTest(unittest.TestCase):
@@ -227,6 +261,187 @@ class NativeOidcTest(unittest.TestCase):
 
         self.assertIsNone(renderer_ref())
         self.assertIsNone(auth_ref())
+
+
+class NativeOidcIntegrationTest(unittest.TestCase):
+    def test_discovery_device_flow_and_renderer_callbacks(self):
+        renderer = RecordingRenderer()
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            self.assertEqual(auth.config.client_id, 'discovered-client')
+            self.assertEqual(
+                auth.config.device_authorization_endpoint,
+                server.url + '/device')
+
+            auth.sign_in()
+            self.assertEqual(auth.token(), 'AT-initial')
+
+            settings = server.requests('/settings', 'GET')
+            device = server.requests('/device', 'POST')
+            tokens = server.requests('/token', 'POST')
+
+        self.assertEqual(len(settings), 1)
+        self.assertEqual(device[0]['form']['client_id'], ['discovered-client'])
+        self.assertEqual(device[0]['form']['scope'], [
+            'openid offline_access'])
+        self.assertEqual(tokens[0]['form']['device_code'], ['DEV-CODE-123'])
+        self.assertEqual(renderer.prompts, [{
+            'user_code': 'WXYZ-1234',
+            'verification_uri': server.url + '/verify',
+            'verification_uri_complete': (
+                server.url + '/verify?user_code=WXYZ-1234'),
+            'browser_target': (
+                server.url + '/verify?user_code=WXYZ-1234'),
+        }])
+        self.assertEqual(len(renderer.successes), 1)
+        self.assertIsNone(renderer.successes[0][0])
+        self.assertGreater(renderer.successes[0][1], 0)
+        self.assertEqual(renderer.failures, [])
+
+    def test_expired_token_is_refreshed_without_device_flow(self):
+        with OidcTestServer(
+                initial_access_token=EXPIRED_ACCESS_TOKEN) as server:
+            auth = make_discovered_auth(server)
+            auth.sign_in()
+            self.assertEqual(auth.token(), 'AT-refreshed')
+            self.assertEqual(
+                auth.headers(), {'Authorization': 'Bearer AT-refreshed'})
+            token_requests = server.requests('/token', 'POST')
+            device_requests = server.requests('/device', 'POST')
+
+        self.assertEqual(len(device_requests), 1)
+        self.assertEqual(len(token_requests), 2)
+        self.assertEqual(
+            token_requests[1]['form']['grant_type'], ['refresh_token'])
+        self.assertEqual(
+            token_requests[1]['form']['refresh_token'], ['RT-1'])
+
+    def test_terminal_renderer_receives_native_callbacks(self):
+        output = io.StringIO()
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(
+                server, renderer=TerminalRenderer(stream=output))
+            auth.sign_in()
+
+        rendered = output.getvalue()
+        self.assertIn(server.url + '/verify', rendered)
+        self.assertIn('WXYZ-1234', rendered)
+        self.assertIn('Signed in', rendered)
+
+    def test_file_store_round_trip_avoids_second_device_flow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                self.assertEqual(auth.token(), 'AT-initial')
+
+                restored = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                self.assertEqual(restored.token(), 'AT-initial')
+                self.assertEqual(len(server.requests('/device', 'POST')), 1)
+                self.assertEqual(len(server.requests('/token', 'POST')), 1)
+                restored.clear()
+
+    def test_http_sender_authenticates_retry_and_flush(self):
+        with OidcTestServer(write_statuses=(500, 204)) as server:
+            auth = make_discovered_auth(server)
+            auth.sign_in()
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    server.port,
+                    oidc_auth=auth,
+                    auto_flush=False,
+                    retry_timeout=1000) as sender:
+                sender.row(
+                    'events', columns={'value': 42},
+                    at=questdb.ServerTimestamp)
+                sender.flush()
+            writes = server.requests('/write', 'POST')
+
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[0]['body'], writes[1]['body'])
+        self.assertEqual(
+            [request['headers'].get('authorization') for request in writes],
+            ['Bearer AT-initial', 'Bearer AT-initial'])
+
+    def test_qwp_sender_authenticates_establish_reconnect_and_flush(self):
+        with OidcTestServer() as oidc_server:
+            auth = make_discovered_auth(oidc_server)
+            auth.sign_in()
+            with QwpAckServer(
+                    close_plan=(0, None),
+                    required_authorization='Bearer AT-initial') as qwp_server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{qwp_server.port};'
+                    'lazy_connect=true;'
+                    'reconnect_initial_backoff_millis=1;'
+                    'reconnect_max_backoff_millis=1;'
+                    'reconnect_max_duration_millis=5000;'
+                    'close_flush_timeout_millis=5000;')
+                sender = questdb.Sender.from_conf(
+                    conf, oidc_auth=auth, auto_flush=False)
+                try:
+                    sender.establish()
+                    sender.row(
+                        'events', columns={'value': 42},
+                        at=questdb.ServerTimestamp)
+                    fsn = sender.flush_and_get_fsn()
+                    self.assertTrue(sender.await_acked_fsn(fsn, 5000))
+                finally:
+                    sender.close(flush=False)
+                stats = qwp_server.snapshot()
+
+        self.assertGreaterEqual(stats['accepted_connections'], 2)
+        self.assertEqual(stats['binary_frames'], 1)
+        self.assertGreaterEqual(len(stats['upgrade_authorizations']), 2)
+        self.assertTrue(all(
+            value == 'Bearer AT-initial'
+            for value in stats['upgrade_authorizations']))
+        self.assertEqual(stats['errors'], [])
+
+    def test_sqlalchemy_listener_uses_native_refreshed_token(self):
+        with OidcTestServer(
+                initial_access_token=EXPIRED_ACCESS_TOKEN) as server:
+            auth = make_discovered_auth(server)
+            auth.sign_in()
+            engine = types.SimpleNamespace(listeners={})
+            sqlalchemy = types.ModuleType('sqlalchemy')
+            sqlalchemy.create_engine = mock.Mock(return_value=engine)
+
+            class Event:
+                @staticmethod
+                def listens_for(target, name):
+                    def register(listener):
+                        target.listeners[name] = listener
+                        return listener
+                    return register
+
+            class URL:
+                create = mock.Mock(return_value='postgresql-url')
+
+            sqlalchemy.event = Event
+            sqlalchemy_engine_module = types.ModuleType('sqlalchemy.engine')
+            sqlalchemy_engine_module.URL = URL
+            modules = {
+                'sqlalchemy': sqlalchemy,
+                'sqlalchemy.engine': sqlalchemy_engine_module,
+            }
+            with mock.patch.dict(sys.modules, modules):
+                returned = _adapters.sqlalchemy_engine(
+                    auth,
+                    server.url,
+                    drivername='postgresql+test')
+            params = {}
+            returned.listeners['do_connect'](None, None, [], params)
+            token_requests = server.requests('/token', 'POST')
+
+        self.assertIs(returned, engine)
+        self.assertEqual(params['password'], 'AT-refreshed')
+        self.assertEqual(len(token_requests), 2)
+        self.assertEqual(
+            token_requests[1]['form']['grant_type'], ['refresh_token'])
 
 
 class NativeTransportAttachmentTest(unittest.TestCase):

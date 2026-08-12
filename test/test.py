@@ -56,6 +56,7 @@ from fixture import _parse_version
 # up in the aggregated CI run alongside the ingress tests.
 from test_auth import (
     AdapterTest,
+    NativeOidcIntegrationTest,
     NativeOidcTest,
     NativeTransportAttachmentTest,
 )

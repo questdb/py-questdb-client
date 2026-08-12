@@ -1,0 +1,179 @@
+"""Deterministic loopback QuestDB discovery and OIDC device-flow fixture."""
+
+from __future__ import annotations
+
+import http.server
+import json
+import threading
+import urllib.parse
+
+
+class _ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+
+class OidcTestServer:
+    """Serve QuestDB settings, an IdP device flow, and ILP/HTTP locally."""
+
+    def __init__(
+            self,
+            *,
+            initial_access_token='AT-initial',
+            initial_expires_in=300,
+            refresh_token='RT-1',
+            refreshed_access_token='AT-refreshed',
+            refreshed_expires_in=300,
+            write_statuses=()):
+        self.initial_access_token = initial_access_token
+        self.initial_expires_in = initial_expires_in
+        self.refresh_token = refresh_token
+        self.refreshed_access_token = refreshed_access_token
+        self.refreshed_expires_in = refreshed_expires_in
+        self._write_statuses = list(write_statuses)
+        self._lock = threading.Lock()
+        self._requests = []
+        self._server = None
+        self._thread = None
+
+    def __enter__(self):
+        fixture = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                pass
+
+            def do_GET(self):
+                fixture._handle(self)
+
+            def do_POST(self):
+                fixture._handle(self)
+
+        self._server = _ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    @property
+    def url(self):
+        return f'http://127.0.0.1:{self._server.server_port}'
+
+    @property
+    def port(self):
+        return self._server.server_port
+
+    def requests(self, path=None, method=None):
+        with self._lock:
+            requests = list(self._requests)
+        if path is not None:
+            requests = [request for request in requests
+                        if request['path'] == path]
+        if method is not None:
+            requests = [request for request in requests
+                        if request['method'] == method]
+        return requests
+
+    def _record(self, handler, body):
+        parsed = urllib.parse.urlsplit(handler.path)
+        request = {
+            'method': handler.command,
+            'path': parsed.path,
+            'query': urllib.parse.parse_qs(parsed.query),
+            'headers': {key.lower(): value
+                        for key, value in handler.headers.items()},
+            'body': body,
+            'form': urllib.parse.parse_qs(
+                body.decode('utf-8'), keep_blank_values=True),
+        }
+        with self._lock:
+            self._requests.append(request)
+        return request
+
+    def _handle(self, handler):
+        length = int(handler.headers.get('Content-Length', '0'))
+        body = handler.rfile.read(length) if length else b''
+        request = self._record(handler, body)
+        path = request['path']
+
+        if handler.command == 'GET' and path == '/settings':
+            self._json(handler, 200, {
+                'config': {
+                    'acl.oidc.enabled': True,
+                    'acl.oidc.client.id': 'discovered-client',
+                    'acl.oidc.scope': 'openid offline_access',
+                    'acl.oidc.groups.encoded.in.token': False,
+                    'acl.oidc.token.endpoint': self.url + '/token',
+                    'acl.oidc.device.authorization.endpoint': (
+                        self.url + '/device'),
+                    'line.proto.support.versions': [1, 2, 3],
+                    'ilp.proto.transports': ['tcp', 'http'],
+                },
+                'preferences': {},
+            })
+            return
+
+        if handler.command == 'POST' and path == '/device':
+            self._json(handler, 200, {
+                'device_code': 'DEV-CODE-123',
+                'user_code': 'WXYZ-1234',
+                'verification_uri': self.url + '/verify',
+                'verification_uri_complete': (
+                    self.url + '/verify?user_code=WXYZ-1234'),
+                'expires_in': 600,
+                'interval': 5,
+            })
+            return
+
+        if handler.command == 'POST' and path == '/token':
+            grant_type = request['form'].get('grant_type', [None])[0]
+            if grant_type == 'refresh_token':
+                self._json(handler, 200, {
+                    'access_token': self.refreshed_access_token,
+                    'token_type': 'Bearer',
+                    'expires_in': self.refreshed_expires_in,
+                })
+            else:
+                self._json(handler, 200, {
+                    'access_token': self.initial_access_token,
+                    'refresh_token': self.refresh_token,
+                    'token_type': 'Bearer',
+                    'expires_in': self.initial_expires_in,
+                    'scope': 'openid offline_access',
+                })
+            return
+
+        if handler.command == 'POST' and path == '/write':
+            with self._lock:
+                status = (
+                    self._write_statuses.pop(0)
+                    if self._write_statuses else 204)
+            response = b'retriable error' if status >= 400 else b''
+            self._bytes(handler, status, response, 'text/plain')
+            return
+
+        self._json(handler, 404, {'error': 'not found'})
+
+    @staticmethod
+    def _json(handler, status, value):
+        OidcTestServer._bytes(
+            handler,
+            status,
+            json.dumps(value, separators=(',', ':')).encode('utf-8'),
+            'application/json')
+
+    @staticmethod
+    def _bytes(handler, status, body, content_type):
+        handler.send_response(status)
+        handler.send_header('Content-Type', content_type)
+        handler.send_header('Content-Length', str(len(body)))
+        handler.send_header('Connection', 'close')
+        handler.end_headers()
+        if body:
+            handler.wfile.write(body)
