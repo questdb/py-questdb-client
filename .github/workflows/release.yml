@@ -76,7 +76,11 @@ jobs:
         with:
           ref: ${{ steps.release.outputs.release_sha }}
           fetch-depth: 0
-          submodules: recursive
+
+      - name: Initialize release source submodule
+        run: |
+          set -Eeuo pipefail
+          git submodule update --init c-questdb-client
 
       - name: Verify release commit ancestry
         run: |
@@ -318,6 +322,13 @@ jobs:
           sdist_name, sdist_version = parse_sdist_filename(sdists[0].name)
           if canonicalize_name(sdist_name) != "questdb" or sdist_version != version:
               raise SystemExit(f"unexpected sdist identity: {sdists[0].name}")
+          max_sdist_size = 100 * 1024 * 1024
+          sdist_size = sdists[0].stat().st_size
+          if sdist_size >= max_sdist_size:
+              raise SystemExit(
+                  f"sdist {sdists[0].name} is {sdist_size} bytes; "
+                  f"must be below PyPI's {max_sdist_size}-byte per-file limit"
+              )
 
           with tarfile.open(sdists[0], "r:gz") as archive:
               members = archive.getmembers()
@@ -326,6 +337,14 @@ jobs:
                   path = Path(name)
                   if path.is_absolute() or ".." in path.parts:
                       raise SystemExit(f"unsafe sdist member path: {name}")
+                  if any(
+                      path.parts[index : index + 2] == ("c-questdb-client", "questdb")
+                      for index in range(len(path.parts) - 1)
+                  ):
+                      raise SystemExit(
+                          "sdist contains nested c-questdb-client/questdb/ submodule "
+                          f"content: {name}"
+                      )
               required_suffixes = (
                   "/PKG-INFO",
                   "/src/questdb/__init__.py",
