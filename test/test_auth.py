@@ -183,7 +183,15 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         gc.collect()
         self.assertIsNotNone(renderer_ref())
         sender.close(flush=False)
-        gc.collect()
+        # PyPy's tracing GC may finalize ``auth`` after a collection has
+        # already marked the renderer through its native callback reference.
+        # Finalizing ``auth`` releases that reference, and the renderer is then
+        # reclaimed by the next collection. Keep the assertion bounded while
+        # allowing that two-phase cpyext cleanup.
+        for _ in range(3):
+            gc.collect()
+            if renderer_ref() is None:
+                break
         self.assertIsNone(renderer_ref())
 
     def test_sender_from_conf_accepts_shared_provider(self):
