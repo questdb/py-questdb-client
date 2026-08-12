@@ -33,7 +33,7 @@ cdef inline object _oidc_text(const char* buf, size_t length):
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>length)
 
 
-cdef object _oidc_err_to_py(questdb_error* err):
+cdef object _oidc_err_to_py_unowned(questdb_error* err):
     cdef const char* msg_buf = NULL
     cdef size_t msg_len = 0
     cdef questdb_oidc_error_view view
@@ -89,8 +89,16 @@ cdef object _oidc_err_to_py(questdb_error* err):
             exc = OidcError(message, status=status, retry_after=retry_after)
     else:
         exc = OidcError(message)
-    questdb_error_free(err)
     return exc
+
+
+cdef object _oidc_err_to_py(questdb_error* err):
+    if err == NULL:
+        return _oidc_err_to_py_unowned(err)
+    try:
+        return _oidc_err_to_py_unowned(err)
+    finally:
+        questdb_error_free(err)
 
 
 cdef inline bytes _oidc_required_utf8(object value, str name):
