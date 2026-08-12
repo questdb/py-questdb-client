@@ -285,10 +285,12 @@ cdef class OidcDeviceAuth:
         cdef questdb_oidc_builder* builder
         cdef OidcDeviceAuth auth = cls.__new__(cls)
         cdef PyThreadState* gs = NULL
+        cdef const char* encoded_url_ptr = PyBytes_AsString(encoded_url)
+        cdef size_t encoded_url_len = PyBytes_GET_SIZE(encoded_url)
 
         _ensure_doesnt_have_gil(&gs)
         builder = questdb_oidc_builder_from_questdb(
-            PyBytes_AsString(encoded_url), PyBytes_GET_SIZE(encoded_url), &err)
+            encoded_url_ptr, encoded_url_len, &err)
         _ensure_has_gil(&gs)
         if builder == NULL:
             raise _oidc_err_to_py(err)
