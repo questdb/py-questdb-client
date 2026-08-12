@@ -52,8 +52,7 @@ def in_ipython_kernel() -> bool:
         return False
     # ZMQInteractiveShell == notebook/qtconsole/lab; TerminalInteractiveShell
     # == ipython in a terminal.
-    return ip.__class__.__name__ in (
-        'ZMQInteractiveShell', 'TerminalInteractiveShell')
+    return ip.__class__.__name__ == 'ZMQInteractiveShell'
 
 
 def _kernel_allows_stdin() -> bool:

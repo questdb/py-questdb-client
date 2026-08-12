@@ -42,7 +42,12 @@ from questdb.auth import (
     Renderer,
 )
 from questdb.auth import _adapters
-from questdb.auth._render import _verification_target
+from questdb.auth._render import (
+    TerminalRenderer,
+    _verification_target,
+    in_ipython_kernel,
+    make_renderer,
+)
 
 try:
     import pandas as pd
@@ -61,6 +66,23 @@ def make_auth(**kwargs):
 
 
 class NativeOidcTest(unittest.TestCase):
+    def test_terminal_ipython_uses_terminal_renderer(self):
+        ipython = types.ModuleType('IPython')
+        shell = type('TerminalInteractiveShell', (), {})()
+        ipython.get_ipython = lambda: shell
+
+        with mock.patch.dict(sys.modules, {'IPython': ipython}):
+            self.assertFalse(in_ipython_kernel())
+            self.assertIsInstance(make_renderer(), TerminalRenderer)
+
+    def test_zmq_ipython_is_detected_as_kernel(self):
+        ipython = types.ModuleType('IPython')
+        shell = type('ZMQInteractiveShell', (), {})()
+        ipython.get_ipython = lambda: shell
+
+        with mock.patch.dict(sys.modules, {'IPython': ipython}):
+            self.assertTrue(in_ipython_kernel())
+
     def test_explicit_config_round_trip(self):
         auth = make_auth(
             scope='groups',
