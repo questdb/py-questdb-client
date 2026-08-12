@@ -220,6 +220,15 @@ class NativeOidcTest(unittest.TestCase):
             auth = make_auth(token_store=FileTokenStore.at(directory))
             self.assertEqual(auth.config.client_id, 'questdb')
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX bytes paths only')
+    def test_non_utf8_file_store_path_is_typed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.fsencode(directory) + b'/tokens-\xff'
+            token_store = FileTokenStore.at(path)
+            with self.assertRaisesRegex(
+                    OidcConfigError, 'token_store directory'):
+                make_auth(token_store=token_store)
+
     def test_default_file_store_environment_override(self):
         with mock.patch.dict(
                 os.environ,

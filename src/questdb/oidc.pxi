@@ -432,7 +432,12 @@ cdef class OidcDeviceAuth:
             if not isinstance(token_store, FileTokenStore):
                 raise OidcConfigError(
                     'native OIDC supports FileTokenStore persistence only')
-            encoded = os.fspath(token_store.directory).encode('utf-8')
+            # The native ABI accepts UTF-8 text, not arbitrary POSIX path
+            # bytes. FileTokenStore uses os.fsdecode(), which intentionally
+            # preserves undecodable bytes as surrogate characters; translate
+            # that unsupported case into the public configuration error type.
+            encoded = _oidc_required_utf8(
+                os.fspath(token_store.directory), 'token_store directory')
             if not questdb_oidc_builder_file_token_store(
                     builder,
                     PyBytes_AsString(encoded), PyBytes_GET_SIZE(encoded), &err):
