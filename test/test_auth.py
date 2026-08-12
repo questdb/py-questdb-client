@@ -66,6 +66,34 @@ def make_auth(**kwargs):
 
 
 class NativeOidcTest(unittest.TestCase):
+    def test_boolean_options_require_actual_bool_values(self):
+        for name in (
+                'groups_in_token', 'insecure', 'open_browser', 'interactive',
+                'qr'):
+            invalid_values = (0, 1, 'false', object())
+            if name != 'interactive':
+                invalid_values += (None,)
+            for value in invalid_values:
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(OidcConfigError, name):
+                        make_auth(**{name: value})
+
+    def test_from_questdb_validates_booleans_before_url(self):
+        for name in (
+                'groups_in_token', 'insecure', 'open_browser', 'interactive',
+                'qr'):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(OidcConfigError, name):
+                    OidcDeviceAuth.from_questdb(
+                        object(), **{name: 'false'})
+
+    def test_documented_optional_booleans_retain_none(self):
+        auth = make_auth(interactive=None)
+        self.assertEqual(auth.config.client_id, 'questdb')
+        with self.assertRaisesRegex(OidcConfigError, 'url'):
+            OidcDeviceAuth.from_questdb(
+                object(), groups_in_token=None, interactive=None)
+
     def test_terminal_ipython_uses_terminal_renderer(self):
         ipython = types.ModuleType('IPython')
         shell = type('TerminalInteractiveShell', (), {})()

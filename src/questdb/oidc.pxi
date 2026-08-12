@@ -126,6 +126,16 @@ cdef inline bytes _oidc_optional_utf8(object value, str name):
             f'{name} must contain valid Unicode text') from exc
 
 
+cdef inline void _oidc_validate_bool(
+        object value, str name, bint allow_none) except *:
+    if (value is None and allow_none) or isinstance(value, bool):
+        return
+    from questdb.auth._errors import OidcConfigError
+    if allow_none:
+        raise OidcConfigError(f'{name} must be a bool or None')
+    raise OidcConfigError(f'{name} must be a bool')
+
+
 cdef void _oidc_event_dispatch(
         void* user_data,
         const questdb_oidc_event* event) noexcept with gil:
@@ -243,7 +253,13 @@ cdef class OidcDeviceAuth:
             default_interval=5,
             timeout=30,
             token_store=None):
-        cdef questdb_oidc_builder* builder = questdb_oidc_builder_new()
+        cdef questdb_oidc_builder* builder
+        _oidc_validate_bool(groups_in_token, 'groups_in_token', False)
+        _oidc_validate_bool(insecure, 'insecure', False)
+        _oidc_validate_bool(open_browser, 'open_browser', False)
+        _oidc_validate_bool(interactive, 'interactive', True)
+        _oidc_validate_bool(qr, 'qr', False)
+        builder = questdb_oidc_builder_new()
         if builder == NULL:
             raise MemoryError()
         try:
@@ -291,13 +307,23 @@ cdef class OidcDeviceAuth:
             default_interval=5,
             timeout=30,
             token_store=None):
-        cdef bytes encoded_url = _oidc_required_utf8(url, 'url')
+        cdef bytes encoded_url
         cdef questdb_error* err = NULL
         cdef questdb_oidc_builder* builder
-        cdef OidcDeviceAuth auth = cls.__new__(cls)
+        cdef OidcDeviceAuth auth
         cdef PyThreadState* gs = NULL
-        cdef const char* encoded_url_ptr = PyBytes_AsString(encoded_url)
-        cdef size_t encoded_url_len = PyBytes_GET_SIZE(encoded_url)
+        cdef const char* encoded_url_ptr
+        cdef size_t encoded_url_len
+
+        _oidc_validate_bool(groups_in_token, 'groups_in_token', True)
+        _oidc_validate_bool(insecure, 'insecure', False)
+        _oidc_validate_bool(open_browser, 'open_browser', False)
+        _oidc_validate_bool(interactive, 'interactive', True)
+        _oidc_validate_bool(qr, 'qr', False)
+        encoded_url = _oidc_required_utf8(url, 'url')
+        auth = cls.__new__(cls)
+        encoded_url_ptr = PyBytes_AsString(encoded_url)
+        encoded_url_len = PyBytes_GET_SIZE(encoded_url)
 
         _ensure_doesnt_have_gil(&gs)
         builder = questdb_oidc_builder_from_questdb(
@@ -356,18 +382,20 @@ cdef class OidcDeviceAuth:
         if self._raw != NULL:
             raise OidcConfigError('OidcDeviceAuth is already initialized')
         if groups_in_token is not None and not questdb_oidc_builder_groups_in_token(
-                builder, bool(groups_in_token), &err):
+                builder, groups_in_token is True, &err):
             raise _oidc_err_to_py(err)
         if not questdb_oidc_builder_allow_insecure_transport(
-                builder, bool(insecure), &err):
+                builder, insecure is True, &err):
             raise _oidc_err_to_py(err)
         if not questdb_oidc_builder_open_browser(
-                builder, bool(open_browser) and not in_ipython_kernel(), &err):
+                builder,
+                open_browser is True and not in_ipython_kernel(),
+                &err):
             raise _oidc_err_to_py(err)
         if interactive is None:
             interactive = detect_interactive()
         if not questdb_oidc_builder_interactive(
-                builder, bool(interactive), &err):
+                builder, interactive is True, &err):
             raise _oidc_err_to_py(err)
 
         if (not isinstance(default_interval, int)
@@ -410,7 +438,8 @@ cdef class OidcDeviceAuth:
                     PyBytes_AsString(encoded), PyBytes_GET_SIZE(encoded), &err):
                 raise _oidc_err_to_py(err)
 
-        self._renderer = renderer if renderer is not None else make_renderer(qr=bool(qr))
+        self._renderer = (
+            renderer if renderer is not None else make_renderer(qr=qr is True))
         if not hasattr(self._renderer, 'on_prompt'):
             raise OidcConfigError('renderer must implement the Renderer interface')
         event_user_data = PyWeakref_NewRef(self, None)
