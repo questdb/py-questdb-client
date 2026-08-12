@@ -29,166 +29,76 @@ matching the 2.x releases: ``tls_verify=unsafe_off`` works out of the
 box, and TLS verification stays on unless the user explicitly disables
 it in the conf string.
 
-The source distribution is built on your workstation, which is also
-where you collate the CI artifacts and perform the final upload to PyPI.
+The release workflow collects the CI wheels, builds the source
+distribution, validates the complete bundle, and publishes it.
 
-Bumping Version and updating Changelog
---------------------------------------
+One-time administrator setup
+----------------------------
 
-Create a new PR with the new changes in ``CHANGELOG.rst``.
+This setup is required before the first live release workflow run. It is
+not required to review or merge the workflow code.
 
-Make a commit and push the changes to a new branch.
+1. In the GitHub repository, create an environment named ``pypi`` and
+   configure required reviewers.
+2. On PyPI, add a Trusted Publisher for:
 
-You also want to bump the version. This process is semi-automated.
+   * repository: ``questdb/py-questdb-client``
+   * workflow: ``release.yml``
+   * environment: ``pypi``
 
-Ensure you have ``uv`` and ``bump-my-version`` installed:
+3. In the GitHub repository, add repository secret
+   ``AZURE_DEVOPS_TOKEN`` with its Azure DevOps token scoped to Build Read.
+4. In the GitHub ``pypi`` environment, add environment secret
+   ``READTHEDOCS_TOKEN``.
 
-* ``curl -LsSf https://astral.sh/uv/install.sh | sh`` : see
-  https://docs.astral.sh/uv/getting-started/installation/
-* ``uv tool install bump-my-version``: see
-  https://github.com/callowayproject/bump-my-version.
+Prepare the release PR
+----------------------
 
-::
+1. Update ``CHANGELOG.rst`` with the release notes.
+2. Set the version with ``bump-my-version``::
 
-    bump-my-version replace --new-version NEW_VERSION
+       bump-my-version replace --new-version X.Y.Z
 
-If you're unsure, append ``--dry-run`` to preview changes.
+   Add ``--dry-run`` to preview the changes.
+3. Set the changelog date to the intended UTC release date. The workflow
+   requires that date to match the UTC date on which it runs.
+4. Open the version/changelog PR. Merge it only after both the Azure
+   wheel checks and the **macOS arm64 wheels** check pass.
+5. Keep the merged PR number for the ``release_pr`` workflow input.
 
-Now merge the PR with the title "Bump version: V.V.V → W.W.W".
+Run the release
+---------------
 
-Note that CI builds the release binaries on the bump PR itself — both
-systems run as PR checks:
+1. In GitHub, open **Actions** → **Release** → **Run workflow**.
+2. Select branch ``main``.
+3. Enter ``version`` without the ``v`` prefix, for example ``X.Y.Z``.
+4. Enter the merged PR number in ``release_pr``, then select
+   **Run workflow**.
+5. Open the ``prepare`` job and inspect its **Validated release bundle**
+   summary, including the release commit, source runs, package count,
+   and package list.
+6. At the protected ``pypi`` environment gate, approve the ``publish``
+   job. This publishes to PyPI using Trusted Publishing, creates tag
+   ``vX.Y.Z`` and the GitHub release, and triggers Read the Docs.
 
-* Azure Pipelines runs the ``cibuildwheel`` jobs for Linux, Windows and
-  macOS Intel.
-* The GitHub Actions "macOS arm64 wheels" workflow builds the macOS ARM
-  wheels. (It can also be triggered manually: Actions tab → "macOS arm64
-  wheels" → "Run workflow", or ``gh workflow run "macOS arm64 wheels"``.)
+Verify
+------
 
-The binaries you release are collected from the merged bump PR's runs.
+1. Open the ``publish`` job's **Release publication** summary.
+2. Follow and check all three links:
 
-Double-check the date in the CHANGELOG
---------------------------------------
+   * **PyPI**: the new version and files are present.
+   * **GitHub release**: the release notes and distribution assets are
+     present under ``vX.Y.Z``.
+   * **Read the Docs build**: the build finished successfully.
 
-Open ``CHANGELOG.rst`` and ensure that the version you are releasing no
-longer says "(unreleased)" and that the date next to it matches today's
-date. If the CHANGELOG was created earlier, it might have an older date.
-If so, update it.
+Recover
+-------
 
-Prepare the source distribution
--------------------------------
-
-The source code distribution is for any other platforms that we don't have
-binaries for. I don't think it's _actually_ used by anyone, but it might get
-used by IDEs.
-
-From an up-to-date clone (with submodules initialized) on the release
-commit::
-
-    cd ~/questdb/py-questdb-client
-    git checkout main
-    git pull
-    git submodule update --init --recursive
-    python3 setup.py sdist
-
-Download the macOS ARM binaries from GitHub Actions
----------------------------------------------------
-
-Find the workflow run for the bump PR and download its artifact into
-``dist/``::
-
-    gh run list --workflow "macOS arm64 wheels" --limit 5
-    gh run download <run-id> --name wheels-macos-arm64 --dir dist
-
-(Or via the browser: the bump PR's Checks tab → "macOS arm64 wheels" —
-or Actions tab → "macOS arm64 wheels" → the run for the bump PR — then
-download the ``wheels-macos-arm64`` artifact.)
-
-Download the other binaries from Azure CI
------------------------------------------
-
-From a terminal, run::
-
-    cd ~/Downloads
-    rm drop.zip
-    rm -rf drop
-
-Launch a browser, log into GitHub and open the last (closed and merged) PR.
-
-Click on the "Checks" tab and open up the last "questdb.py-questdb-client (1)"
-check. There will be a link to the Azure DevOps page.
-
-The following link might also work: https://dev.azure.com/questdb/questdb/_build?definitionId=21&_a=summary
-
-If you open up the last run, you'll find a link called "1 published".
-This will redirect you to the "Published artifacts" page.
-
-There will be a "drop" directory.
-* Don't open it.
-* Instead use click on the three vertical dots on the right-hand
-side and select download artifacts.
-
-This will download a file called "drop.zip".
-
-double-check it in Finder: It will extract to a directory called "drop".
-
-Now from the terminal, run::
-
-    cd ~/questdb/py-questdb-client
-    cp -vr ~/Downloads/drop/* dist/
-
-Sanity-check the contents of ``dist/`` before uploading. You should see:
-
-* ``manylinux`` and ``musllinux`` wheels for both ``x86_64`` and
-  ``aarch64``, CPython 3.10 through 3.14 plus ``cp314t``;
-* PyPy (``pp3*``) wheels for Linux x86_64;
-* ``win32`` and ``win_amd64`` wheels, CPython 3.10 through 3.14
-  (no ``cp314t``);
-* ``macosx`` wheels for both ``x86_64`` (from Azure) and ``arm64``
-  (from GitHub Actions), CPython 3.10 through 3.14 plus ``cp314t``;
-* exactly one ``.tar.gz`` source distribution.
-
-Tagging the release
--------------------
-
-In GitHub with a web browser create a new release with the tag "vX.Y.Z"
-(where X.Y.Z is the new version number).
-
-The release notes should be copied from the ``CHANGELOG.rst`` file,
-but reformatted as Markdown.
-
-
-Uploading to PyPI
------------------
-
-``dist/`` now holds all the binaries and the source distribution, ready
-to be uploaded to PyPI.
-
-This is a good time to double-check you can log into PyPI and have set up an
-API token. If you don't have one (or lost it), you can create a new one here:
-https://pypi.org/manage/account/ (scroll down to "API tokens").
-
-Once you've triple-checked everything is in ``dist/``, you can upload to PyPI.
-
-.. code-block:: bash
-
-    python3 -m pip install -U twine
-    python3 -m twine upload dist/*
-
-This will prompt you for your PyPI username and token.
-
-Once the upload is complete, you can check the PyPI page to see if the new
-release is there: https://pypi.org/project/questdb/
-
-
-Updating the docs
------------------
-
-Log into ReadTheDocs and trigger a new build for the project.
-
-https://readthedocs.org/dashboard/py-questdb-client/users/
-
-Watch it to ensure there are no errors.
-
-Once the build is complete, COMMAND-SHIFT-R to refresh the page (without cache)
-and check the new version is there.
+1. Fix a transient dependency or configuration failure, then rerun the
+   failed job with the same ``version`` and ``release_pr`` inputs. The
+   publish steps recover completed work and do not replace matching
+   artifacts.
+2. Never move an existing release tag. If ``vX.Y.Z`` points to a commit
+   other than the validated release commit, stop and investigate the
+   tag-to-commit mismatch before retrying.
