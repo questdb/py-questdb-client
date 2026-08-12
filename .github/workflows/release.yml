@@ -484,3 +484,322 @@ jobs:
             release-notes.md
           retention-days: 7
           if-no-files-found: error
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+
+      - name: Check immutable tag and initialize publication URLs
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
+            echo "Checked-out commit does not match release commit $RELEASE_SHA" >&2
+            exit 1
+          }
+          git fetch --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+            [[ "$tag_sha" == "$RELEASE_SHA" ]] || {
+              echo "Existing tag $RELEASE_TAG resolves to $tag_sha, expected $RELEASE_SHA" >&2
+              exit 1
+            }
+            echo "RELEASE_TAG_EXISTS=true" >>"$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG_EXISTS=false" >>"$GITHUB_ENV"
+          fi
+          {
+            echo "PYPI_RELEASE_URL=https://pypi.org/project/questdb/$RELEASE_VERSION/"
+            echo "GITHUB_RELEASE_URL=https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+            echo "READTHEDOCS_BUILD_URL=https://app.readthedocs.org/projects/py-questdb-client/builds/"
+          } >>"$GITHUB_ENV"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+      - name: Create immutable release tag when absent
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$RELEASE_TAG_EXISTS" == false ]]; then
+            git tag "$RELEASE_TAG" "$RELEASE_SHA"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+      - name: Create or recover GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          title="QuestDB Python client $RELEASE_VERSION"
+          api_url="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          release_json="$RUNNER_TEMP/github-release.json"
+
+          gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY" >/dev/null
+
+          lookup_release() {
+            local status
+            status="$(curl --silent --show-error \
+              --output "$release_json" \
+              --write-out '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$api_url")" || {
+                echo "GitHub release lookup failed before receiving an HTTP response" >&2
+                return 1
+              }
+            case "$status" in
+              200) return 0 ;;
+              404) return 4 ;;
+              *)
+                echo "GitHub release lookup failed with HTTP $status" >&2
+                jq -r '.message // empty' "$release_json" >&2 || true
+                return 1
+                ;;
+            esac
+          }
+
+          verify_assets() {
+            local expected_json asset name count asset_id downloaded
+            expected_json="$(printf '%s\n' "${expected_assets[@]##*/}" | jq -R . | jq -s .)"
+            jq -e --argjson expected "$expected_json" '
+              ([.assets[].name] | length) == ([.assets[].name] | unique | length)
+              and (([.assets[].name] | sort) == ($expected | sort))
+            ' "$release_json" >/dev/null || {
+              echo "GitHub release asset names do not exactly match the release bundle" >&2
+              return 1
+            }
+            for asset in "${expected_assets[@]}"; do
+              name="${asset##*/}"
+              count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' "$release_json")"
+              [[ "$count" == 1 ]] || {
+                echo "Expected exactly one GitHub release asset named $name" >&2
+                return 1
+              }
+              asset_id="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+              downloaded="$RUNNER_TEMP/github-asset-$asset_id"
+              gh api \
+                -H 'Accept: application/octet-stream' \
+                "/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$downloaded"
+              cmp --silent "$asset" "$downloaded" || {
+                echo "Existing GitHub release asset $name differs from the validated bundle" >&2
+                return 1
+              }
+            done
+          }
+
+          mapfile -d '' expected_assets < <(find dist -maxdepth 1 -type f -print0 | LC_ALL=C sort -z)
+          (( ${#expected_assets[@]} > 0 )) || {
+            echo "Release bundle contains no distributions" >&2
+            exit 1
+          }
+
+          if lookup_release; then
+            release_exists=true
+          else
+            lookup_status=$?
+            if [[ "$lookup_status" == 4 ]]; then
+              release_exists=false
+            else
+              exit "$lookup_status"
+            fi
+          fi
+
+          if [[ "$release_exists" == false ]]; then
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --draft \
+              --title "$title" \
+              --notes-file release-notes.md
+            lookup_release
+          fi
+
+          jq -e --arg tag "$RELEASE_TAG" '
+            .tag_name == $tag and .prerelease == false
+          ' "$release_json" >/dev/null || {
+            echo "Existing GitHub release has unexpected tag or prerelease state" >&2
+            exit 1
+          }
+
+          is_draft="$(jq -r '.draft | if type == "boolean" then tostring else error("draft is not boolean") end' "$release_json")"
+          if [[ "$is_draft" == false ]]; then
+            jq -e --arg title "$title" --rawfile notes release-notes.md '
+              .name == $title and .body == $notes
+            ' "$release_json" >/dev/null || {
+              echo "Published GitHub release metadata differs from the validated bundle" >&2
+              exit 1
+            }
+            verify_assets
+            exit 0
+          fi
+
+          jq -e '.immutable != true' "$release_json" >/dev/null || {
+            echo "Draft GitHub release is immutable and cannot be recovered" >&2
+            exit 1
+          }
+          gh release edit "$RELEASE_TAG" \
+            --draft=true \
+            --prerelease=false \
+            --title "$title" \
+            --notes-file release-notes.md
+          lookup_release
+
+          for asset in "${expected_assets[@]}"; do
+            name="${asset##*/}"
+            count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' "$release_json")"
+            case "$count" in
+              0) gh release upload "$RELEASE_TAG" "$asset" ;;
+              1)
+                asset_id="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+                downloaded="$RUNNER_TEMP/github-asset-$asset_id"
+                gh api \
+                  -H 'Accept: application/octet-stream' \
+                  "/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$downloaded"
+                cmp --silent "$asset" "$downloaded" || {
+                  echo "Existing GitHub release asset $name differs from the validated bundle" >&2
+                  exit 1
+                }
+                ;;
+              *)
+                echo "GitHub release has duplicate assets named $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          lookup_release
+          verify_assets
+          gh release edit "$RELEASE_TAG" \
+            --draft=false \
+            --prerelease=false \
+            --title "$title" \
+            --notes-file release-notes.md
+          lookup_release
+          jq -e --arg title "$title" --rawfile notes release-notes.md '
+            .draft == false and .prerelease == false and .name == $title and .body == $notes
+          ' "$release_json" >/dev/null || {
+            echo "Published GitHub release metadata could not be verified" >&2
+            exit 1
+          }
+          verify_assets
+
+      - name: Trigger and monitor Read the Docs
+        env:
+          READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          api_root="https://app.readthedocs.org/api/v3/projects/py-questdb-client"
+          deadline=$((SECONDS + 1800))
+          trigger_json="$(curl --fail-with-body --silent --show-error \
+            --max-time 30 \
+            --request POST \
+            -H "Authorization: Token $READTHEDOCS_TOKEN" \
+            -H 'Accept: application/json' \
+            "$api_root/versions/latest/builds/")"
+          build_id="$(jq -er '
+            .build.id
+            | if type == "number" then select(floor == .) | tostring
+              elif type == "string" then select(test("^[0-9]+$"))
+              else empty
+              end
+          ' <<<"$trigger_json")" || {
+            echo "Read the Docs trigger response has no valid build ID" >&2
+            exit 1
+          }
+          echo "READTHEDOCS_BUILD_URL=https://app.readthedocs.org/projects/py-questdb-client/builds/$build_id/" \
+            >>"$GITHUB_ENV"
+
+          while (( SECONDS < deadline )); do
+            remaining=$((deadline - SECONDS))
+            (( remaining > 0 )) || break
+            build_json="$(curl --fail-with-body --silent --show-error \
+              --max-time "$remaining" \
+              -H "Authorization: Token $READTHEDOCS_TOKEN" \
+              -H 'Accept: application/json' \
+              "$api_root/builds/$build_id/")"
+            returned_id="$(jq -er '.id | tostring' <<<"$build_json")"
+            [[ "$returned_id" == "$build_id" ]] || {
+              echo "Read the Docs returned build $returned_id while polling $build_id" >&2
+              exit 1
+            }
+            state="$(jq -er '
+              if (.state | type) == "object" then .state.code
+              elif (.state | type) == "string" then .state
+              else empty
+              end
+              | select(type == "string" and length > 0)
+            ' <<<"$build_json")"
+            case "$state" in
+              finished)
+                jq -e '.success == true' <<<"$build_json" >/dev/null || {
+                  echo "Read the Docs build $build_id finished unsuccessfully" >&2
+                  jq '{id, version, state, success, error, commit}' <<<"$build_json" >&2
+                  exit 1
+                }
+                exit 0
+                ;;
+              cancelled)
+                echo "Read the Docs build $build_id was cancelled" >&2
+                jq '{id, version, state, success, error, commit}' <<<"$build_json" >&2
+                exit 1
+                ;;
+              triggered|building|installing|cloning)
+                remaining=$((deadline - SECONDS))
+                (( remaining > 0 )) || break
+                (( remaining < 15 )) && sleep "$remaining" || sleep 15
+                ;;
+              *)
+                echo "Unknown Read the Docs build state: $state" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "Read the Docs build $build_id did not finish within 30 minutes" >&2
+          exit 1
+
+      - name: Write publication summary
+        if: ${{ always() }}
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          pypi_url="${PYPI_RELEASE_URL:-https://pypi.org/project/questdb/$RELEASE_VERSION/}"
+          release_url="${GITHUB_RELEASE_URL:-https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG}"
+          docs_url="${READTHEDOCS_BUILD_URL:-https://app.readthedocs.org/projects/py-questdb-client/builds/}"
+          {
+            echo "## Release publication"
+            echo
+            echo "- PyPI: $pypi_url"
+            echo "- GitHub release: $release_url"
+            echo "- Read the Docs build: $docs_url"
+          } >>"$GITHUB_STEP_SUMMARY"
