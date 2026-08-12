@@ -242,6 +242,25 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaisesRegex(OidcConfigError, 'renderer'):
             make_auth(renderer=object())
 
+    def test_renderer_requires_all_callbacks_to_be_callable(self):
+        callbacks = {
+            name: lambda *args: None
+            for name in (
+                'on_prompt', 'on_waiting', 'on_success', 'on_failure')
+        }
+        for callback_name in callbacks:
+            missing = callbacks.copy()
+            del missing[callback_name]
+            with self.subTest(callback=callback_name, value='missing'):
+                with self.assertRaisesRegex(OidcConfigError, callback_name):
+                    make_auth(renderer=types.SimpleNamespace(**missing))
+
+            non_callable = callbacks.copy()
+            non_callable[callback_name] = None
+            with self.subTest(callback=callback_name, value='non-callable'):
+                with self.assertRaisesRegex(OidcConfigError, callback_name):
+                    make_auth(renderer=types.SimpleNamespace(**non_callable))
+
     def test_renderer_browser_target_uses_native_vetted_value(self):
         self.assertEqual(
             _verification_target({

@@ -445,8 +445,11 @@ cdef class OidcDeviceAuth:
 
         self._renderer = (
             renderer if renderer is not None else make_renderer(qr=qr is True))
-        if not hasattr(self._renderer, 'on_prompt'):
-            raise OidcConfigError('renderer must implement the Renderer interface')
+        for callback_name in (
+                'on_prompt', 'on_waiting', 'on_success', 'on_failure'):
+            if not callable(getattr(self._renderer, callback_name, None)):
+                raise OidcConfigError(
+                    f'renderer callback {callback_name} must be callable')
         event_user_data = PyWeakref_NewRef(self, None)
         Py_INCREF(event_user_data)
         if not questdb_oidc_builder_event_handler(
