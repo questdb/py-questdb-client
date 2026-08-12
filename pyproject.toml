@@ -66,9 +66,9 @@ skip = [
     # Those builds are named `*win32*` in cibuildwheel.
     "*i686*",
 
-    # Temporarily skip the 3.14 free-threaded built on Windows.
-    # Pandas dependencies missing.
-    "*314t-win*"
+    # Note: each job selects its Python versions through `CIBW_BUILD`. That
+    # list is the single gate on which versions we build. Do not add a
+    # version filter here as well, or the two will disagree.
 ]
 
 # [tool.cibuildwheel.windows]

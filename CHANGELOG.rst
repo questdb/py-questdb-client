@@ -4,8 +4,8 @@
 Changelog
 =========
 
-Unreleased
-----------
+5.0.1 (unreleased)
+------------------
 
 Features
 ~~~~~~~~
@@ -64,6 +64,34 @@ Highlights:
   lazily.
 
 See the :ref:`OIDC authentication guide <oidc_auth>` for details.
+
+Other changes
+~~~~~~~~~~~~~
+
+- Applications may now create a ``QueryResult`` on one thread and process it on
+  another, including through its Arrow stream. Hand it off with normal thread
+  synchronization and never use it from two threads at once. If it came from a
+  ``PooledReader``, keep that reader on its original thread until processing
+  finishes.
+- WebSocket connections keep a dictionary of ``SYMBOL`` values to avoid sending
+  repeated text in full. Repeated values do not grow it, but a long-lived
+  connection fills it after 2,000,000 distinct values or 256 MiB of symbol
+  text. The client then raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.SymbolDictFull``. Pooled clients replace the connection;
+  standalone senders should call ``close_drain()`` and reconnect. Before
+  retrying, check ``err.in_doubt``; when it is true, some rows may already be
+  stored.
+- If a DataFrame load fails, batches waiting in memory are now discarded. Most
+  loads commit once at the end, but very large Arrow loads may commit an earlier
+  checkpoint. If a later batch fails, that prefix from the same DataFrame call
+  remains, so retrying the whole DataFrame can duplicate rows.
+- When ``sf_dir`` enables disk-backed delivery, shutdown now obeys its configured
+  timeout and recovery is safer after a crash or an incomplete final write.
+- If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
+  ``in_flight_window``, remove it. These options are no longer supported and now
+  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ConfigError`` during startup.
 
 5.0.0 (2026-07-27)
 ------------------

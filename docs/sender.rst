@@ -994,6 +994,16 @@ it durably applies them, so the client can confirm delivery.
   diagnostics through the ``error_handler`` passed to
   :func:`questdb.connect`, on a dedicated dispatcher thread.
 
+* **Full symbol dictionary.** ``QuestDBErrorCode.SymbolDictFull`` means that
+  a ws/wss connection has exhausted its connection-scoped symbol dictionary.
+  Retrying a new symbol on that sender cannot succeed. Return a pooled sender
+  normally so the connection is retired, then borrow a fresh sender. If older
+  published frames must be confirmed first, wait for their FSN before returning
+  the sender. For a standalone sender, call ``close_drain()`` and check that it
+  succeeds, then close and reopen it. Check ``err.in_doubt`` before replaying
+  the failed input: a chunked flush may already have published an earlier
+  prefix.
+
 * **Draining on close.** :func:`Sender.close_drain <questdb.Sender.close_drain>` waits for outstanding
   frames to be acknowledged before closing.
 
@@ -1137,6 +1147,10 @@ while preserving the connection, call
 draining to a terminal reply, then close the result (or leave its context
 manager).
 
+A result, including its Arrow C stream, may be handed to a worker thread.
+Use a synchronized hand-off and access it from only one thread at a time;
+concurrent consumption, cancellation, and close are unsupported.
+
 ``SYMBOL`` columns: ``to_polars`` / ``to_pandas`` build the categorical directly
 (connection dictionary interned once, no per-row remap). ``to_arrow`` /
 ``iter_arrow`` / ``__arrow_c_stream__`` emit a generic Arrow form whose
@@ -1170,16 +1184,25 @@ a fresh one. To abandon a result without losing the lease, call ``cancel()``
 and then ``close()``; cancellation drains to terminal, so the next query can
 reuse the connection. A lease has thread affinity: use one lease per thread,
 on the thread that created it (threads sharing a
-:class:`QuestDB <questdb.QuestDB>` handle each take their own lease).
+:class:`QuestDB <questdb.QuestDB>` handle each take their own lease). A
+:class:`QueryResult <questdb.QueryResult>` may be handed to a worker thread;
+join that worker before using the lease for its next query.
 
-The same :class:`QuestDB <questdb.QuestDB>` can ingest dataframes through the pooled columnar QWP
-path with :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. Dataframe ingestion always uses the direct
-(non-store-and-forward) column sender, independent of ``sf_dir``, and returns
-once the whole frame is committed (``AckLevel::Ok``). On a transient connection
-failure the frame is re-sent from the caller's DataFrame only when the failed
-operation is provably not delivered. If the native client reports delivery as
-in doubt, or an intermediate commit checkpoint on a large frame has already
-landed, the error surfaces immediately and a committed prefix may remain in the
-table. Retrying an in-doubt operation can duplicate rows unless the table has
-appropriate ``DEDUP UPSERT KEYS``.
+The same :class:`QuestDB <questdb.QuestDB>` can ingest DataFrames through the pooled columnar QWP
+path with :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. DataFrame ingestion always uses the direct
+(non-store-and-forward) column sender, independent of ``sf_dir``.
+
+On success, the call returns only after every row has been committed. Most
+loads queue their batches and commit once at the end. A very large Arrow load
+checkpoints about every 100 batches to keep memory bounded. The client may
+checkpoint earlier if the connection cannot queue another batch or if a batch
+must be split to fit. If a later batch fails, the exception means that the load
+did not finish, not necessarily that no rows landed. Any already committed
+prefix from that call remains in the table, and retrying the entire DataFrame
+can duplicate it unless the table uses suitable ``DEDUP UPSERT KEYS``.
+
+On a transient connection failure, the client re-sends from the caller's
+DataFrame only when it knows that no rows landed. Otherwise it reports the
+error instead of risking a blind retry.
+
 * Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.
