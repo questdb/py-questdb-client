@@ -411,8 +411,8 @@ cdef class OidcDeviceAuth:
         if (not isinstance(timeout, (int, float))
                 or isinstance(timeout, bool)
                 or timeout <= 0
-                or isnan(timeout)
-                or timeout > 120):
+                or timeout > 120
+                or (isinstance(timeout, float) and isnan(timeout))):
             raise OidcConfigError(
                 'timeout must be a positive, finite number no greater than 120 seconds')
         timeout_ms = <uint64_t>round(timeout * 1000)

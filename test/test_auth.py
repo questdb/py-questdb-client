@@ -195,7 +195,8 @@ class NativeOidcTest(unittest.TestCase):
                 OidcDeviceAuth(**args, interactive=False)
 
     def test_timeout_validation(self):
-        for value in (0, -1, True, float('inf'), float('nan'), 121):
+        for value in (
+                0, -1, True, float('inf'), float('nan'), 121, 10**1000):
             with self.subTest(value=value), self.assertRaises(OidcConfigError):
                 make_auth(timeout=value)
 
