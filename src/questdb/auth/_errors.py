@@ -93,11 +93,12 @@ class OidcDeviceFlowError(OidcError):
             *,
             error: Optional[str] = None,
             error_description: Optional[str] = None,
-            status: Optional[int] = None):
+            status: Optional[int] = None,
+            retry_after: Optional[int] = None):
         # Forward status to OidcError so a device-flow error raised in response
         # to a known HTTP status carries it (e.g. for a caller inspecting
         # err.status), rather than always reporting None.
-        super().__init__(message, status=status)
+        super().__init__(message, status=status, retry_after=retry_after)
         # error / error_description come straight from the untrusted IdP
         # response and are exposed as attributes (a caller may re-display them),
         # so strip them too — same rationale as the message in OidcError. Coerce

@@ -265,7 +265,12 @@ def _verification_target(resp: Dict[str, Any]) -> Optional[str]:
     target opened/scanned/clicked can never diverge from the host shown in the
     link the user actually reads.
     """
-    return _matched_complete(resp) or _safe_target(_verification_uri(resp))
+    # Native OIDC events carry the one URL independently vetted for browser,
+    # link and QR use. Prefer it when present; pure-Python callers retain the
+    # origin-matching fallback for compatibility with custom renderers.
+    native_target = _safe_target(resp.get('browser_target'))
+    return (native_target or _matched_complete(resp)
+            or _safe_target(_verification_uri(resp)))
 
 
 def _ascii_visible(text: str) -> str:
@@ -513,7 +518,7 @@ def _fmt_minutes(seconds: float) -> int:
     # guard as _fmt_mmss: a hostile/garbage lifetime (inf/nan) would otherwise
     # make int(round(...)) raise (OverflowError/ValueError) inside on_success and
     # break the sign-in at the last step. Callers pass a clamped, finite value
-    # today (see _device._display_lifetime), so this is defense-in-depth.
+    # today from the native engine, so this is defense-in-depth.
     if not math.isfinite(seconds):
         return 1
     return max(1, int(round(seconds / 60)))

@@ -36,8 +36,8 @@ The level controls how much of the review below actually runs. Lower levels keep
 
 | Level | What runs |
 |-------|-----------|
-| **0 (default)** | Steps 1, 2, 4. Skip Steps 2.5a-d, but still run Step 2.5e (build & binding profile — mandatory at every level). Skip Step 3 — no agent spawn; review the diff inline in the main loop, using Read/Grep on demand to resolve ambiguities. Skip Step 3b — verify each finding inline as you write it. Single-pass review covering correctness, Cython memory/refcount/GIL safety, C-ABI binding correctness, tests, and coding standards on the diff itself. |
-| **1** | Adds Step 2.5a (semantic delta only — skip 2.5b/2.5c/2.5d; Step 2.5e still runs, as at every level). In Step 3, launch only Agent 1 (correctness), Agent 2 (Cython memory & refcount safety), and Agent 7 (tests) in parallel. Skip all other agents. Skip Step 3b — verify findings inline as you draft the report. |
+| **0 (default)** | Steps 1, 2, 4. Skip Step 2.5. Skip Step 3 — no agent spawn; review the diff inline in the main loop, using Read/Grep on demand to resolve ambiguities. Skip Step 3b — verify each finding inline as you write it. Single-pass review covering correctness, Cython memory/refcount/GIL safety, C-ABI binding correctness, tests, and coding standards on the diff itself. |
+| **1** | Adds Step 2.5a (semantic delta only — skip 2.5b/2.5c/2.5d). In Step 3, launch only Agent 1 (correctness), Agent 2 (Cython memory & refcount safety), and Agent 7 (tests) in parallel. Skip all other agents. Skip Step 3b — verify findings inline as you draft the report. |
 | **2** | Full Step 2.5, but in 2.5b restrict the callsite inventory to public Python symbols (exported in `__all__` / `ingress.pyi`) plus every `cdef`/`cpdef` function and every C-ABI symbol declared in the `.pxd` files. In Step 3, launch Agents 1-8. Skip Agent 9 (cross-context) and Agent 10 (adversarial fresh-context). Step 3b uses a single batched verification agent for all findings instead of one per finding. |
 | **3** | Every step below as written, all 10 agents, per-finding verification. The full mission-critical pass. |
 
@@ -68,7 +68,7 @@ Check:
 
 ## Step 2.5: Map the change surface
 
-Before launching review agents, produce a structured change surface map. This step is mandatory and must use Grep/Glob — do not reason about callsites from memory. The output of this step is required input for every Step 3 agent except Agent 10 (the fresh-context adversarial agent, which deliberately works from the diff alone).
+Before launching review agents, produce a structured change surface map. This step is mandatory and must use Grep/Glob — do not reason about callsites from memory. The output of this step is required input for every agent in Step 3.
 
 ### 2.5a Semantic delta per changed symbol
 
@@ -152,11 +152,11 @@ Record, with file:line citations:
 - **Minimum numpy / Python versions** (`pyproject.toml`: `requires-python`, `numpy>=1.21.0`). Code that uses a newer numpy C-API or Python C-API symbol than the floor breaks the oldest supported build. State the floor.
 - **`abort()` is imported** (`from libc.stdlib cimport ... abort`). Any reachable `abort()` call, or any Rust panic that crosses the C ABI, terminates the host interpreter with no traceback. Flag the path.
 
-A review without this section is incomplete. State the relevant facts (directives, exception default, submodule commit) in one line at the top of every Step 3 agent prompt (except Agent 10's, which works from the diff alone) so the agent reasons from the right premise.
+A review without this section is incomplete. State the relevant facts (directives, exception default, submodule commit) in one line at the top of every Step 3 agent prompt so the agent reasons from the right premise.
 
 ## Step 3: Parallel review
 
-Every agent except Agent 10 receives:
+Every agent receives:
 1. The PR diff
 2. The full change surface map from Step 2.5 (semantic deltas, callsite inventory, implicit contracts, cross-context exposure list, build & binding profile facts)
 

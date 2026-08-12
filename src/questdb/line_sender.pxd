@@ -898,6 +898,286 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+
+cdef extern from "questdb/oidc.h":
+    cdef struct questdb_oidc_builder:
+        pass
+
+    cdef struct questdb_oidc_auth:
+        pass
+
+    cdef struct questdb_oidc_token:
+        pass
+
+    cdef enum questdb_oidc_event_kind:
+        QUESTDB_OIDC_EVENT_PROMPT
+        QUESTDB_OIDC_EVENT_WAITING
+        QUESTDB_OIDC_EVENT_SUCCESS
+        QUESTDB_OIDC_EVENT_FAILURE
+
+    cdef struct questdb_oidc_event:
+        size_t struct_size
+        questdb_oidc_event_kind kind
+        const char* user_code
+        size_t user_code_len
+        const char* verification_uri
+        size_t verification_uri_len
+        const char* verification_uri_complete
+        size_t verification_uri_complete_len
+        const char* identity
+        size_t identity_len
+        const char* message
+        size_t message_len
+        double seconds_left
+        double expires_in_seconds
+        const char* browser_target
+        size_t browser_target_len
+
+    ctypedef void (*questdb_oidc_event_cb)(
+        void* user_data,
+        const questdb_oidc_event* event
+        ) noexcept nogil
+
+    ctypedef void (*questdb_oidc_user_data_release_cb)(
+        void* user_data
+        ) noexcept nogil
+
+    questdb_oidc_builder* questdb_oidc_builder_new() noexcept nogil
+
+    questdb_oidc_builder* questdb_oidc_builder_from_questdb(
+        const char* url,
+        size_t url_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    void questdb_oidc_builder_free(
+        questdb_oidc_builder* builder
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_client_id(
+        questdb_oidc_builder* builder,
+        const char* value,
+        size_t value_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_scope(
+        questdb_oidc_builder* builder,
+        const char* value,
+        size_t value_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_audience(
+        questdb_oidc_builder* builder,
+        const char* value,
+        size_t value_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_issuer(
+        questdb_oidc_builder* builder,
+        const char* value,
+        size_t value_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_token_endpoint(
+        questdb_oidc_builder* builder,
+        const char* value,
+        size_t value_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_device_authorization_endpoint(
+        questdb_oidc_builder* builder,
+        const char* value,
+        size_t value_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_groups_in_token(
+        questdb_oidc_builder* builder,
+        cbool enabled,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_allow_insecure_transport(
+        questdb_oidc_builder* builder,
+        cbool enabled,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_open_browser(
+        questdb_oidc_builder* builder,
+        cbool enabled,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_interactive(
+        questdb_oidc_builder* builder,
+        cbool enabled,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_default_interval_seconds(
+        questdb_oidc_builder* builder,
+        uint64_t seconds,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_timeout_ms(
+        questdb_oidc_builder* builder,
+        uint64_t timeout_ms,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_ca_bundle(
+        questdb_oidc_builder* builder,
+        const char* path,
+        size_t path_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_file_token_store(
+        questdb_oidc_builder* builder,
+        const char* directory,
+        size_t directory_len,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_default_file_token_store(
+        questdb_oidc_builder* builder,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_event_handler(
+        questdb_oidc_builder* builder,
+        questdb_oidc_event_cb callback,
+        void* user_data,
+        questdb_oidc_user_data_release_cb release,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    questdb_oidc_auth* questdb_oidc_builder_build(
+        const questdb_oidc_builder* builder,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    questdb_oidc_auth* questdb_oidc_auth_clone(
+        const questdb_oidc_auth* auth,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    void questdb_oidc_auth_free(
+        questdb_oidc_auth* auth
+        ) noexcept nogil
+
+    bint questdb_oidc_auth_sign_in(
+        const questdb_oidc_auth* auth,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    questdb_oidc_token* questdb_oidc_auth_token(
+        const questdb_oidc_auth* auth,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_auth_clear(
+        const questdb_oidc_auth* auth,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    const char* questdb_oidc_token_data(
+        const questdb_oidc_token* token
+        ) noexcept nogil
+
+    size_t questdb_oidc_token_len(
+        const questdb_oidc_token* token
+        ) noexcept nogil
+
+    void questdb_oidc_token_free(
+        questdb_oidc_token* token
+        ) noexcept nogil
+
+    cdef struct questdb_oidc_config_view:
+        size_t struct_size
+        cbool groups_in_token
+        const char* client_id
+        size_t client_id_len
+        const char* token_endpoint
+        size_t token_endpoint_len
+        const char* device_authorization_endpoint
+        size_t device_authorization_endpoint_len
+        const char* scope
+        size_t scope_len
+        const char* audience
+        size_t audience_len
+        const char* issuer
+        size_t issuer_len
+
+    bint questdb_oidc_auth_get_config(
+        const questdb_oidc_auth* auth,
+        questdb_oidc_config_view* out
+        ) noexcept nogil
+
+    cdef enum questdb_oidc_error_kind:
+        QUESTDB_OIDC_ERROR_CONFIG
+        QUESTDB_OIDC_ERROR_NETWORK
+        QUESTDB_OIDC_ERROR_DEVICE_FLOW
+        QUESTDB_OIDC_ERROR_TIMEOUT
+        QUESTDB_OIDC_ERROR_INTERACTION_REQUIRED
+        QUESTDB_OIDC_ERROR_UNKNOWN
+
+    cdef struct questdb_oidc_error_view:
+        size_t struct_size
+        questdb_oidc_error_kind kind
+        const char* idp_error
+        size_t idp_error_len
+        const char* idp_error_description
+        size_t idp_error_description_len
+        cbool has_status
+        uint16_t status
+        cbool has_retry_after
+        uint64_t retry_after_seconds
+
+    bint questdb_error_oidc_get_view(
+        const questdb_error* error,
+        questdb_oidc_error_view* out
+        ) noexcept nogil
+
+    bint line_sender_opts_oidc_auth(
+        line_sender_opts* opts,
+        const questdb_oidc_auth* auth,
+        questdb_error** err_out
+        ) noexcept nogil
+
+
+cdef extern from "questdb/client.h":
+    cdef struct questdb_db_connect_options:
+        size_t struct_size
+        const questdb_oidc_auth* oidc_auth
+        questdb_connection_event_cb event_callback
+        void* event_user_data
+        size_t event_inbox_capacity
+        line_sender_qwpws_error_cb rejection_callback
+        void* rejection_user_data
+        size_t rejection_inbox_capacity
+
+    void questdb_db_connect_options_init(
+        questdb_db_connect_options* options,
+        size_t options_size
+        ) noexcept nogil
+
+    questdb_db* questdb_db_connect_ex(
+        const char* conf,
+        size_t conf_len,
+        const questdb_db_connect_options* options,
+        questdb_error** err_out
+        ) noexcept nogil
+
+
+cdef extern from "questdb/ingress/qwp_sender.h":
     uint64_t line_sender_connection_events_dropped(
         const line_sender* sender
         ) noexcept nogil

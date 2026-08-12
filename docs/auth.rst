@@ -5,322 +5,161 @@ OIDC Authentication
 ===================
 
 QuestDB Enterprise can be secured with `OpenID Connect (OIDC)
-<https://questdb.com/docs/operations/rbac/>`_. The :mod:`questdb.auth` module
-lets you sign in interactively from Python — including from a **remote** kernel
-(JupyterHub, SageMaker, Colab, VS Code-remote, containers) where there is no
-local browser.
+<https://questdb.com/docs/operations/rbac/>`_. The Python client runs the OAuth
+2.0 Device Authorization Grant (RFC 8628), including in remote Jupyter kernels
+where the browser and Python process are on different machines.
 
-It runs the `OAuth 2.0 Device Authorization Grant (RFC 8628)
-<https://datatracker.ietf.org/doc/html/rfc8628>`_ entirely client-side: you
-authorize in **any** browser (your laptop or your phone), while the kernel only
-makes outbound calls to your identity provider (IdP). The resulting token is
-then presented to QuestDB over the auth paths it already supports — HTTP
-``Authorization: Bearer`` or PG-wire ``_sso`` — so **no server change is
-required**.
+The device flow, refresh, cache, file persistence, and transport token-provider
+logic all run in the native QuestDB client. Python supplies the Jupyter/terminal
+renderer and PG-wire convenience adapters.
 
-.. note::
+Native QuestDB transports
+=========================
 
-    This feature targets **QuestDB Enterprise with OIDC enabled**. The IdP
-    client referenced by ``acl.oidc.client.id`` must have the device grant
-    (``urn:ietf:params:oauth:grant-type:device_code``) enabled and be a public
-    client. See :ref:`oidc_idp_requirements`.
-
-Two ways to use it
-==================
-
-You can let the helper drive everything, or you can just take the token and use
-it with your own tooling.
-
-Just the token (PG-wire / HTTP / anything)
-------------------------------------------
-
-You sign in once and get a valid, auto-refreshed token; present it to QuestDB
-over PG-wire, raw HTTP, or any other client. This path has **no extra
-dependencies**.
+Sign in explicitly, then attach the same rotating provider to a deployment-level
+client or a standalone sender:
 
 .. code-block:: python
 
+    import questdb
     from questdb.auth import OidcDeviceAuth
 
-    # Discover the OIDC configuration from the QuestDB server:
-    auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
+    auth = OidcDeviceAuth.from_questdb(
+        "https://questdb.example.com:9000")
+    auth.sign_in()  # the only operation that may prompt or open a browser
 
-    token = auth.token()        # runs the device flow on first use, else cached
-    headers = auth.headers()    # {"Authorization": "Bearer <token>"}
+    with questdb.connect(
+            "wss::addr=questdb.example.com:9000;",
+            oidc_auth=auth) as db:
+        result = db.query("select * from trades limit 10")
+        with db.sender() as sender:
+            sender.row("events", columns={"value": 42},
+                       at=questdb.ServerTimestamp)
 
-On first use you will see a sign-in prompt (rendered as a clickable link in
-Jupyter, plain text on a terminal)::
+    with questdb.Sender.from_conf(
+            "https::addr=questdb.example.com:9000;",
+            oidc_auth=auth) as sender:
+        ...
 
-    🔐 Sign in to QuestDB
-       Open https://idp.example.com/device  and enter code:  WDJB-MJHT
-       (or open directly: https://idp.example.com/device?user_code=WDJB-MJHT)
-       ⏳ waiting for authorization… (4:51 left)
-    ✅ Signed in as alice@example.com — token cached, expires in 60 min
+The pool and sender retain shared native ownership of the provider. Every
+connect and reconnect asks it for a current token, including silent refresh,
+without copying a fixed token into the connection configuration.
 
-On a local terminal the verification URL is also opened in your default browser
-automatically (pass ``open_browser=False`` to disable); on a notebook kernel it
-is not — the kernel host isn't your machine, so the clickable link above is
-used instead.
+Token lifecycle
+===============
 
-Re-running is silent — the token is cached and refreshed silently on the next
-use once it nears expiry.
+The lifecycle is deliberately split:
 
-PG-wire adapters
-----------------
+* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` is interactive. It uses a cached
+  or silently refreshable credential when possible and otherwise runs the
+  device flow.
+* :meth:`~questdb.auth.OidcDeviceAuth.token` is never interactive. It returns a
+  cached, persisted, or silently refreshed token, and raises
+  :class:`~questdb.auth.OidcInteractionRequired` when explicit sign-in is
+  needed. Transport connect/reconnect paths have the same behavior.
+* :meth:`~questdb.auth.OidcDeviceAuth.clear` clears memory and the configured
+  persisted entry. It does not revoke the credential at the identity provider.
 
-For PG-wire there are two convenience adapters that inject the auto-refreshed
-token as the QuestDB ``_sso`` password (they require
-``acl.oidc.pg.token.as.password.enabled=true`` on the server):
+This prevents a reconnect, SQLAlchemy pool worker, or ingestion background
+thread from unexpectedly launching a browser flow. Applications should call
+``sign_in()`` on their UI/main thread before opening transports.
 
-.. code-block:: python
+Configuration
+=============
 
-    from questdb.auth import OidcDeviceAuth, sqlalchemy_engine, psycopg_connect
-
-    url = "https://questdb.example.com:9000"
-    auth = OidcDeviceAuth.from_questdb(url)
-    auth.token()   # sign in once up front, before the pool opens connections
-
-    # SQLAlchemy: a fresh token is injected as the password on every new
-    # (pooled) connection, so the engine keeps working as the token rotates.
-    engine = sqlalchemy_engine(auth, url)
-
-    # Or a raw psycopg / psycopg2 connection:
-    conn = psycopg_connect(auth, url)
-
-For REST or ingestion, take ``auth.headers()`` / ``auth.token()`` and wire it
-into your HTTP client or the ingestion :class:`~questdb.ingress.Sender`
-yourself:
+Discover configuration from QuestDB's public ``/settings`` endpoint:
 
 .. code-block:: python
 
-    from questdb.ingress import Sender, TimestampNanos
+    auth = OidcDeviceAuth.from_questdb(
+        "https://questdb.example.com:9000",
+        issuer="https://idp.example.com/realms/questdb",
+        audience="questdb")
 
-    with Sender.from_conf("https::addr=questdb.example.com:9000;",
-                          token=auth.token()) as sender:
-        sender.row("trades", columns={"price": 101.5},
-                   at=TimestampNanos.now())
-
-How it works
-============
-
-Configuration discovery
-------------------------
-
-:meth:`OidcDeviceAuth.from_questdb <questdb.auth.OidcDeviceAuth.from_questdb>`
-resolves the OIDC configuration in this order:
-
-1. ``GET {url}/settings`` (public, no auth) for the QuestDB-authoritative
-   values: ``acl.oidc.client.id``, ``acl.oidc.scope``, ``acl.oidc.token.endpoint``,
-   ``acl.oidc.groups.encoded.in.token`` and (on newer servers)
-   ``acl.oidc.device.authorization.endpoint``.
-2. If the device-authorization endpoint is not advertised, the helper falls
-   back to the IdP discovery document
-   (``{issuer}/.well-known/openid-configuration``). This path **requires** an
-   explicit ``issuer=`` argument.
-
-Anything you pass explicitly overrides discovery. You can also skip discovery
-entirely:
+Explicit keyword arguments override discovered values. Or skip discovery:
 
 .. code-block:: python
 
     auth = OidcDeviceAuth(
         client_id="questdb",
-        device_authorization_endpoint="https://idp/.../device",
-        token_endpoint="https://idp/.../token",
+        device_authorization_endpoint="https://idp.example.com/device",
+        token_endpoint="https://idp.example.com/token",
         scope="openid groups",
-        groups_in_token=True,     # send id_token (True) vs access_token (False)
-        audience="questdb")       # optional; some IdPs need it to set `aud`
+        groups_in_token=True,
+        audience="questdb")
 
-Which token is sent
--------------------
+``groups_in_token=True`` selects the ID token and ensures the ``openid`` scope
+is requested. Otherwise the provider returns the access token, matching the
+QuestDB server's selection.
 
-The helper mirrors QuestDB's own selection logic
-(``groupsEncodedInToken ? idToken : accessToken``):
+Persistence
+===========
 
-============================================ =================
-``acl.oidc.groups.encoded.in.token``         Helper sends
-============================================ =================
-``true``                                      ``id_token``
-``false``                                     ``access_token``
-============================================ =================
-
-When neither the server's ``/settings`` nor an explicit ``groups_in_token=``
-specifies it, the helper defaults to ``False`` (send the ``access_token``),
-mirroring the QuestDB server default. When sending the ``id_token`` the
-``openid`` scope is requested automatically.
-
-Token lifecycle (cache + refresh)
----------------------------------
-
-``token()`` returns the cached token while it is valid (with a small clock-skew
-margin). When it nears expiry the helper silently refreshes it using the
-``refresh_token`` if one was issued. If the refresh token is missing or rejected
-(expired/revoked), it re-runs the interactive sign-in; a transient network error
-is raised instead, so you can retry without being needlessly re-prompted. A lock
-serializes refresh so parallel cells/threads don't double-prompt.
-
-The token is held in a process-global, in-memory cache, so re-running a cell
-reuses it instead of re-prompting; a kernel restart re-prompts once. By default
-nothing is written to disk — opt into persistence (below) to survive a restart.
-
-Persisting the token across restarts
--------------------------------------
-
-By default the token lives in memory only, so a restarted process (a fresh
-kernel, a re-run script, a new container) has to run the device flow again. Pass
-a ``token_store`` to persist it; the restarted process then resumes from the
-saved refresh token — a silent call to the token endpoint — instead of prompting
-again:
+Credentials stay in memory unless a :class:`~questdb.auth.FileTokenStore` is
+configured:
 
 .. code-block:: python
 
-    from questdb.auth import OidcDeviceAuth, FileTokenStore
+    from questdb.auth import FileTokenStore
 
     auth = OidcDeviceAuth.from_questdb(
         "https://questdb.example.com:9000",
         token_store=FileTokenStore.at_default_location())
-    auth.token()  # prompts the first time; after a restart it refreshes silently
+    auth.sign_in()
 
-:meth:`~questdb.auth.FileTokenStore.at_default_location` writes one file per
-identity under ``~/.questdb/oidc-tokens/`` (override the directory with the
-``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable). The file name is a
-hash of the endpoints, client id, scope, audience and groups-in-token mode, so
-tokens for different servers or identities never collide. After a restart,
-:meth:`~questdb.auth.OidcDeviceAuth.token` also works as the *first* call — no
-explicit sign-in needed — which suits a long-lived adapter such as
-:func:`~questdb.auth.sqlalchemy_engine`.
-:meth:`~questdb.auth.OidcDeviceAuth.clear` removes the persisted entry and forces
-a fresh sign-in next time.
+The default directory is ``~/.questdb/oidc-tokens/``, overridable with
+``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR``. The native client writes plaintext JSON
+using atomic replacement and cross-process coordination; on POSIX, directories
+are mode ``0700`` and files mode ``0600``. Enabling it stores a long-lived
+refresh token on disk, so use it only when that at-rest tradeoff is acceptable.
+Custom Python token stores are not supported by the native provider.
 
-The token is stored as **plaintext JSON protected by file permissions** —
-``0600`` file, ``0700`` directory on POSIX systems (Linux, macOS), the same
-approach ``gcloud``, ``aws`` and ``gh`` take. On Windows these POSIX permissions
-cannot be enforced, so the file relies on the user-profile directory's default
-ACL and the client prints a one-line warning to ``stderr`` the first time it
-cannot enforce them. Enabling persistence therefore writes a long-lived refresh
-token to disk: anyone who can read the file holds a credential until it expires
-or is revoked. To encrypt it at rest, implement your own
-:class:`~questdb.auth.TokenStore` (backed by an OS keychain or a secrets manager)
-and pass that instead of :class:`~questdb.auth.FileTokenStore`. A persisted file
-is treated as **untrusted input** on load — a tampered, corrupt, oversized, or
-identity-mismatched entry is ignored (the client falls back to a refresh or an
-interactive sign-in), and the bearer token it serves (put verbatim into an
-``Authorization`` header or the PG-wire ``_sso`` password) is rejected if it
-carries control or non-ASCII characters, so a tampered credential is never placed
-on the wire.
+PG-wire and manual token use
+============================
 
-:class:`~questdb.auth.FileTokenStore` is safe to share between processes that
-sign in as the same identity: each update is written atomically (so a concurrent
-reader never sees a half-written credential), and when the identity provider
-rotates the refresh token on each refresh, the read-refresh-write is serialized
-across processes with a lock file so they don't race each other into an
-unnecessary re-prompt. That coordination is **best-effort**: under heavy
-contention, or if the lock can't be taken, a process falls back to refreshing
-without it — still integrity-safe (the atomic write stands), just uncoordinated
-for that one refresh, which on a rotating-refresh IdP may cost an extra sign-in.
-The on-disk format is a language-neutral contract, so the Java QuestDB client and
-this one can share the same file.
+The adapters inject the current token as QuestDB's ``_sso`` password. Sign in
+before creating a pool:
 
-Non-interactive contexts
--------------------------
+.. code-block:: python
 
-Scheduled / non-interactive notebooks (papermill, cron, CI) have no human to
-authorize the device. The helper detects this and raises
-:class:`~questdb.auth.OidcInteractionRequired` instead of hanging. Use a QuestDB
-**service-account REST token** or the **client-credentials** grant there.
+    from questdb.auth import sqlalchemy_engine, psycopg_connect
 
-Connection adapters
-===================
+    auth.sign_in()
+    engine = sqlalchemy_engine(auth, "https://questdb.example.com:9000")
+    conn = psycopg_connect(auth, "https://questdb.example.com:9000")
 
-Two helpers wire the auto-refreshed token into PG-wire as the ``_sso`` password
-(both require ``acl.oidc.pg.token.as.password.enabled=true``):
+SQLAlchemy calls non-interactive ``token()`` for every new pooled connection,
+so it follows rotation and silent refresh. ``psycopg_connect`` captures one
+token for that connection. For other HTTP clients, use ``auth.headers()``.
 
-* :func:`~questdb.auth.sqlalchemy_engine` — a SQLAlchemy ``Engine`` that injects
-  a fresh token for every new connection, so a pool keeps working as the token
-  rotates. The per-connection injection is non-interactive (it reuses and
-  silently refreshes the up-front token); sign in once with ``auth.token()``
-  before opening connections, or it raises
-  :class:`~questdb.auth.OidcInteractionRequired` rather than launching a browser
-  prompt from a pool thread.
-* :func:`~questdb.auth.psycopg_connect` — a raw psycopg / psycopg2 connection
-  (token captured at connect time).
+Rendering and non-interactive environments
+==========================================
 
-For REST (``Authorization: Bearer``) and ingestion (the
-:class:`~questdb.ingress.Sender`), take
-:meth:`~questdb.auth.OidcDeviceAuth.headers` /
-:meth:`~questdb.auth.OidcDeviceAuth.token` and wire the token in yourself.
+The default renderer produces a rich, clickable Jupyter prompt or terminal
+text. Pass ``qr=True`` for a QR code, ``open_browser=False`` to suppress browser
+opening, or ``renderer=`` for a custom :class:`~questdb.auth.Renderer`.
 
-.. note::
-
-    QuestDB validates the token at **authentication** time, not per query. An
-    already-open PG connection survives token expiry; only **new** connections
-    need a fresh token — which is why :func:`~questdb.auth.sqlalchemy_engine`
-    supplies the token per-connect.
-
-.. _oidc_idp_requirements:
-
-IdP requirements
-================
-
-The OIDC client referenced by ``acl.oidc.client.id`` must:
-
-* have the **Device Authorization grant** enabled;
-* be a **public client** (no secret in a notebook);
-* optionally issue **refresh tokens** for the device grant (for silent refresh);
-* issue tokens whose ``aud`` matches ``acl.oidc.audience`` (some IdPs need an
-  ``audience``/``resource`` request parameter);
-* include the **groups** claim in the token (``groups.encoded.in.token=true``)
-  or expose it via the **userinfo** endpoint (``false``), matching the server.
+When no interactive terminal/frontend is available, ``sign_in()`` raises
+:class:`~questdb.auth.OidcInteractionRequired` instead of waiting indefinitely.
+Use a QuestDB service-account token or OAuth client-credentials flow for cron,
+CI, and unattended notebook execution.
 
 Security notes
 ==============
 
-* No IdP passwords are ever entered in the notebook; MFA/SSO happen at the IdP.
-* ``https`` is required. Plaintext ``http`` to a **loopback** address
-  (``localhost`` / ``127.0.0.1`` / ``::1``) is always allowed — it never leaves
-  the host. ``insecure=True`` additionally permits plaintext to a non-loopback
-  **QuestDB** host (local development only); it does **not** downgrade the
-  **IdP**, so the device code and refresh token are never sent in cleartext
-  over the network. Certificate verification is never disabled.
-* **Endpoint trust.** The device code and the long-lived refresh token are sent
-  to the device-authorization and token endpoints, which are discovered from
-  QuestDB ``/settings``. The helper requires both endpoints to share a single
-  origin and rejects the configuration otherwise. Because ``/settings`` is
-  authoritative-by-QuestDB, a compromised server could in principle point them
-  elsewhere; pass ``issuer=`` to **pin** the IdP so endpoints advertised over
-  ``/settings`` are verified to belong to it and credentials can't be redirected
-  to another host. For a ``/settings`` endpoint the pin checks the issuer
-  **origin** and **path** — so on a path-based multi-tenant IdP (e.g. Keycloak
-  issuers ``https://host/realms/{realm}``) a tampered ``/settings`` cannot
-  redirect the device code / refresh token to a *different realm on the same
-  host*. (Caller-supplied endpoints and endpoints from the IdP's own
-  ``.well-known`` document are authoritative and are **not** pinned to the issuer
-  origin/path: the issuer is an OIDC *identifier*, not necessarily the
-  endpoints' host — e.g. Google issues from ``accounts.google.com`` but serves
-  tokens from ``oauth2.googleapis.com``, and some IdPs such as Azure AD place
-  endpoints outside the issuer path. A ``/settings`` endpoint that sits off the
-  issuer origin **or path** is still accepted when the IdP's own discovery
-  document confirms the same URL.) When the server does not advertise the device-
-  authorization endpoint (so it must be discovered from the IdP), ``issuer=`` is
-  **required** for exactly this reason — the helper refuses to guess the
-  discovery origin from the server-supplied token endpoint.
-* **Token persistence is opt-in and off by default.** Passing a ``token_store``
-  writes a long-lived refresh token to disk; :class:`~questdb.auth.FileTokenStore`
-  protects it with owner-only file permissions (``0600``/``0700``) rather than
-  encryption. A persisted file is validated as untrusted input on load and the
-  served bearer token is rejected if it carries control / non-ASCII characters.
-  See `Persisting the token across restarts`_.
-* Adapters avoid logging the token / PG DSN. Avoid logging them yourself.
-* Standard proxy / CA settings (``HTTPS_PROXY``, ``REQUESTS_CA_BUNDLE``,
-  ``SSL_CERT_FILE``) are honoured for the IdP / discovery transport; you can
-  also pass ``ca_bundle=``.
+* IdP passwords and MFA stay in the browser; Python receives device and bearer
+  tokens only.
+* IdP credential endpoints require HTTPS, except loopback HTTP for local
+  development. ``insecure=True`` applies only to QuestDB discovery transport.
+* Native renderer events expose sanitized display text and one separately
+  vetted browser target; the Python renderer uses that target for links and QR
+  codes.
+* Avoid logging tokens, authorization headers, or PG connection parameters.
 
-Dependencies
-============
+Optional dependencies
+=====================
 
-``token()`` / ``headers()`` need nothing beyond the standard library. The
-following are imported lazily, only when used:
-
-* ``sqlalchemy`` and ``psycopg`` / ``psycopg2`` — for the PG-wire adapters;
-* ``qrcode`` — to render a QR code for phone-based authorization (``qr=True``);
-* ``IPython`` — for the rich Jupyter prompt (falls back to plain text).
+OIDC itself uses the native client and needs no extra package. ``sqlalchemy``
+and ``psycopg``/``psycopg2`` support the PG adapters, ``qrcode`` enables QR
+rendering, and ``IPython`` enables the rich Jupyter renderer. All are imported
+lazily.

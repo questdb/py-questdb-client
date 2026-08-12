@@ -13,55 +13,41 @@ Features
 OIDC Authentication (:mod:`questdb.auth`)
 ************************************************
 
-New :mod:`questdb.auth` module to sign in interactively to OIDC-secured
-QuestDB Enterprise from Python — including from **remote** kernels
-(JupyterHub, SageMaker, Colab, VS Code-remote) that have no local browser.
-
-It runs the OAuth 2.0 Device Authorization Grant (RFC 8628) client-side: you
-authorize in any browser (laptop or phone), and the token is presented to
-QuestDB over the auth paths it already supports (HTTP ``Bearer`` / PG-wire
-``_sso``). No server change is required.
+New :mod:`questdb.auth` module backed by the native QuestDB client. It runs the
+OAuth 2.0 Device Authorization Grant (RFC 8628), including from remote Jupyter
+kernels, and supplies rotating Bearer tokens directly to QuestDB transports.
 
 .. code-block:: python
 
-    from questdb.auth import OidcDeviceAuth, sqlalchemy_engine
+    import questdb
+    from questdb.auth import OidcDeviceAuth
 
-    # Sign in once and get a valid, auto-refreshed token:
     auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
-    token = auth.token()      # use it with PG-wire, HTTP, or any client
-
-    # Or wire it into PG-wire as the _sso password:
-    engine = sqlalchemy_engine(auth, "https://questdb.example.com:9000")
+    auth.sign_in()
+    db = questdb.connect(
+        "wss::addr=questdb.example.com:9000;", oidc_auth=auth)
 
 Highlights:
 
-* Auto-discovery of OIDC config from the QuestDB ``/settings`` endpoint, with a
-  fallback to the IdP ``.well-known`` document. Works with IdPs whose issuer is
-  on a different origin than its token / device-authorization endpoints (e.g.
-  Google: ``accounts.google.com`` issuer, ``oauth2.googleapis.com`` endpoints),
-  while still pinning endpoints advertised over an untrusted ``/settings``
-  channel to the issuer.
-* In-process token cache with silent refresh; in-memory only by default
-  (nothing written to disk unless you opt into a
-  :class:`~questdb.auth.TokenStore` — see the next entry).
-* Opt-in **token persistence** (:class:`~questdb.auth.FileTokenStore`, passed as
-  ``token_store=``) so a restarted process resumes from a saved refresh token
-  instead of prompting again. The default file store keeps one owner-only
-  (``0600``) plaintext file per identity under ``~/.questdb/oidc-tokens/``,
-  written atomically and coordinated across processes with a lock file; supply a
-  custom :class:`~questdb.auth.TokenStore` to back it with an OS keychain. The
-  on-disk format is a language-neutral contract shared with the Java client. The
-  per-request ``timeout`` is capped at 120s (matching the Java client) so a slow
-  refresh held under the file store's cross-process lock can't outlast its
-  staleness window; a larger value raises ``OidcConfigError`` at construction.
+* :func:`questdb.connect`, :class:`questdb.Sender`, and
+  :meth:`questdb.Sender.from_conf` accept ``oidc_auth=``. They retain the shared
+  native provider and pull a fresh token for each connect or reconnect.
+* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` is the only interactive
+  operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
+  path remain non-interactive, silently refreshing when possible and otherwise
+  raising :class:`~questdb.auth.OidcInteractionRequired`.
+* OIDC discovery, endpoint validation, token selection, caching, refresh, and
+  concurrency control use the same native implementation as the C/C++ clients.
+* Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
+  plaintext credentials atomically and coordinates refresh across processes.
+  Custom Python token stores are not supported by the native provider.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
   token on every new pooled connection, ``psycopg_connect`` captures it at
   connect time.
-* ``token()`` / ``headers()`` require no dependencies beyond the standard
-  library; ``sqlalchemy`` / ``psycopg`` / ``qrcode`` / ``IPython`` are imported
-  lazily.
+* OIDC requires no additional Python dependency; ``sqlalchemy`` / ``psycopg`` /
+  ``qrcode`` / ``IPython`` are imported lazily for optional conveniences.
 
 See the :ref:`OIDC authentication guide <oidc_auth>` for details.
 

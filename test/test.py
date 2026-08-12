@@ -55,20 +55,9 @@ from fixture import _parse_version
 # extension in place. They are imported here so ``unittest.main()`` picks them
 # up in the aggregated CI run alongside the ingress tests.
 from test_auth import (
-    TestDeviceFlow,
-    TestNonInteractive,
-    TestRefresh,
-    TestDiscovery,
-    TestInsecureSettingsGuard,
-    TestAdapters,
-    TestConcurrency,
-    TestConfigHelpers,
-    TestEndpointValidation,
-    TestCacheKey,
-    TestFileTokenStore,
-    TestPersistence,
-    TestTransportSecurity,
-    TestRendererSecurity,
+    AdapterTest,
+    NativeOidcTest,
+    NativeTransportAttachmentTest,
 )
 
 NUMPY_VERSION = _parse_version(np.__version__)

@@ -27,7 +27,7 @@ Without it, you may still ingest data row-by-row through
 ``__arrow_c_stream__`` PyCapsule protocol.
 
 The :ref:`OIDC authentication helper <oidc_auth>` (:mod:`questdb.auth`) needs
-no extra dependencies for ``token()`` / ``headers()``. Some of its conveniences
+no extra dependencies for ``sign_in()`` / ``token()``. Some conveniences
 import the following lazily, only when used: ``sqlalchemy`` and ``psycopg`` /
 ``psycopg2`` (PG-wire adapters), ``qrcode`` (QR-code prompt) and ``IPython``
 (rich Jupyter prompt).

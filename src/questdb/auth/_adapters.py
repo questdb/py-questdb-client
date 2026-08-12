@@ -26,22 +26,29 @@
 PG-wire connection adapters.
 
 Feed an :class:`OidcDeviceAuth` token into SQLAlchemy / psycopg as the QuestDB
-``_sso`` password. These are thin conveniences over the token: for REST or the
-ingestion ``Sender``, take :meth:`OidcDeviceAuth.headers` / :meth:`token` and
-wire it up yourself.
+``_sso`` password. These are thin conveniences over the token; native QuestDB
+senders and pools should attach the provider directly through ``oidc_auth=``.
 """
 
 from __future__ import annotations
 
 import re
+import urllib.parse
 from typing import Any, Optional
 
-from ._device import OidcDeviceAuth
+from questdb._client import OidcDeviceAuth
 from ._errors import OidcConfigError
-from ._http import safe_urlparse
 
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
+
+
+def _safe_urlparse(url: str) -> tuple:
+    try:
+        parts = urllib.parse.urlparse(url)
+        return parts, parts.port
+    except (ValueError, TypeError, AttributeError) as e:
+        raise OidcConfigError(f'Malformed endpoint URL {url!r}: {e}.') from e
 
 # Constrain the PG-wire host to exactly the characters a real hostname / IPv4 /
 # IPv6-literal can contain — ASCII letters, digits, '.', '-', '_', and ':' (which
@@ -87,10 +94,10 @@ def _require_host(url: str, host: Optional[str] = None) -> str:
     ``"localhost"`` or ``"questdb:9000"``.
 
     The returned host is *unbracketed* — psycopg and SQLAlchemy take address and
-    port separately. ``safe_urlparse`` validates the port up-front, raising
+    port separately. ``_safe_urlparse`` validates the port up-front, raising
     ``OidcConfigError`` (not a bare ``ValueError``) for a malformed one.
     """
-    parts, _ = safe_urlparse(url)
+    parts, _ = _safe_urlparse(url)
     resolved = host or parts.hostname
     if not resolved:
         raise OidcConfigError(
@@ -171,7 +178,7 @@ def sqlalchemy_engine(
     always authenticate with a valid, auto-refreshed token. Requires
     ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
 
-    Sign in once up front (``auth.token()``) before the pool opens connections.
+    Sign in once up front (``auth.sign_in()``) before the pool opens connections.
     The per-connection injection is **non-interactive**: it reuses and silently
     refreshes the cached token, but never launches a browser prompt from a pool
     thread. If no token has been acquired yet it raises
@@ -221,7 +228,7 @@ def sqlalchemy_engine(
         # Non-interactive: reuse / silently refresh the up-front token, but never
         # run an interactive device flow from a pool thread (it would block the
         # pool). Raises OidcInteractionRequired if no token was acquired first.
-        cparams['password'] = auth._token(allow_interactive=False)
+        cparams['password'] = auth.token()
 
     return engine
 

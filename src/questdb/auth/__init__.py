@@ -30,13 +30,14 @@ presents the token to QuestDB (HTTP ``Bearer`` / PG-wire ``_sso``). Works on
 browserless local and remote kernels (JupyterHub, SageMaker, Colab,
 VS Code-remote): authorize in any browser, the kernel only calls the IdP.
 
-**Get the token**, then present it however you like — no optional dependencies::
+Sign in explicitly, then attach the rotating provider to a QuestDB transport::
 
     from questdb.auth import OidcDeviceAuth
+    from questdb import connect
 
     auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
-    token = auth.token()                      # device flow on first use
-    headers = auth.headers()                  # {"Authorization": "Bearer .."}
+    auth.sign_in()                            # the only interactive operation
+    db = connect("wss::addr=questdb.example.com:9000;", oidc_auth=auth)
 
 For PG-wire there are two convenience adapters that wire the token in as the
 ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
@@ -52,9 +53,8 @@ Optional deps (``sqlalchemy``/``psycopg``, ``qrcode``, ``IPython``) are imported
 lazily, only when used.
 """
 
-from ._device import OidcDeviceAuth
-from ._discovery import OidcConfig
-from ._cache import TokenSet
+from questdb._client import OidcDeviceAuth
+from ._config import OidcConfig
 from ._render import Renderer
 from ._errors import (
     OidcError,
@@ -66,9 +66,6 @@ from ._errors import (
 )
 from ._store import (
     FileTokenStore,
-    PersistedToken,
-    TokenStore,
-    TokenStoreKey,
 )
 from ._adapters import sqlalchemy_engine, psycopg_connect
 
@@ -82,11 +79,7 @@ __all__ = [
     'OidcInteractionRequired',
     'OidcNetworkError',
     'OidcTimeoutError',
-    'PersistedToken',
     'Renderer',
-    'TokenSet',
-    'TokenStore',
-    'TokenStoreKey',
     'psycopg_connect',
     'sqlalchemy_engine',
 ]

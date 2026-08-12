@@ -25,6 +25,7 @@
 __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
+    "OidcDeviceAuth",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -58,6 +59,67 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 import numpy as np
 import pandas as pd
 from decimal import Decimal
+
+
+class OidcDeviceAuth:
+    """Native-backed OAuth 2.0 device-flow token provider."""
+
+    def __init__(
+        self,
+        client_id: str,
+        device_authorization_endpoint: str,
+        token_endpoint: str,
+        *,
+        scope: str = "openid",
+        groups_in_token: bool = False,
+        audience: Optional[str] = None,
+        issuer: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[str] = None,
+        open_browser: bool = True,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Any = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Any = None,
+    ) -> None: ...
+
+    @classmethod
+    def from_questdb(
+        cls,
+        url: str,
+        *,
+        client_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        audience: Optional[str] = None,
+        groups_in_token: Optional[bool] = None,
+        issuer: Optional[str] = None,
+        token_endpoint: Optional[str] = None,
+        device_authorization_endpoint: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[str] = None,
+        open_browser: bool = True,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Any = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Any = None,
+    ) -> OidcDeviceAuth: ...
+
+    def sign_in(self) -> None:
+        """Run the interactive device flow when sign-in is required."""
+
+    def token(self) -> str:
+        """Return a cached or silently refreshed token; never prompt."""
+
+    def headers(self) -> Dict[str, str]: ...
+
+    def clear(self) -> None: ...
+
+    @property
+    def config(self) -> Any: ...
 
 class QuestDBErrorCode(Enum):
     """Category of Error."""
@@ -1139,6 +1201,7 @@ class QuestDB:
     def from_conf(
         conf_str: str,
         *,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         error_handler: Optional[Callable[[SenderError], None]] = None,
@@ -1441,6 +1504,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1475,6 +1539,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1519,6 +1584,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,

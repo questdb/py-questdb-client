@@ -33,6 +33,7 @@ API for fast data ingestion into and querying from QuestDB.
 __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
+    'OidcDeviceAuth',
     'PooledReader',
     'PooledSender',
     'Protocol',
@@ -95,6 +96,7 @@ ctypedef int void_int
 
 import cython
 include "dataframe.pxi"
+include "oidc.pxi"
 include "egress.pxi"
 
 from enum import Enum
@@ -444,6 +446,12 @@ cdef inline object c_err_to_fields(questdb_error* err):
 
 cdef inline object c_err_to_py(line_sender_error* err):
     """Construct a ``QuestDBError`` from a C error, which will be freed."""
+    cdef questdb_oidc_error_view oidc_view
+    if err != NULL:
+        memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
+        oidc_view.struct_size = sizeof(questdb_oidc_error_view)
+        if questdb_error_oidc_get_view(err, &oidc_view):
+            return _oidc_err_to_py(err)
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(
@@ -6005,6 +6013,7 @@ cdef class QuestDB:
     cdef bint _closing
     cdef object _connection_listener
     cdef object _error_handler
+    cdef object _oidc_auth
     cdef size_t _cb_refs_key
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
@@ -6017,6 +6026,7 @@ cdef class QuestDB:
         self._closing = False
         self._connection_listener = None
         self._error_handler = None
+        self._oidc_auth = None
         self._cb_refs_key = 0
         self._auto_flush_mode.enabled = False
         self._auto_flush_mode.interval = -1
@@ -6053,6 +6063,7 @@ cdef class QuestDB:
     def from_conf(
             str conf_str,
             *,
+            oidc_auth=None,
             connection_listener=None,
             connection_event_inbox_capacity=0,
             error_handler=None,
@@ -6084,8 +6095,12 @@ cdef class QuestDB:
         when the first row enters an empty lease buffer. Auto-triggered
         publishes do not wait for server acknowledgement.
 
-        The underlying connection pool is opened by
-        `questdb_db_connect_with_handlers`.
+        ``oidc_auth`` attaches a native rotating OIDC token provider. Call its
+        :meth:`~questdb.auth.OidcDeviceAuth.sign_in` method before constructing
+        the pool; connection and reconnect paths never start an interactive
+        device flow.
+
+        The underlying connection pool is opened by `questdb_db_connect_ex`.
         Dataframe ingestion always uses the direct (non-store-and-forward)
         QWP/WebSocket column sender, independent of ``sf_dir``. On a transient
         connection failure the frame is re-sent from the caller's DataFrame
@@ -6156,6 +6171,7 @@ cdef class QuestDB:
         cdef questdb_connection_event_cb connection_event_cb = NULL
         cdef size_t c_event_inbox_capacity
         cdef size_t c_error_inbox_capacity
+        cdef questdb_db_connect_options connect_options
         try:
             protocol, params = parse_conf_str(b, conf_str)
             if protocol not in (Protocol.Ws, Protocol.Wss):
@@ -6203,6 +6219,13 @@ cdef class QuestDB:
                 raise TypeError(
                     '"error_handler" must be callable or None, '
                     f'not {_fqn(type(error_handler))}')
+            if oidc_auth is not None and not isinstance(
+                    oidc_auth, OidcDeviceAuth):
+                raise TypeError(
+                    '"oidc_auth" must be an OidcDeviceAuth or None, '
+                    f'not {_fqn(type(oidc_auth))}')
+            if oidc_auth is not None and (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+                raise ValueError('"oidc_auth" is closed')
             str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
@@ -6222,16 +6245,23 @@ cdef class QuestDB:
             # value must raise here, not inside the nogil region below.
             c_event_inbox_capacity = connection_event_inbox_capacity
             c_error_inbox_capacity = error_event_inbox_capacity
+            questdb_db_connect_options_init(
+                &connect_options, sizeof(questdb_db_connect_options))
+            connect_options.oidc_auth = (
+                (<OidcDeviceAuth>oidc_auth)._raw
+                if oidc_auth is not None else NULL)
+            connect_options.event_callback = connection_event_cb
+            connect_options.event_user_data = connection_listener_data
+            connect_options.event_inbox_capacity = c_event_inbox_capacity
+            connect_options.rejection_callback = _sender_error_trampoline
+            connect_options.rejection_user_data = <void*>db._error_handler
+            connect_options.rejection_inbox_capacity = c_error_inbox_capacity
+            db._oidc_auth = oidc_auth
             _ensure_doesnt_have_gil(&gs)
-            db._db = questdb_db_connect_with_handlers(
+            db._db = questdb_db_connect_ex(
                 c_conf.buf,
                 c_conf.len,
-                connection_event_cb,
-                connection_listener_data,
-                c_event_inbox_capacity,
-                _sender_error_trampoline,
-                <void*>db._error_handler,
-                c_error_inbox_capacity,
+                &connect_options,
                 &err)
             _ensure_has_gil(&gs)
             if db._db == NULL:
@@ -6239,6 +6269,7 @@ cdef class QuestDB:
                 # returning, so the callback targets are now safe to release.
                 db._connection_listener = None
                 db._error_handler = None
+                db._oidc_auth = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
             db._cb_refs_key = _retain_callback_refs(
@@ -6769,6 +6800,7 @@ cdef class QuestDB:
             with self._state_cond:
                 if closed:
                     self._conf_str = None
+                    self._oidc_auth = None
                 else:
                     self._db = db
                 self._closing = False
@@ -6815,6 +6847,7 @@ cdef class Sender:
     cdef Buffer _buffer
     cdef object _error_handler
     cdef object _connection_listener
+    cdef object _oidc_auth
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
@@ -6834,6 +6867,7 @@ cdef class Sender:
             str username,
             str password,
             str token,
+            object oidc_auth,
             str token_x,
             str token_y,
             object auth_timeout,
@@ -7009,6 +7043,18 @@ cdef class Sender:
             str_to_utf8(b, <PyObject*>token, &c_token)
             if not line_sender_opts_token(self._opts, c_token, &err):
                 raise c_err_to_py(err)
+
+        if oidc_auth is not None:
+            if not isinstance(oidc_auth, OidcDeviceAuth):
+                raise TypeError(
+                    '"oidc_auth" must be an OidcDeviceAuth or None, '
+                    f'not {_fqn(type(oidc_auth))}')
+            if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+                raise ValueError('"oidc_auth" is closed')
+            if not line_sender_opts_oidc_auth(
+                    self._opts, (<OidcDeviceAuth>oidc_auth)._raw, &err):
+                raise c_err_to_py(err)
+            self._oidc_auth = oidc_auth
 
         if token_x is not None:
             str_to_utf8(b, <PyObject*>token_x, &c_token_x)
@@ -7191,6 +7237,7 @@ cdef class Sender:
         self._buffer = None
         self._error_handler = None
         self._connection_listener = None
+        self._oidc_auth = None
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
@@ -7208,6 +7255,7 @@ cdef class Sender:
             str username=None,
             str password=None,
             str token=None,
+            object oidc_auth=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -7270,6 +7318,7 @@ cdef class Sender:
                 username,
                 password,
                 token,
+                oidc_auth,
                 token_x,
                 token_y,
                 auth_timeout,
@@ -7306,6 +7355,7 @@ cdef class Sender:
             str username=None,
             str password=None,
             str token=None,
+            object oidc_auth=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -7447,6 +7497,7 @@ cdef class Sender:
                 params.get('username'),
                 params.get('password'),
                 params.get('token'),
+                oidc_auth,
                 params.get('token_x'),
                 params.get('token_y'),
                 params.get('auth_timeout'),
@@ -7484,6 +7535,7 @@ cdef class Sender:
             str username=None,
             str password=None,
             str token=None,
+            object oidc_auth=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -7532,6 +7584,7 @@ cdef class Sender:
             username=username,
             password=password,
             token=token,
+            oidc_auth=oidc_auth,
             token_x=token_x,
             token_y=token_y,
             auth_timeout=auth_timeout,
@@ -8340,6 +8393,7 @@ cdef class Sender:
         self._buffer = None
         self._error_handler = None
         self._connection_listener = None
+        self._oidc_auth = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1

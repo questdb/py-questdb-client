@@ -13,6 +13,7 @@ loop), so it is not part of the automated example suite.
 import contextlib
 import sys
 
+import questdb
 from questdb.auth import (
     FileTokenStore,
     OidcDeviceAuth,
@@ -28,10 +29,9 @@ QUESTDB_URL = 'https://questdb.example.com:9000'
 def sign_in(url: str = QUESTDB_URL) -> OidcDeviceAuth:
     """Discover config from QuestDB and sign in interactively (once)."""
     auth = OidcDeviceAuth.from_questdb(url)
-    # The first token() triggers the interactive device-flow sign-in; the token
-    # is cached and refreshed silently, so re-running is silent until it
-    # expires. Sign in once up front, before any connection pool opens.
-    auth.token()
+    # sign_in() is the only interactive operation. token() and every transport
+    # connect/reconnect path remain non-interactive.
+    auth.sign_in()
     return auth
 
 
@@ -68,12 +68,11 @@ def persist_across_restarts(url: str = QUESTDB_URL) -> OidcDeviceAuth:
     re-runs the device flow. Pass a ``token_store`` to persist it: the restarted
     process resumes from the saved refresh token (a silent token-endpoint call)
     instead of re-prompting. ``FileTokenStore`` writes one file per identity
-    under ``~/.questdb/oidc-tokens/`` (``0600``, owner-only); supply your own
-    ``TokenStore`` to back it with an OS keychain for at-rest encryption.
+    under ``~/.questdb/oidc-tokens/`` (``0600``, owner-only).
     """
     auth = OidcDeviceAuth.from_questdb(
         url, token_store=FileTokenStore.at_default_location())
-    auth.token()  # prompts the first time; silent on later runs / after restart
+    auth.sign_in()  # interactive only when persistence cannot refresh silently
     return auth
 
 
@@ -81,20 +80,21 @@ def bring_your_own_client(url: str = QUESTDB_URL):
     """You just want the token (REST / ingestion / anything)."""
     auth = OidcDeviceAuth.from_questdb(url)
 
+    auth.sign_in()
     token = auth.token()               # valid, auto-refreshed id/access token
     headers = auth.headers()           # {"Authorization": "Bearer <token>"}
     print('Authorization header ready:', 'Authorization' in headers)
 
-    # Ingestion: hand the token to the ILP Sender. questdb.ingress is the
-    # compiled extension; import it lazily so this module loads without it.
-    from questdb.ingress import Sender, TimestampNanos
-    with Sender.from_conf(
-            'https::addr=questdb.example.com:9000;', token=token) as sender:
+    # Ingestion retains the shared provider and pulls a fresh token on every
+    # connect/reconnect instead of capturing the current token string.
+    with questdb.Sender.from_conf(
+            'https::addr=questdb.example.com:9000;',
+            oidc_auth=auth) as sender:
         sender.row(
             'trades',
             symbols={'symbol': 'ETH-USD', 'side': 'sell'},
             columns={'price': 2615.54, 'amount': 0.00044},
-            at=TimestampNanos.now())
+            at=questdb.TimestampNanos.now())
 
     return token
 
