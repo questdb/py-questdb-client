@@ -88,16 +88,25 @@ def _pg_module():
 
 def _require_host(url: str, host: Optional[str] = None) -> str:
     """
-    Resolve the PG-wire host: an explicit ``host`` override, else the host from
-    the QuestDB ``url``. Raises (rather than passing a bare ``None`` to the
-    driver) when neither yields one, e.g. a URL with no authority such as
-    ``"localhost"`` or ``"questdb:9000"``.
+    Validate the QuestDB HTTP(S) URL and resolve the PG-wire host: an explicit
+    ``host`` override, else the host from ``url``. Userinfo is forbidden because
+    a URL such as ``https://trusted.example@evil.example`` resolves to the host
+    after ``@``. Raises (rather than passing a bare ``None`` to the driver) when
+    neither yields one, e.g. a URL with no authority such as ``"localhost"`` or
+    ``"questdb:9000"``.
 
     The returned host is *unbracketed* — psycopg and SQLAlchemy take address and
     port separately. ``_safe_urlparse`` validates the port up-front, raising
     ``OidcConfigError`` (not a bare ``ValueError``) for a malformed one.
     """
     parts, _ = _safe_urlparse(url)
+    scheme = (parts.scheme or '').lower()
+    if scheme not in ('http', 'https'):
+        raise OidcConfigError(
+            'The QuestDB URL must use the http or https scheme.')
+    if parts.username is not None or parts.password is not None:
+        raise OidcConfigError(
+            'The QuestDB URL must not contain a username or password.')
     resolved = host or parts.hostname
     if not resolved:
         raise OidcConfigError(
@@ -195,9 +204,11 @@ def sqlalchemy_engine(
     :param drivername: SQLAlchemy driver; defaults to ``postgresql+psycopg``
         (v3) or ``postgresql+psycopg2`` depending on what is installed.
     :param engine_kwargs: Forwarded to ``create_engine``.
-    :raises OidcConfigError: if ``pg_port`` is not a valid TCP port, or the
-        resolved host is missing or carries connection-string metacharacters.
+    :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
+        has no host; if the resolved host carries connection-string
+        metacharacters; or if ``pg_port`` is not a valid TCP port.
     """
+    resolved_host = _require_host(url, host)
     pg_port = _coerce_port(pg_port)
     try:
         from sqlalchemy import create_engine, event
@@ -218,7 +229,7 @@ def sqlalchemy_engine(
         URL.create(
             drivername=drivername,
             username='_sso',
-            host=_require_host(url, host),
+            host=resolved_host,
             port=pg_port,
             database=database),
         **engine_kwargs)
@@ -257,15 +268,18 @@ def psycopg_connect(
     :param pg_port: PG-wire port (default ``8812``).
     :param database: Database name (default ``"qdb"``).
     :param connect_kwargs: Forwarded to the driver's ``connect()``.
-    :raises OidcConfigError: if ``pg_port`` is not a valid TCP port, or the
-        resolved host is missing or carries connection-string metacharacters.
+    :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
+        has no host; if the resolved host carries connection-string
+        metacharacters; or if ``pg_port`` is not a valid TCP port.
     """
+    resolved_host = _require_host(url, host)
     pg_port = _coerce_port(pg_port)
     mod = _pg_module()
+    token = auth.token()
     return mod.connect(
-        host=_require_host(url, host),
+        host=resolved_host,
         port=pg_port,
         dbname=database,
         user='_sso',
-        password=auth.token(),
+        password=token,
         **connect_kwargs)

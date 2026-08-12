@@ -26,7 +26,9 @@
 
 import gc
 import os
+import sys
 import tempfile
+import types
 import unittest
 import weakref
 from unittest import mock
@@ -232,6 +234,12 @@ class NativeTransportAttachmentTest(unittest.TestCase):
 
 
 class AdapterTest(unittest.TestCase):
+    unsafe_urls = (
+        'https://trusted.questdb.com@evil.example:9000',
+        'https://trusted.questdb.com:secret@evil.example:9000',
+        'file://evil.example',
+    )
+
     def test_psycopg_uses_noninteractive_token(self):
         auth = mock.Mock()
         auth.token.return_value = 'TOKEN'
@@ -250,6 +258,35 @@ class AdapterTest(unittest.TestCase):
     def test_bad_adapter_url_is_typed(self):
         with self.assertRaises(OidcConfigError):
             _adapters._require_host('https://host:invalid')
+
+    def test_psycopg_rejects_unsafe_url_before_token_or_connection(self):
+        for url in self.unsafe_urls:
+            auth = mock.Mock()
+            driver = mock.Mock()
+            with self.subTest(url=url), mock.patch.object(
+                    _adapters, '_pg_module', return_value=driver):
+                with self.assertRaises(OidcConfigError):
+                    _adapters.psycopg_connect(auth, url)
+            auth.token.assert_not_called()
+            driver.connect.assert_not_called()
+
+    def test_sqlalchemy_rejects_unsafe_url_before_token_or_engine(self):
+        sqlalchemy = types.ModuleType('sqlalchemy')
+        sqlalchemy.create_engine = mock.Mock()
+        sqlalchemy.event = mock.Mock()
+        sqlalchemy_engine = types.ModuleType('sqlalchemy.engine')
+        sqlalchemy_engine.URL = mock.Mock()
+        modules = {
+            'sqlalchemy': sqlalchemy,
+            'sqlalchemy.engine': sqlalchemy_engine,
+        }
+        for url in self.unsafe_urls:
+            auth = mock.Mock()
+            with self.subTest(url=url), mock.patch.dict(sys.modules, modules):
+                with self.assertRaises(OidcConfigError):
+                    _adapters.sqlalchemy_engine(auth, url)
+            auth.token.assert_not_called()
+            sqlalchemy.create_engine.assert_not_called()
 
 
 if __name__ == '__main__':
