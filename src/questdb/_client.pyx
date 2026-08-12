@@ -461,6 +461,12 @@ cdef inline object c_err_to_py(line_sender_error* err):
 
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Construct a ``QuestDBError`` from a C error, which will be freed."""
+    cdef questdb_oidc_error_view oidc_view
+    if err != NULL:
+        memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
+        oidc_view.struct_size = sizeof(questdb_oidc_error_view)
+        if questdb_error_oidc_get_view(err, &oidc_view):
+            return _oidc_err_to_py(err)
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(

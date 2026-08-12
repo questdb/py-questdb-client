@@ -44,6 +44,11 @@ from questdb.auth import (
 from questdb.auth import _adapters
 from questdb.auth._render import _verification_target
 
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
 
 def make_auth(**kwargs):
     options = dict(interactive=False, open_browser=False)
@@ -231,6 +236,24 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             questdb.connect(
                 'ws::addr=localhost:9000;lazy_connect=true;',
                 oidc_auth=object())
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_dataframe_auto_flush_preserves_oidc_error(self):
+        auth = make_auth()
+        with questdb.Sender(
+                questdb.Protocol.Http,
+                '127.0.0.1',
+                9000,
+                oidc_auth=auth,
+                auto_flush_rows=1,
+                auto_flush_bytes=False,
+                auto_flush_interval=False,
+                protocol_version=2) as sender:
+            with self.assertRaises(OidcInteractionRequired):
+                sender.dataframe(
+                    pd.DataFrame({'value': [1]}),
+                    table_name='oidc_auto_flush',
+                    at=questdb.ServerTimestamp)
 
 
 class AdapterTest(unittest.TestCase):

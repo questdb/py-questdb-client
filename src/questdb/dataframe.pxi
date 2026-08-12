@@ -3369,6 +3369,9 @@ cdef void_int _dataframe(
                 raise
     except Exception as e:
         if not isinstance(e, QuestDBError):
+            from questdb.auth._errors import OidcError
+            if isinstance(e, OidcError):
+                raise
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 str(e)) from e
