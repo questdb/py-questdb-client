@@ -151,9 +151,10 @@ Security notes
   tokens only.
 * IdP credential endpoints require HTTPS, except loopback HTTP for local
   development. ``insecure=True`` applies only to QuestDB discovery transport.
-* Native renderer events expose sanitized display text and one separately
-  vetted browser target; the Python renderer uses that target for links and QR
-  codes.
+* Renderer callbacks receive raw, untrusted IdP text. The built-in renderers
+  sanitize it and use the separately vetted ``browser_target`` for links and QR
+  codes. Custom renderers must sanitize callback fields for their terminal or
+  HTML output sink and use ``browser_target`` for actionable URLs.
 * Avoid logging tokens, authorization headers, or PG connection parameters.
 
 Optional dependencies
