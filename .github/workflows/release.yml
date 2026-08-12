@@ -1,0 +1,486 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the v prefix (for example, 5.0.1)
+        required: true
+        type: string
+      release_pr:
+        description: Merged version/changelog PR number
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      release_sha: ${{ steps.release.outputs.release_sha }}
+    steps:
+      - name: Validate dispatch and release pull request
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_PR: ${{ inputs.release_pr }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$DISPATCH_REF" == refs/heads/main ]] || {
+            echo "Release workflow must be dispatched from main, not $DISPATCH_REF" >&2
+            exit 1
+          }
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9.-]+)?$ ]] || {
+            echo "Invalid version: $RELEASE_VERSION" >&2
+            exit 1
+          }
+          [[ "$RELEASE_PR" =~ ^[0-9]+$ ]] || {
+            echo "Invalid release PR number: $RELEASE_PR" >&2
+            exit 1
+          }
+
+          pr_json="$(gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR")"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '.merged == true and .base.ref == "main" and .head.repo.full_name == $repository' \
+            <<<"$pr_json" >/dev/null || {
+              echo "PR $RELEASE_PR must be merged into main from $GITHUB_REPOSITORY" >&2
+              exit 1
+            }
+          release_sha="$(jq -er '.merge_commit_sha | select(test("^[0-9a-f]{40}$"))' <<<"$pr_json")"
+          {
+            echo "version=$RELEASE_VERSION"
+            echo "tag=v$RELEASE_VERSION"
+            echo "release_sha=$release_sha"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.release_sha }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Verify release commit ancestry
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "Release commit is not reachable from origin/main" >&2
+            exit 1
+          }
+
+      - name: Validate version metadata and changelog
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import datetime
+          import re
+          import tomllib
+          from pathlib import Path
+
+          import os
+
+          version = os.environ["RELEASE_VERSION"]
+          config = tomllib.loads(Path(".bumpversion.toml").read_text())
+          bump = config["tool"]["bumpversion"]
+          if bump["current_version"] != version:
+              raise SystemExit(
+                  f".bumpversion.toml has {bump['current_version']!r}, expected {version!r}"
+              )
+          for entry in bump["files"]:
+              path = Path(entry["filename"])
+              expected = entry["search"].replace("{current_version}", version)
+              if expected not in path.read_text():
+                  raise SystemExit(f"{path} does not contain configured version literal {expected!r}")
+
+          lines = Path("CHANGELOG.rst").read_text().splitlines()
+          heading_re = re.compile(r"^(\d+\.\d+\.\d+(?:[a-zA-Z0-9.-]+)?) \(([^)]+)\)$")
+          first = next(((i, match) for i, line in enumerate(lines)
+                        if (match := heading_re.fullmatch(line))), None)
+          if first is None:
+              raise SystemExit("CHANGELOG.rst has no version heading")
+          index, match = first
+          expected_date = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+          if match.group(1) != version:
+              raise SystemExit(
+                  f"first changelog version is {match.group(1)!r}, expected {version!r}"
+              )
+          date = match.group(2)
+          if date.lower() == "unreleased" or date != expected_date:
+              raise SystemExit(
+                  f"changelog date is {date!r}, expected UTC date {expected_date!r}"
+              )
+          if index + 1 >= len(lines) or not re.fullmatch(r"-+", lines[index + 1]):
+              raise SystemExit(f"changelog heading for {version} has no RST underline")
+          PY
+
+      - name: Download macOS arm64 wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ inputs.release_pr }}
+        run: |
+          set -Eeuo pipefail
+          source_root="$RUNNER_TEMP/release-sources/github-macos-arm64"
+          rm -rf "$source_root"
+          mkdir -p "$source_root"
+
+          gh api --paginate \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/workflows/macos-arm64-wheels.yml/runs?event=pull_request&status=success&per_page=100" \
+            --jq '.workflow_runs[]' \
+            >"$RUNNER_TEMP/macos-runs.jsonl"
+          run_json="$(jq -cs --argjson pr "$RELEASE_PR" '
+            [.[]
+             | select(.event == "pull_request"
+                      and .status == "completed"
+                      and .conclusion == "success"
+                      and any(.pull_requests[]?; .number == $pr))]
+            | sort_by(.created_at, .id) | reverse | .[0] // empty
+          ' "$RUNNER_TEMP/macos-runs.jsonl")"
+          [[ -n "$run_json" ]] || {
+            echo "No successful macOS arm64 pull_request run found for PR $RELEASE_PR" >&2
+            exit 1
+          }
+          run_id="$(jq -er '.id' <<<"$run_json")"
+          run_url="$(jq -er '.html_url' <<<"$run_json")"
+
+          artifacts="$(gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?name=wheels-macos-arm64&per_page=100")"
+          artifact="$(jq -c '[.artifacts[] | select(.name == "wheels-macos-arm64")] |
+            if length == 1 then .[0] else error("expected exactly one wheels-macos-arm64 artifact") end' \
+            <<<"$artifacts")"
+          jq -e '.expired == false' <<<"$artifact" >/dev/null || {
+            echo "wheels-macos-arm64 artifact for run $run_id is expired" >&2
+            exit 1
+          }
+          artifact_id="$(jq -er '.id' <<<"$artifact")"
+          gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+            >"$RUNNER_TEMP/macos-arm64-wheels.zip"
+          unzip -t "$RUNNER_TEMP/macos-arm64-wheels.zip" >/dev/null
+          unzip -q "$RUNNER_TEMP/macos-arm64-wheels.zip" -d "$source_root"
+          {
+            echo "GHA_WHEEL_ROOT=$source_root"
+            echo "GHA_SOURCE_URL=$run_url"
+          } >>"$GITHUB_ENV"
+
+      - name: Download Azure wheel artifacts
+        env:
+          AZURE_DEVOPS_TOKEN: ${{ secrets.AZURE_DEVOPS_TOKEN }}
+          RELEASE_PR: ${{ inputs.release_pr }}
+        run: |
+          set -Eeuo pipefail
+          source_root="$RUNNER_TEMP/release-sources/azure-drop"
+          rm -rf "$source_root"
+          mkdir -p "$source_root"
+          branch="refs/pull/$RELEASE_PR/merge"
+          builds_url="https://dev.azure.com/questdb/questdb/_apis/build/builds"
+          builds_json="$(curl --fail-with-body --silent --show-error \
+            --user ":$AZURE_DEVOPS_TOKEN" \
+            --get \
+            --data-urlencode 'definitions=21' \
+            --data-urlencode "branchName=$branch" \
+            --data-urlencode 'reasonFilter=pullRequest' \
+            --data-urlencode 'statusFilter=completed' \
+            --data-urlencode 'resultFilter=succeeded' \
+            --data-urlencode 'queryOrder=finishTimeDescending' \
+            --data-urlencode '$top=10' \
+            --data-urlencode 'api-version=7.1' \
+            "$builds_url")"
+          build="$(jq -c --arg branch "$branch" '
+            [.value[]
+             | select(.definition.id == 21
+                      and .sourceBranch == $branch
+                      and .reason == "pullRequest"
+                      and .status == "completed"
+                      and .result == "succeeded")]
+            | sort_by(.finishTime, .id) | reverse | .[0] // empty
+          ' <<<"$builds_json")"
+          [[ -n "$build" ]] || {
+            echo "No successful Azure definition 21 build found for $branch" >&2
+            exit 1
+          }
+          build_id="$(jq -er '.id' <<<"$build")"
+          build_url="https://dev.azure.com/questdb/questdb/_build/results?buildId=$build_id"
+          artifact_url="https://dev.azure.com/questdb/questdb/_apis/build/builds/$build_id/artifacts"
+          curl --fail-with-body --location --silent --show-error \
+            --user ":$AZURE_DEVOPS_TOKEN" \
+            -H 'Accept: application/zip' \
+            --get \
+            --data-urlencode 'artifactName=drop' \
+            --data-urlencode 'api-version=7.1' \
+            --output "$RUNNER_TEMP/azure-drop.zip" \
+            "$artifact_url"
+          unzip -t "$RUNNER_TEMP/azure-drop.zip" >/dev/null
+          unzip -q "$RUNNER_TEMP/azure-drop.zip" -d "$source_root"
+          {
+            echo "AZURE_WHEEL_ROOT=$source_root"
+            echo "AZURE_SOURCE_URL=$build_url"
+          } >>"$GITHUB_ENV"
+
+      - name: Build source distribution
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf dist
+          mkdir dist
+          python -m pip install --disable-pip-version-check build packaging twine
+          python -m build --sdist --outdir dist
+
+      - name: Collect and validate distributions
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import os
+          import re
+          import shutil
+          import tarfile
+          from collections import Counter
+          from itertools import product
+          from pathlib import Path
+
+          from packaging.tags import Tag
+          from packaging.utils import (
+              canonicalize_name,
+              parse_sdist_filename,
+              parse_wheel_filename,
+          )
+          from packaging.version import Version
+
+          version = Version(os.environ["RELEASE_VERSION"])
+          dist = Path("dist")
+          roots = [Path(os.environ["GHA_WHEEL_ROOT"]), Path(os.environ["AZURE_WHEEL_ROOT"])]
+
+          source_files = []
+          for root in roots:
+              if not root.is_dir():
+                  raise SystemExit(f"wheel source directory does not exist: {root}")
+              files = sorted(path for path in root.rglob("*") if path.is_file())
+              unexpected = [path for path in files if path.suffix != ".whl"]
+              if unexpected:
+                  raise SystemExit(
+                      "non-wheel payload in wheel artifact: "
+                      + ", ".join(str(path) for path in unexpected)
+                  )
+              source_files.extend(files)
+
+          names = Counter(path.name for path in source_files)
+          duplicates = sorted(name for name, count in names.items() if count != 1)
+          if duplicates:
+              details = [
+                  f"{name}: {', '.join(str(path) for path in source_files if path.name == name)}"
+                  for name in duplicates
+              ]
+              raise SystemExit("duplicate wheel basename(s): " + "; ".join(details))
+          for path in source_files:
+              shutil.copy2(path, dist / path.name)
+
+          sdists = sorted(dist.glob("*.tar.gz"))
+          if len(sdists) != 1:
+              raise SystemExit(f"expected exactly one .tar.gz, found {[p.name for p in sdists]}")
+          sdist_name, sdist_version = parse_sdist_filename(sdists[0].name)
+          if canonicalize_name(sdist_name) != "questdb" or sdist_version != version:
+              raise SystemExit(f"unexpected sdist identity: {sdists[0].name}")
+
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              members = archive.getmembers()
+              member_names = [member.name for member in members]
+              for name in member_names:
+                  path = Path(name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"unsafe sdist member path: {name}")
+              required_suffixes = (
+                  "/PKG-INFO",
+                  "/src/questdb/__init__.py",
+                  "/rpyutils/Cargo.toml",
+                  "/c-questdb-client/questdb-rs/Cargo.toml",
+                  "/c-questdb-client/questdb-rs-ffi/Cargo.toml",
+              )
+              for suffix in required_suffixes:
+                  if not any(name.endswith(suffix) for name in member_names):
+                      raise SystemExit(f"sdist missing required member ending in {suffix}")
+              print(
+                  f"sdist {sdists[0].name}: {len(members)} members, "
+                  f"{sdists[0].stat().st_size} bytes"
+              )
+
+          interpreters = ("cp310", "cp311", "cp312", "cp313", "cp314", "cp314t")
+          expected = set()
+          expected.update(product(interpreters, ("manylinux", "musllinux"), ("x86_64", "aarch64")))
+          expected.update(product(interpreters, ("macos",), ("x86_64", "arm64")))
+          expected.update(product(("cp310", "cp311", "cp312", "cp313", "cp314"), ("windows",), ("win32", "win_amd64")))
+
+          def classify_platform(platform):
+              linux = re.fullmatch(r"(manylinux[^.]*)_(x86_64|aarch64)", platform)
+              if linux:
+                  return "manylinux", linux.group(2), None
+              musl = re.fullmatch(r"(musllinux[^.]*)_(x86_64|aarch64)", platform)
+              if musl:
+                  return "musllinux", musl.group(2), None
+              mac = re.fullmatch(r"macosx_(\d+)_(\d+)_(x86_64|arm64|universal2)", platform)
+              if mac:
+                  return "macos", mac.group(3), (int(mac.group(1)), int(mac.group(2)))
+              if platform in ("win32", "win_amd64"):
+                  return "windows", platform, None
+              raise ValueError(f"unsupported platform tag {platform!r}")
+
+          def classify_tags(filename, tags):
+              targets = set()
+              for tag in tags:
+                  if tag.interpreter.startswith("cp"):
+                      if tag.interpreter not in {"cp310", "cp311", "cp312", "cp313", "cp314"}:
+                          raise ValueError(f"unsupported CPython interpreter tag {tag.interpreter!r}")
+                      if tag.interpreter == "cp314" and tag.abi == "cp314t":
+                          interpreter = "cp314t"
+                      elif tag.abi == tag.interpreter:
+                          interpreter = tag.interpreter
+                      else:
+                          raise ValueError(
+                              f"ABI {tag.abi!r} is inconsistent with {tag.interpreter!r}"
+                          )
+                  elif re.fullmatch(r"pp3\d+", tag.interpreter):
+                      if not tag.abi.startswith("pypy"):
+                          raise ValueError(f"invalid PyPy ABI {tag.abi!r}")
+                      interpreter = tag.interpreter
+                  else:
+                      raise ValueError(f"unsupported interpreter tag {tag.interpreter!r}")
+
+                  family, arch, mac_floor = classify_platform(tag.platform)
+                  if arch == "universal2":
+                      raise ValueError("macOS universal2 wheels are not release targets")
+                  if family == "macos" and arch == "arm64" and mac_floor < (11, 0):
+                      raise ValueError(f"macOS arm64 tag has deployment floor below 11.0: {tag.platform}")
+                  targets.add((interpreter, family, arch))
+              if len(targets) != 1:
+                  raise ValueError(f"tags span multiple semantic targets: {sorted(targets)}")
+              return targets.pop()
+
+          cpython = Counter()
+          pypy = Counter()
+          wheels = sorted(dist.glob("*.whl"))
+          for wheel in wheels:
+              try:
+                  name, wheel_version, _build, tags = parse_wheel_filename(wheel.name)
+                  if canonicalize_name(name) != "questdb" or wheel_version != version:
+                      raise ValueError(
+                          f"expected questdb {version}, got {canonicalize_name(name)} {wheel_version}"
+                      )
+                  target = classify_tags(wheel.name, tags)
+              except Exception as error:
+                  raise SystemExit(f"invalid wheel {wheel.name}: {error}") from error
+              if target[0].startswith("cp"):
+                  cpython[target] += 1
+              else:
+                  if target[1:] != ("manylinux", "x86_64"):
+                      raise SystemExit(f"unexpected PyPy wheel target {target}: {wheel.name}")
+                  pypy[target] += 1
+
+          missing = sorted(expected - set(cpython))
+          extra = sorted(set(cpython) - expected)
+          repeated = sorted(target for target, count in cpython.items() if count != 1)
+          if missing or extra or repeated:
+              raise SystemExit(
+                  f"CPython wheel matrix mismatch; missing={missing}, extra={extra}, repeated={repeated}"
+              )
+          if not pypy:
+              raise SystemExit("missing PyPy 3 manylinux x86_64 wheel")
+          repeated_pypy = sorted(target for target, count in pypy.items() if count != 1)
+          if repeated_pypy:
+              raise SystemExit(f"duplicate PyPy wheel target(s): {repeated_pypy}")
+
+          distributions = sorted(path.name for path in dist.iterdir() if path.is_file())
+          if len(distributions) != len(wheels) + 1:
+              raise SystemExit(f"unexpected distribution payload: {distributions}")
+          print(f"validated {len(wheels)} wheels and one source distribution")
+          PY
+
+      - name: Check distribution metadata
+        run: |
+          set -Eeuo pipefail
+          python -m twine check dist/*
+
+      - name: Generate release notes
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          lines = Path("CHANGELOG.rst").read_text().splitlines()
+          heading_re = re.compile(r"^(\d+\.\d+\.\d+(?:[a-zA-Z0-9.-]+)?) \([^)]+\)$")
+          start = next((i for i, line in enumerate(lines)
+                        if line.startswith(version + " (") and heading_re.fullmatch(line)), None)
+          if start is None:
+              raise SystemExit(f"no changelog section for {version}")
+          end = next((i for i in range(start + 2, len(lines)) if heading_re.fullmatch(lines[i])), len(lines))
+          section = lines[start:end]
+
+          converted = []
+          index = 0
+          while index < len(section):
+              line = section[index]
+              if index + 1 < len(section) and re.fullmatch(r"[-~^=]+", section[index + 1]):
+                  level = "#" if section[index + 1][0] in "=-" else "##"
+                  converted.append(f"{level} {line}")
+                  index += 2
+                  continue
+              line = re.sub(r"``([^`]+)``", r"`\1`", line)
+              line = re.sub(r":[A-Za-z0-9_-]+:`([^`<]+?)\s*<[^`>]+>`", r"\1", line)
+              line = re.sub(r":[A-Za-z0-9_-]+:`([^`]+)`", r"\1", line)
+              converted.append(line)
+              index += 1
+          Path("release-notes.md").write_text("\n".join(converted).rstrip() + "\n")
+          PY
+
+      - name: Write preparation summary
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.release_sha }}
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "## Validated release bundle"
+            echo
+            echo "- Release commit: \`$RELEASE_SHA\`"
+            echo "- macOS arm64 source run: $GHA_SOURCE_URL"
+            echo "- Azure source build: $AZURE_SOURCE_URL"
+            echo "- Package count: $(find dist -maxdepth 1 -type f | wc -l)"
+            echo
+            echo "### Packages"
+            find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | sed 's/^/- `/' | sed 's/$/`/'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: |
+            dist/*
+            release-notes.md
+          retention-days: 7
+          if-no-files-found: error
