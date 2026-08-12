@@ -121,7 +121,9 @@ cdef inline bytes _oidc_optional_utf8(object value, str name):
 cdef void _oidc_event_dispatch(
         void* user_data,
         const questdb_oidc_event* event) noexcept with gil:
-    renderer = <object>user_data
+    renderer = _oidc_renderer_from_user_data(user_data)
+    if renderer is None:
+        return
     try:
         if event.kind == QUESTDB_OIDC_EVENT_PROMPT:
             renderer.on_prompt({
@@ -206,6 +208,7 @@ cdef void _oidc_builder_set_string(
 cdef class OidcDeviceAuth:
     """Native-backed OAuth 2.0 device-flow token provider for QuestDB."""
 
+    cdef object __weakref__
     cdef questdb_oidc_auth* _raw
     cdef object _renderer
 
@@ -336,6 +339,7 @@ cdef class OidcDeviceAuth:
         cdef bytes encoded
         cdef uint64_t timeout_ms
         cdef PyThreadState* gs = NULL
+        cdef object event_user_data
         from questdb.auth._errors import OidcConfigError
         from questdb.auth._render import (
             detect_interactive, in_ipython_kernel, make_renderer)
@@ -401,17 +405,19 @@ cdef class OidcDeviceAuth:
         self._renderer = renderer if renderer is not None else make_renderer(qr=bool(qr))
         if not hasattr(self._renderer, 'on_prompt'):
             raise OidcConfigError('renderer must implement the Renderer interface')
-        Py_INCREF(self._renderer)
+        event_user_data = PyWeakref_NewRef(self, None)
+        Py_INCREF(event_user_data)
         if not questdb_oidc_builder_event_handler(
                 builder,
                 _oidc_event_trampoline,
-                <void*>self._renderer,
+                <void*>event_user_data,
                 _oidc_user_data_release_trampoline,
                 &err):
-            Py_DECREF(self._renderer)
+            Py_DECREF(event_user_data)
             raise _oidc_err_to_py(err)
-        # Ownership of the extra renderer reference now belongs to the native
-        # callback state, including any transport clones made from this auth.
+        # Native callback state owns only the extra reference to this weakref.
+        # The provider owns the renderer, keeping provider/renderer cycles fully
+        # visible to Python's cyclic GC. Attached transports retain the provider.
         _ensure_doesnt_have_gil(&gs)
         self._raw = questdb_oidc_builder_build(builder, &err)
         _ensure_has_gil(&gs)
@@ -499,3 +505,18 @@ cdef class OidcDeviceAuth:
         if self._raw != NULL:
             questdb_oidc_auth_free(self._raw)
             self._raw = NULL
+
+
+cdef object _oidc_renderer_from_user_data(void* user_data):
+    cdef PyObject* provider_obj = NULL
+    cdef int provider_state
+    try:
+        provider_state = PyWeakref_GetRef(
+            <object>user_data, &provider_obj)
+        if provider_state <= 0:
+            if provider_state < 0:
+                PyErr_Clear()
+            return None
+        return (<OidcDeviceAuth><object>provider_obj)._renderer
+    finally:
+        Py_XDECREF(provider_obj)

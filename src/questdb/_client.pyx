@@ -73,6 +73,7 @@ from cpython.datetime cimport (
     PyDateTime_DATE_GET_SECOND, PyDateTime_DATE_GET_MICROSECOND,
 )
 from cpython.bool cimport bool
+from cpython.exc cimport PyErr_Clear
 from cpython.ref cimport Py_XDECREF
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject

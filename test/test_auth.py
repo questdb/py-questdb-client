@@ -162,6 +162,22 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaises(OidcInteractionRequired):
             auth.token()
 
+    def test_renderer_provider_cycle_is_collected(self):
+        renderer = Renderer()
+        auth = make_auth(renderer=renderer)
+        renderer.auth = auth
+        renderer_ref = weakref.ref(renderer)
+        auth_ref = weakref.ref(auth)
+
+        del renderer, auth
+        for _ in range(3):
+            gc.collect()
+            if renderer_ref() is None and auth_ref() is None:
+                break
+
+        self.assertIsNone(renderer_ref())
+        self.assertIsNone(auth_ref())
+
 
 class NativeTransportAttachmentTest(unittest.TestCase):
     def setUp(self):
@@ -190,11 +206,8 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         gc.collect()
         self.assertIsNotNone(renderer_ref())
         sender.close(flush=False)
-        # PyPy's tracing GC may finalize ``auth`` after a collection has
-        # already marked the renderer through its native callback reference.
-        # Finalizing ``auth`` releases that reference, and the renderer is then
-        # reclaimed by the next collection. Keep the assertion bounded while
-        # allowing that two-phase cpyext cleanup.
+        # PyPy's tracing GC may need another collection after finalizing the
+        # provider and releasing its renderer reference.
         for _ in range(3):
             gc.collect()
             if renderer_ref() is None:
