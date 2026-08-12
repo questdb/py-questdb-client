@@ -8,6 +8,7 @@ from questdb import _client
 from questdb._client import (
     ConnectionEvent,
     ConnectionEventKind,
+    OidcDeviceAuth as _OidcDeviceAuth,
     PooledReader,
     PooledSender,
     Protocol,
@@ -78,7 +79,7 @@ def connect(
         host: _Optional[str] = None,
         port: _Union[int, str, None] = None,
         tls: _Optional[bool] = None,
-        oidc_auth=None,
+        oidc_auth: _Optional[_OidcDeviceAuth] = None,
         connection_listener: _Optional[
             _Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,

@@ -60,6 +60,10 @@ import numpy as np
 import pandas as pd
 from decimal import Decimal
 
+from .auth._config import OidcConfig
+from .auth._render import Renderer
+from .auth._store import FileTokenStore
+
 
 class OidcDeviceAuth:
     """Native-backed OAuth 2.0 device-flow token provider."""
@@ -79,10 +83,10 @@ class OidcDeviceAuth:
         open_browser: bool = True,
         interactive: Optional[bool] = None,
         qr: bool = False,
-        renderer: Any = None,
+        renderer: Optional[Renderer] = None,
         default_interval: int = 5,
         timeout: float = 30,
-        token_store: Any = None,
+        token_store: Optional[FileTokenStore] = None,
     ) -> None: ...
 
     @classmethod
@@ -102,10 +106,10 @@ class OidcDeviceAuth:
         open_browser: bool = True,
         interactive: Optional[bool] = None,
         qr: bool = False,
-        renderer: Any = None,
+        renderer: Optional[Renderer] = None,
         default_interval: int = 5,
         timeout: float = 30,
-        token_store: Any = None,
+        token_store: Optional[FileTokenStore] = None,
     ) -> OidcDeviceAuth: ...
 
     def sign_in(self) -> None:
@@ -119,7 +123,7 @@ class OidcDeviceAuth:
     def clear(self) -> None: ...
 
     @property
-    def config(self) -> Any: ...
+    def config(self) -> OidcConfig: ...
 
 class QuestDBErrorCode(Enum):
     """Category of Error."""
