@@ -438,6 +438,48 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertGreater(renderer.successes[0][1], 0)
         self.assertEqual(renderer.failures, [])
 
+    def test_renderer_on_waiting_fires_while_authorization_pending(self):
+        # The native poll loop emits WAITING between polls while the IdP replies
+        # authorization_pending. The binding must map event.seconds_left ->
+        # on_waiting (a struct-field mis-map would silently drop the countdown).
+        # The first poll returns pending (one poll-interval wait follows), the
+        # second falls through to the default success.
+        renderer = RecordingRenderer()
+        with OidcTestServer(device_token_responses=[
+                (400, {'error': 'authorization_pending'}, None)]) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            auth.sign_in()
+            self.assertEqual(auth.token(), 'AT-initial')
+        self.assertTrue(
+            renderer.waiting,
+            'on_waiting was never called during authorization_pending')
+        for seconds_left in renderer.waiting:
+            self.assertIsInstance(seconds_left, float)
+            self.assertGreater(seconds_left, 0.0)
+        # The flow still completed: SUCCESS fired, FAILURE did not.
+        self.assertEqual(len(renderer.successes), 1)
+        self.assertEqual(renderer.failures, [])
+
+    def test_renderer_on_failure_receives_native_message(self):
+        # A terminal device-flow error emits FAILURE. The binding must map
+        # event.message -> on_failure; event.identity is NULL for FAILURE, so a
+        # mis-map to it would surface the 'OIDC sign-in failed.' fallback instead
+        # of the real message. Assert the sanitized IdP-derived text reaches it.
+        renderer = RecordingRenderer()
+        with OidcTestServer(device_token_response=(400, {
+                'error': 'access_denied',
+                'error_description': 'The user denied the request.'},
+                None)) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            with self.assertRaises(OidcDeviceFlowError):
+                auth.sign_in()
+        self.assertEqual(len(renderer.failures), 1)
+        message = renderer.failures[0]
+        self.assertIsInstance(message, str)
+        self.assertIn('The user denied the request.', message)
+        # SUCCESS must not fire on the failure path.
+        self.assertEqual(renderer.successes, [])
+
     def test_expired_token_is_refreshed_without_device_flow(self):
         with OidcTestServer(
                 initial_access_token=EXPIRED_ACCESS_TOKEN) as server:

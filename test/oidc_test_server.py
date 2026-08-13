@@ -25,6 +25,7 @@ class OidcTestServer:
             refreshed_expires_in=300,
             write_statuses=(),
             device_token_response=None,
+            device_token_responses=(),
             refresh_token_response=None):
         self.initial_access_token = initial_access_token
         self.initial_expires_in = initial_expires_in
@@ -37,7 +38,13 @@ class OidcTestServer:
         # ``headers`` is an optional dict (e.g. ``{'Retry-After': '7'}``).
         # ``device_token_response`` overrides the device-grant poll response;
         # ``refresh_token_response`` overrides the refresh-grant response.
+        # ``device_token_responses`` is a sequence consumed one entry per
+        # successive device-grant poll (e.g. an ``authorization_pending`` reply
+        # followed by the default success), for driving the multi-poll path;
+        # once it is exhausted the server falls back to ``device_token_response``
+        # (or the default success).
         self.device_token_response = device_token_response
+        self._device_token_responses = list(device_token_responses)
         self.refresh_token_response = refresh_token_response
         self._write_statuses = list(write_statuses)
         self._lock = threading.Lock()
@@ -153,8 +160,13 @@ class OidcTestServer:
                     'expires_in': self.refreshed_expires_in,
                 })
             else:
-                if self.device_token_response is not None:
-                    self._emit(handler, self.device_token_response)
+                with self._lock:
+                    override = (
+                        self._device_token_responses.pop(0)
+                        if self._device_token_responses
+                        else self.device_token_response)
+                if override is not None:
+                    self._emit(handler, override)
                     return
                 self._json(handler, 200, {
                     'access_token': self.initial_access_token,
