@@ -2647,6 +2647,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 txn.rollback()
 
     def test_qwp_websocket_accepts_all_row_types(self):
+        date_millis = -0x0102030405060708
+        long256 = 2 ** 255 + 7
         with QwpAckServer(record_payloads=True) as server:
             with qi.Sender.from_conf(
                     f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
@@ -2658,8 +2660,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         'ipv4_col': ipaddress.IPv4Address('192.0.2.1'),
                         'binary_col': b'',
                         'char_col': qi.Char('Q'),
-                        'date_col': qi.DateMillis(-1),
-                        'long256_col': qi.Long256(2 ** 255 + 7),
+                        'date_col': qi.DateMillis(date_millis),
+                        'long256_col': qi.Long256(long256),
                         'geohash_col': qi.Geohash.from_string('u33d8'),
                     },
                     at=qi.TimestampNanos(1_700_000_000_000_000_000))
@@ -2668,6 +2670,62 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['qwp1_frames'], 1)
+
+        payload = next(
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0))
+        pos = 12
+
+        delta_start, pos = _read_qwp_varint(payload, pos)
+        delta_count, pos = _read_qwp_varint(payload, pos)
+        self.assertEqual((delta_start, delta_count), (0, 0))
+
+        table_name_len, pos = _read_qwp_varint(payload, pos)
+        self.assertEqual(
+            payload[pos:pos + table_name_len], b'qwp_row_types')
+        pos += table_name_len
+        row_count, pos = _read_qwp_varint(payload, pos)
+        column_count, pos = _read_qwp_varint(payload, pos)
+        self.assertEqual((row_count, column_count), (1, 8))
+
+        schema = []
+        for _ in range(column_count):
+            name_len, pos = _read_qwp_varint(payload, pos)
+            name = payload[pos:pos + name_len]
+            pos += name_len
+            schema.append((name, payload[pos]))
+            pos += 1
+        self.assertEqual(schema, [
+            (b'uuid_col', 0x0C),
+            (b'ipv4_col', 0x18),
+            (b'binary_col', 0x17),
+            (b'char_col', 0x16),
+            (b'date_col', 0x0B),
+            (b'long256_col', 0x0D),
+            (b'geohash_col', 0x0E),
+            (b'', 0x10),  # designated TIMESTAMP_NS
+        ])
+
+        def assert_dense_column(expected):
+            nonlocal pos
+            self.assertEqual(payload[pos], 0)  # no null bitmap
+            pos += 1
+            self.assertEqual(payload[pos:pos + len(expected)], expected)
+            pos += len(expected)
+
+        assert_dense_column(self.UUID_VALUE.int.to_bytes(16, 'little'))
+        assert_dense_column(b'\x01\x02\x00\xc0')
+        assert_dense_column(b'\x00' * 8)  # empty BINARY offsets [0, 0]
+        assert_dense_column(b'Q\x00')
+        assert_dense_column(date_millis.to_bytes(8, 'little', signed=True))
+        assert_dense_column(b'\x07' + b'\x00' * 30 + b'\x80')
+        # precision=25, then ceil(25/8) little-endian value bytes
+        assert_dense_column(b'\x19\x88\x8d\xa1\x01')
+        assert_dense_column(
+            (1_700_000_000_000_000_000).to_bytes(
+                8, 'little', signed=True))
+        self.assertEqual(pos, len(payload))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
