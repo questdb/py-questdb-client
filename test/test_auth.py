@@ -259,6 +259,36 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaises(OidcConfigError):
             make_auth(default_interval=1 << 80)
 
+    def test_default_interval_validation(self):
+        # Complements test_interval_overflow_is_typed (the > uint64-max branch):
+        # cover the remaining branches of the same guard -- <= 0, bool (an int
+        # subclass but never a meaningful interval), and non-int.
+        for value in (0, -1, True, 1.5, 'x', None):
+            with self.subTest(value=value), self.assertRaises(OidcConfigError):
+                make_auth(default_interval=value)
+
+    def test_closed_provider_is_rejected(self):
+        # A provider built with __new__ but never __init__'d has _raw == NULL
+        # ("closed"). Its own token-flow ops raise RuntimeError, and attaching it
+        # to a transport raises ValueError -- never a native NULL deref. clear()
+        # is a documented no-op on a closed provider.
+        closed = OidcDeviceAuth.__new__(OidcDeviceAuth)
+        for op in ('sign_in', 'token', 'headers'):
+            with self.subTest(op=op), self.assertRaisesRegex(
+                    RuntimeError, 'closed'):
+                getattr(closed, op)()
+        with self.assertRaisesRegex(RuntimeError, 'closed'):
+            closed.config
+        closed.clear()  # idempotent no-op on a closed provider
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            questdb.Sender(
+                questdb.Protocol.Http, '127.0.0.1', 9000,
+                oidc_auth=closed, auto_flush=False)
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                oidc_auth=closed)
+
     def test_invalid_unicode_is_typed(self):
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth(
@@ -900,6 +930,32 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 sender.flush()
             self.assertNotIsInstance(ctx.exception, questdb.QuestDBError)
 
+    def test_query_and_connect_surface_typed_oidc_error(self):
+        # The read/connect side, like flush/dataframe above: an unsigned
+        # provider's token pull fails at reader-borrow / pool-connect and
+        # surfaces the typed OidcError (NOT a QuestDBError), so `except
+        # QuestDBError` does not swallow it. Deterministic for the same reason as
+        # the flush test -- the native provider pulls the (absent) token before
+        # the socket, so the result is OidcInteractionRequired regardless of
+        # whether 127.0.0.1:9000 is up. The borrow-time failure is typed on every
+        # output path; __arrow_c_stream__ needs no optional dependency, so use it
+        # as the primary assertion. (The zero-copy stream's untyped-OSError
+        # limitation applies only to a refresh that fails mid-stream, after
+        # iteration has begun -- not unit-triggerable.)
+        with questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                oidc_auth=make_auth()) as client:
+            with self.assertRaises(OidcInteractionRequired) as ctx:
+                client.query('select 1').__arrow_c_stream__()
+            self.assertNotIsInstance(ctx.exception, questdb.QuestDBError)
+            if pd is not None:
+                with self.assertRaises(OidcInteractionRequired):
+                    client.query('select 1').to_pandas()
+        # Non-lazy connect surfaces the same typed error at pool-open time.
+        with self.assertRaises(OidcInteractionRequired) as ctx:
+            questdb.connect('ws::addr=127.0.0.1:9000;', oidc_auth=make_auth())
+        self.assertNotIsInstance(ctx.exception, questdb.QuestDBError)
+
     def test_sender_from_env_accepts_shared_provider(self):
         with mock.patch.dict(
                 os.environ,
@@ -1015,6 +1071,18 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertNotIn('／', shown)
         self.assertIn('\\uff0f', shown)
 
+    def test_display_url_escapes_idna_minted_backslash(self):
+        # U+FF3C fullwidth reverse solidus PASSES urlparse (whose NFKC
+        # delimiter-reject covers '/ @ :' but not '\') yet nameprep folds it to
+        # a literal '\', which a WHATWG/browser parser treats as '/', ending the
+        # host early. This exercises the post-IDNA '\\/@?#' guard -- the distinct
+        # branch the U+FF0F test above does NOT reach (that one makes urlparse
+        # raise before IDNA). The confusable must be shown \u-escaped, never as
+        # a bare '\'.
+        shown = _render._display_url('https://exa＼mple.com/x')
+        self.assertNotIn('＼', shown)   # raw fullwidth char gone
+        self.assertIn('\\uff3c', shown)     # shown as its visible escape
+
     def test_display_url_preserves_plain_host_and_port(self):
         self.assertEqual(_render._display_url('https://ok.example:9000/x'),
                          'https://ok.example:9000/x')
@@ -1077,6 +1145,50 @@ class RenderSanitizerTest(unittest.TestCase):
                 'verification_uri': 'https://idp.example/v',
                 'verification_uri_complete': 'https://evil.example/c'}),
             'https://idp.example/v')
+
+    def test_jupyter_renderer_sanitizes_and_escapes_untrusted_fields(self):
+        # The "Jupyter-first" renderer writes untrusted, MITM-tamperable IdP
+        # fields (user_code, verification_uri, JWT identity, error message) into
+        # the notebook DOM. The per-field helpers are tested above; this drives
+        # JupyterRenderer end-to-end with a fake IPython.display and pins that
+        # it actually applies them -- stripping control/bidi/zero-width chars,
+        # html-escaping injected markup, and never linkifying a dangerous scheme.
+        captured = []
+
+        class _FakeHTML:
+            def __init__(self, data):
+                self.data = data
+
+        class _FakeHandle:
+            def update(self, obj):
+                captured.append(obj.data)
+
+        def _fake_display(obj, display_id=None):
+            captured.append(obj.data)
+            return _FakeHandle()
+
+        ipython = types.ModuleType('IPython')
+        display_mod = types.ModuleType('IPython.display')
+        display_mod.HTML = _FakeHTML
+        display_mod.display = _fake_display
+        ipython.display = display_mod
+        with mock.patch.dict(
+                sys.modules,
+                {'IPython': ipython, 'IPython.display': display_mod}):
+            renderer = _render.JupyterRenderer(qr=False)
+            renderer.on_prompt({
+                'user_code': 'AB​CD',                    # zero-width space
+                'verification_uri': 'javascript:alert(1)'})   # dangerous scheme
+            renderer.on_success('ev<script>il‮', 600)    # markup + bidi
+            renderer.on_failure('boom <img src=x> ​')    # markup + zero-width
+        html = '\n'.join(captured)
+        self.assertTrue(captured, 'renderer emitted nothing')
+        self.assertNotIn('​', html)              # zero-width stripped
+        self.assertNotIn('‮', html)              # bidi override stripped
+        self.assertIn('&lt;script&gt;', html)         # identity markup escaped
+        self.assertNotIn('<script>', html)
+        self.assertIn('&lt;img', html)                # message markup escaped
+        self.assertNotIn('href="javascript:', html)   # dangerous scheme inert
 
 
 class AdapterTest(unittest.TestCase):
@@ -1144,6 +1256,18 @@ class AdapterTest(unittest.TestCase):
             _adapters._require_host('file://evil.example/')
         with self.assertRaises(OidcConfigError):
             _adapters._require_host('localhost')  # no scheme/authority
+
+    def test_require_host_rejects_non_string_override(self):
+        # A truthy non-str host= override (int, bytes, arbitrary object) must
+        # surface as the package's typed OidcConfigError, not the bare
+        # AttributeError/TypeError it would otherwise raise on .startswith() /
+        # the host regex -- mirroring _coerce_port's up-front type guard. An
+        # empty string and None stay valid (they fall back to the URL host).
+        for bad in (123, b'evil.example', object(), ['h']):
+            with self.subTest(bad=bad), self.assertRaises(OidcConfigError):
+                _adapters._require_host('https://ok.example:9000/', bad)
+        self.assertEqual(
+            _adapters._require_host('https://ok.example/', ''), 'ok.example')
 
     def test_psycopg_rejects_unsafe_url_before_token_or_connection(self):
         for url in self.unsafe_urls:
