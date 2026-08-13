@@ -18,6 +18,9 @@ Changelog
   of ``TypeError``.
 - DataFrame BINARY columns now accept ``bytearray`` and ``memoryview`` cells
   in addition to ``bytes``.
+- DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
+  of silently discarding their network prefix. Pass an
+  ``ipaddress.IPv4Address`` value instead.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
