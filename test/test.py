@@ -2771,14 +2771,19 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
                     fsn = sender.flush_and_get_fsn()
                     self.assertTrue(sender.await_acked_fsn(fsn, 30000))
 
+                    # Mixed precisions within one batch are unrepresentable
+                    # on the wire (one precision per column chunk), so the
+                    # client pins the precision at the first value and
+                    # rejects the mismatch at row() time.
                     sender.row(
                         mixed_table, columns={'gh': qi.Geohash(1, 1)},
                         at=qi.TimestampMicros(3))
-                    sender.row(
-                        mixed_table, columns={'gh': qi.Geohash(1, 5)},
-                        at=qi.TimestampMicros(4))
-                    with self.assertRaises(qi.QuestDBError):
-                        sender.flush_and_get_fsn()
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            'precision mismatch within column'):
+                        sender.row(
+                            mixed_table, columns={'gh': qi.Geohash(1, 5)},
+                            at=qi.TimestampMicros(4))
                 finally:
                     sender.close(False)
 
@@ -2789,11 +2794,14 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
                         f'gh8, gh60 FROM {table_name} ORDER BY ts').to_arrow().to_pylist()
 
             first, second = rows
-            if isinstance(first['u'], bytes):
-                self.assertEqual(int.from_bytes(first['u'], 'little'),
-                                 normal_uuid.int)
-            else:
-                self.assertEqual(first['u'], normal_uuid)
+            # Egress forwards UUID bytes verbatim in QuestDB's wire layout
+            # (lo half LE, hi half LE) even under the `arrow.uuid` label --
+            # the documented c-questdb-client family convention -- so decode
+            # little-endian regardless of whether pyarrow surfaces the cell
+            # as raw bytes or wraps it in a `uuid.UUID`.
+            raw_u = (first['u'] if isinstance(first['u'], bytes)
+                     else first['u'].bytes)
+            self.assertEqual(int.from_bytes(raw_u, 'little'), normal_uuid.int)
             self.assertEqual(first['ip'], int(ipaddress.IPv4Address('192.0.2.1')))
             self.assertEqual(first['bin'], b'')
             self.assertEqual(first['ch'], ord('Q'))
@@ -2802,8 +2810,11 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
             self.assertEqual(
                 [first[name] for name in ('gh1', 'gh5', 'gh7', 'gh8', 'gh60')],
                 [1, 31, 85, 170, (1 << 60) - 1])
-            for name in ('u', 'ip', 'ch', 'dt', 'l'):
+            for name in ('u', 'ip', 'dt', 'l'):
                 self.assertIsNone(second[name])
+            # CHAR has no NULL in QuestDB: the '\x00' sentinel is stored as
+            # code unit 0 (rendered '' in text output, 0 in Arrow egress).
+            self.assertEqual(second['ch'], 0)
             self.assertEqual(second['bin'], b'x')
             self.assertEqual(
                 [second[name] for name in ('gh1', 'gh5', 'gh7', 'gh8', 'gh60')],
