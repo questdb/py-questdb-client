@@ -860,7 +860,10 @@ cdef class TimestampNanos:
 cdef class Char:
     """A QuestDB CHAR value stored as one UTF-16 code unit.
 
-    ``'\\x00'`` is accepted but reads back from QuestDB as ``NULL``.
+    ``'\\x00'`` is stored as code unit 0. CHAR has no physical ``NULL``
+    representation: QWP/Arrow egress returns it as 0, while text output
+    renders it as empty. Some QuestDB SQL operations treat code unit 0 as
+    CHAR's null/absent marker.
     """
     cdef uint16_t _value
 
@@ -1799,11 +1802,13 @@ cdef class Buffer:
         9.4.0 or newer; BINARY and IPV4 require QuestDB 9.4.1 or newer.
 
         QuestDB reserves these values as ``NULL`` sentinels, but the client
-        deliberately accepts them: IPV4 ``0.0.0.0``, CHAR ``'\\x00'``, DATE
-        ``INT64_MIN``, UUID ``80000000-0000-0000-8000-000000000000``, and a
-        LONG256 whose four 64-bit limbs are all ``0x8000000000000000``.
-        GEOHASH has no sentinel collision. Empty BINARY ``b''`` is a real
-        empty value and is distinct from ``NULL``.
+        deliberately accepts them: IPV4 ``0.0.0.0``, DATE ``INT64_MIN``, UUID
+        ``80000000-0000-0000-8000-000000000000``, and a LONG256 whose four
+        64-bit limbs are all ``0x8000000000000000``. CHAR has no physical
+        ``NULL`` sentinel: ``'\\x00'`` is stored as code unit 0, although some
+        SQL operations treat it as CHAR's null/absent marker. GEOHASH has no
+        sentinel collision. Empty BINARY ``b''`` is a real empty value and is
+        distinct from ``NULL``.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible

@@ -615,10 +615,12 @@ class Buffer:
         The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``.
         UUID/LONG256/CHAR/DATE/GEOHASH require QuestDB 9.4.0+; BINARY/IPV4
         require 9.4.1+. Their reserved ``NULL`` sentinels are accepted:
-        IPV4 ``0.0.0.0``, CHAR ``'\\x00'``, DATE ``INT64_MIN``, UUID
+        IPV4 ``0.0.0.0``, DATE ``INT64_MIN``, UUID
         ``80000000-0000-0000-8000-000000000000``, and LONG256 with all four
-        limbs equal to ``0x8000000000000000``. GEOHASH has no collision, and
-        empty BINARY ``b''`` is distinct from ``NULL``.
+        limbs equal to ``0x8000000000000000``. CHAR has no physical ``NULL``
+        sentinel: ``'\\x00'`` is stored as code unit 0, although some SQL
+        operations treat it as CHAR's null/absent marker. GEOHASH has no
+        collision, and empty BINARY ``b''`` is distinct from ``NULL``.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible

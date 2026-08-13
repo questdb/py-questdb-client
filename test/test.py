@@ -2813,8 +2813,8 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
                 [1, 31, 85, 170, (1 << 60) - 1])
             for name in ('u', 'ip', 'dt', 'l'):
                 self.assertIsNone(second[name])
-            # CHAR has no NULL in QuestDB: the '\x00' sentinel is stored as
-            # code unit 0 (rendered '' in text output, 0 in Arrow egress).
+            # CHAR has no physical/QWP NULL representation: '\x00' is stored
+            # as code unit 0 (rendered '' in text output, 0 in Arrow egress).
             self.assertEqual(second['ch'], 0)
             self.assertEqual(second['bin'], b'x')
             self.assertEqual(
