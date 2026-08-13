@@ -283,7 +283,18 @@ class NativeOidcTest(unittest.TestCase):
         auth_ref = weakref.ref(auth)
 
         del renderer, auth
-        for _ in range(3):
+        # The provider<->renderer cycle is collectable because the native side
+        # holds only a weakref to the provider, so no C-level strong reference
+        # pins it. CPython reclaims it on the first gc.collect(). PyPy's tracing
+        # GC collects a cycle whose member has a finalizer
+        # (OidcDeviceAuth.__dealloc__, which frees the native handle) in stages:
+        # the finalizer runs in one collection, the cycle is reclaimed in a
+        # later one, and the native release drops the weakref as a further
+        # object -- so it needs several passes, more than the finalizer-free
+        # chain in test_sender_keeps_renderer_alive_until_close (3 is not
+        # enough). Retry generously; the break exits as soon as it is collected,
+        # so this stays cheap on CPython (one pass) and non-flaky on PyPy.
+        for _ in range(50):
             gc.collect()
             if renderer_ref() is None and auth_ref() is None:
                 break
