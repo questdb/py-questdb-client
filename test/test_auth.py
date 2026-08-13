@@ -173,6 +173,33 @@ class NativeOidcTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {'IPython': ipython}):
             self.assertTrue(in_ipython_kernel())
 
+    def test_notebook_executor_without_stdin_is_non_interactive(self):
+        # A notebook executor (papermill / nbclient / nbconvert --execute) runs a
+        # real ZMQ kernel -- in_ipython_kernel() is True -- but with
+        # allow_stdin=False: no human can authorize. detect_interactive() must
+        # then be False so sign-in fails fast with OidcInteractionRequired instead
+        # of polling to the device-code deadline (a silent CI/notebook hang).
+        for allow, expected in [(False, False), (True, True), (None, True)]:
+            with self.subTest(allow_stdin=allow):
+                ipython = types.ModuleType('IPython')
+                shell = type('ZMQInteractiveShell', (), {})()
+                shell.kernel = types.SimpleNamespace(_allow_stdin=allow)
+                ipython.get_ipython = lambda shell=shell: shell
+                with mock.patch.dict(sys.modules, {'IPython': ipython}):
+                    self.assertTrue(in_ipython_kernel())
+                    self.assertEqual(
+                        _render._kernel_allows_stdin(), expected)
+                    self.assertEqual(_render.detect_interactive(), expected)
+
+    def test_terminal_shell_is_treated_as_stdin_capable(self):
+        # A terminal IPython shell has no `kernel` attribute; a human is at the
+        # REPL, so stdin is assumed available (fail-open, not fail-fast).
+        ipython = types.ModuleType('IPython')
+        shell = type('TerminalInteractiveShell', (), {})()
+        ipython.get_ipython = lambda: shell
+        with mock.patch.dict(sys.modules, {'IPython': ipython}):
+            self.assertTrue(_render._kernel_allows_stdin())
+
     def test_explicit_config_round_trip(self):
         auth = make_auth(
             scope='groups',
@@ -259,6 +286,20 @@ class NativeOidcTest(unittest.TestCase):
         self.assertIs(type(err), OidcError)  # base class, not a typed subclass
         self.assertIsNone(err.status)
         self.assertIsNone(err.retry_after)
+
+    def test_oidc_errors_are_not_questdb_errors(self):
+        # The whole feature relies on OidcError being deliberately NOT a
+        # QuestDBError: a transport attached with oidc_auth= routes OIDC failures
+        # through c_err_to_py as typed OidcErrors, and `except QuestDBError` must
+        # NOT swallow them. Pin the class hierarchy directly (the transport-path
+        # behaviour is covered by the attachment tests).
+        self.assertFalse(issubclass(OidcError, questdb.QuestDBError))
+        for exc_type in (
+                OidcConfigError, OidcNetworkError, OidcInteractionRequired,
+                OidcDeviceFlowError, OidcTimeoutError):
+            with self.subTest(exc_type=exc_type.__name__):
+                self.assertTrue(issubclass(exc_type, OidcError))
+                self.assertNotIsInstance(exc_type('x'), questdb.QuestDBError)
 
     def test_custom_store_is_rejected(self):
         with self.assertRaisesRegex(OidcConfigError, 'FileTokenStore'):
@@ -510,6 +551,35 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertIn('The user denied the request.', message)
         # SUCCESS must not fire on the failure path.
         self.assertEqual(renderer.successes, [])
+
+    def test_renderer_callback_that_raises_is_logged_not_fatal(self):
+        # A buggy user renderer that raises inside a callback must not abort an
+        # otherwise-successful sign-in. The native event trampoline is
+        # `noexcept nogil`, so an exception leaking out of dispatch would be
+        # crash-adjacent; the binding's dispatch guard swallows it and logs to
+        # the 'questdb' logger instead.
+        class RaisingRenderer(Renderer):
+            def on_prompt(self, response):
+                raise RuntimeError('boom-prompt')
+
+            def on_waiting(self, seconds_left):
+                raise RuntimeError('boom-waiting')
+
+            def on_success(self, identity, expires_in):
+                raise RuntimeError('boom-success')
+
+            def on_failure(self, message):
+                raise RuntimeError('boom-failure')
+
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server, renderer=RaisingRenderer())
+            with self.assertLogs('questdb', level='ERROR') as logs:
+                auth.sign_in()
+                self.assertEqual(auth.token(), 'AT-initial')
+        self.assertTrue(
+            any('OIDC renderer callback failed' in line
+                for line in logs.output),
+            logs.output)
 
     def test_expired_token_is_refreshed_without_device_flow(self):
         with OidcTestServer(
@@ -808,6 +878,35 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     pd.DataFrame({'value': [1]}),
                     table_name='oidc_auto_flush',
                     at=questdb.ServerTimestamp)
+
+    def test_flush_surfaces_oidc_error_not_questdb_error(self):
+        # The plain row()/flush() path (not the dataframe path) whose OIDC token
+        # pull fails at connect must surface the typed OidcError through
+        # c_err_to_py. It is NOT a QuestDBError, so `except QuestDBError` around a
+        # flush does not catch it. Complements
+        # test_dataframe_auto_flush_preserves_oidc_error (the dataframe path).
+        auth = make_auth()  # never signed in
+        with questdb.Sender(
+                questdb.Protocol.Http,
+                '127.0.0.1',
+                9000,
+                oidc_auth=auth,
+                auto_flush=False,
+                protocol_version=2) as sender:
+            sender.row(
+                'oidc_flush', columns={'value': 1},
+                at=questdb.ServerTimestamp)
+            with self.assertRaises(OidcInteractionRequired) as ctx:
+                sender.flush()
+            self.assertNotIsInstance(ctx.exception, questdb.QuestDBError)
+
+    def test_sender_from_env_accepts_shared_provider(self):
+        with mock.patch.dict(
+                os.environ,
+                {'QDB_CLIENT_CONF': 'https::addr=localhost:9000;'}):
+            sender = questdb.Sender.from_env(
+                oidc_auth=self.auth, auto_flush=False)
+        sender.close(flush=False)
 
 
 class RenderSanitizerTest(unittest.TestCase):
