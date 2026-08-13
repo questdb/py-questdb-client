@@ -64,6 +64,40 @@ This prevents a reconnect, SQLAlchemy pool worker, or ingestion background
 thread from unexpectedly launching a browser flow. Applications should call
 ``sign_in()`` on their UI/main thread before opening transports.
 
+Error handling
+==============
+
+All :mod:`questdb.auth` failures are :class:`~questdb.auth.OidcError`
+subclasses — :class:`~questdb.auth.OidcConfigError`,
+:class:`~questdb.auth.OidcNetworkError`,
+:class:`~questdb.auth.OidcInteractionRequired`,
+:class:`~questdb.auth.OidcDeviceFlowError`, and
+:class:`~questdb.auth.OidcTimeoutError`. ``OidcError`` is **deliberately
+not** a :class:`QuestDBError <questdb.QuestDBError>`.
+
+Because a token is fetched on every connect, reconnect, and flush, a
+transport attached with ``oidc_auth=`` can raise *either* a ``QuestDBError``
+(a data, server, or transport failure) *or* an ``OidcError`` (a token
+failure, e.g. :class:`~questdb.auth.OidcInteractionRequired` when sign-in
+has lapsed) from the same ``flush()``, ``dataframe()``, ``row()``,
+``query()``, or :func:`questdb.connect` call. Ingestion retry or
+dead-letter logic that only catches ``QuestDBError`` will silently miss auth
+failures — catch both:
+
+.. code-block:: python
+
+    from questdb import QuestDBError
+    from questdb.auth import OidcError, OidcInteractionRequired
+
+    try:
+        sender.flush()
+    except OidcInteractionRequired:
+        auth.sign_in()      # token lapsed; re-authenticate interactively
+    except OidcError:
+        raise               # other auth failure — not a retriable data error
+    except QuestDBError:
+        ...                 # data / server / transport failure
+
 Configuration
 =============
 

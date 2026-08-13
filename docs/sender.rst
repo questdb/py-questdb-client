@@ -459,6 +459,22 @@ When using the TCP protocol errors are *not* sent back from the server and
 must be searched for in the logs. See the :ref:`troubleshooting-flushing`
 section for more details.
 
+.. note::
+
+   **OIDC auth failures raise a different exception type.** When a transport
+   is configured with an :class:`~questdb.auth.OidcDeviceAuth` provider (via
+   ``oidc_auth=``), a connect, reconnect, or
+   flush that cannot obtain a token raises an
+   :class:`~questdb.auth.OidcError` (for example
+   :class:`~questdb.auth.OidcInteractionRequired` when explicit sign-in has
+   lapsed). ``OidcError`` is **deliberately not** a subclass of
+   :class:`QuestDBError <questdb.QuestDBError>`, so the same ``flush()``,
+   ``dataframe()``, ``row()``, ``query()``, or :func:`questdb.connect` call
+   can raise *either* type depending on the cause. Retry or dead-letter
+   logic that only catches ``QuestDBError`` will silently miss auth
+   failures — catch ``(QuestDBError, OidcError)``, or handle ``OidcError``
+   explicitly, when using ``oidc_auth``. See :ref:`oidc_auth`.
+
 .. _sender_transaction:
 
 HTTP Transactions
