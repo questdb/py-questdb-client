@@ -76,6 +76,22 @@ def make_discovered_auth(server, **kwargs):
     return OidcDeviceAuth.from_questdb(server.url, **options)
 
 
+def _live_weakref_count():
+    """Live ``weakref.ref`` objects, after draining pending finalizers.
+
+    Each ``OidcDeviceAuth`` hands the native event handler a Py_INCREF'd
+    weakref to the provider; the native release callback must Py_DECREF it
+    exactly once. A leaked one stays alive (held by the native +1) and, since
+    ``weakref.ref`` instances are cyclic-GC tracked, shows up here. Collect
+    generously: PyPy stages cpyext finalization across several passes, so a
+    single ``gc.collect()`` would undercount live-then-freed objects.
+    """
+    for _ in range(15):
+        gc.collect()
+    return sum(1 for obj in gc.get_objects()
+               if isinstance(obj, weakref.ReferenceType))
+
+
 class RecordingRenderer(Renderer):
     def __init__(self):
         self.prompts = []
@@ -301,6 +317,55 @@ class NativeOidcTest(unittest.TestCase):
 
         self.assertIsNone(renderer_ref())
         self.assertIsNone(auth_ref())
+
+    # A missing release leaks one weakref deterministically per construction,
+    # so a small count cleanly separates 0 (correct) from N (leaking); native
+    # build() is ~100ms, so keep N modest. Threshold well below N, above any
+    # PyPy staged-collection transient.
+    _LEAK_ITERS = 20
+
+    def test_event_handler_weakref_released_on_success(self):
+        # Each OidcDeviceAuth installs a native event handler that owns a
+        # Py_INCREF'd weakref to the provider (oidc.pxi _finish_builder). When
+        # the provider is dropped, questdb_oidc_auth_free must fire the native
+        # release callback exactly once, Py_DECREF'ing that weakref. A missing
+        # release leaks one weakref object per construction.
+        make_auth(renderer=Renderer())  # warm one-time module state
+        before = _live_weakref_count()
+        for _ in range(self._LEAK_ITERS):
+            make_auth(renderer=Renderer())  # constructed and immediately dropped
+        after = _live_weakref_count()
+        self.assertLess(
+            after - before, 10,
+            f'live weakref objects grew by {after - before} over '
+            f'{self._LEAK_ITERS} constructions; the native event-handler '
+            f'weakref is leaking')
+
+    def test_event_handler_weakref_released_on_failed_build(self):
+        # An empty client_id passes the native string setters (they only
+        # validate UTF-8) but fails the native build() -- which runs AFTER the
+        # event handler is installed. The Py_INCREF'd weakref is then owned by
+        # the builder, and `finally: questdb_oidc_builder_free` (oidc.pxi
+        # __init__) must fire the release callback so it is not leaked once per
+        # failed construction. Confirms the no-auth-built ownership path.
+        def construct_and_fail():
+            with self.assertRaises(OidcConfigError):
+                OidcDeviceAuth(
+                    '',  # empty client_id: stored by the setter, rejected by build()
+                    'https://idp.example/device',
+                    'https://idp.example/token',
+                    interactive=False, open_browser=False,
+                    renderer=Renderer())
+        construct_and_fail()  # warm
+        before = _live_weakref_count()
+        for _ in range(self._LEAK_ITERS):
+            construct_and_fail()
+        after = _live_weakref_count()
+        self.assertLess(
+            after - before, 10,
+            f'live weakref objects grew by {after - before} over '
+            f'{self._LEAK_ITERS} failed constructions; the native '
+            f'event-handler weakref is leaking on the failed-build path')
 
 
 class NativeOidcIntegrationTest(unittest.TestCase):
