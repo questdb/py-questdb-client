@@ -1821,8 +1821,8 @@ cdef class Buffer:
             have the same effect as skipping the key: If the column already
             existed, it will be recorded as ``NULL``, otherwise it will not be
             created.
-        :param columns: A dictionary of column names to ``bool``, ``int``,
-            ``float``, ``str``, ``TimestampMicros`` or ``datetime`` values.
+        :param columns: A dictionary mapping column names to the supported
+            column values listed above.
             As a convenience, you can also pass a ``None`` value which will
             have the same effect as skipping the key: If the column already
             existed, it will be recorded as ``NULL``, otherwise it will not be
