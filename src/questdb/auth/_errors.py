@@ -30,10 +30,25 @@ from typing import Optional
 
 # _render is stdlib-only (no internal imports), so this introduces no cycle.
 from ._render import _strip_control
+# OIDC failures are QuestDB auth failures, so OidcError subclasses QuestDBError:
+# an existing ``except QuestDBError`` ingestion / retry / dead-letter handler
+# keeps catching them when a transport is attached with ``oidc_auth=``, while
+# ``except OidcError`` (and the typed subclasses) still allow auth-specific
+# handling. ``questdb._client`` is always fully imported before this module
+# (the extension imports it lazily on the error path; ``questdb.auth`` imports
+# it up front), so this is not a circular import.
+from questdb._client import QuestDBError, QuestDBErrorCode
 
 
-class OidcError(Exception):
-    """Base class for every error raised by :mod:`questdb.auth`."""
+class OidcError(QuestDBError):
+    """Base class for every error raised by :mod:`questdb.auth`.
+
+    A subclass of :class:`~questdb.QuestDBError` (with ``code``
+    ``QuestDBErrorCode.AuthError``), so a transport attached with ``oidc_auth=``
+    whose token acquisition fails is caught by an existing ``except
+    QuestDBError`` handler; catch :class:`OidcError` — or a typed subclass such
+    as :class:`OidcInteractionRequired` — to handle auth failures specifically.
+    """
 
     def __init__(self, *args, status: Optional[int] = None,
                  retry_after: Optional[int] = None):
@@ -50,7 +65,13 @@ class OidcError(Exception):
         # raise site passes one today — this is defense-in-depth).
         args = tuple(
             _strip_control(a if isinstance(a, str) else str(a)) for a in args)
-        super().__init__(*args)
+        # Seed the QuestDBError base with an auth code + the (sanitized) first
+        # message, then restore the full args tuple so str()/repr() match the
+        # historical Exception-based behavior (raise sites pass a single message
+        # today; the tuple keeps the defense-in-depth multi-arg case intact).
+        QuestDBError.__init__(
+            self, QuestDBErrorCode.AuthError, args[0] if args else '')
+        self.args = args
         # HTTP status behind a non-JSON HTTP response (else None), so the poll
         # loop and silent refresh can tell a terminal 4xx (e.g. a WAF error
         # page) from a transient 5xx/429/network blip.

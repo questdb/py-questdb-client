@@ -450,9 +450,10 @@ cdef inline object c_err_to_py(line_sender_error* err):
 
     Returns an ``OidcError`` (from ``questdb.auth``) when the native error
     carries an OIDC view -- reachable only on an ``oidc_auth`` transport --
-    otherwise a ``QuestDBError`` subclass. ``OidcError`` is intentionally NOT
-    a ``QuestDBError`` subclass, so ``except QuestDBError`` does not catch it;
-    OIDC failures propagate as the typed ``questdb.auth`` exceptions.
+    otherwise a plain ``QuestDBError`` subclass. ``OidcError`` is itself a
+    ``QuestDBError`` subclass, so ``except QuestDBError`` still catches an OIDC
+    failure; catch ``OidcError`` (or a typed subclass) for auth-specific
+    handling.
     """
     cdef questdb_oidc_error_view oidc_view
     if err != NULL:
@@ -470,11 +471,11 @@ cdef inline object c_err_to_py(line_sender_error* err):
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Build the Python exception for a C error, which will be freed.
 
-    Like ``c_err_to_py`` but formats a ``QuestDBError`` message through
+    Like ``c_err_to_py`` but formats the ``QuestDBError`` message through
     ``fmt``. A native error carrying an OIDC view (only on an ``oidc_auth``
     transport) is returned as an unformatted ``OidcError`` -- ``fmt`` is a
     flush/transport hint that does not apply to an auth error. ``OidcError``
-    is intentionally NOT a ``QuestDBError`` subclass.
+    is a ``QuestDBError`` subclass, so ``except QuestDBError`` catches it.
     """
     cdef questdb_oidc_error_view oidc_view
     if err != NULL:

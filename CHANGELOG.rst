@@ -36,12 +36,14 @@ Highlights:
   operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
   path remain non-interactive, silently refreshing when possible and otherwise
   raising :class:`~questdb.auth.OidcInteractionRequired`.
-* Auth failures are typed :class:`~questdb.auth.OidcError` subclasses,
-  **deliberately not** :class:`~questdb.QuestDBError`. A transport attached
-  with ``oidc_auth=`` can therefore raise *either* type from the same
+* Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
+  :class:`~questdb.QuestDBError` (``code`` ``QuestDBErrorCode.AuthError``). A
+  transport attached with ``oidc_auth=`` can raise one from the same
   ``flush`` / ``dataframe`` / ``row`` / ``query`` / :func:`questdb.connect`
-  call; ingestion retry or dead-letter logic should catch
-  ``(QuestDBError, OidcError)``.
+  call, so an existing ``except QuestDBError`` retry or dead-letter handler
+  keeps catching auth failures; catch :class:`~questdb.auth.OidcError` (or a
+  typed subclass such as :class:`~questdb.auth.OidcInteractionRequired`) for
+  auth-specific handling.
 * OIDC discovery, endpoint validation, token selection, caching, refresh, and
   concurrency control use the same native implementation as the C/C++ clients.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only

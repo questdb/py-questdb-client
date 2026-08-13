@@ -3368,10 +3368,9 @@ cdef void_int _dataframe(
             else:
                 raise
     except Exception as e:
+        # OidcError is a QuestDBError subclass, so it takes the ``else: raise``
+        # branch and propagates un-wrapped -- no OIDC special-case needed.
         if not isinstance(e, QuestDBError):
-            from questdb.auth._errors import OidcError
-            if isinstance(e, OidcError):
-                raise
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 str(e)) from e

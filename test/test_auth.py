@@ -317,19 +317,21 @@ class NativeOidcTest(unittest.TestCase):
         self.assertIsNone(err.status)
         self.assertIsNone(err.retry_after)
 
-    def test_oidc_errors_are_not_questdb_errors(self):
-        # The whole feature relies on OidcError being deliberately NOT a
-        # QuestDBError: a transport attached with oidc_auth= routes OIDC failures
-        # through c_err_to_py as typed OidcErrors, and `except QuestDBError` must
-        # NOT swallow them. Pin the class hierarchy directly (the transport-path
-        # behaviour is covered by the attachment tests).
-        self.assertFalse(issubclass(OidcError, questdb.QuestDBError))
+    def test_oidc_errors_are_questdb_errors(self):
+        # OidcError subclasses QuestDBError so an existing `except QuestDBError`
+        # ingestion / retry / dead-letter handler keeps catching auth failures
+        # routed through c_err_to_py, while the typed subclasses stay catchable
+        # specifically. Pin the hierarchy and the AuthError code directly (the
+        # transport-path behaviour is covered by the attachment tests).
+        self.assertTrue(issubclass(OidcError, questdb.QuestDBError))
         for exc_type in (
                 OidcConfigError, OidcNetworkError, OidcInteractionRequired,
                 OidcDeviceFlowError, OidcTimeoutError):
             with self.subTest(exc_type=exc_type.__name__):
                 self.assertTrue(issubclass(exc_type, OidcError))
-                self.assertNotIsInstance(exc_type('x'), questdb.QuestDBError)
+                err = exc_type('x')
+                self.assertIsInstance(err, questdb.QuestDBError)
+                self.assertIs(err.code, questdb.QuestDBErrorCode.AuthError)
 
     def test_custom_store_is_rejected(self):
         with self.assertRaisesRegex(OidcConfigError, 'FileTokenStore'):
@@ -909,11 +911,12 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     table_name='oidc_auto_flush',
                     at=questdb.ServerTimestamp)
 
-    def test_flush_surfaces_oidc_error_not_questdb_error(self):
+    def test_flush_surfaces_typed_oidc_error(self):
         # The plain row()/flush() path (not the dataframe path) whose OIDC token
-        # pull fails at connect must surface the typed OidcError through
-        # c_err_to_py. It is NOT a QuestDBError, so `except QuestDBError` around a
-        # flush does not catch it. Complements
+        # pull fails at connect surfaces the typed OidcError through c_err_to_py.
+        # OidcError subclasses QuestDBError, so an existing `except QuestDBError`
+        # flush handler still catches it while `except OidcInteractionRequired`
+        # can react specifically. Complements
         # test_dataframe_auto_flush_preserves_oidc_error (the dataframe path).
         auth = make_auth()  # never signed in
         with questdb.Sender(
@@ -928,33 +931,34 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 at=questdb.ServerTimestamp)
             with self.assertRaises(OidcInteractionRequired) as ctx:
                 sender.flush()
-            self.assertNotIsInstance(ctx.exception, questdb.QuestDBError)
+            self.assertIsInstance(ctx.exception, questdb.QuestDBError)
 
     def test_query_and_connect_surface_typed_oidc_error(self):
         # The read/connect side, like flush/dataframe above: an unsigned
         # provider's token pull fails at reader-borrow / pool-connect and
-        # surfaces the typed OidcError (NOT a QuestDBError), so `except
-        # QuestDBError` does not swallow it. Deterministic for the same reason as
-        # the flush test -- the native provider pulls the (absent) token before
-        # the socket, so the result is OidcInteractionRequired regardless of
-        # whether 127.0.0.1:9000 is up. The borrow-time failure is typed on every
-        # output path; __arrow_c_stream__ needs no optional dependency, so use it
-        # as the primary assertion. (The zero-copy stream's untyped-OSError
-        # limitation applies only to a refresh that fails mid-stream, after
-        # iteration has begun -- not unit-triggerable.)
+        # surfaces the typed OidcError. It subclasses QuestDBError, so an
+        # existing `except QuestDBError` handler still catches it while the typed
+        # OidcInteractionRequired stays available. Deterministic for the same
+        # reason as the flush test -- the native provider pulls the (absent)
+        # token before the socket, so the result is OidcInteractionRequired
+        # regardless of whether 127.0.0.1:9000 is up. The borrow-time failure is
+        # typed on every output path; __arrow_c_stream__ needs no optional
+        # dependency, so use it as the primary assertion. (The zero-copy stream's
+        # untyped-OSError limitation applies only to a refresh that fails
+        # mid-stream, after iteration has begun -- not unit-triggerable.)
         with questdb.connect(
                 'ws::addr=127.0.0.1:9000;lazy_connect=true;',
                 oidc_auth=make_auth()) as client:
             with self.assertRaises(OidcInteractionRequired) as ctx:
                 client.query('select 1').__arrow_c_stream__()
-            self.assertNotIsInstance(ctx.exception, questdb.QuestDBError)
+            self.assertIsInstance(ctx.exception, questdb.QuestDBError)
             if pd is not None:
                 with self.assertRaises(OidcInteractionRequired):
                     client.query('select 1').to_pandas()
         # Non-lazy connect surfaces the same typed error at pool-open time.
         with self.assertRaises(OidcInteractionRequired) as ctx:
             questdb.connect('ws::addr=127.0.0.1:9000;', oidc_auth=make_auth())
-        self.assertNotIsInstance(ctx.exception, questdb.QuestDBError)
+        self.assertIsInstance(ctx.exception, questdb.QuestDBError)
 
     def test_sender_from_env_accepts_shared_provider(self):
         with mock.patch.dict(

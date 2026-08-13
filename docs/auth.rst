@@ -72,17 +72,19 @@ subclasses — :class:`~questdb.auth.OidcConfigError`,
 :class:`~questdb.auth.OidcNetworkError`,
 :class:`~questdb.auth.OidcInteractionRequired`,
 :class:`~questdb.auth.OidcDeviceFlowError`, and
-:class:`~questdb.auth.OidcTimeoutError`. ``OidcError`` is **deliberately
-not** a :class:`QuestDBError <questdb.QuestDBError>`.
+:class:`~questdb.auth.OidcTimeoutError`. ``OidcError`` is a
+:class:`QuestDBError <questdb.QuestDBError>` subclass (``code``
+``QuestDBErrorCode.AuthError``).
 
 Because a token is fetched on every connect, reconnect, and flush, a
-transport attached with ``oidc_auth=`` can raise *either* a ``QuestDBError``
-(a data, server, or transport failure) *or* an ``OidcError`` (a token
-failure, e.g. :class:`~questdb.auth.OidcInteractionRequired` when sign-in
-has lapsed) from the same ``flush()``, ``dataframe()``, ``row()``,
-``query()``, or :func:`questdb.connect` call. Ingestion retry or
-dead-letter logic that only catches ``QuestDBError`` will silently miss auth
-failures — catch both:
+transport attached with ``oidc_auth=`` can raise a token failure (an
+``OidcError``, e.g. :class:`~questdb.auth.OidcInteractionRequired` when
+sign-in has lapsed) as well as an ordinary data / server / transport
+``QuestDBError`` from the same ``flush()``, ``dataframe()``, ``row()``,
+``query()``, or :func:`questdb.connect` call. Because ``OidcError`` is a
+``QuestDBError``, an existing ``except QuestDBError`` retry or dead-letter
+handler keeps catching auth failures; to react to them specifically, catch
+``OidcError`` (or a typed subclass) *before* ``QuestDBError``:
 
 .. code-block:: python
 
