@@ -43,6 +43,7 @@ from questdb.auth import (
     Renderer,
 )
 from questdb.auth import _adapters
+from questdb.auth import _render
 from questdb.auth._render import (
     TerminalRenderer,
     _verification_target,
@@ -367,6 +368,21 @@ class NativeOidcTest(unittest.TestCase):
             f'{self._LEAK_ITERS} failed constructions; the native '
             f'event-handler weakref is leaking on the failed-build path')
 
+    def test_provider_holds_exactly_one_native_weakref(self):
+        # Directly observe the native machinery: the event handler owns exactly
+        # one weakref to the provider (event_user_data, oidc.pxi
+        # _finish_builder), Py_INCREF'd and handed to the native side. Nothing
+        # else references the provider weakly, so getweakrefcount sees exactly
+        # that one -- the +1 the release callback must later Py_DECREF.
+        auth = make_auth(renderer=Renderer())
+        self.assertEqual(weakref.getweakrefcount(auth), 1)
+        (native_ref,) = weakref.getweakrefs(auth)  # exactly one; unpack asserts it
+        self.assertIs(native_ref(), auth)
+        # A second provider gets its own independent weakref, not a shared one.
+        other = make_auth(renderer=Renderer())
+        self.assertEqual(weakref.getweakrefcount(other), 1)
+        self.assertIsNot(weakref.getweakrefs(other)[0], native_ref)
+
 
 class NativeOidcIntegrationTest(unittest.TestCase):
     def test_discovery_device_flow_and_renderer_callbacks(self):
@@ -639,6 +655,176 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     at=questdb.ServerTimestamp)
 
 
+class RenderSanitizerTest(unittest.TestCase):
+    """Adversarial tests for the anti-phishing sanitizers in ``_render``.
+
+    The device-authorization fields (verification_uri, user_code, IdP error
+    strings) are untrusted and MITM-tamperable; these pure-Python sanitizers
+    are the only defense between them and a terminal / notebook DOM. Each
+    documented protection gets a direct test so a regression (or a future
+    refactor that quietly weakens one) fails loudly. No compiled extension is
+    exercised here -- only ``questdb.auth._render``.
+    """
+
+    # -- _strip_control: strip control / bidi / zero-width / format chars --
+    def test_strip_control_removes_bidi_override(self):
+        # U+202E RIGHT-TO-LEFT OVERRIDE can visually reverse a host/URL.
+        self.assertEqual(_render._strip_control('ab‮cd'), 'abcd')
+
+    def test_strip_control_removes_zero_width(self):
+        # ZWSP / ZWNJ / BOM render as nothing and can hide/segment text.
+        self.assertEqual(_render._strip_control('a​b‌c﻿d'), 'abcd')
+
+    def test_strip_control_removes_ansi_escape(self):
+        # A raw ESC could spoof a terminal prompt via ANSI control sequences.
+        self.assertEqual(_render._strip_control('\x1b[31mX'), '[31mX')
+
+    def test_strip_control_folds_exotic_spaces_to_ascii_space(self):
+        # NBSP / ideographic space are invisible-as-space (hide trailing text);
+        # fold them, but keep the ordinary ASCII space of a legitimate identity.
+        self.assertEqual(_render._strip_control('a b　c'), 'a b c')
+        self.assertEqual(_render._strip_control('a b'), 'a b')
+
+    def test_strip_control_removes_variation_selectors_and_enclosing_marks(self):
+        self.assertEqual(_render._strip_control('a️b'), 'ab')   # VS16
+        self.assertEqual(_render._strip_control('a⃠b'), 'ab')   # enclosing mark
+
+    def test_strip_control_caps_combining_run(self):
+        # A long "Zalgo" combining stack smears across prompt lines; cap it,
+        # while keeping a couple of legitimate accents.
+        self.assertEqual(_render._strip_control('a' + '́' * 20),
+                         'a' + '́' * 4)
+        self.assertEqual(_render._strip_control('é'), 'é')  # é survives
+
+    def test_strip_control_cap_not_reset_by_interleaved_zero_width(self):
+        # Interleaving stripped chars must not reset the combining counter.
+        text = 'a' + ''.join('́​' for _ in range(20))
+        self.assertEqual(_render._strip_control(text), 'a' + '́' * 4)
+
+    def test_strip_control_coerces_non_str_and_none(self):
+        # Total by design: a hostile IdP could put a JSON number/object in an
+        # error field; it must be coerced, not raise (typed-error contract).
+        self.assertEqual(_render._strip_control(123), '123')
+        self.assertEqual(_render._strip_control(None), '')
+
+    # -- _safe_link_url / _safe_target: what may be linkified / opened / QR'd --
+    def test_safe_link_url_rejects_dangerous_schemes(self):
+        self.assertIsNone(_render._safe_link_url('javascript:alert(1)'))
+        self.assertIsNone(_render._safe_link_url('data:text/html,<script>'))
+        self.assertIsNone(_render._safe_link_url('file:///etc/passwd'))
+
+    def test_safe_link_url_rejects_userinfo(self):
+        # https://trusted@evil connects to evil while reading as trusted.
+        self.assertIsNone(
+            _render._safe_link_url('https://login.questdb.io@evil.example/'))
+
+    def test_safe_link_url_rejects_nonascii_host(self):
+        self.assertIsNone(_render._safe_link_url('https://аpple.com/'))
+
+    def test_safe_link_url_rejects_bad_port_and_embedded_controls(self):
+        self.assertIsNone(_render._safe_link_url('https://host:70000/'))
+        self.assertIsNone(_render._safe_link_url('https://host\t/'))
+        self.assertIsNone(_render._safe_link_url('https://ho\nst/'))
+
+    def test_safe_link_url_accepts_plain_https_and_punycode(self):
+        self.assertEqual(_render._safe_link_url('https://ok.example/verify'),
+                         'https://ok.example/verify')
+        self.assertEqual(_render._safe_link_url('https://xn--e1afmkfd.example/'),
+                         'https://xn--e1afmkfd.example/')
+
+    def test_safe_target_strips_control_before_vetting(self):
+        # One value feeds the href, webbrowser.open() and the QR, so a control
+        # char stripped from the shown link can't survive into the real target.
+        self.assertEqual(
+            _render._safe_target('https://ok.example/​verify'),
+            'https://ok.example/verify')
+        self.assertIsNone(_render._safe_target('javascript:​alert(1)'))
+
+    # -- _display_url: what is shown as text (homograph defense) --
+    def test_display_url_folds_fullwidth_dot_to_real_domain(self):
+        # U+FF0E folds to '.', exposing the true registrable domain (evil.com).
+        self.assertEqual(_render._display_url('https://exa．mple.com/x'),
+                         'https://exa.mple.com/x')
+
+    def test_display_url_shows_homograph_host_as_punycode(self):
+        # Cyrillic look-alike host is shown IDNA/punycode, never raw.
+        self.assertEqual(_render._display_url('https://аpple.com/x'),
+                         'https://xn--pple-43d.com/x')
+
+    def test_display_url_drops_userinfo(self):
+        self.assertEqual(_render._display_url('https://trusted@evil.example/x'),
+                         'https://evil.example/x')
+
+    def test_display_url_escapes_delimiter_folding_confusable(self):
+        # U+FF0F fullwidth solidus is shown \u-escaped, never as a bare '/'.
+        shown = _render._display_url('https://exa／mple/x')
+        self.assertNotIn('／', shown)
+        self.assertIn('\\uff0f', shown)
+
+    def test_display_url_preserves_plain_host_and_port(self):
+        self.assertEqual(_render._display_url('https://ok.example:9000/x'),
+                         'https://ok.example:9000/x')
+
+    # -- _matched_complete / _same_origin: origin-match the complete URL --
+    def test_matched_complete_accepts_same_origin(self):
+        self.assertEqual(
+            _render._matched_complete({
+                'verification_uri': 'https://idp.example/device',
+                'verification_uri_complete': 'https://idp.example/device?code=X'}),
+            'https://idp.example/device?code=X')
+
+    def test_matched_complete_drops_different_host(self):
+        # A trusted-looking uri paired with a complete on a DIFFERENT host would
+        # steer the auto-open/QR/click to the attacker -> treat as absent.
+        self.assertIsNone(
+            _render._matched_complete({
+                'verification_uri': 'https://idp.example/device',
+                'verification_uri_complete': 'https://evil.example/device?code=X'}))
+
+    def test_matched_complete_drops_different_port(self):
+        self.assertIsNone(
+            _render._matched_complete({
+                'verification_uri': 'https://idp.example:9000/device',
+                'verification_uri_complete':
+                    'https://idp.example:9001/device?code=X'}))
+
+    def test_same_origin(self):
+        self.assertTrue(_render._same_origin(
+            'https://a.example:9000/x', 'https://a.example:9000/y'))
+        self.assertFalse(_render._same_origin(
+            'https://a.example:9000/x', 'https://a.example:9001/y'))
+        self.assertFalse(_render._same_origin(
+            'https://a.example/x', 'http://a.example/y'))
+
+    # -- _render_link: linkify only vetted URLs, escape the rest --
+    def test_render_link_linkifies_safe_url(self):
+        html = _render._render_link('https://ok.example/verify')
+        self.assertIn('<a href="https://ok.example/verify"', html)
+        self.assertIn('rel="noopener noreferrer"', html)
+
+    def test_render_link_shows_rejected_url_as_inert_escaped_text(self):
+        html = _render._render_link('javascript:"><img src=x onerror=alert(1)>')
+        self.assertNotIn('<a ', html)    # never linkified
+        self.assertNotIn('<img', html)   # markup is html-escaped, not live
+
+    # -- _verification_target: the single canonical actionable URL --
+    def test_verification_target_prefers_native_browser_target(self):
+        self.assertEqual(
+            _render._verification_target({
+                'verification_uri': 'https://shown.example/v',
+                'verification_uri_complete': 'https://shown.example/c',
+                'browser_target': 'https://vetted.example/t'}),
+            'https://vetted.example/t')
+
+    def test_verification_target_drops_diverging_complete(self):
+        # No native browser_target; a complete on a different host is not used.
+        self.assertEqual(
+            _render._verification_target({
+                'verification_uri': 'https://idp.example/v',
+                'verification_uri_complete': 'https://evil.example/c'}),
+            'https://idp.example/v')
+
+
 class AdapterTest(unittest.TestCase):
     unsafe_urls = (
         'https://trusted.questdb.com@evil.example:9000',
@@ -664,6 +850,46 @@ class AdapterTest(unittest.TestCase):
     def test_bad_adapter_url_is_typed(self):
         with self.assertRaises(OidcConfigError):
             _adapters._require_host('https://host:invalid')
+
+    def test_coerce_port_rejects_invalid(self):
+        # bool (True/False is never a port), non-integral / non-finite float,
+        # non-numeric, and out-of-range must all raise the typed error rather
+        # than reach the driver as a bare ValueError / silently truncate.
+        for bad in (True, False, 8812.9, float('inf'), float('nan'),
+                    0, -1, 65536, 70000, 10 ** 100, 'x', None):
+            with self.subTest(bad=bad), self.assertRaises(OidcConfigError):
+                _adapters._coerce_port(bad)
+
+    def test_coerce_port_accepts_valid(self):
+        self.assertEqual(_adapters._coerce_port(8812), 8812)
+        self.assertEqual(_adapters._coerce_port('8812'), 8812)  # e.g. from env
+        self.assertEqual(_adapters._coerce_port(8812.0), 8812)  # integral float
+        self.assertEqual(_adapters._coerce_port(1), 1)
+        self.assertEqual(_adapters._coerce_port(65535), 65535)
+
+    def test_require_host_rejects_connstring_metacharacters(self):
+        # The libpq-conninfo-injection / connection-redirection defense: none of
+        # these belong in a real host, so an explicit host= override carrying
+        # one (bypassing urlparse) must be rejected before it reaches a driver.
+        for bad in ('a,evil', 'a/evil', 'a;b', 'a=b', 'a b', 'a%b', 'a\tb'):
+            with self.subTest(bad=bad), self.assertRaises(OidcConfigError):
+                _adapters._require_host('https://ok.example:9000/', bad)
+
+    def test_require_host_strips_ipv6_brackets(self):
+        # The PG drivers take a bare address; a bracketed IPv6 literal (from an
+        # override or a URL) is returned unbracketed.
+        self.assertEqual(
+            _adapters._require_host('https://ok.example/', '[::1]'), '::1')
+        self.assertEqual(
+            _adapters._require_host('https://[::1]:9000/'), '::1')
+
+    def test_require_host_rejects_userinfo_nonhttp_and_hostless(self):
+        with self.assertRaises(OidcConfigError):
+            _adapters._require_host('https://trusted@evil.example/')
+        with self.assertRaises(OidcConfigError):
+            _adapters._require_host('file://evil.example/')
+        with self.assertRaises(OidcConfigError):
+            _adapters._require_host('localhost')  # no scheme/authority
 
     def test_psycopg_rejects_unsafe_url_before_token_or_connection(self):
         for url in self.unsafe_urls:

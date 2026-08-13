@@ -59,6 +59,7 @@ from test_auth import (
     NativeOidcIntegrationTest,
     NativeOidcTest,
     NativeTransportAttachmentTest,
+    RenderSanitizerTest,
 )
 
 NUMPY_VERSION = _parse_version(np.__version__)
