@@ -3727,8 +3727,6 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
     cdef uint32_t* values = NULL
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
-    cdef object ipv4_cls = _ipaddress.IPv4Address
-
     try:
         values = <uint32_t*>calloc(row_count if row_count > 0 else 1,
                                    sizeof(uint32_t))
@@ -3741,7 +3739,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
                 raise MemoryError()
         for i in range(row_count):
             cell = access[i]
-            if isinstance(<object>cell, ipv4_cls):
+            if type(<object>cell) is _ipaddress.IPv4Address:
                 values[i] = <uint32_t>int(<object>cell)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)

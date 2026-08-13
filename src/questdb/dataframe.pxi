@@ -1512,7 +1512,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
                 col.setup.source = col_source_t.col_source_bytes_pyobj
             elif isinstance(<object>obj, _uuid.UUID):
                 col.setup.source = col_source_t.col_source_uuid_pyobj
-            elif isinstance(<object>obj, _ipaddress.IPv4Address):
+            elif type(<object>obj) is _ipaddress.IPv4Address:
                 col.setup.source = col_source_t.col_source_ipv4_pyobj
             elif isinstance(<object>obj, datetime.datetime):
                 col.setup.source = col_source_t.col_source_datetime_pyobj

@@ -2595,6 +2595,45 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 0)
         self.assertEqual(stats['errors'], [])
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_dataframe_rejects_ipv4_interface(self):
+        address = ipaddress.IPv4Address('192.0.2.129')
+        interface = ipaddress.IPv4Interface('192.0.2.129/24')
+        cases = (
+            (
+                [interface],
+                'Unsupported object column containing an object of type '
+                'ipaddress.IPv4Interface',
+            ),
+            (
+                [address, interface],
+                "Bad column 'value' at row 1: expected "
+                'ipaddress.IPv4Address, got ipaddress.IPv4Interface',
+            ),
+        )
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                for values, message in cases:
+                    frame = pd.DataFrame({
+                        'value': pd.Series(values, dtype=object)})
+                    with self.subTest(values=values):
+                        with self.assertRaises(qi.QuestDBError) as cm:
+                            client.dataframe(
+                                frame, table_name='ipv4_values',
+                                at=qi.ServerTimestamp)
+                        self.assertEqual(
+                            cm.exception.code,
+                            qi.QuestDBErrorCode.BadDataFrame)
+                        self.assertIn(message, str(cm.exception))
+            stats = server.snapshot()
+
+        self.assertEqual(stats['binary_frames'], 0)
+        self.assertEqual(stats['errors'], [])
+
     def _assert_ilp_rejections(self, sender):
         values = (
             ('UUID', self.UUID_VALUE),
