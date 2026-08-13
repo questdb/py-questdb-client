@@ -2341,6 +2341,20 @@ class QueryResult:
         Stream callbacks are serialised by the same cursor lock, but the
         Arrow C stream itself must still be consumed by only one thread at
         a time; concurrent ``get_next`` / ``release`` calls are unsupported.
+
+        Typed-``OidcError`` caveat (``oidc_auth`` transports only): a token
+        failure that happens *mid-stream* — a failover reconnect between
+        batches that needs a fresh token — reaches the consumer as a generic
+        Arrow / ``OSError``, **not** a typed
+        :class:`~questdb.auth.OidcError`, because the Arrow C-stream boundary
+        carries only an error string, not a Python exception type. A failure
+        acquiring the token *before* streaming begins still raises the typed
+        ``OidcError``, and the Python-driven readers (:meth:`iter_arrow`,
+        :meth:`to_pandas`, :meth:`to_arrow`, :meth:`to_polars`) surface it on
+        every path. Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` up front
+        so no mid-stream token acquisition is needed, or materialize with
+        :meth:`to_pandas` / :meth:`to_arrow`, when the typed error must be
+        caught.
         """
         if requested_schema is not None:
             raise NotImplementedError(
