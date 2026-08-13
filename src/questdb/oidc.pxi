@@ -80,8 +80,15 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
                 status=status,
                 retry_after=retry_after)
         elif view.kind == QUESTDB_OIDC_ERROR_TIMEOUT:
+            # OidcTimeoutError is an OidcDeviceFlowError, and the native side
+            # attaches the IdP error (e.g. "expired_token"); carry it through
+            # like the DEVICE_FLOW branch instead of dropping it.
             exc = OidcTimeoutError(
-                message, status=status, retry_after=retry_after)
+                message,
+                error=idp_error,
+                error_description=description,
+                status=status,
+                retry_after=retry_after)
         elif view.kind == QUESTDB_OIDC_ERROR_INTERACTION_REQUIRED:
             exc = OidcInteractionRequired(
                 message, status=status, retry_after=retry_after)

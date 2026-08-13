@@ -39,7 +39,10 @@ from questdb.auth import (
     FileTokenStore,
     OidcConfigError,
     OidcDeviceAuth,
+    OidcDeviceFlowError,
+    OidcNetworkError,
     OidcInteractionRequired,
+    OidcTimeoutError,
     Renderer,
 )
 from questdb.auth import _adapters
@@ -563,6 +566,69 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertEqual(len(token_requests), 2)
         self.assertEqual(
             token_requests[1]['form']['grant_type'], ['refresh_token'])
+
+    def test_device_flow_error_maps_to_typed_error_with_idp_fields(self):
+        # A terminal OAuth error at the token endpoint during polling maps to
+        # OidcDeviceFlowError with the IdP error / description / HTTP status
+        # populated from the native error view (line_sender.pxd mirroring
+        # oidc.h). A struct-field mis-map would drop these silently.
+        with OidcTestServer(device_token_response=(400, {
+                'error': 'access_denied',
+                'error_description': 'The user denied the request.'}, None)) as server:
+            auth = make_discovered_auth(server)
+            with self.assertRaises(OidcDeviceFlowError) as ctx:
+                auth.sign_in()
+        err = ctx.exception
+        self.assertEqual(err.error, 'access_denied')
+        self.assertEqual(err.error_description, 'The user denied the request.')
+        self.assertEqual(err.status, 400)
+
+    def test_expired_device_code_maps_to_timeout_with_idp_error(self):
+        # `expired_token` maps to OidcTimeoutError (a OidcDeviceFlowError), and
+        # the native-attached IdP error must be carried through, not dropped.
+        with OidcTestServer(device_token_response=(
+                400, {'error': 'expired_token'}, None)) as server:
+            auth = make_discovered_auth(server)
+            with self.assertRaises(OidcTimeoutError) as ctx:
+                auth.sign_in()
+        self.assertIsInstance(ctx.exception, OidcDeviceFlowError)
+        self.assertEqual(ctx.exception.error, 'expired_token')
+
+    def test_transient_refresh_error_maps_to_network_with_retry_after(self):
+        # A transient status on the refresh call maps to OidcNetworkError with
+        # HTTP status and parsed Retry-After preserved (the poll/refresh loop
+        # uses these to schedule a retry). Exercises has_status / has_retry_after
+        # + uint16_t status / uint64_t retry_after_seconds in the error view.
+        with OidcTestServer(
+                initial_access_token=EXPIRED_ACCESS_TOKEN,
+                refresh_token_response=(
+                    429, {'error': 'slow_down'}, {'Retry-After': '7'})) as server:
+            auth = make_discovered_auth(server)
+            auth.sign_in()  # obtains the (expired) access token + refresh token
+            with self.assertRaises(OidcNetworkError) as ctx:
+                auth.token()  # triggers the refresh, which hits the 429
+        self.assertEqual(ctx.exception.status, 429)
+        self.assertEqual(ctx.exception.retry_after, 7)
+
+    def test_full_lifecycle_loop_does_not_leak_weakrefs(self):
+        # Construct -> sign_in -> token -> drop, repeatedly, against the mock
+        # IdP. Exercises the native token acquisition/free path
+        # (questdb_oidc_token_free) and the event-handler weakref release across
+        # the FULL lifecycle, not just bare construction; a leaked
+        # event_user_data weakref would accumulate.
+        with OidcTestServer() as server:
+            make_discovered_auth(server).sign_in()  # warm
+            before = _live_weakref_count()
+            for _ in range(12):
+                auth = make_discovered_auth(server)
+                auth.sign_in()
+                self.assertEqual(auth.token(), 'AT-initial')
+                del auth
+            after = _live_weakref_count()
+        self.assertLess(
+            after - before, 10,
+            f'live weakref objects grew by {after - before} over 12 '
+            f'sign-in/token lifecycles; a native weakref is leaking')
 
 
 class NativeTransportAttachmentTest(unittest.TestCase):

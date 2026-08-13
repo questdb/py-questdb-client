@@ -23,12 +23,22 @@ class OidcTestServer:
             refresh_token='RT-1',
             refreshed_access_token='AT-refreshed',
             refreshed_expires_in=300,
-            write_statuses=()):
+            write_statuses=(),
+            device_token_response=None,
+            refresh_token_response=None):
         self.initial_access_token = initial_access_token
         self.initial_expires_in = initial_expires_in
         self.refresh_token = refresh_token
         self.refreshed_access_token = refreshed_access_token
         self.refreshed_expires_in = refreshed_expires_in
+        # Optional error injection for the token endpoint. Each override is a
+        # ``(status, body, headers)`` tuple where ``body`` is a dict (serialized
+        # as JSON), raw ``bytes`` (e.g. a non-JSON error page), or ``None``, and
+        # ``headers`` is an optional dict (e.g. ``{'Retry-After': '7'}``).
+        # ``device_token_response`` overrides the device-grant poll response;
+        # ``refresh_token_response`` overrides the refresh-grant response.
+        self.device_token_response = device_token_response
+        self.refresh_token_response = refresh_token_response
         self._write_statuses = list(write_statuses)
         self._lock = threading.Lock()
         self._requests = []
@@ -134,12 +144,18 @@ class OidcTestServer:
         if handler.command == 'POST' and path == '/token':
             grant_type = request['form'].get('grant_type', [None])[0]
             if grant_type == 'refresh_token':
+                if self.refresh_token_response is not None:
+                    self._emit(handler, self.refresh_token_response)
+                    return
                 self._json(handler, 200, {
                     'access_token': self.refreshed_access_token,
                     'token_type': 'Bearer',
                     'expires_in': self.refreshed_expires_in,
                 })
             else:
+                if self.device_token_response is not None:
+                    self._emit(handler, self.device_token_response)
+                    return
                 self._json(handler, 200, {
                     'access_token': self.initial_access_token,
                     'refresh_token': self.refresh_token,
@@ -159,6 +175,29 @@ class OidcTestServer:
             return
 
         self._json(handler, 404, {'error': 'not found'})
+
+    @staticmethod
+    def _emit(handler, override):
+        """Send an injected ``(status, body, headers)`` token-endpoint response.
+
+        ``body`` may be a dict (JSON), raw ``bytes`` (non-JSON), or ``None``.
+        """
+        status, body, headers = override
+        if isinstance(body, (bytes, bytearray)):
+            payload, content_type = bytes(body), 'text/plain'
+        else:
+            payload = json.dumps(
+                body or {}, separators=(',', ':')).encode('utf-8')
+            content_type = 'application/json'
+        handler.send_response(status)
+        handler.send_header('Content-Type', content_type)
+        handler.send_header('Content-Length', str(len(payload)))
+        for key, value in (headers or {}).items():
+            handler.send_header(key, value)
+        handler.send_header('Connection', 'close')
+        handler.end_headers()
+        if payload:
+            handler.wfile.write(payload)
 
     @staticmethod
     def _json(handler, status, value):
