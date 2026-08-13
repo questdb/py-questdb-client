@@ -1407,8 +1407,7 @@ cdef class Buffer:
                 raise ValueError(
                     'memoryview BINARY values must be C-contiguous with '
                     'one-byte items.')
-            if PyObject_GetBuffer(value, &view, PyBUF_SIMPLE) < 0:
-                raise ValueError('could not borrow the memoryview buffer.')
+            PyObject_GetBuffer(value, &view, PyBUF_SIMPLE)
             release_view = True
             data = <const uint8_t*>view.buf
             data_len = <size_t>view.len
@@ -3903,10 +3902,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
                             'memoryview BINARY values must be C-contiguous '
                             'with one-byte items.')
                     try:
-                        if PyObject_GetBuffer(
-                                py_cell, &view, PyBUF_SIMPLE) < 0:
-                            raise ValueError(
-                                'could not borrow the memoryview buffer.')
+                        PyObject_GetBuffer(py_cell, &view, PyBUF_SIMPLE)
                     except (BufferError, ValueError) as exc:
                         raise QuestDBError(
                             QuestDBErrorCode.BadDataFrame,

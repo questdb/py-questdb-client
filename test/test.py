@@ -2684,7 +2684,10 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         'uuid_wire', columns={'value': self.UUID_VALUE},
                         at=qi.ServerTimestamp)
                     sender.flush(wait=True)
-            row_payload = row_server.snapshot()['binary_payloads'][0]
+            row_payload = next(
+                payload
+                for payload in row_server.snapshot()['binary_payloads']
+                if int.from_bytes(payload[6:8], 'little') > 0)
 
         with QwpAckServer(record_payloads=True) as dataframe_server:
             conf = (
@@ -2696,15 +2699,13 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             with qi.QuestDB.from_conf(conf) as client:
                 client.dataframe(
                     frame, table_name='uuid_wire', at=qi.ServerTimestamp)
-            dataframe_payload = dataframe_server.snapshot()['binary_payloads'][0]
+            dataframe_payload = next(
+                payload
+                for payload in dataframe_server.snapshot()['binary_payloads']
+                if int.from_bytes(payload[6:8], 'little') > 0)
 
-        row_pos = row_payload.find(expected)
-        dataframe_pos = dataframe_payload.find(expected)
-        self.assertGreaterEqual(row_pos, 0)
-        self.assertGreaterEqual(dataframe_pos, 0)
-        self.assertEqual(
-            row_payload[row_pos:row_pos + 16],
-            dataframe_payload[dataframe_pos:dataframe_pos + 16])
+        self.assertTrue(row_payload.endswith(b'\x00' + expected))
+        self.assertEqual(row_payload, dataframe_payload)
 
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
