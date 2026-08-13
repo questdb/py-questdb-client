@@ -99,6 +99,14 @@ def _require_host(url: str, host: Optional[str] = None) -> str:
     port separately. ``_safe_urlparse`` validates the port up-front, raising
     ``OidcConfigError`` (not a bare ``ValueError``) for a malformed one.
     """
+    if host is not None and not isinstance(host, str):
+        # A non-str host override (int, bytes, an arbitrary object) is truthy,
+        # so it would skip the URL-derived hostname below and reach
+        # .startswith() / _LEGAL_HOST_RE.match() on the wrong type, raising a
+        # bare AttributeError/TypeError that escapes this module's typed-error
+        # contract. Guard it up front, mirroring _coerce_port's pg_port check.
+        raise OidcConfigError(
+            f'host must be a string or None, got {host!r}.')
     parts, _ = _safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
     if scheme not in ('http', 'https'):
