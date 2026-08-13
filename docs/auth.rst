@@ -98,6 +98,23 @@ failures — catch both:
     except QuestDBError:
         ...                 # data / server / transport failure
 
+.. note::
+
+   The typed ``OidcError`` reaches you only when the result is delivered
+   through a Python call that can raise it: ``flush()``, ``dataframe()``,
+   ``row()``, ``query()``, materializing a query result with ``to_pandas()``
+   or ``to_arrow()``, or :func:`questdb.connect`. If you instead consume a
+   query result through the zero-copy Arrow C-stream interface
+   (``__arrow_c_stream__`` — e.g. ``polars.from_arrow(db.query(sql))`` or a
+   ``pyarrow.RecordBatchReader``), a token failure that happens *mid-stream*
+   (a failover reconnect between batches needing a fresh token) surfaces as a
+   generic Arrow / ``OSError`` from the consumer, **not** an ``OidcError``:
+   the Arrow C-stream boundary carries only an error string, not a Python
+   exception type. Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` up front
+   so no interactive token acquisition is needed mid-stream, or materialize
+   with ``to_pandas()`` / ``to_arrow()`` when you need to catch the typed
+   error.
+
 Configuration
 =============
 
