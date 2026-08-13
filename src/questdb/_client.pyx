@@ -1798,8 +1798,7 @@ cdef class Buffer:
 
         The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``
         and are rejected by ILP buffers used by ``tcp``, ``tcps``, ``http``,
-        and ``https``. UUID, LONG256, CHAR, DATE, and GEOHASH require QuestDB
-        9.4.0 or newer; BINARY and IPV4 require QuestDB 9.4.1 or newer.
+        and ``https``. They require QuestDB 10 or newer.
 
         QuestDB reserves these values as ``NULL`` sentinels, but the client
         deliberately accepts them: IPV4 ``0.0.0.0``, DATE ``INT64_MIN``, UUID
@@ -6761,7 +6760,7 @@ cdef class QuestDB:
         - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
           C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
           the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`
-          accepts. Requires QuestDB 9.4.1 or newer.
+          accepts. Requires QuestDB 10 or newer.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints

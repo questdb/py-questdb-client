@@ -612,9 +612,8 @@ class Buffer:
 
         **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
 
-        The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``.
-        UUID/LONG256/CHAR/DATE/GEOHASH require QuestDB 9.4.0+; BINARY/IPV4
-        require 9.4.1+. Their reserved ``NULL`` sentinels are accepted:
+        The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``
+        and QuestDB 10 or newer. Their reserved ``NULL`` sentinels are accepted:
         IPV4 ``0.0.0.0``, DATE ``INT64_MIN``, UUID
         ``80000000-0000-0000-8000-000000000000``, and LONG256 with all four
         limbs equal to ``0x8000000000000000``. CHAR has no physical ``NULL``

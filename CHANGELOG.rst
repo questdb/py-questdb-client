@@ -12,8 +12,8 @@ Changelog
   ``ipaddress.IPv4Address``, or bytes-like values directly, and use the new
   :class:`Char <questdb.Char>`, :class:`DateMillis <questdb.DateMillis>`,
   :class:`Long256 <questdb.Long256>`, and :class:`Geohash <questdb.Geohash>`
-  wrappers for the rest. BINARY and IPV4 need QuestDB 9.4.1 or newer; the
-  other types need 9.4.0. On ILP senders these values now raise
+  wrappers for the rest. These types require QuestDB 10 or newer. On ILP
+  senders these values now raise
   :class:`QuestDBError <questdb.QuestDBError>` (``InvalidApiCall``) instead
   of ``TypeError``.
 - DataFrame BINARY columns now accept ``bytearray`` and ``memoryview`` cells
