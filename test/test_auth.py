@@ -41,6 +41,7 @@ from questdb.auth import (
     OidcConfigError,
     OidcDeviceAuth,
     OidcDeviceFlowError,
+    OidcError,
     OidcNetworkError,
     OidcInteractionRequired,
     OidcTimeoutError,
@@ -238,6 +239,26 @@ class NativeOidcTest(unittest.TestCase):
                 'https://idp.example/device',
                 'https://idp.example/token',
                 interactive=False)
+
+    def test_non_oidc_native_error_maps_to_base_oidc_error(self):
+        # A field over the native 1 MiB input cap fails in the builder setter
+        # with a plain (non-OIDC) native error, so questdb_error_oidc_get_view
+        # returns false and the binding takes its no-view fallback: a *base*
+        # OidcError (not a typed subclass) carrying no status / retry_after.
+        # Covers the defensive dispatch branch for a native error without an
+        # OIDC view. (Its sibling UNKNOWN-kind branch is unreachable today: every
+        # native OidcErrorKind maps to a specific view kind, never UNKNOWN.)
+        oversized = 'x' * (2 * 1024 * 1024)  # over MAX_OIDC_INPUT_BYTES (1 MiB)
+        with self.assertRaises(OidcError) as ctx:
+            OidcDeviceAuth(
+                oversized,
+                'https://idp.example/device',
+                'https://idp.example/token',
+                interactive=False)
+        err = ctx.exception
+        self.assertIs(type(err), OidcError)  # base class, not a typed subclass
+        self.assertIsNone(err.status)
+        self.assertIsNone(err.retry_after)
 
     def test_custom_store_is_rejected(self):
         with self.assertRaisesRegex(OidcConfigError, 'FileTokenStore'):
