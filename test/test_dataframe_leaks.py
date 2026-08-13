@@ -167,8 +167,9 @@ class TestPyobjColumnarLeak(unittest.TestCase):
     (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes}_pyobj``)
     reached by ``QuestDB.dataframe`` for object-dtype columns: every native
     buffer (data, validity bitmap, str byte arena) must be freed on the
-    success and all-valid (bitmap-dropped) paths, and the pooled connection
-    must be returned on every call."""
+    success and all-valid (bitmap-dropped) paths, borrowed BINARY memoryviews
+    must be released on success and failure, and the pooled connection must
+    be returned on every call."""
 
     ROWS = 2048
 
@@ -188,7 +189,16 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         bools = pd.Series([bool(i & 1) for i in range(n)], dtype=object)
         uuids = [uuid.UUID(int=i) for i in range(n)]
         ips = [ipaddress.IPv4Address(i) for i in range(n)]
-        blobs = [b'value_%06d' % i for i in range(n)]
+        blobs = []
+        for i in range(n):
+            value = b'value_%06d' % i
+            kind = i % 3
+            if kind == 0:
+                blobs.append(value)
+            elif kind == 1:
+                blobs.append(bytearray(value))
+            else:
+                blobs.append(memoryview(value))
         frames = []
         for null_step in (0, 7):
             frames.append(pd.DataFrame({
@@ -222,6 +232,49 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                             df, table_name='t', at='ts', symbols=False)
 
                 self._assert_stable(work, warmup=150, measure=1800)
+
+    def test_binary_memoryview_error_path_no_leak(self):
+        """A late invalid memoryview must release every earlier borrowed
+        BINARY cell while unwinding the partially built native column."""
+        from qwp_ws_ack_server import QwpAckServer
+
+        def invalid_frame():
+            values = []
+            for i in range(96):
+                value = (b'value_%06d_' % i) + b'x' * 256
+                kind = i % 3
+                if kind == 0:
+                    values.append(value)
+                elif kind == 1:
+                    values.append(bytearray(value))
+                else:
+                    values.append(memoryview(value))
+            values.append(memoryview(b'invalid')[::2])
+            return pd.DataFrame({
+                'by': pd.Series(values, dtype=object),
+            })
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    try:
+                        client.dataframe(
+                            invalid_frame(), table_name='t',
+                            at=qi.ServerTimestamp, symbols=False)
+                    except qi.QuestDBError as exc:
+                        if exc.code != qi.QuestDBErrorCode.BadDataFrame:
+                            raise
+                        if "Bad column 'by' at row 96" not in str(exc):
+                            raise AssertionError(
+                                f'unexpected BINARY validation error: {exc}')
+                    else:
+                        raise AssertionError(
+                            'invalid BINARY memoryview was accepted')
+
+                self._assert_stable(work, warmup=200, measure=2400)
 
     @unittest.skipUnless(pa is not None, 'pyarrow not installed')
     def test_promoted_columnar_path_no_leak(self):
