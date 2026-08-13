@@ -2436,14 +2436,21 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             qi.DateMillis.from_datetime(
                 epoch - datetime.timedelta(microseconds=1)).value,
             -1)
-        qi._NAIVE_DATETIME_WARNED = False
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            naive = datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)
-            self.assertEqual(qi.DateMillis.from_datetime(naive).value, -1)
-        self.assertEqual(
-            len([w for w in caught if issubclass(w.category, UserWarning)]),
-            1)
+        naive_datetime_warned = qi._NAIVE_DATETIME_WARNED
+        try:
+            qi._NAIVE_DATETIME_WARNED = False
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                naive = datetime.datetime(
+                    1969, 12, 31, 23, 59, 59, 999999)
+                self.assertEqual(
+                    qi.DateMillis.from_datetime(naive).value, -1)
+            self.assertEqual(
+                len([w for w in caught
+                     if issubclass(w.category, UserWarning)]),
+                1)
+        finally:
+            qi._NAIVE_DATETIME_WARNED = naive_datetime_warned
 
     def test_binary_memoryview_validation_and_ipv6_error(self):
         buffer = qi.Buffer._new_qwp()
