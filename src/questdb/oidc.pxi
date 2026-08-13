@@ -260,6 +260,14 @@ cdef class OidcDeviceAuth:
             default_interval=5,
             timeout=30,
             token_store=None):
+        """Configure a provider from explicit IdP endpoints.
+
+        ``groups_in_token`` selects the token kind: ``False`` (the default)
+        returns the access token; ``True`` requests and returns the ID token
+        (and ensures the ``openid`` scope). Unlike :meth:`from_questdb` there is
+        no server-advertised default to inherit here, so the kind is always
+        chosen explicitly and defaults to ``False``.
+        """
         cdef questdb_oidc_builder* builder
         _oidc_validate_bool(groups_in_token, 'groups_in_token', False)
         _oidc_validate_bool(insecure, 'insecure', False)
@@ -314,6 +322,15 @@ cdef class OidcDeviceAuth:
             default_interval=5,
             timeout=30,
             token_store=None):
+        """Discover OIDC configuration from a QuestDB server's ``/settings``.
+
+        Explicit keyword arguments override discovery. ``groups_in_token``
+        defaults to ``None``, meaning "inherit whatever the server advertises"
+        (``acl.oidc.groups.encoded.in.token``); pass ``True`` or ``False`` to
+        force the ID-token or access-token kind regardless of the server. This
+        differs from the direct constructor, whose ``groups_in_token`` defaults
+        to ``False``.
+        """
         cdef bytes encoded_url
         cdef questdb_error* err = NULL
         cdef questdb_oidc_builder* builder
@@ -510,8 +527,8 @@ cdef class OidcDeviceAuth:
         finally:
             questdb_oidc_token_free(token)
 
-    def _token(self, *, allow_interactive=False):
-        """Compatibility alias; token acquisition is always non-interactive."""
+    def _token(self):
+        """Compatibility alias for :meth:`token` (always non-interactive)."""
         return self.token()
 
     def headers(self):
@@ -541,14 +558,25 @@ cdef class OidcDeviceAuth:
         view.struct_size = sizeof(questdb_oidc_config_view)
         if not questdb_oidc_auth_get_config(self._raw, &view):
             raise RuntimeError('native OIDC config view is unavailable')
+        client_id = _oidc_text(view.client_id, view.client_id_len)
+        token_endpoint = _oidc_text(
+            view.token_endpoint, view.token_endpoint_len)
+        device_authorization_endpoint = _oidc_text(
+            view.device_authorization_endpoint,
+            view.device_authorization_endpoint_len)
+        scope = _oidc_text(view.scope, view.scope_len)
+        # A built provider always resolves these; guard anyway so a weakened
+        # native invariant surfaces clearly instead of seating None into
+        # OidcConfig's non-optional str fields. audience / issuer stay optional.
+        if (client_id is None or token_endpoint is None
+                or device_authorization_endpoint is None or scope is None):
+            raise RuntimeError(
+                'native OIDC config view is missing a required field')
         return OidcConfig(
-            client_id=_oidc_text(view.client_id, view.client_id_len),
-            token_endpoint=_oidc_text(
-                view.token_endpoint, view.token_endpoint_len),
-            device_authorization_endpoint=_oidc_text(
-                view.device_authorization_endpoint,
-                view.device_authorization_endpoint_len),
-            scope=_oidc_text(view.scope, view.scope_len),
+            client_id=client_id,
+            token_endpoint=token_endpoint,
+            device_authorization_endpoint=device_authorization_endpoint,
+            scope=scope,
             groups_in_token=bool(view.groups_in_token),
             audience=_oidc_text(view.audience, view.audience_len),
             issuer=_oidc_text(view.issuer, view.issuer_len))

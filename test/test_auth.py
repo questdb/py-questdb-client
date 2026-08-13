@@ -264,6 +264,16 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaisesRegex(OidcConfigError, 'FileTokenStore'):
             make_auth(token_store=object())
 
+    def test_file_store_directory_must_be_path_like(self):
+        # A falsy directory is "required"; a truthy non-path-like one must raise
+        # the package's typed OidcConfigError, not a bare TypeError from
+        # os.fspath escaping the contract every sibling honors.
+        with self.assertRaises(OidcConfigError):
+            FileTokenStore('')
+        for bad in (123, ['x'], object()):
+            with self.subTest(bad=bad), self.assertRaises(OidcConfigError):
+                FileTokenStore(bad)
+
     def test_native_file_store_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             auth = make_auth(token_store=FileTokenStore.at(directory))

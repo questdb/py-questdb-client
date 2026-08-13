@@ -47,7 +47,14 @@ class FileTokenStore:
     def __init__(self, directory: Any):
         if not directory:
             raise OidcConfigError('the token store directory is required')
-        self._directory = os.fsdecode(os.fspath(directory))
+        try:
+            self._directory = os.fsdecode(os.fspath(directory))
+        except TypeError as exc:
+            # A truthy non-path (int, dict, arbitrary object) would otherwise
+            # escape the package's typed-error contract with a bare TypeError.
+            raise OidcConfigError(
+                'the token store directory must be a path-like object '
+                '(str, bytes, or os.PathLike)') from exc
 
     @classmethod
     def at(cls, directory: Any) -> 'FileTokenStore':
