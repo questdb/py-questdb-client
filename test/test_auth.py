@@ -542,6 +542,26 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertGreater(renderer.successes[0][1], 0)
         self.assertEqual(renderer.failures, [])
 
+    def test_discovery_config_view_strips_control_chars(self):
+        # The native config view is not display-sanitized (only the device-flow
+        # event text is), so OidcDeviceAuth.config is the sink that strips
+        # control / bidi / zero-width characters a MITM'd or hostile /settings
+        # could smuggle into the resolved client id. OidcConfig's repr can reach
+        # a terminal, a notebook cell, or a logged traceback, so a dropped
+        # _strip_control() in the config property would reintroduce an ANSI /
+        # bidi injection there -- and otherwise pass every existing test.
+        # ESC + BEL (C0 control), U+202E RIGHT-TO-LEFT OVERRIDE (bidi),
+        # U+200B ZERO WIDTH SPACE (zero-width) -- all removed by _strip_control.
+        hostile_client_id = 'disc\x1b\x07lient‮​'
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.client.id': hostile_client_id,
+        }) as server:
+            auth = make_discovered_auth(server)
+            client_id = auth.config.client_id
+        self.assertEqual(client_id, 'disclient')
+        for ch in ('\x1b', '\x07', '‮', '​'):
+            self.assertNotIn(ch, client_id)
+
     def test_renderer_on_waiting_fires_while_authorization_pending(self):
         # The native poll loop emits WAITING between polls while the IdP replies
         # authorization_pending. The binding must map event.seconds_left ->

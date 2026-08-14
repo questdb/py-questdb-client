@@ -26,7 +26,8 @@ class OidcTestServer:
             write_statuses=(),
             device_token_response=None,
             device_token_responses=(),
-            refresh_token_response=None):
+            refresh_token_response=None,
+            settings_config_overrides=None):
         self.initial_access_token = initial_access_token
         self.initial_expires_in = initial_expires_in
         self.refresh_token = refresh_token
@@ -46,6 +47,10 @@ class OidcTestServer:
         self.device_token_response = device_token_response
         self._device_token_responses = list(device_token_responses)
         self.refresh_token_response = refresh_token_response
+        # Merged into the ``config`` object of the ``/settings`` response, so a
+        # test can serve hostile / MITM'd discovery values (e.g. a client id
+        # carrying control / bidi / zero-width characters).
+        self.settings_config_overrides = dict(settings_config_overrides or {})
         self._write_statuses = list(write_statuses)
         self._lock = threading.Lock()
         self._requests = []
@@ -120,18 +125,20 @@ class OidcTestServer:
         path = request['path']
 
         if handler.command == 'GET' and path == '/settings':
+            config = {
+                'acl.oidc.enabled': True,
+                'acl.oidc.client.id': 'discovered-client',
+                'acl.oidc.scope': 'openid offline_access',
+                'acl.oidc.groups.encoded.in.token': False,
+                'acl.oidc.token.endpoint': self.url + '/token',
+                'acl.oidc.device.authorization.endpoint': (
+                    self.url + '/device'),
+                'line.proto.support.versions': [1, 2, 3],
+                'ilp.proto.transports': ['tcp', 'http'],
+            }
+            config.update(self.settings_config_overrides)
             self._json(handler, 200, {
-                'config': {
-                    'acl.oidc.enabled': True,
-                    'acl.oidc.client.id': 'discovered-client',
-                    'acl.oidc.scope': 'openid offline_access',
-                    'acl.oidc.groups.encoded.in.token': False,
-                    'acl.oidc.token.endpoint': self.url + '/token',
-                    'acl.oidc.device.authorization.endpoint': (
-                        self.url + '/device'),
-                    'line.proto.support.versions': [1, 2, 3],
-                    'ilp.proto.transports': ['tcp', 'http'],
-                },
+                'config': config,
                 'preferences': {},
             })
             return
