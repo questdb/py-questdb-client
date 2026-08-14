@@ -223,9 +223,12 @@ cdef void _oidc_builder_set_string(
     elif setting == 4:
         ok = questdb_oidc_builder_token_endpoint(
             builder, PyBytes_AsString(encoded), PyBytes_GET_SIZE(encoded), &err)
-    else:
+    elif setting == 5:
         ok = questdb_oidc_builder_device_authorization_endpoint(
             builder, PyBytes_AsString(encoded), PyBytes_GET_SIZE(encoded), &err)
+    else:
+        raise AssertionError(
+            f'_oidc_builder_set_string: unknown setting {setting!r}')
     if not ok:
         raise _oidc_err_to_py(err)
 
@@ -527,10 +530,6 @@ cdef class OidcDeviceAuth:
         finally:
             questdb_oidc_token_free(token)
 
-    def _token(self):
-        """Compatibility alias for :meth:`token` (always non-interactive)."""
-        return self.token()
-
     def headers(self):
         """Return an HTTP Authorization header containing the current token."""
         return {'Authorization': 'Bearer ' + self.token()}
@@ -550,6 +549,12 @@ cdef class OidcDeviceAuth:
 
     @property
     def config(self):
+        """The resolved OIDC configuration as an :class:`OidcConfig`.
+
+        Reports the client id, the token and device-authorization endpoints, the
+        scope, the selected token kind (``groups_in_token``), and the optional
+        audience / issuer. Raises ``RuntimeError`` if the provider is closed.
+        """
         cdef questdb_oidc_config_view view
         from questdb.auth._config import OidcConfig
         if self._raw == NULL:
@@ -565,6 +570,8 @@ cdef class OidcDeviceAuth:
             view.device_authorization_endpoint,
             view.device_authorization_endpoint_len)
         scope = _oidc_text(view.scope, view.scope_len)
+        audience = _oidc_text(view.audience, view.audience_len)
+        issuer = _oidc_text(view.issuer, view.issuer_len)
         # A built provider always resolves these; guard anyway so a weakened
         # native invariant surfaces clearly instead of seating None into
         # OidcConfig's non-optional str fields. audience / issuer stay optional.
@@ -572,14 +579,25 @@ cdef class OidcDeviceAuth:
                 or device_authorization_endpoint is None or scope is None):
             raise RuntimeError(
                 'native OIDC config view is missing a required field')
+        # Native config-view strings are not guaranteed display-sanitized (only
+        # the device-flow event text is), yet OidcConfig's repr can reach a
+        # terminal / notebook or a logged traceback. Strip control/bidi/zero-
+        # width chars from every field so a MITM'd or hostile /settings response
+        # cannot inject ANSI/bidi through this sink -- matching the sanitize-
+        # every-sink posture of the renderers and OidcError. _render is stdlib-
+        # only, so this lazy import introduces no cycle. Optional fields keep
+        # None (absent) distinct from '' (present-but-empty).
+        from questdb.auth._render import _strip_control
         return OidcConfig(
-            client_id=client_id,
-            token_endpoint=token_endpoint,
-            device_authorization_endpoint=device_authorization_endpoint,
-            scope=scope,
+            client_id=_strip_control(client_id),
+            token_endpoint=_strip_control(token_endpoint),
+            device_authorization_endpoint=_strip_control(
+                device_authorization_endpoint),
+            scope=_strip_control(scope),
             groups_in_token=bool(view.groups_in_token),
-            audience=_oidc_text(view.audience, view.audience_len),
-            issuer=_oidc_text(view.issuer, view.issuer_len))
+            audience=(_strip_control(audience)
+                      if audience is not None else None),
+            issuer=_strip_control(issuer) if issuer is not None else None)
 
     def __dealloc__(self):
         if self._raw != NULL:

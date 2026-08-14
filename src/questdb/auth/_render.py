@@ -163,12 +163,12 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
         return None
     # urlparse() ignores surrounding whitespace when parsing the scheme, so
     # "  https://idp/..." parses as https; trim it so the value we vet is the
-    # value we return (and hand to the href / webbrowser.open()), not the
+    # value we return (and hand to the href / QR encoders), not the
     # untrimmed original.
     url = url.strip()
     # urlparse() also silently REMOVES tab/newline/CR from anywhere in the URL
     # before parsing, so a value carrying them would be vetted as its stripped
-    # form yet returned (→ the href / webbrowser.open() / QR) with them intact —
+    # form yet returned (→ the href / QR encoders) with them intact —
     # the value vetted would not equal the value returned. Reject such a URL so
     # the invariant holds even when this is called directly. (Production always
     # passes a _strip_control'd value via _safe_target, which removes these
@@ -182,7 +182,7 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
         # non-integer or out-of-range `.port` raises ValueError, caught below.
         # Reading `.port` is essential, not incidental: without it a URL with a
         # junk port (e.g. "https://host:70000/…") is returned verbatim for the
-        # href / webbrowser.open() / QR, while `_display_url` DROPS that port
+        # href / QR encoders, while `_display_url` DROPS that port
         # from the shown text — so the displayed link and the real target would
         # diverge, the exact spoof this vetting (via `_safe_target`) exists to
         # prevent. Rejecting it here keeps them identical: the URL is then shown
@@ -204,16 +204,28 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
 
 def _safe_target(value: Optional[str]) -> Optional[str]:
     """
-    The single control-stripped, scheme/userinfo/host-vetted URL to click, open
-    in a browser, or encode as a QR — or ``None`` if it can't be trusted.
+    The single control-stripped, scheme/userinfo/host-vetted URL to click or
+    encode as a QR — or ``None`` if it can't be trusted.
 
-    One value feeds the displayed link's ``href``, :func:`webbrowser.open` and
-    both QR encoders, so a control / zero-width char stripped from the on-screen
-    link can never survive into the URL actually opened or scanned: the displayed
-    link and the real target cannot diverge. (Earlier the browser/QR paths vetted
-    the *raw* response value while the display was control-stripped.)
+    One value feeds the displayed link's ``href`` and both QR encoders, so a
+    control / zero-width char stripped from the on-screen link can never survive
+    into the URL actually scanned: the displayed link and the real target cannot
+    diverge. (Browser opening is performed natively from the vetted
+    ``browser_target``; earlier the QR path vetted the *raw* response value while
+    the display was control-stripped.)
     """
     return _safe_link_url(_strip_control(value))
+
+
+def _effective_port(parts) -> Optional[int]:
+    """The URL's port, folding in the scheme default (443 ``https`` / 80
+    ``http``) when it is omitted, so an explicit ``:443``/``:80`` and an implicit
+    port compare equal. Inputs are ``_safe_target``-vetted ``http(s)``, so a
+    default always exists.
+    """
+    if parts.port is not None:
+        return parts.port
+    return {'http': 80, 'https': 443}.get((parts.scheme or '').lower())
 
 
 def _same_origin(a: str, b: str) -> bool:
@@ -222,14 +234,18 @@ def _same_origin(a: str, b: str) -> bool:
 
     Both are guaranteed ``http(s)`` with an ASCII host, no userinfo, and a
     parseable in-range port (:func:`_safe_link_url` rejects anything else), so a
-    plain origin comparison is meaningful and cannot raise on ``.port``.
+    plain origin comparison is meaningful and cannot raise on ``.port``. The
+    scheme's default port is normalized (:func:`_effective_port`) so a URL that
+    spells out ``:443``/``:80`` and one that omits it still match — RFC 8628's
+    ``verification_uri_complete`` is ``verification_uri`` plus the user code, so
+    a legitimate pair shares an origin even when one side writes the port.
     """
     pa = urllib.parse.urlparse(a)
     pb = urllib.parse.urlparse(b)
     return (
         pa.scheme.lower() == pb.scheme.lower()
         and (pa.hostname or '').lower() == (pb.hostname or '').lower()
-        and pa.port == pb.port)
+        and _effective_port(pa) == _effective_port(pb))
 
 
 def _matched_complete(resp: Dict[str, Any]) -> Optional[str]:
@@ -258,11 +274,20 @@ def _matched_complete(resp: Dict[str, Any]) -> Optional[str]:
 
 
 def _verification_target(resp: Dict[str, Any]) -> Optional[str]:
-    """The single URL to auto-open, encode as a QR, or make a one-click link:
-    the origin-matched ``verification_uri_complete`` when usable (see
-    :func:`_matched_complete`), else the vetted ``verification_uri`` — so the
-    target opened/scanned/clicked can never diverge from the host shown in the
-    link the user actually reads.
+    """The single URL to auto-open, encode as a QR, or make a one-click link.
+
+    Prefers the native-vetted ``browser_target`` when present; otherwise the
+    origin-matched ``verification_uri_complete`` (see :func:`_matched_complete`),
+    else the vetted ``verification_uri``.
+
+    For the two fallback branches the target cannot diverge from the host shown
+    in the link the user reads, and Python enforces that here:
+    :func:`_matched_complete` drops an off-origin ``complete``, and
+    ``verification_uri`` *is* the shown host. For the ``browser_target`` branch
+    that guarantee is delegated to the native side, which vets the URL and
+    derives it from the same device-authorization response as the shown
+    ``verification_uri``; this function does not independently re-check its
+    origin against the shown host.
     """
     # Native OIDC events carry the one URL independently vetted for browser,
     # link and QR use. Prefer it when present; pure-Python callers retain the
@@ -414,10 +439,14 @@ _STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Me', 'Zl', 'Zp'})
 #    user_code / URL / identity. (The Cf/Cn/Lo Default_Ignorables — soft hyphen,
 #    U+180E, the zero-width/bidi runs, the tag chars — are already dropped by the
 #    category rule.)
+#  - U+2800 BRAILLE PATTERN BLANK (category So, so neither the category rule nor
+#    the Zs space-fold below catches it) renders as a blank, cell-width glyph and
+#    is a known invisible-padding primitive that can hide trailing text in a
+#    user_code / identity / error, the same hazard class as the Hangul fillers.
 _STRIP_EXTRA = frozenset(
     '\u115f\u1160\u3164\uffa0'
     + ''.join(chr(c) for c in (
-        0x034F, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F))
+        0x2800, 0x034F, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F))
     + ''.join(chr(c) for c in range(0xFE00, 0xFE10))
     + ''.join(chr(c) for c in range(0xE0100, 0xE01F0)))
 
@@ -552,7 +581,11 @@ class Renderer:
 
         ``resp`` is the raw (untrusted) device-authorization response; the
         verification URI and user code live under ``verification_uri`` /
-        ``verification_uri_complete`` / ``user_code``.
+        ``verification_uri_complete`` / ``user_code``. Native events also carry
+        ``browser_target`` — the single URL the native side has vetted for
+        opening / linkifying / QR-encoding; the built-in renderers prefer it,
+        and a custom renderer should use it (rather than the raw
+        ``verification_uri``) as the actionable target.
         """
 
     def on_waiting(self, seconds_left: float) -> None:

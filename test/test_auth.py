@@ -1021,6 +1021,13 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertEqual(_render._strip_control(123), '123')
         self.assertEqual(_render._strip_control(None), '')
 
+    def test_strip_control_removes_braille_blank(self):
+        # U+2800 BRAILLE PATTERN BLANK renders as a blank, cell-width glyph
+        # (category So, so the category rule and the Zs space-fold both miss it)
+        # and can pad or hide trailing text in a user_code / identity / error.
+        self.assertEqual(
+            _render._strip_control('ab' + chr(0x2800) + 'cd'), 'abcd')
+
     # -- _safe_link_url / _safe_target: what may be linkified / opened / QR'd --
     def test_safe_link_url_rejects_dangerous_schemes(self):
         self.assertIsNone(_render._safe_link_url('javascript:alert(1)'))
@@ -1114,6 +1121,17 @@ class RenderSanitizerTest(unittest.TestCase):
                 'verification_uri_complete':
                     'https://idp.example:9001/device?code=X'}))
 
+    def test_matched_complete_accepts_explicit_default_port(self):
+        # verification_uri omits the port while complete spells out :443 — the
+        # scheme default is normalized, so this is the same origin and the
+        # pre-filled URL is kept rather than dropped as a spoof.
+        self.assertEqual(
+            _render._matched_complete({
+                'verification_uri': 'https://idp.example/device',
+                'verification_uri_complete':
+                    'https://idp.example:443/device?code=X'}),
+            'https://idp.example:443/device?code=X')
+
     def test_same_origin(self):
         self.assertTrue(_render._same_origin(
             'https://a.example:9000/x', 'https://a.example:9000/y'))
@@ -1121,6 +1139,15 @@ class RenderSanitizerTest(unittest.TestCase):
             'https://a.example:9000/x', 'https://a.example:9001/y'))
         self.assertFalse(_render._same_origin(
             'https://a.example/x', 'http://a.example/y'))
+        # An explicit default port equals an implicit one (443 https / 80 http),
+        # so a legitimate complete URL that writes the port still matches.
+        self.assertTrue(_render._same_origin(
+            'https://a.example/x', 'https://a.example:443/y'))
+        self.assertTrue(_render._same_origin(
+            'http://a.example:80/x', 'http://a.example/y'))
+        # A non-default explicit port still differs from an implicit one.
+        self.assertFalse(_render._same_origin(
+            'https://a.example/x', 'https://a.example:8443/y'))
 
     # -- _render_link: linkify only vetted URLs, escape the rest --
     def test_render_link_linkifies_safe_url(self):

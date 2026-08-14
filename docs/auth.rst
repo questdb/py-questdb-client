@@ -31,7 +31,7 @@ client or a standalone sender:
     with questdb.connect(
             "wss::addr=questdb.example.com:9000;",
             oidc_auth=auth) as db:
-        result = db.query("select * from trades limit 10")
+        df = db.query("select * from trades limit 10").to_pandas()
         with db.sender() as sender:
             sender.row("events", columns={"value": 42},
                        at=questdb.ServerTimestamp)

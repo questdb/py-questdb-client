@@ -461,19 +461,18 @@ section for more details.
 
 .. note::
 
-   **OIDC auth failures raise a different exception type.** When a transport
+   **OIDC auth failures surface as a typed exception.** When a transport
    is configured with an :class:`~questdb.auth.OidcDeviceAuth` provider (via
-   ``oidc_auth=``), a connect, reconnect, or
-   flush that cannot obtain a token raises an
-   :class:`~questdb.auth.OidcError` (for example
+   ``oidc_auth=``), a connect, reconnect, or flush that cannot obtain a token
+   raises an :class:`~questdb.auth.OidcError` (for example
    :class:`~questdb.auth.OidcInteractionRequired` when explicit sign-in has
-   lapsed). ``OidcError`` is **deliberately not** a subclass of
-   :class:`QuestDBError <questdb.QuestDBError>`, so the same ``flush()``,
-   ``dataframe()``, ``row()``, ``query()``, or :func:`questdb.connect` call
-   can raise *either* type depending on the cause. Retry or dead-letter
-   logic that only catches ``QuestDBError`` will silently miss auth
-   failures — catch ``(QuestDBError, OidcError)``, or handle ``OidcError``
-   explicitly, when using ``oidc_auth``. See :ref:`oidc_auth`.
+   lapsed), from the same ``flush()``, ``dataframe()``, ``row()``,
+   ``query()``, or :func:`questdb.connect` call. ``OidcError`` **is** a
+   subclass of :class:`QuestDBError <questdb.QuestDBError>` (``code``
+   ``QuestDBErrorCode.AuthError``), so an existing ``except QuestDBError``
+   retry or dead-letter handler keeps catching auth failures; catch
+   ``OidcError`` (or a typed subclass) *before* ``QuestDBError`` to handle
+   auth failures specifically. See :ref:`oidc_auth`.
 
 .. _sender_transaction:
 
