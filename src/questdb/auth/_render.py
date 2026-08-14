@@ -516,7 +516,7 @@ def format_prompt(resp: Dict[str, Any]) -> str:
     # _display_url shows the IDNA/punycode host (and drops userinfo) so a
     # homoglyph / user@host can't spoof the host in the plain-text prompt either.
     uri = _display_url(_verification_uri(resp))
-    code = _strip_control(str(resp.get('user_code', '')))
+    code = _strip_control(str(resp.get('user_code') or ''))
     # Only offer the pre-filled "open directly" URL when it shares the shown
     # link's origin (see _matched_complete); a complete on a different host is
     # dropped rather than shown, so the convenience URL can't point somewhere the
@@ -702,7 +702,7 @@ class JupyterRenderer(Renderer):
         # the QR and the displayed (IDNA-normalized) label uniformly.
         raw_uri = _verification_uri(resp)
         raw_complete = _verification_uri_complete(resp)
-        code = html.escape(_strip_control(str(resp.get('user_code', ''))))
+        code = html.escape(_strip_control(str(resp.get('user_code') or '')))
         body = [
             '<div style="font-size:1.05em;font-weight:600;margin-bottom:6px">'
             '🔐 Sign in to QuestDB</div>',

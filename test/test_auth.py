@@ -1019,6 +1019,19 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertEqual(_render._strip_control('a b　c'), 'a b c')
         self.assertEqual(_render._strip_control('a b'), 'a b')
 
+    def test_format_prompt_missing_user_code_renders_empty(self):
+        # oidc.pxi passes user_code=None (key present, value None) when the
+        # native pointer is NULL. The plain-text prompt must then render an
+        # empty code, not the literal 'None' -- a `.get('user_code', '')`
+        # (rather than `... or ''`) regression would surface 'None' to the user.
+        for resp in (
+                {'user_code': None,
+                 'verification_uri': 'https://idp.example/verify'},
+                {'verification_uri': 'https://idp.example/verify'}):
+            prompt = _render.format_prompt(resp)
+            self.assertNotIn('None', prompt)
+            self.assertTrue(prompt.rstrip().endswith('enter code:'))
+
     def test_strip_control_removes_variation_selectors_and_enclosing_marks(self):
         self.assertEqual(_render._strip_control('a️b'), 'ab')   # VS16
         self.assertEqual(_render._strip_control('a⃠b'), 'ab')   # enclosing mark

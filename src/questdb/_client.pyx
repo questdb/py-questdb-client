@@ -1368,7 +1368,10 @@ cdef class Buffer:
     cdef inline void_int _may_trigger_row_complete(self) except -1:
         cdef PyObject* sender = NULL
         if self._row_complete_sender != None:
-            if PyWeakref_GetRef(self._row_complete_sender, &sender):
+            # > 0 (not just truthy): PyWeakref_GetRef returns -1 on error, which
+            # would otherwise enter the branch with sender == NULL. Matches the
+            # OIDC renderer's PyWeakref_GetRef handling in oidc.pxi.
+            if PyWeakref_GetRef(self._row_complete_sender, &sender) > 0:
                 try:
                     may_flush_on_row_complete(
                         self, <Sender><object>sender)
