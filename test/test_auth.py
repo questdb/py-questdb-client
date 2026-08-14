@@ -267,6 +267,30 @@ class NativeOidcTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(OidcConfigError):
                 make_auth(default_interval=value)
 
+    def test_oidc_error_propagates_in_doubt(self):
+        # The OIDC error path (_oidc_err_to_py) must carry the native in-doubt
+        # flag through to the raised OidcError, exactly as the non-OIDC
+        # c_err_to_py path does; otherwise a retry / dead-letter handler keying
+        # on QuestDBError.in_doubt could replay a possibly-delivered write. The
+        # native classification does not pair an OIDC view with in_doubt today,
+        # so this constructor plumbing is the reachable regression surface.
+        self.assertFalse(OidcError('x').in_doubt)
+        self.assertTrue(OidcError('x', in_doubt=True).in_doubt)
+        # in_doubt is a QuestDBError-level property, so an ``except
+        # QuestDBError`` handler observes it on an OidcError too.
+        self.assertIsInstance(OidcError('x'), questdb.QuestDBError)
+        # Every typed subclass forwards it: the plain ones share
+        # OidcError.__init__; the device-flow ones super() into it.
+        for factory in (
+                lambda **k: OidcConfigError('x', **k),
+                lambda **k: OidcNetworkError('x', **k),
+                lambda **k: OidcInteractionRequired('x', **k),
+                lambda **k: OidcDeviceFlowError('x', error='e', **k),
+                lambda **k: OidcTimeoutError('x', error='e', **k)):
+            with self.subTest(factory=factory):
+                self.assertFalse(factory().in_doubt)
+                self.assertTrue(factory(in_doubt=True).in_doubt)
+
     def test_closed_provider_is_rejected(self):
         # A provider built with __new__ but never __init__'d has _raw == NULL
         # ("closed"). Its own token-flow ops raise RuntimeError, and attaching it
@@ -561,6 +585,57 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertEqual(client_id, 'disclient')
         for ch in ('\x1b', '\x07', '‮', '​'):
             self.assertNotIn(ch, client_id)
+
+    def test_discovery_inherits_groups_in_token_from_server(self):
+        # from_questdb defaults groups_in_token=None => inherit the server's
+        # advertised acl.oidc.groups.encoded.in.token (unlike the direct
+        # constructor, which defaults to False). The default fixture advertises
+        # False; a server advertising True must be inherited as True.
+        with OidcTestServer() as server:
+            self.assertFalse(
+                make_discovered_auth(server).config.groups_in_token)
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.groups.encoded.in.token': True}) as server:
+            self.assertTrue(
+                make_discovered_auth(server).config.groups_in_token)
+
+    def test_discovery_groups_in_token_override_beats_server(self):
+        # An explicit groups_in_token wins over discovery, in both directions.
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.groups.encoded.in.token': True}) as server:
+            self.assertFalse(
+                make_discovered_auth(
+                    server, groups_in_token=False).config.groups_in_token)
+        with OidcTestServer() as server:  # advertises False
+            self.assertTrue(
+                make_discovered_auth(
+                    server, groups_in_token=True).config.groups_in_token)
+
+    def test_discovery_explicit_kwargs_override_discovered_values(self):
+        # "Explicit keyword arguments override discovery." The builder-override
+        # path that runs after questdb_oidc_builder_from_questdb is otherwise
+        # only ever exercised with None (skipped) across the suite; confirm a
+        # non-None client_id / scope / audience wins over the server-advertised
+        # /settings values (default: discovered-client / openid offline_access).
+        with OidcTestServer() as server:
+            config = make_discovered_auth(
+                server,
+                client_id='overridden-client',
+                scope='openid custom-scope',
+                audience='questdb-api').config
+        self.assertEqual(config.client_id, 'overridden-client')
+        self.assertEqual(config.scope, 'openid custom-scope')
+        self.assertEqual(config.audience, 'questdb-api')
+
+    def test_discovery_on_non_oidc_server_raises_config_error(self):
+        # Pointing from_questdb at a QuestDB that does not advertise OIDC (OSS,
+        # or OIDC disabled) is the #1 real-world discovery failure: the native
+        # QUESTDB_OIDC_ERROR_CONFIG result must surface as OidcConfigError, and
+        # only via discovery is that native config-error branch reached.
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.enabled': False}) as server:
+            with self.assertRaises(OidcConfigError):
+                make_discovered_auth(server)
 
     def test_renderer_on_waiting_fires_while_authorization_pending(self):
         # The native poll loop emits WAITING between polls while the IdP replies

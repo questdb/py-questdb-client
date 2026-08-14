@@ -51,7 +51,8 @@ class OidcError(QuestDBError):
     """
 
     def __init__(self, *args, status: Optional[int] = None,
-                 retry_after: Optional[int] = None):
+                 retry_after: Optional[int] = None,
+                 in_doubt: bool = False):
         # Strip terminal/bidi/zero-width control characters from every string
         # message argument before it can reach a display sink. Error messages
         # routinely interpolate untrusted IdP fields (error_description, response
@@ -69,8 +70,12 @@ class OidcError(QuestDBError):
         # message, then restore the full args tuple so str()/repr() match the
         # historical Exception-based behavior (raise sites pass a single message
         # today; the tuple keeps the defense-in-depth multi-arg case intact).
+        # in_doubt threads through to the base so the OIDC error path reports
+        # delivery uncertainty consistently with the non-OIDC QuestDBError path;
+        # an ``except QuestDBError`` retry/dead-letter handler reads it.
         QuestDBError.__init__(
-            self, QuestDBErrorCode.AuthError, args[0] if args else '')
+            self, QuestDBErrorCode.AuthError, args[0] if args else '',
+            in_doubt=in_doubt)
         self.args = args
         # HTTP status behind a non-JSON HTTP response (else None), so the poll
         # loop and silent refresh can tell a terminal 4xx (e.g. a WAF error
@@ -115,11 +120,16 @@ class OidcDeviceFlowError(OidcError):
             error: Optional[str] = None,
             error_description: Optional[str] = None,
             status: Optional[int] = None,
-            retry_after: Optional[int] = None):
+            retry_after: Optional[int] = None,
+            in_doubt: bool = False):
         # Forward status to OidcError so a device-flow error raised in response
         # to a known HTTP status carries it (e.g. for a caller inspecting
-        # err.status), rather than always reporting None.
-        super().__init__(message, status=status, retry_after=retry_after)
+        # err.status), rather than always reporting None. in_doubt likewise
+        # forwards so a device-flow error never under-reports delivery
+        # uncertainty relative to the non-OIDC path.
+        super().__init__(
+            message, status=status, retry_after=retry_after,
+            in_doubt=in_doubt)
         # error / error_description come straight from the untrusted IdP
         # response and are exposed as attributes (a caller may re-display them),
         # so strip them too — same rationale as the message in OidcError. Coerce
