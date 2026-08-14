@@ -6,7 +6,7 @@
 ##    \__\_\\__,_|\___||___/\__|____/|____/
 ##
 ##  Copyright (c) 2014-2019 Appsicle
-##  Copyright (c) 2019-2024 QuestDB
+##  Copyright (c) 2019-2026 QuestDB
 ##
 ##  Licensed under the Apache License, Version 2.0 (the "License");
 ##  you may not use this file except in compliance with the License.
@@ -34,19 +34,25 @@ from __future__ import annotations
 
 import re
 import urllib.parse
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from questdb._client import OidcDeviceAuth
 from ._errors import OidcConfigError
+
+if TYPE_CHECKING:
+    # Forward references only: sqlalchemy is imported lazily at call time so it
+    # stays an optional dependency, but the return annotation must still resolve.
+    import sqlalchemy.engine
 
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
 
 
-def _safe_urlparse(url: str) -> tuple:
+def _safe_urlparse(url: str) -> urllib.parse.ParseResult:
     try:
         parts = urllib.parse.urlparse(url)
-        return parts, parts.port
+        _ = parts.port  # Validate the port eagerly: a malformed one raises here.
+        return parts
     except (ValueError, TypeError, AttributeError) as e:
         raise OidcConfigError(f'Malformed endpoint URL {url!r}: {e}.') from e
 
@@ -107,7 +113,7 @@ def _require_host(url: str, host: Optional[str] = None) -> str:
         # contract. Guard it up front, mirroring _coerce_port's pg_port check.
         raise OidcConfigError(
             f'host must be a string or None, got {host!r}.')
-    parts, _ = _safe_urlparse(url)
+    parts = _safe_urlparse(url)
     scheme = (parts.scheme or '').lower()
     if scheme not in ('http', 'https'):
         raise OidcConfigError(

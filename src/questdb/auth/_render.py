@@ -6,7 +6,7 @@
 ##    \__\_\\__,_|\___||___/\__|____/|____/
 ##
 ##  Copyright (c) 2014-2019 Appsicle
-##  Copyright (c) 2019-2024 QuestDB
+##  Copyright (c) 2019-2026 QuestDB
 ##
 ##  Licensed under the Apache License, Version 2.0 (the "License");
 ##  you may not use this file except in compliance with the License.
@@ -648,7 +648,10 @@ class TerminalRenderer(Renderer):
         if self._countdown_active:
             self._write('\n')
             self._countdown_active = False
-        who = f' as {_strip_control(identity)}' if identity else ''
+        # Guard the suffix on the POST-strip value: an all-control identity
+        # strips to '' and must not render a dangling ' as ' with no name.
+        stripped = _strip_control(identity) if identity else ''
+        who = f' as {stripped}' if stripped else ''
         mins = _fmt_minutes(expires_in)
         self._write(f'✅ Signed in{who} — token cached, expires in {mins} min\n')
 
@@ -694,14 +697,13 @@ class JupyterRenderer(Renderer):
         on the first tick. The untrusted device-response fields are stripped of
         control/bidi/zero-width chars (which ``html.escape`` does NOT remove)
         before rendering; ``_render_link`` also html-escapes and scheme-vets the
-        URL. Returns ``(body, uri, complete)``.
+        URL. Returns the list of body HTML fragments.
         """
         resp = self._resp
         # _render_link / _safe_target / _qr_img each strip + vet internally, so
         # pass the raw fields and let the single canonical target drive the href,
         # the QR and the displayed (IDNA-normalized) label uniformly.
         raw_uri = _verification_uri(resp)
-        raw_complete = _verification_uri_complete(resp)
         code = html.escape(_strip_control(str(resp.get('user_code') or '')))
         body = [
             '<div style="font-size:1.05em;font-weight:600;margin-bottom:6px">'
@@ -725,7 +727,7 @@ class JupyterRenderer(Renderer):
             qr_html = self._qr_img(_verification_target(resp))
             if qr_html:
                 body.append(qr_html)
-        return body, raw_uri, raw_complete
+        return body
 
     def _qr_img(self, target: Optional[str]) -> str:
         """The QR ``<img>`` for the verification URL, built once and cached.
@@ -752,7 +754,7 @@ class JupyterRenderer(Renderer):
         # user_code, so the cached image from a previous prompt would be stale).
         self._handle = None
         self._qr_html = None
-        body, _uri, _complete = self._prompt_head()
+        body = self._prompt_head()
         body.append(
             '<div id="qdb-oidc-status" style="color:#888;margin-top:8px">'
             '⏳ waiting for authorization…</div>')
@@ -782,7 +784,7 @@ class JupyterRenderer(Renderer):
             '❌ ' + html.escape(_strip_control(message)), color='#c62828')
 
     def _render_with_status(self, status_html: str, color: str) -> None:
-        body, _uri, _complete = self._prompt_head()
+        body = self._prompt_head()
         body.append(
             f'<div style="color:{color};margin-top:8px">{status_html}</div>')
         self._display(self._panel(''.join(body)))
