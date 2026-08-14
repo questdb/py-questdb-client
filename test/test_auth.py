@@ -678,6 +678,27 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 self.assertEqual(len(server.requests('/token', 'POST')), 1)
                 restored.clear()
 
+    def test_clear_removes_persisted_token(self):
+        # clear() must delete the persisted store entry, not only the in-memory
+        # copy: a fresh provider over the same store then finds nothing and
+        # re-runs the device flow (a SECOND /device request). If clear() left
+        # the file, the fresh provider would load it and /device stays at 1.
+        with tempfile.TemporaryDirectory() as directory:
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                self.assertEqual(auth.token(), 'AT-initial')
+                self.assertEqual(len(server.requests('/device', 'POST')), 1)
+
+                auth.clear()
+
+                fresh = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                fresh.sign_in()
+                self.assertEqual(fresh.token(), 'AT-initial')
+                self.assertEqual(len(server.requests('/device', 'POST')), 2)
+
     def test_http_sender_authenticates_retry_and_flush(self):
         with OidcTestServer(write_statuses=(500, 204)) as server:
             auth = make_discovered_auth(server)
@@ -731,6 +752,35 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertGreaterEqual(stats['accepted_connections'], 2)
         self.assertEqual(stats['binary_frames'], 1)
         self.assertGreaterEqual(len(stats['upgrade_authorizations']), 2)
+        self.assertTrue(all(
+            value == 'Bearer AT-initial'
+            for value in stats['upgrade_authorizations']))
+        self.assertEqual(stats['errors'], [])
+
+    def test_qwp_pool_authenticates_and_flushes(self):
+        # The pool opens its QWP connection through questdb_db_connect_ex -- a
+        # different native path than the standalone Sender's
+        # line_sender_opts_oidc_auth -- so exercise the Bearer token over the
+        # pool too (previously only system-tested). required_authorization makes
+        # the mock reject (401) any un-authenticated upgrade, so a committed
+        # frame proves the pool authenticated.
+        with OidcTestServer() as oidc_server:
+            auth = make_discovered_auth(oidc_server)
+            auth.sign_in()
+            with QwpAckServer(
+                    required_authorization='Bearer AT-initial') as qwp_server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{qwp_server.port};'
+                    'lazy_connect=true;sender_pool_min=1;pool_reap=manual;')
+                with questdb.connect(conf, oidc_auth=auth) as db:
+                    with db.sender() as sender:
+                        sender.row(
+                            'events', columns={'value': 42},
+                            at=questdb.ServerTimestamp)
+                stats = qwp_server.snapshot()
+
+        self.assertEqual(stats['binary_frames'], 1)
+        self.assertGreaterEqual(len(stats['upgrade_authorizations']), 1)
         self.assertTrue(all(
             value == 'Bearer AT-initial'
             for value in stats['upgrade_authorizations']))
@@ -846,14 +896,32 @@ class NativeTransportAttachmentTest(unittest.TestCase):
     def setUp(self):
         self.auth = make_auth()
 
+    def _assert_retains_and_releases(self, build):
+        # build(provider) -> (transport, close). The transport must pin the
+        # provider while open -- proving oidc_auth was actually attached, not
+        # silently ignored -- and release it on close.
+        provider = make_auth()
+        ref = weakref.ref(provider)
+        transport, close = build(provider)
+        del provider
+        gc.collect()
+        self.assertIsNotNone(
+            ref(), 'the transport must retain the OIDC provider while open')
+        close()
+        for _ in range(4):
+            gc.collect()
+            if ref() is None:
+                break
+        self.assertIsNone(
+            ref(), 'closing the transport must release the OIDC provider')
+
     def test_sender_accepts_shared_provider(self):
-        sender = questdb.Sender(
-            questdb.Protocol.Ws,
-            'localhost',
-            9000,
-            oidc_auth=self.auth,
-            auto_flush=False)
-        sender.close(flush=False)
+        def build(provider):
+            sender = questdb.Sender(
+                questdb.Protocol.Ws, 'localhost', 9000,
+                oidc_auth=provider, auto_flush=False)
+            return sender, lambda: sender.close(flush=False)
+        self._assert_retains_and_releases(build)
 
     def test_sender_keeps_renderer_alive_until_close(self):
         renderer = Renderer()
@@ -878,11 +946,12 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         self.assertIsNone(renderer_ref())
 
     def test_sender_from_conf_accepts_shared_provider(self):
-        sender = questdb.Sender.from_conf(
-            'https::addr=localhost:9000;',
-            oidc_auth=self.auth,
-            auto_flush=False)
-        sender.close(flush=False)
+        def build(provider):
+            sender = questdb.Sender.from_conf(
+                'https::addr=localhost:9000;', oidc_auth=provider,
+                auto_flush=False)
+            return sender, lambda: sender.close(flush=False)
+        self._assert_retains_and_releases(build)
 
     def test_sender_rejects_fixed_and_rotating_token(self):
         with self.assertRaises(questdb.QuestDBError):
@@ -891,6 +960,20 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 'localhost',
                 9000,
                 token='fixed',
+                oidc_auth=self.auth)
+
+    def test_sender_from_conf_rejects_fixed_and_rotating_token(self):
+        # The conf-string token (params.get('token')) hits the same mutual
+        # exclusion as the direct token= kwarg.
+        with self.assertRaises(questdb.QuestDBError):
+            questdb.Sender.from_conf(
+                'http::addr=localhost:9000;token=fixed;', oidc_auth=self.auth)
+
+    def test_pool_rejects_fixed_and_rotating_token(self):
+        # The pool's connect_ex path enforces the same exclusion.
+        with self.assertRaises(questdb.QuestDBError):
+            questdb.connect(
+                'ws::addr=localhost:9000;lazy_connect=true;token=fixed;',
                 oidc_auth=self.auth)
 
     def test_sender_rejects_wrong_auth_type(self):
@@ -902,10 +985,12 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 oidc_auth=object())
 
     def test_lazy_pool_accepts_shared_provider(self):
-        with questdb.connect(
+        def build(provider):
+            db = questdb.connect(
                 'ws::addr=localhost:9000;lazy_connect=true;',
-                oidc_auth=self.auth):
-            pass
+                oidc_auth=provider)
+            return db, db.close
+        self._assert_retains_and_releases(build)
 
     def test_pool_rejects_wrong_auth_type(self):
         with self.assertRaisesRegex(TypeError, 'OidcDeviceAuth'):
@@ -981,12 +1066,14 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         self.assertIsInstance(ctx.exception, questdb.QuestDBError)
 
     def test_sender_from_env_accepts_shared_provider(self):
-        with mock.patch.dict(
-                os.environ,
-                {'QDB_CLIENT_CONF': 'https::addr=localhost:9000;'}):
-            sender = questdb.Sender.from_env(
-                oidc_auth=self.auth, auto_flush=False)
-        sender.close(flush=False)
+        def build(provider):
+            with mock.patch.dict(
+                    os.environ,
+                    {'QDB_CLIENT_CONF': 'https::addr=localhost:9000;'}):
+                sender = questdb.Sender.from_env(
+                    oidc_auth=provider, auto_flush=False)
+            return sender, lambda: sender.close(flush=False)
+        self._assert_retains_and_releases(build)
 
 
 class RenderSanitizerTest(unittest.TestCase):
