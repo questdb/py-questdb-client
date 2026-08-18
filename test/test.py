@@ -2899,14 +2899,13 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
                         f'gh8, gh60 FROM {table_name} ORDER BY ts').to_arrow().to_pylist()
 
             first, second = rows
-            # Egress forwards UUID bytes verbatim in QuestDB's wire layout
-            # (lo half LE, hi half LE) even under the `arrow.uuid` label --
-            # the documented c-questdb-client family convention -- so decode
-            # little-endian regardless of whether pyarrow surfaces the cell
-            # as raw bytes or wraps it in a `uuid.UUID`.
+            # Egress emits UUID storage as canonical RFC 4122 big-endian
+            # bytes, matching what the `arrow.uuid` label promises, so the
+            # storage bytes equal `uuid.UUID.bytes` regardless of whether
+            # pyarrow surfaces the cell raw or wraps it in a `uuid.UUID`.
             raw_u = (first['u'] if isinstance(first['u'], bytes)
                      else first['u'].bytes)
-            self.assertEqual(int.from_bytes(raw_u, 'little'), normal_uuid.int)
+            self.assertEqual(raw_u, normal_uuid.bytes)
             self.assertEqual(first['ip'], int(ipaddress.IPv4Address('192.0.2.1')))
             self.assertEqual(first['bin'], b'')
             self.assertEqual(first['ch'], ord('Q'))

@@ -7,6 +7,26 @@ Changelog
 5.0.1 (unreleased)
 ------------------
 
+- **Breaking:** UUID values now use canonical RFC 4122 byte order
+  (big-endian, i.e. ``uuid.UUID.bytes``) everywhere they cross the API as
+  raw bytes. This affects Arrow and binary DataFrame columns on ingestion,
+  and the bytes read back from a UUID result column. Code that passed or
+  interpreted the two little-endian 64-bit halves of QuestDB's wire layout
+  must drop its own byte-swapping. Values passed as ``uuid.UUID`` objects —
+  in ``row()``, in object-dtype DataFrame columns, and as query binds — are
+  unaffected, as are the UUIDs that ``to_pandas()`` produces.
+- **Breaking:** an Arrow ``fixed_size_binary`` column is no longer read as
+  UUID or LONG256 on the strength of its width alone. 16- and 32-byte
+  columns are opaque bytes and land as BINARY unless the column claims a
+  type: the ``arrow.uuid`` extension type, ``questdb.column_type`` field
+  metadata, or the new ``schema_overrides`` kinds below.
+- ``schema_overrides`` accepts two new kinds, ``'uuid'`` and ``'long256'``,
+  which claim a column of that QuestDB type. They apply to fixed-size and
+  variable-length binary columns alike — the route polars frames take, since
+  polars has no fixed-size binary dtype — and every non-null value must be
+  exactly 16 or 32 bytes respectively.
+- polars ``Object`` columns are now rejected with a clear error instead of
+  being ingested as meaningless in-process handles.
 - ``row()`` on QWP senders now supports UUID, IPV4, BINARY, CHAR, DATE,
   LONG256, and GEOHASH columns. Pass ``uuid.UUID``,
   ``ipaddress.IPv4Address``, or bytes-like values directly, and use the new

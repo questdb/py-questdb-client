@@ -3672,7 +3672,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
     cdef size_t buf_bytes = row_count * 16 if row_count > 0 else 16
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
-    cdef object le_bytes
+    cdef object be_bytes
     cdef object uuid_cls = _uuid.UUID
 
     try:
@@ -3687,12 +3687,13 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
         for i in range(row_count):
             cell = access[i]
             if isinstance(<object>cell, uuid_cls):
-                # `.int.to_bytes(16, 'little')` produces exactly the
-                # QuestDB UUID wire layout: bytes 0..8 = lo half LE,
-                # bytes 8..16 = hi half LE. One C-implemented call +
-                # one 16-byte memcpy per row.
-                le_bytes = (<object>cell).int.to_bytes(16, 'little')
-                memcpy(buf + i * 16, PyBytes_AsString(le_bytes), 16)
+                # `qwp_numpy_s16` reads canonical RFC 4122 big-endian
+                # rows and byte-swaps them into QWP wire order itself.
+                # `.int.to_bytes(16, 'big')` is what `UUID.bytes`
+                # returns, reached in one C-implemented call + one
+                # 16-byte memcpy per row.
+                be_bytes = (<object>cell).int.to_bytes(16, 'big')
+                memcpy(buf + i * 16, PyBytes_AsString(be_bytes), 16)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             elif _dataframe_is_null_pyobj(cell):
@@ -5363,7 +5364,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
     if not isinstance(schema_overrides, dict):
         raise TypeError(
             'schema_overrides must be a dict mapping column name to '
-            "one of: 'symbol', 'ipv4', 'char', or ('geohash', bits).")
+            "one of: 'symbol', 'ipv4', 'char', 'uuid', 'long256', or "
+            "('geohash', bits).")
     cdef list out = []
     cdef object name, override, kind, value
     cdef int kind_int
@@ -5389,6 +5391,10 @@ cdef object _validate_schema_overrides(object schema_overrides):
             kind_int = <int>qwp_arrow_override_ipv4
         elif kind == 'char':
             kind_int = <int>qwp_arrow_override_char
+        elif kind == 'uuid':
+            kind_int = <int>qwp_arrow_override_uuid
+        elif kind == 'long256':
+            kind_int = <int>qwp_arrow_override_long256
         elif kind == 'geohash':
             if not isinstance(value, int) or value < 1 or value > 60:
                 raise ValueError(
@@ -5399,7 +5405,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
         else:
             raise ValueError(
                 f'schema_overrides[{name!r}] kind {kind!r} not '
-                "in {'symbol', 'ipv4', 'char', 'geohash'}.")
+                "in {'symbol', 'ipv4', 'char', 'uuid', 'long256', "
+                "'geohash'}.")
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 
@@ -6747,18 +6754,25 @@ cdef class QuestDB:
           ``numpy.ndarray`` cells (any rank; requires pyarrow). Both land as
           QuestDB ``ARRAY(DOUBLE)``. Null rows are allowed; null *elements*
           inside an array are not.
-        - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
-          extension type. Bytes are forwarded verbatim as **QuestDB's
-          UUID wire layout** ("bytes 0..8 lo half LE, bytes 8..16 hi
-          half LE"), matching the convention shared across the
-          c-questdb-client family (Rust direct, Polars). Round-trip is
-          byte-identity at this layout; users who want
-          ``uuid.UUID.bytes`` (RFC 4122 big-endian) round-trip must
-          convert at their boundary.
+        - **UUID**: object-dtype columns of ``uuid.UUID``, the
+          ``arrow.uuid`` extension type over ``pa.fixed_size_binary(16)``,
+          or any 16-byte binary column claimed with
+          ``schema_overrides={'col': 'uuid'}``. Bytes are **canonical
+          RFC 4122 big-endian** — exactly ``uuid.UUID.bytes`` — and the
+          client byte-swaps them into QWP wire order. Round-trip through
+          :meth:`query <questdb.QuestDB.query>` is byte-identity.
+        - **LONG256**: 32-byte binary columns claimed with
+          ``schema_overrides={'col': 'long256'}``. Bytes are
+          little-endian limbs, least-significant limb first, forwarded
+          verbatim.
         - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
           C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
           the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`
-          accepts. Requires QuestDB 10 or newer.
+          accepts. Arrow ``pa.binary()``, ``pa.large_binary()``, and
+          ``pa.fixed_size_binary(n)`` columns also land as BINARY: a
+          16- or 32-byte width on its own claims nothing, so an
+          unlabeled fixed-size column is opaque bytes rather than a
+          UUID or a LONG256. Requires QuestDB 10 or newer.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints
@@ -6766,11 +6780,17 @@ cdef class QuestDB:
         ``QuestDBError`` from the ``flush()``.
 
         ``schema_overrides`` reclassifies columns by name, mapping each to
-        ``'symbol'``, ``'ipv4'``, ``'char'``, or ``'geohash'`` (e.g.
+        ``'symbol'``, ``'ipv4'``, ``'char'``, ``'uuid'``, ``'long256'``, or
+        ``('geohash', bits)`` (e.g.
         ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
-        rejected. It requires the Arrow columnar path (fully Arrow-backed
-        input without ``table_name_col``); on input that falls back to the
-        NumPy planner it raises :class:`UnsupportedDataFrameShapeError`.
+        rejected. An override wins over any Arrow field metadata on its
+        column. ``'uuid'`` and ``'long256'`` apply to fixed-size and
+        variable-length binary columns alike — the route polars frames take,
+        since polars has no fixed-size binary dtype — and every non-null
+        value must be exactly 16 or 32 bytes respectively. It requires the
+        Arrow columnar path (fully Arrow-backed input without
+        ``table_name_col``); on input that falls back to the NumPy planner
+        it raises :class:`UnsupportedDataFrameShapeError`.
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded

@@ -472,10 +472,9 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
     errors raised here are Python-side type rejections.
     """
     cdef bytes utf8
-    cdef bytes uuid_wire
+    cdef bytes uuid_bytes
     cdef line_sender_utf8 c_utf8
     cdef line_sender_error* utf8_err = NULL
-    cdef object u_int
     cdef Py_ssize_t idx = 0
     for value in binds:
         idx += 1
@@ -508,15 +507,12 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
             qwp_reader_query_bind_timestamp_micros(
                 query, datetime_to_micros(value))
         elif isinstance(value, uuid.UUID):
-            # QuestDB's UUID wire layout: low 64 bits little-endian, then
-            # high 64 bits little-endian (matching the ingestion side and
-            # the Java client's (lo, hi) long-pair encoding).
-            u_int = value.int
-            uuid_wire = (
-                (u_int & 0xFFFFFFFFFFFFFFFF).to_bytes(8, 'little')
-                + (u_int >> 64).to_bytes(8, 'little'))
+            # The bind takes canonical RFC 4122 big-endian bytes, which is
+            # exactly `UUID.bytes`; the native client byte-swaps them into
+            # QWP wire order (lo half LE, then hi half LE).
+            uuid_bytes = value.bytes
             qwp_reader_query_bind_uuid(
-                query, <const uint8_t*>PyBytes_AsString(uuid_wire))
+                query, <const uint8_t*>PyBytes_AsString(uuid_bytes))
         else:
             raise TypeError(
                 f'query bind ${idx}: unsupported type '
@@ -1410,8 +1406,6 @@ cdef object _numpy_uuid_chunk(
     cdef const uint8_t* values
     cdef size_t r
     cdef size_t stride
-    cdef uint64_t lo
-    cdef uint64_t hi
     cdef cnp.ndarray out
     _reader_check(
         qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
@@ -1429,9 +1423,14 @@ cdef object _numpy_uuid_chunk(
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
-        memcpy(&lo, values + r * stride, 8)
-        memcpy(&hi, values + r * stride + 8, 8)
-        _obj_chunk_set(out, r, _uuid.UUID(int=((<object>hi) << 64) | (<object>lo)))
+        # The reader hands out canonical RFC 4122 big-endian rows, having
+        # already reversed them out of QWP wire order, so the 16 bytes go
+        # straight into `UUID(bytes=...)`.
+        _obj_chunk_set(
+            out,
+            r,
+            _uuid.UUID(bytes=PyBytes_FromStringAndSize(
+                <const char*>(values + r * stride), 16)))
     return out
 
 
