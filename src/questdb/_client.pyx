@@ -3898,13 +3898,18 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
                     blob_buf = PyByteArray_AsString(<object>cell)
                 elif PyMemoryView_Check(<object>cell):
                     py_cell = <object>cell
-                    if py_cell.itemsize != 1 or not py_cell.c_contiguous:
-                        raise QuestDBError(
-                            QuestDBErrorCode.BadDataFrame,
-                            f'Bad column {df_col_name!r} at row {i}: '
-                            'memoryview BINARY values must be C-contiguous '
-                            'with one-byte items.')
+                    # A released memoryview raises ValueError from the
+                    # `itemsize` and `c_contiguous` reads, not from
+                    # `PyObject_GetBuffer`, so those reads sit inside the
+                    # handler that names the column and the row.
                     try:
+                        if (py_cell.itemsize != 1
+                                or not py_cell.c_contiguous):
+                            raise QuestDBError(
+                                QuestDBErrorCode.BadDataFrame,
+                                f'Bad column {df_col_name!r} at row {i}: '
+                                'memoryview BINARY values must be '
+                                'C-contiguous with one-byte items.')
                         PyObject_GetBuffer(py_cell, &view, PyBUF_SIMPLE)
                     except (BufferError, ValueError) as exc:
                         raise QuestDBError(

@@ -2581,6 +2581,21 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                             frame, table_name='binary_values',
                             at=qi.ServerTimestamp)
 
+                # A released memoryview refuses even the `itemsize`
+                # read, so this is the usual way into the
+                # `invalid memoryview` branch.
+                released = memoryview(bytearray(b'gone'))
+                released.release()
+                frame = pd.DataFrame({
+                    'value': pd.Series([b'ok', released], dtype=object)})
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        "Bad column 'value' at row 1: invalid memoryview "
+                        'BINARY value: .*released memoryview'):
+                    client.dataframe(
+                        frame, table_name='binary_values',
+                        at=qi.ServerTimestamp)
+
                 generic_buffer = array.array('B', [1, 2])
                 frame = pd.DataFrame({
                     'value': pd.Series([generic_buffer], dtype=object)})
