@@ -5487,9 +5487,11 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got_bytes, [v0, None, v2, None, v4])
 
     def test_fsb32_rejected_by_row_ilp(self):
-        """Row-ILP doesn't list `col_target_column_arrow` in
-        `_FIELD_TARGETS_ROW`, so `Sender.dataframe` rejects FSB(32)
-        with `BadDataFrame`. Symmetric to the FSB(16) row-ILP
+        """`Sender.dataframe` runs the NumPy planner, which refuses
+        FSB(32) outright: nothing on that planner can claim the column
+        as LONG256, and row-ILP has no target for opaque bytes either
+        (`_FIELD_TARGETS_ROW` lists neither `col_target_column_arrow`
+        nor a LONG256 target). Symmetric to the FSB(16) row-ILP
         rejection test."""
         import pyarrow as pa
         self._require_qwp_ws()

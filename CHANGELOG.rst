@@ -19,7 +19,11 @@ Changelog
   UUID or LONG256 on the strength of its width alone. 16- and 32-byte
   columns are opaque bytes and land as BINARY unless the column claims a
   type: the ``arrow.uuid`` extension type, ``questdb.column_type`` field
-  metadata, or the new ``schema_overrides`` kinds below.
+  metadata, or the new ``schema_overrides`` kinds below. A pandas frame
+  where any column is not an ``ArrowDtype`` takes the NumPy planner, on
+  which none of the three ways to claim LONG256 are available; a 32-byte
+  ``fixed_size_binary`` column there is rejected with an error telling you
+  to convert the frame, rather than quietly auto-creating a BINARY column.
 - ``schema_overrides`` accepts two new kinds, ``'uuid'`` and ``'long256'``,
   which claim a column of that QuestDB type. They apply to fixed-size and
   variable-length binary columns alike — the route polars frames take, since

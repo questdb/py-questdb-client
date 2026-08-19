@@ -2680,6 +2680,49 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['binary_frames'], 2)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_numpy_planner_rejects_fsb32(self):
+        """On the NumPy planner nothing can claim a 32-byte column as
+        LONG256: there is no Arrow extension type for it, pandas drops
+        the field metadata, and `schema_overrides` needs the Arrow
+        route. The column is refused rather than auto-creating a BINARY
+        column. One plain numpy column sends the whole frame down that
+        planner."""
+        value = bytes(range(32))
+        frame = pd.DataFrame({
+            'l': pd.Series(
+                [value, value],
+                dtype=pd.ArrowDtype(pyarrow.binary(32))),
+            'n': [1, 2],
+            'ts': pd.to_datetime(['2025-01-01', '2025-01-02']),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        "Bad column 'l': a 32-byte fixed_size_binary "
+                        'column claims no QuestDB type'):
+                    client.dataframe(
+                        frame, table_name='long256s', at='ts')
+
+                # The same values go through once every column is
+                # Arrow-backed and the claim can be made.
+                arrow_frame = frame.astype({
+                    'n': pd.ArrowDtype(pyarrow.int64()),
+                    'ts': pd.ArrowDtype(pyarrow.timestamp('us')),
+                })
+                client.dataframe(
+                    arrow_frame, table_name='long256s', at='ts',
+                    schema_overrides={'l': 'long256'})
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+
     def _assert_ilp_rejections(self, sender):
         values = (
             ('UUID', self.UUID_VALUE),

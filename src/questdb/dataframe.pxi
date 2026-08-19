@@ -415,9 +415,9 @@ cdef tuple _FIELD_TARGETS_QWP = (
     # (`arrow.uuid`-labeled FixedSizeBinary(16)). LONG256 is absent:
     # its only claim is `questdb.column_type=long256` field metadata,
     # which pyarrow drops when it exports a single column, so this
-    # planner can never select that target. A 32-byte column here is
-    # opaque bytes; claiming LONG256 belongs to the Rust Arrow
-    # ingestion path, via `schema_overrides`.
+    # planner can never select that target. Claiming LONG256 belongs to
+    # the Rust Arrow ingestion path, via `schema_overrides`, and a
+    # 32-byte column is refused here rather than sent as opaque bytes.
     col_target_t.col_target_column_uuid,
     col_target_t.col_target_column_binary,
     col_target_t.col_target_column_arrow)
@@ -1403,6 +1403,27 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
         ext_name = arrowtype.extension_name
         arrowtype = arrowtype.storage_type
+
+    # A 32-byte fixed-size binary column is the one shape this planner
+    # cannot resolve either way. LONG256 is claimed only by
+    # `questdb.column_type=long256` field metadata, which pyarrow drops
+    # when pandas exports a column on its own, and `schema_overrides` is
+    # unavailable here. Passing the bytes through as BINARY would let a
+    # LONG256 auto-create the wrong column type without a word, so the
+    # column is refused and the message names both ways out.
+    if (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 32):
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad column {pandas_col.name!r}: a 32-byte '
+            f'fixed_size_binary column claims no QuestDB type on this '
+            f'path. To store LONG256, claim the type with '
+            f'`questdb.column_type=long256` field metadata or '
+            f'`schema_overrides={{{pandas_col.name!r}: \'long256\'}}`, '
+            f'both of which need QuestDB.dataframe() with a fully '
+            f'Arrow-backed frame — every column an ArrowDtype, e.g. '
+            f'df.convert_dtypes(dtype_backend="pyarrow"). To store the '
+            f'bytes as BINARY, pass them as an object column of bytes.')
 
     cdef object t_dec32 = getattr(_PYARROW.lib, 'Type_DECIMAL32', None)
     cdef object t_dec64 = getattr(_PYARROW.lib, 'Type_DECIMAL64', None)
