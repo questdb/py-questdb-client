@@ -2557,6 +2557,18 @@ class TestEgressWithDatabase(unittest.TestCase):
                     client.query(
                         f'SELECT count() AS n FROM {table_name} '
                         'WHERE lg = $1', [object()])
+                # `uuid.UUID.bytes` is a property, so a subclass can
+                # hand back a buffer shorter than the 16 bytes the bind
+                # reads. Caught here rather than read off the end.
+                class ShortUuid(uuid.UUID):
+                    @property
+                    def bytes(self):
+                        return b'\x01'
+
+                with self.assertRaisesRegex(ValueError, r'expected 16'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE u = $1', [ShortUuid(int=0)])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')

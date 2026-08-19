@@ -511,6 +511,13 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
             # exactly `UUID.bytes`; the native client byte-swaps them into
             # QWP wire order (lo half LE, then hi half LE).
             uuid_bytes = value.bytes
+            # `UUID.bytes` is a property a subclass can override, and the
+            # bind reads exactly 16 bytes from the pointer, so the length
+            # is checked before the buffer is handed over.
+            if len(uuid_bytes) != 16:
+                raise ValueError(
+                    f'query bind ${idx}: uuid.UUID.bytes returned '
+                    f'{len(uuid_bytes)} bytes, expected 16.')
             qwp_reader_query_bind_uuid(
                 query, <const uint8_t*>PyBytes_AsString(uuid_bytes))
         else:
