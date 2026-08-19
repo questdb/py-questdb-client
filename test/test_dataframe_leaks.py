@@ -234,8 +234,16 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 self._assert_stable(work, warmup=150, measure=1800)
 
     def test_binary_memoryview_error_path_no_leak(self):
-        """A late invalid memoryview must release every earlier borrowed
-        BINARY cell while unwinding the partially built native column."""
+        """A frame rejected on its last BINARY cell must leave no native
+        memory behind. Every cell before the bad one is borrowed, copied
+        and released inside the row loop, so at most one buffer is open
+        at a time; what this measures is the partially built column and
+        its offset table, which the unwind has to free. The bad cell is
+        caught by the itemsize / contiguity check, so this exercises the
+        pre-`PyObject_GetBuffer` branch. ``PyBuffer_Release`` itself is a
+        refcount question RSS cannot answer; it is asserted directly in
+        ``test_binary_memoryview_buffers_are_released``.
+        """
         from qwp_ws_ack_server import QwpAckServer
 
         def invalid_frame():
@@ -305,6 +313,69 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                         df, table_name='t', at='ts', symbols=False)
 
                 self._assert_stable(work, warmup=150, measure=1800)
+
+
+class TestBinaryBufferRelease(unittest.TestCase):
+    """``PyObject_GetBuffer`` on a memoryview BINARY cell must be paired
+    with a ``PyBuffer_Release``. A missing release is a refcount leak of
+    a fixed size, which the RSS harness above cannot see. It is visible
+    directly instead: while any buffer is exported, the underlying
+    ``bytearray`` refuses to be re-sized with
+
+      BufferError: Existing exports of data: object cannot be re-sized
+
+    so a ``bytearray`` that accepts ``append`` afterwards proves the
+    client let go of it.
+    """
+
+    @staticmethod
+    def _conf(port):
+        return (f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                'query_pool_min=0;')
+
+    def _assert_released(self, backing, view):
+        view.release()
+        try:
+            backing.append(0)
+        except BufferError as exc:
+            self.fail(f'client kept a Py_buffer on the cell: {exc}')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_good_path_releases(self):
+        from qwp_ws_ack_server import QwpAckServer
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        frame = pd.DataFrame({'by': pd.Series([view], dtype=object)})
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(self._conf(server.port)) as client:
+                client.dataframe(
+                    frame, table_name='t', at=qi.ServerTimestamp,
+                    symbols=False)
+        del frame
+        gc.collect()
+        self._assert_released(backing, view)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_error_path_releases_earlier_cells(self):
+        """The bad cell sits after the good one, so the good cell's
+        buffer is released by the ``finally`` inside the row loop rather
+        than by reaching the end of the column."""
+        from qwp_ws_ack_server import QwpAckServer
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        frame = pd.DataFrame({
+            'by': pd.Series(
+                [view, memoryview(b'invalid')[::2]], dtype=object)})
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(self._conf(server.port)) as client:
+                with self.assertRaises(qi.QuestDBError):
+                    client.dataframe(
+                        frame, table_name='t', at=qi.ServerTimestamp,
+                        symbols=False)
+        del frame
+        gc.collect()
+        self._assert_released(backing, view)
 
 
 if __name__ == '__main__':
