@@ -4,7 +4,7 @@
 Changelog
 =========
 
-5.0.1 (unreleased)
+5.1.0 (unreleased)
 ------------------
 
 - **Breaking:** UUID values now use canonical RFC 4122 byte order
@@ -29,6 +29,13 @@ Changelog
   variable-length binary columns alike — the route polars frames take, since
   polars has no fixed-size binary dtype — and every non-null value must be
   exactly 16 or 32 bytes respectively.
+- **Read both breaking notes together if you send UUIDs as raw bytes.** The
+  usual repair for the second one is ``schema_overrides={'col': 'uuid'}``,
+  which brings the UUID column back. That alone is not enough: the first
+  note also changed the byte order the client expects, and any 16 bytes are
+  a valid UUID, so a column that keeps sending QuestDB's old wire layout is
+  accepted and stored with the two halves transposed. Drop your own byte
+  swapping at the same time and pass ``uuid.UUID.bytes``.
 - polars ``Object`` columns are now rejected with a clear error instead of
   being ingested as meaningless in-process handles.
 - ``row()`` on QWP senders now supports UUID, IPV4, BINARY, CHAR, DATE,
