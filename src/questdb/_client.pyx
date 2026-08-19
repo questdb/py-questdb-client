@@ -1578,7 +1578,7 @@ cdef class Buffer:
             self._column_binary(c_name, value)
         elif isinstance(value, uuid.UUID):
             self._column_uuid(c_name, value)
-        elif type(value) is _ipaddress.IPv4Address:
+        elif _is_ipv4_address(value):
             self._column_ipv4(c_name, value)
         elif isinstance(value, Char):
             self._column_char(c_name, value)
@@ -3740,7 +3740,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
                 raise MemoryError()
         for i in range(row_count):
             cell = access[i]
-            if type(<object>cell) is _ipaddress.IPv4Address:
+            if _is_ipv4_address(<object>cell):
                 values[i] = <uint32_t>int(<object>cell)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)

@@ -2649,6 +2649,37 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 0)
         self.assertEqual(stats['errors'], [])
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_ipv4_address_subclass_accepted(self):
+        """Only ``IPv4Interface`` carries a prefix the IPV4 column
+        cannot hold. A plain subclass is an ordinary address and is
+        accepted by the planner, by the per-cell writer, and by
+        ``row()``."""
+        class MyAddr(ipaddress.IPv4Address):
+            pass
+
+        addresses = [MyAddr('192.0.2.1'), ipaddress.IPv4Address('192.0.2.2')]
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                frame = pd.DataFrame({
+                    'value': pd.Series(addresses, dtype=object)})
+                client.dataframe(
+                    frame, table_name='ipv4_values', at=qi.ServerTimestamp)
+                with client.sender() as sender:
+                    sender.row(
+                        'ipv4_rows',
+                        columns={'value': MyAddr('192.0.2.3')},
+                        at=qi.ServerTimestamp)
+                    sender.flush(wait=True)
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 2)
+
     def _assert_ilp_rejections(self, sender):
         values = (
             ('UUID', self.UUID_VALUE),

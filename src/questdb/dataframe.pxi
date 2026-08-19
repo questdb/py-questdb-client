@@ -74,6 +74,14 @@ cdef inline uint64_t bswap64(uint64_t value) noexcept:
       ((value & 0x000000000000FF00u) << 40u) |
       ((value & 0x00000000000000FFu) << 56u))
 
+cdef inline bint _is_ipv4_address(object value):
+    """``IPv4Interface`` subclasses ``IPv4Address`` but carries a network
+    prefix that QuestDB's IPV4 column has nowhere to keep, so it is not
+    accepted as an address. Every other subclass is."""
+    return (isinstance(value, _ipaddress.IPv4Address)
+            and not isinstance(value, _ipaddress.IPv4Interface))
+
+
 cdef struct col_chunks_t:
     size_t n_chunks
     ArrowArray* chunks  # We calloc `n_chunks + 1` of these.
@@ -1515,7 +1523,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
                 col.setup.source = col_source_t.col_source_bytes_pyobj
             elif isinstance(<object>obj, _uuid.UUID):
                 col.setup.source = col_source_t.col_source_uuid_pyobj
-            elif type(<object>obj) is _ipaddress.IPv4Address:
+            elif _is_ipv4_address(<object>obj):
                 col.setup.source = col_source_t.col_source_ipv4_pyobj
             elif isinstance(<object>obj, datetime.datetime):
                 col.setup.source = col_source_t.col_source_datetime_pyobj
