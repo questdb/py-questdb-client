@@ -2723,6 +2723,111 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['binary_frames'], 1)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_numpy_planner_rejects_fsb16_without_arrow_uuid(self):
+        """pyarrow registers the `arrow.uuid` canonical extension type
+        from version 18 on. Where it is absent no column can carry the
+        label, so a bare 16-byte column has no route to UUID on this
+        planner and is refused rather than auto-creating a BINARY
+        column. Hiding `pyarrow.uuid` stands in for an older build."""
+        value = bytes(range(16))
+        frame = pd.DataFrame({
+            'u': pd.Series(
+                [value, value],
+                dtype=pd.ArrowDtype(pyarrow.binary(16))),
+            'n': [1, 2],
+            'ts': pd.to_datetime(['2025-01-01', '2025-01-02']),
+        })
+        uuid_factory = getattr(pyarrow, 'uuid', None)
+        if uuid_factory is not None:
+            del pyarrow.uuid
+        try:
+            with QwpAckServer(record_payloads=True) as server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+                with qi.QuestDB.from_conf(conf) as client:
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            "Bad column 'u': a 16-byte fixed_size_binary "
+                            'column claims no QuestDB type'):
+                        client.dataframe(
+                            frame, table_name='uuids', at='ts')
+
+                    # `uuid.UUID` cells reach UUID without the extension
+                    # type, so the refusal names a route that works.
+                    obj_frame = pd.DataFrame({
+                        'u': pd.Series(
+                            [uuid.UUID(bytes=value)] * 2, dtype=object),
+                        'n': [1, 2],
+                        'ts': frame['ts'],
+                    })
+                    client.dataframe(
+                        obj_frame, table_name='uuids', at='ts')
+                stats = server.snapshot()
+        finally:
+            if uuid_factory is not None:
+                pyarrow.uuid = uuid_factory
+
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_numpy_planner_sends_unlabeled_fsb16_as_binary(self):
+        """Where `arrow.uuid` exists, an unlabeled 16-byte column is
+        opaque bytes by design and goes through as BINARY: the pyarrow
+        version guard is the only thing that refuses this shape."""
+        if not hasattr(pyarrow, 'uuid'):
+            self.skipTest('pyarrow.uuid() not available in this build')
+        value = bytes(range(16))
+        frame = pd.DataFrame({
+            'u': pd.Series(
+                [value, value],
+                dtype=pd.ArrowDtype(pyarrow.binary(16))),
+            'n': [1, 2],
+            'ts': pd.to_datetime(['2025-01-01', '2025-01-02']),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                client.dataframe(frame, table_name='blobs', at='ts')
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_arrow_uuid_claim_needs_the_extension_type(self):
+        """`ARROW:extension:name` written as plain field metadata stays
+        on the field: `pa.Table.from_arrays` leaves the type as bare
+        `fixed_size_binary(16)`, while a C-stream import rebuilds the
+        extension type from the same key. A pandas `ArrowDtype` carries
+        the type and no field, so only the second spelling claims UUID
+        on this planner."""
+        if not hasattr(pyarrow, 'uuid'):
+            self.skipTest('pyarrow.uuid() not available in this build')
+        md = {b'ARROW:extension:name': b'arrow.uuid',
+              b'ARROW:extension:metadata': b''}
+        schema = pyarrow.schema(
+            [pyarrow.field('u', pyarrow.binary(16), metadata=md)])
+        storage = pyarrow.array([bytes(range(16))], type=pyarrow.binary(16))
+        built = pyarrow.Table.from_arrays([storage], schema=schema)
+        streamed = pyarrow.RecordBatchReader.from_stream(built).read_all()
+
+        def planner_dtype(table):
+            return table.to_pandas(
+                types_mapper=pd.ArrowDtype).dtypes['u'].pyarrow_dtype
+
+        self.assertEqual(planner_dtype(built), pyarrow.binary(16))
+        streamed_type = planner_dtype(streamed)
+        self.assertIsInstance(streamed_type, pyarrow.BaseExtensionType)
+        self.assertEqual(streamed_type.extension_name, 'arrow.uuid')
+
     def _assert_ilp_rejections(self, sender):
         values = (
             ('UUID', self.UUID_VALUE),

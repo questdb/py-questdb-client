@@ -24,6 +24,15 @@ Changelog
   which none of the three ways to claim LONG256 are available; a 32-byte
   ``fixed_size_binary`` column there is rejected with an error telling you
   to convert the frame, rather than quietly auto-creating a BINARY column.
+  The ``arrow.uuid`` route needs pyarrow >= 18 and a column built from
+  ``pa.uuid()``: pyarrow registers that canonical extension type from 18
+  on, and only an extension *type* survives into a pandas ``ArrowDtype``,
+  which carries no field and so no ``ARROW:extension:name`` metadata. On
+  pyarrow < 18 no column can carry the label, so a 16-byte
+  ``fixed_size_binary`` column on the NumPy planner is likewise rejected
+  rather than landing as BINARY; use ``uuid.UUID`` cells or
+  ``schema_overrides={'col': 'uuid'}``, neither of which depends on the
+  pyarrow version.
 - ``schema_overrides`` accepts two new kinds, ``'uuid'`` and ``'long256'``,
   which claim a column of that QuestDB type. They apply to fixed-size and
   variable-length binary columns alike — the route polars frames take, since

@@ -1399,6 +1399,17 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     # a 16-byte column a UUID rather than opaque BINARY.
     # pyarrow exposes no `Type_EXTENSION` constant in all versions we
     # support; check via `BaseExtensionType` instead.
+    #
+    # The name is legible here only where pyarrow built an extension
+    # *type*. `arrow.uuid` is a canonical extension registered from
+    # pyarrow 18 on, and a column carries the type when it comes from
+    # `pa.uuid()` or is imported over the C data interface or IPC, both
+    # of which rebuild it from the field's `ARROW:extension:name` key.
+    # That key written as plain field metadata — `pa.Table.from_arrays`
+    # over a hand-built schema, say — stays on the field, and a pandas
+    # `ArrowDtype` holds a type and no field, so it never reaches this
+    # planner. Building the column from `pa.uuid()` is the one spelling
+    # readable from both sides.
     cdef object ext_name = None
     if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
         ext_name = arrowtype.extension_name
@@ -1422,6 +1433,31 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
             f'`schema_overrides={{{pandas_col.name!r}: \'long256\'}}`, '
             f'both of which need QuestDB.dataframe() with a fully '
             f'Arrow-backed frame — every column an ArrowDtype, e.g. '
+            f'df.convert_dtypes(dtype_backend="pyarrow"). To store the '
+            f'bytes as BINARY, pass them as an object column of bytes.')
+
+    # Below pyarrow 18 the `arrow.uuid` canonical extension type does
+    # not exist, so no column can carry the label and a 16-byte
+    # fixed-size binary column stands where a 32-byte one does: no route
+    # on this planner claims it as UUID. Passing the bytes through as
+    # BINARY would let a UUID column auto-create as BINARY without a
+    # word, so the column is refused and the message names the ways out.
+    if (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 16
+            and ext_name is None
+            and not hasattr(_PYARROW, 'uuid')):
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad column {pandas_col.name!r}: a 16-byte '
+            f'fixed_size_binary column claims no QuestDB type, and '
+            f'pyarrow {_PYARROW.__version__} can label none: the '
+            f'`arrow.uuid` extension type needs pyarrow 18 or newer. '
+            f'To store UUIDs, either upgrade pyarrow and build the '
+            f'column as `pa.uuid()`, or pass the values as an '
+            f'object-dtype column of `uuid.UUID`, or claim the type '
+            f'with `schema_overrides={{{pandas_col.name!r}: \'uuid\'}}`, '
+            f'which needs QuestDB.dataframe() with a fully Arrow-backed '
+            f'frame — every column an ArrowDtype, e.g. '
             f'df.convert_dtypes(dtype_backend="pyarrow"). To store the '
             f'bytes as BINARY, pass them as an object column of bytes.')
 

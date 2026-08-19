@@ -6798,6 +6798,23 @@ cdef class QuestDB:
           RFC 4122 big-endian** — exactly ``uuid.UUID.bytes`` — and the
           client byte-swaps them into QWP wire order. Round-trip through
           :meth:`query <questdb.QuestDB.query>` is byte-identity.
+
+          The ``arrow.uuid`` route requires pyarrow >= 18, which is where
+          that canonical extension type is registered, and the column
+          must carry the extension **type** — build it from ``pa.uuid()``.
+          Writing ``ARROW:extension:name`` as plain field metadata is not
+          equivalent: pyarrow leaves such a key on the field, and a
+          pandas ``ArrowDtype`` carries a type and no field, so a frame
+          built that way reaches the NumPy planner as a bare
+          ``pa.fixed_size_binary(16)`` and lands as BINARY. Frames
+          imported over the C data interface or Arrow IPC do get the
+          extension type rebuilt from that key, which is why the same
+          metadata can route two ways. The other two routes —
+          ``uuid.UUID`` cells and ``schema_overrides`` — are free of both
+          conditions. On pyarrow < 18, where no column can carry the
+          label at all, a bare ``pa.fixed_size_binary(16)`` column is
+          rejected on the NumPy planner rather than quietly landing as
+          BINARY.
         - **LONG256**: 32-byte binary columns claimed with
           ``schema_overrides={'col': 'long256'}``. Bytes are
           little-endian limbs, least-significant limb first, forwarded
@@ -6817,9 +6834,12 @@ cdef class QuestDB:
           ``pa.fixed_size_binary(n)`` columns also land as BINARY: a
           16- or 32-byte width on its own claims nothing, so an
           unlabeled fixed-size column is opaque bytes rather than a
-          UUID or a LONG256. The one exception is
-          ``pa.fixed_size_binary(32)`` on the NumPy planner, described
-          under **LONG256** above. Requires QuestDB 10 or newer.
+          UUID or a LONG256. Two widths are rejected instead on the
+          NumPy planner, both because no route there can claim them and
+          a silent BINARY would auto-create the wrong column type:
+          ``pa.fixed_size_binary(32)``, described under **LONG256**
+          above, and ``pa.fixed_size_binary(16)`` on pyarrow < 18,
+          described under **UUID**. Requires QuestDB 10 or newer.
         - **DATE**: not writable from a DataFrame. There is no DATE cell
           type and no ``'date'`` kind for ``schema_overrides``, so a DATE
           column can only be written one row at a time, with
