@@ -208,6 +208,35 @@ class TestCapsulePathPolars(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
 
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_object_column_rejected(self):
+        """polars exports ``Object`` as ``fixed_size_binary(8)`` of
+        in-process handles. Without a check those addresses would land
+        on the server as BINARY, so the column is rejected up front and
+        nothing reaches the wire."""
+        class Opaque:
+            pass
+
+        df = pl.DataFrame({
+            'o': pl.Series('o', [Opaque(), Opaque()], dtype=pl.Object),
+            'ts': [
+                datetime.datetime(2025, 1, 1),
+                datetime.datetime(2025, 1, 2),
+            ],
+        })
+        self.assertEqual(df.schema['o'], pl.Object)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, 'polars Object dtype'):
+                    client.dataframe(df, table_name='obj_t', at='ts')
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_payloads'], [])
+
 
 class TestServerTimestampAt(unittest.TestCase):
     """`at=ServerTimestamp` on the Arrow batch route: the frame carries no

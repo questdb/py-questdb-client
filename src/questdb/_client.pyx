@@ -5280,6 +5280,30 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
     return isinstance(obj, (_POLARS_DATAFRAME_T, _POLARS_LAZYFRAME_T))
 
 
+cdef void_int _reject_polars_object_columns(object frame) except -1:
+    """polars exports an ``Object`` column as ``fixed_size_binary(8)``
+    holding in-process handles, which the server would store as BINARY
+    blobs of raw memory addresses. Reject such a column before the
+    Arrow export, mirroring the Rust polars API."""
+    cdef object object_dtype
+    cdef object name
+    cdef object dtype
+    if not _try_import_polars():
+        return 0
+    if not isinstance(frame, _POLARS_DATAFRAME_T):
+        return 0
+    object_dtype = getattr(_POLARS, 'Object', None)
+    if object_dtype is None:
+        return 0
+    for name, dtype in frame.schema.items():
+        if dtype == object_dtype:
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {name!r}: polars Object dtype is not '
+                f'supported; cast it to a supported dtype before ingest.')
+    return 0
+
+
 cdef void_int _capsule_consume_stream(
         qwp_direct_sender* conn,
         object stream_owner,
@@ -5944,6 +5968,8 @@ cdef bint _dataframe_client_try_capsule_path(
             [_PYARROW.record_batch(df)])
     else:
         return False
+
+    _reject_polars_object_columns(sliceable)
 
     total_rows = _capsule_row_count(sliceable)
 
