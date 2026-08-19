@@ -4895,7 +4895,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_fsb_other_size_lands_as_binary(self):
         """``FixedSizeBinary(k)`` carries no QuestDB type claim at any
         width, so it is opaque bytes and auto-creates a BINARY column
-        holding the rows verbatim."""
+        holding the rows verbatim. Auto-create (no ``_create_table``)
+        pins the wire type; a pre-created BINARY column would assert
+        only that the server accepted the rows. Order by ``timestamp``:
+        auto-create renames ``ts``, and BINARY is not orderable."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
@@ -4907,7 +4910,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.qdb_plain.retry_check_table(table, min_rows=2)
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
-                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+                f'SELECT v FROM {table} ORDER BY timestamp').to_arrow()
+        self.assertEqual(got.column('v').type, pa.binary())
         self.assertEqual(got.column('v').to_pylist(), rows)
 
     # ---------- UInt32 / IPV4 policy ----------
