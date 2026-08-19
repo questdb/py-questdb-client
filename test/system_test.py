@@ -43,6 +43,7 @@ FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
 FIRST_QWP_WS_RELEASE = (9, 4, 3)
 FIRST_QWP_GAP_HALT_RELEASE = (9, 4, 4)
+FIRST_QWP_ROW_TYPES_RELEASE = (10, 0, 0)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -123,6 +124,15 @@ class TestWithDatabase(unittest.TestCase):
         if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
             self.skipTest(
                 'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def _require_qwp_row_types(self):
+        """UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH columns
+        over QWP need a QuestDB 10 server, whichever API produced
+        them."""
+        self._require_qwp_ws()
+        if self.qdb_plain.version < FIRST_QWP_ROW_TYPES_RELEASE:
+            self.skipTest(
+                'QWP-only column types require QuestDB 10+')
 
     def _require_qwp_fuzz(self):
         self._require_qwp_ws()
@@ -4291,6 +4301,12 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             self.skipTest(
                 'QWP/WebSocket integration tests require QuestDB 9.4.3+')
 
+    def _require_qwp_row_types(self):
+        self._require_qwp_ws()
+        if self.qdb_plain.version < FIRST_QWP_ROW_TYPES_RELEASE:
+            self.skipTest(
+                'QWP-only column types require QuestDB 10+')
+
     def setUp(self):
         self._require_qwp_ws()
 
@@ -4748,7 +4764,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         a type mismatch the server rejects."""
         import pyarrow as pa
         import uuid as uuid_mod
-        self._require_qwp_ws()
+        self._require_qwp_row_types()
         table = self._table()
         self._create_table(table, 'v UUID')
         values = pa.array(
@@ -4900,7 +4916,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         only that the server accepted the rows. Order by ``timestamp``:
         auto-create renames ``ts``, and BINARY is not orderable."""
         import pyarrow as pa
-        self._require_qwp_ws()
+        self._require_qwp_row_types()
         table = self._table()
         rows = [b'\x00' * 8, b'\xff' * 8]
         values = pa.array(rows, type=pa.binary(8))

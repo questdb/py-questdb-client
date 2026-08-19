@@ -2815,7 +2815,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     class TestQwpOnlyRowTypesIntegration(TestWithDatabase):
         def test_round_trip_sentinels_precisions_and_mixed_precision_error(self):
-            self._require_qwp_ws()
+            self._require_qwp_row_types()
             table_name = 'qwp_row_types_' + uuid.uuid4().hex[:8]
             mixed_table = 'qwp_mixed_gh_' + uuid.uuid4().hex[:8]
             normal_uuid = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
