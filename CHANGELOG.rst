@@ -49,6 +49,12 @@ Changelog
   of ``TypeError``.
 - DataFrame BINARY columns now accept ``bytearray`` and ``memoryview`` cells
   in addition to ``bytes``.
+- DATE columns can be written only with ``row()``, using the new
+  ``DateMillis`` wrapper. The DataFrame paths have no DATE cell type and no
+  ``'date'`` kind for ``schema_overrides``. Reading is unaffected: a DATE
+  column comes back as ``datetime64[ms]``, but feeding that column back in
+  writes TIMESTAMP, so a query-then-DataFrame-then-ingest cycle changes the
+  column type on a table it creates.
 - DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix. Pass an
   ``ipaddress.IPv4Address`` value instead.

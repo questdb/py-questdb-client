@@ -894,6 +894,12 @@ cdef class DateMillis:
     QuestDB DATE is a millisecond timestamp, not a civil date. The full signed
     64-bit range is accepted, including pre-epoch values. ``INT64_MIN`` is
     accepted but reads back from QuestDB as ``NULL``.
+
+    This is the only way to write a DATE column. The DataFrame paths have
+    no DATE cell type and no ``'date'`` kind for ``schema_overrides``, so
+    they write TIMESTAMP for every datetime column — including one read
+    back from a DATE column, which :meth:`QuestDB.query
+    <questdb.QuestDB.query>` returns as ``datetime64[ms]``.
     """
     cdef int64_t _value
 
@@ -6814,6 +6820,16 @@ cdef class QuestDB:
           UUID or a LONG256. The one exception is
           ``pa.fixed_size_binary(32)`` on the NumPy planner, described
           under **LONG256** above. Requires QuestDB 10 or newer.
+        - **DATE**: not writable from a DataFrame. There is no DATE cell
+          type and no ``'date'`` kind for ``schema_overrides``, so a DATE
+          column can only be written one row at a time, with
+          :class:`DateMillis <questdb.DateMillis>` through
+          :func:`Buffer.row <questdb.ingress.Buffer.row>`. Reading is
+          unaffected: :meth:`query <questdb.QuestDB.query>` returns a DATE
+          column as ``datetime64[ms]``. Feeding that column straight back
+          in writes a TIMESTAMP, not a DATE, so a
+          query-then-DataFrame-then-ingest cycle changes the column type
+          on a table it creates.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints

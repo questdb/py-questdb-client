@@ -349,7 +349,12 @@ class Char:
 
 
 class DateMillis:
-    """A QuestDB DATE millisecond timestamp, not a civil date."""
+    """A QuestDB DATE millisecond timestamp, not a civil date.
+
+    The only way to write a DATE column: the DataFrame paths have no DATE
+    cell type and no ``'date'`` kind for ``schema_overrides``, so every
+    datetime column they send lands as TIMESTAMP.
+    """
 
     def __init__(self, millis: int): ...
     @classmethod
