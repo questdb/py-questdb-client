@@ -3032,10 +3032,13 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(bmeta['gh']['kind'], 'geohash')
             self.assertEqual(bmeta['gh']['precision_bits'], 20)
 
+            # An auto-created table names its designated timestamp
+            # column `timestamp`, so the destination orders by that name
+            # and the source by the `ts` it was created with.
             self.assertEqual(
                 self.qdb_plain.http_sql_query(
-                    f'SELECT u, l, ip, gh, c FROM {dst} ORDER BY ts')[
-                        'dataset'],
+                    f'SELECT u, l, ip, gh, c FROM {dst} '
+                    'ORDER BY timestamp')['dataset'],
                 self.qdb_plain.http_sql_query(
                     f'SELECT u, l, ip, gh, c FROM {src} ORDER BY ts')[
                         'dataset'])
