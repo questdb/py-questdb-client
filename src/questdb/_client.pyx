@@ -108,6 +108,7 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString, PyBytes_Check)
 from cpython.bytearray cimport (PyByteArray_AsString, PyByteArray_Size,
                                PyByteArray_Check)
+from cpython.long cimport PyLong_AsLongLongAndOverflow
 from cpython.memoryview cimport PyMemoryView_Check
 
 import datetime
@@ -1537,6 +1538,24 @@ cdef class Buffer:
                 self._impl, c_name, value._bits, value._precision, &err):
             raise c_err_to_py(err)
 
+    cdef inline void_int _column_int(
+            self, line_sender_column_name c_name, str name,
+            object value) except -1:
+        # A bare `int` lands in a LONG column, so one that does not fit in
+        # 64 bits belongs in a LONG256 column and needs the `Long256`
+        # wrapper to say so. `PyLong_AsLongLongAndOverflow` reports that
+        # case by flag rather than by exception, which leaves the message
+        # free to name the wrapper.
+        cdef int overflow = 0
+        cdef int64_t as_i64 = <int64_t>PyLong_AsLongLongAndOverflow(
+            value, &overflow)
+        if overflow != 0:
+            raise OverflowError(
+                f'Bad column {name!r}: integer out of range for a LONG '
+                f'column (-2**63 .. 2**63-1). Wrap it in `Long256(...)` '
+                f'to store it in a LONG256 column.')
+        return self._column_i64(c_name, as_i64)
+
     cdef inline void_int _column_i64(
             self, line_sender_column_name c_name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
@@ -1622,7 +1641,7 @@ cdef class Buffer:
         if PyBool_Check(<PyObject*>value):
             self._column_bool(c_name, value)
         elif PyLong_CheckExact(<PyObject*>value):
-            self._column_i64(c_name, value)
+            self._column_int(c_name, name, value)
         elif PyFloat_CheckExact(<PyObject*>value):
             self._column_f64(c_name, value)
         elif PyUnicode_CheckExact(<PyObject*>value):
@@ -1875,6 +1894,11 @@ cdef class Buffer:
         SQL operations treat it as CHAR's null/absent marker. GEOHASH has no
         sentinel collision. Empty BINARY ``b''`` is a real empty value and is
         distinct from ``NULL``.
+
+        A bare ``int`` is a 64-bit LONG, so a value outside
+        ``-2**63 .. 2**63-1`` raises ``OverflowError`` naming
+        :class:`Long256 <questdb.Long256>` — the wrapper that sends it as a
+        256-bit LONG256 instead.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -3566,6 +3590,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
     cdef int64_t value
+    cdef int overflow = 0
 
     try:
         values = <int64_t*>calloc(row_count if row_count > 0 else 1,
@@ -3587,8 +3612,94 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             elif PyLong_CheckExact(cell):
-                value = PyLong_AsLongLong(cell)
+                value = <int64_t>PyLong_AsLongLongAndOverflow(
+                    <object>cell, &overflow)
+                if overflow != 0:
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
+                        f'Bad column {df_col_name!r} at row {i}: integer '
+                        f'out of range for a LONG column '
+                        f'(-2**63 .. 2**63-1). A 256-bit value needs a '
+                        f'LONG256 column, which this column claims with '
+                        f"df.attrs['questdb'] = {{'version': 1, "
+                        f"'columns': {{{df_col_name!r}: "
+                        f"{{'kind': 'long256'}}}}}}.")
                 values[i] = value
+                if b.validity != NULL:
+                    _pyobj_set_validity_bit(b.validity, i)
+            elif _dataframe_is_null_pyobj(cell):
+                b.has_nulls = True
+            else:
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: expected int, '
+                    f'got {_fqn(type(<object>cell))}.')
+
+        if not b.has_nulls and b.validity != NULL:
+            free(b.validity)
+            b.validity = NULL
+    except:
+        pyobj_built_free(b)
+        raise
+
+    return b
+
+
+cdef object _LONG256_LIMIT = 1 << 256
+
+
+cdef pyobj_built_t* _dataframe_columnar_build_long256_pyobj(
+        col_t* col,
+        size_t row_count,
+        object df_col_name) except NULL:
+    """
+    Walk a PyObject int column claimed as LONG256 and produce 32 bytes
+    per row + LSB-packed validity bitmap.
+
+    ``qwp_numpy_s32`` puts the row on the wire verbatim, and the wire
+    order for LONG256 is little-endian — the same order
+    ``QueryResult.to_pandas()`` read the integer out of, so a value that
+    came from a query goes back unchanged.
+    """
+    cdef pyobj_built_t* b = <pyobj_built_t*>calloc(1, sizeof(pyobj_built_t))
+    if b == NULL:
+        raise MemoryError()
+    b.row_count = row_count
+
+    cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
+    cdef PyObject* cell
+    cdef uint8_t* buf = NULL
+    cdef size_t buf_bytes = row_count * 32 if row_count > 0 else 32
+    cdef size_t validity_bytes = (row_count + 7) // 8
+    cdef size_t i
+    cdef object py_cell
+    cdef bytes le_bytes
+    # Called unbound so that an `int` subclass overriding `to_bytes`
+    # cannot hand back something other than the 32 bytes the column
+    # write copies.
+    cdef object int_to_bytes = int.to_bytes
+
+    try:
+        buf = <uint8_t*>calloc(buf_bytes, sizeof(uint8_t))
+        if buf == NULL:
+            raise MemoryError()
+        b.data = <void*>buf
+        if validity_bytes > 0:
+            b.validity = <uint8_t*>calloc(validity_bytes, sizeof(uint8_t))
+            if b.validity == NULL:
+                raise MemoryError()
+        for i in range(row_count):
+            cell = access[i]
+            if PyLong_CheckExact(cell):
+                py_cell = <object>cell
+                if py_cell < 0 or py_cell >= _LONG256_LIMIT:
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
+                        f'Bad column {df_col_name!r} at row {i}: LONG256 '
+                        f'is unsigned and 256 bits wide, so the value '
+                        f'must be in the range 0 <= value < 2**256.')
+                le_bytes = int_to_bytes(py_cell, 32, 'little')
+                memcpy(buf + i * 32, PyBytes_AsString(le_bytes), 32)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             elif _dataframe_is_null_pyobj(cell):
@@ -4067,8 +4178,15 @@ cdef void_int _dataframe_columnar_prebuild_pyobj(
                 plan.pyobj_built[i] = _dataframe_columnar_build_str_pyobj(
                     col, plan.row_count, col_name)
             elif col.setup.source == col_source_t.col_source_int_pyobj:
-                plan.pyobj_built[i] = _dataframe_columnar_build_int_pyobj(
-                    col, plan.row_count, col_name)
+                if (col.setup.has_override
+                        and col.setup.override_dtype
+                            == qwp_numpy_dtype.qwp_numpy_s32):
+                    plan.pyobj_built[i] = \
+                        _dataframe_columnar_build_long256_pyobj(
+                            col, plan.row_count, col_name)
+                else:
+                    plan.pyobj_built[i] = _dataframe_columnar_build_int_pyobj(
+                        col, plan.row_count, col_name)
             elif col.setup.source == col_source_t.col_source_float_pyobj:
                 plan.pyobj_built[i] = _dataframe_columnar_build_float_pyobj(
                     col, plan.row_count, col_name)
@@ -4320,14 +4438,24 @@ cdef void_int _dataframe_columnar_append_field(
                 validity_ptr = &validity
             else:
                 validity_ptr = NULL
+            # A `long256` round-trip claim turns the same object column
+            # into 32-byte rows; every other claim leaves it int64.
+            if (col.setup.has_override
+                    and col.setup.override_dtype
+                        == qwp_numpy_dtype.qwp_numpy_s32):
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_s32
+                element_size = 32
+            else:
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_i64
+                element_size = 8
             with nogil:
                 ok = qwp_chunk_append_numpy_column(
                     chunk,
                     col.name.buf,
                     col.name.len,
-                    qwp_numpy_dtype.qwp_numpy_i64,
-                    (<const uint8_t*>prebuilt.data) + row_offset * 8,
-                    row_count * 8,
+                    numpy_dtype,
+                    (<const uint8_t*>prebuilt.data) + row_offset * element_size,
+                    row_count * element_size,
                     row_count,
                     validity_ptr,
                     NULL,
@@ -4762,6 +4890,13 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
             col.setup.has_override = True
             col.setup.override_dtype = \
                 qwp_numpy_dtype.qwp_numpy_u16_char
+        elif (kind == 'long256'
+                and col.setup.source == col_source_t.col_source_int_pyobj):
+            # `to_pandas()` hands a LONG256 column back as Python ints —
+            # the only shape wide enough to hold one without pyarrow. The
+            # claim is what tells the 32-byte encoder from the LONG one.
+            col.setup.has_override = True
+            col.setup.override_dtype = qwp_numpy_dtype.qwp_numpy_s32
         elif kind == 'geohash':
             gh = _geohash_override_dtype(col.setup.source)
             bits = meta.get('precision_bits') or 0
@@ -7019,7 +7154,7 @@ cdef class QuestDB:
           rejected on the NumPy planner rather than quietly landing as
           BINARY.
         - **LONG256**: 32-byte binary columns. Bytes are little-endian
-          limbs, least-significant limb first, forwarded verbatim. Two
+          limbs, least-significant limb first, forwarded verbatim. Three
           routes claim the type, and they need different inputs.
           ``schema_overrides={'col': 'long256'}`` needs a fully
           Arrow-backed frame — every column an ArrowDtype, e.g.
@@ -7028,11 +7163,17 @@ cdef class QuestDB:
           ``pa.Table`` or ``pa.RecordBatch`` handed straight to this
           method: field metadata lives on the field, a pandas
           ``ArrowDtype`` carries a type and no field, so a column that
-          passed through pandas has already lost the claim. LONG256 has
-          no Arrow extension type, so the NumPy planner can claim it by
-          no route at all; a ``pa.fixed_size_binary(32)`` column on that
-          planner is rejected rather than sent as opaque bytes, since it
-          would otherwise auto-create a BINARY column without a word.
+          passed through pandas has already lost the claim. A
+          ``{'kind': 'long256'}`` entry in ``df.attrs['questdb']`` claims
+          an object-dtype column of Python ints — the shape plain
+          :meth:`QueryResult.to_pandas` hands a LONG256 column back in —
+          and the NumPy planner encodes each value as 32 unsigned
+          little-endian bytes, so every non-null value must satisfy
+          ``0 <= value < 2**256``. LONG256 has no Arrow extension type,
+          so a ``pa.fixed_size_binary(32)`` column reaching the NumPy
+          planner claims nothing by itself and is rejected rather than
+          sent as opaque bytes, since it would otherwise auto-create a
+          BINARY column without a word.
         - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
           C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
           the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`

@@ -2974,33 +2974,48 @@ class TestEgressWithDatabase(unittest.TestCase):
                     pass
 
     def test_numpy_egress_round_trip_overrides(self):
-        """ipv4 / char / geohash round-trip through the native numpy path
-        driven by df.attrs metadata (no pyarrow). The destination column
-        types are verified by re-querying and checking the egress metadata
-        reports the same kinds.
+        """uuid / long256 / ipv4 / char / geohash round-trip through the
+        native numpy path driven by df.attrs metadata (no pyarrow). UUID
+        comes back as ``uuid.UUID`` cells and LONG256 as Python ints —
+        the widest shape available without pyarrow — and the claim is
+        what turns those ints back into 32-byte values. The destination
+        column types are verified by re-querying and checking the egress
+        metadata reports the same kinds.
         """
         src = 't_rto_src_' + uuid.uuid4().hex[:8]
         dst = 't_rto_dst_' + uuid.uuid4().hex[:8]
-        cols = 'ts, ip, gh, c'
+        value = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+        cols = 'ts, u, l, ip, gh, c'
         try:
             self._exec(
                 f'CREATE TABLE {src} '
-                '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), c CHAR) '
+                '(ts TIMESTAMP, u UUID, l LONG256, ip IPV4, '
+                'gh GEOHASH(4c), c CHAR) '
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
             self._exec(
                 f"INSERT INTO {src} VALUES "
-                f"('2024-01-01T00:00:00Z', '1.2.3.4', #u33d, 'A'), "
-                f"('2024-01-01T00:00:01Z', '255.0.0.1', #u33e, 'B')")
+                f"('2024-01-01T00:00:00Z', '{value}', "
+                "'0x0001020304050607080910111213141516171819202122232425262728293031', "
+                f"'1.2.3.4', #u33d, 'A'), "
+                f"('2024-01-01T00:00:01Z', '{value}', "
+                "'0x01', "
+                f"'255.0.0.1', #u33e, 'B')")
             self.qdb_plain.retry_check_table(src, min_rows=2)
 
             with qi.QuestDB.from_conf(self._conf()) as client:
                 df = client.query(
                     f'SELECT {cols} FROM {src} ORDER BY ts').to_pandas()
             meta = df.attrs['questdb']['columns']
+            self.assertEqual(meta['u']['kind'], 'uuid')
+            self.assertEqual(meta['l']['kind'], 'long256')
             self.assertEqual(meta['ip']['kind'], 'ipv4')
             self.assertEqual(meta['c']['kind'], 'char')
             self.assertEqual(meta['gh']['kind'], 'geohash')
             self.assertEqual(meta['gh']['precision_bits'], 20)
+            self.assertEqual(list(df['u']), [value, value])
+            self.assertEqual(list(df['l']), [
+                0x0001020304050607080910111213141516171819202122232425262728293031,
+                1])
 
             with qi.QuestDB.from_conf(self._conf()) as client:
                 client.dataframe(df, table_name=dst, at='ts')
@@ -3008,12 +3023,22 @@ class TestEgressWithDatabase(unittest.TestCase):
 
             with qi.QuestDB.from_conf(self._conf()) as client:
                 back = client.query(
-                    f'SELECT ip, gh, c FROM {dst}').to_pandas()
+                    f'SELECT u, l, ip, gh, c FROM {dst}').to_pandas()
             bmeta = back.attrs['questdb']['columns']
+            self.assertEqual(bmeta['u']['kind'], 'uuid')
+            self.assertEqual(bmeta['l']['kind'], 'long256')
             self.assertEqual(bmeta['ip']['kind'], 'ipv4')
             self.assertEqual(bmeta['c']['kind'], 'char')
             self.assertEqual(bmeta['gh']['kind'], 'geohash')
             self.assertEqual(bmeta['gh']['precision_bits'], 20)
+
+            self.assertEqual(
+                self.qdb_plain.http_sql_query(
+                    f'SELECT u, l, ip, gh, c FROM {dst} ORDER BY ts')[
+                        'dataset'],
+                self.qdb_plain.http_sql_query(
+                    f'SELECT u, l, ip, gh, c FROM {src} ORDER BY ts')[
+                        'dataset'])
         finally:
             for t in (src, dst):
                 try:

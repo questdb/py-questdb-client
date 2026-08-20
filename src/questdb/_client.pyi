@@ -633,6 +633,10 @@ class Buffer:
         operations treat it as CHAR's null/absent marker. GEOHASH has no
         collision, and empty BINARY ``b''`` is distinct from ``NULL``.
 
+        A bare ``int`` is a 64-bit LONG, so a value outside
+        ``-2**63 .. 2**63-1`` raises ``OverflowError`` naming ``Long256`` —
+        the wrapper that sends it as a 256-bit LONG256 instead.
+
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
         (Refer to the QuestDB documentation pages linked above).

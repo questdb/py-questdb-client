@@ -20,10 +20,10 @@ Changelog
   columns are opaque bytes and land as BINARY unless the column claims a
   type: the ``arrow.uuid`` extension type, ``questdb.column_type`` field
   metadata, or the new ``schema_overrides`` kinds below. A pandas frame
-  where any column is not an ``ArrowDtype`` takes the NumPy planner, on
-  which none of the three ways to claim LONG256 are available; a 32-byte
-  ``fixed_size_binary`` column there is rejected with an error telling you
-  to convert the frame, rather than quietly auto-creating a BINARY column.
+  where any column is not an ``ArrowDtype`` takes the NumPy planner, where a
+  32-byte ``fixed_size_binary`` column claims nothing by itself and is
+  rejected with an error telling you to convert the frame, rather than
+  quietly auto-creating a BINARY column.
   The ``arrow.uuid`` route needs pyarrow >= 18 and a column built from
   ``pa.uuid()``: pyarrow registers that canonical extension type from 18
   on, and only an extension *type* survives into a pandas ``ArrowDtype``,
@@ -92,6 +92,19 @@ Changelog
   SHORT, and INT columns still widen one step on the way back in. Editing
   the frame is safe: a column that has been dropped, renamed, or retyped
   simply loses its claim, and ``symbols`` / ``schema_overrides`` outrank it.
+- LONG256 columns survive a plain ``to_pandas()`` round trip. That backend
+  hands a LONG256 column back as an object column of Python ints — the only
+  shape wide enough to hold one without pyarrow — and ``dataframe()`` now
+  reads the ``{'kind': 'long256'}`` claim that travels with it, encoding
+  each value as 32 unsigned little-endian bytes. Every non-null value must
+  satisfy ``0 <= value < 2**256``. Without the claim an object-dtype int
+  column is still a LONG.
+- An ``int`` too wide for a 64-bit LONG column now says so. ``row()`` raises
+  ``OverflowError`` naming :class:`Long256 <questdb.Long256>`, the wrapper
+  that sends a 256-bit value, and ``dataframe()`` raises
+  :class:`QuestDBError <questdb.QuestDBError>` naming the
+  ``df.attrs['questdb']`` claim that makes the column a LONG256. Both used
+  to surface CPython's bare "int too large to convert", which named neither.
 - DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix. Pass an
   ``ipaddress.IPv4Address`` value instead.

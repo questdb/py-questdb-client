@@ -3208,7 +3208,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
         self.assertEqual(capture(poisoned), capture(self.UUID_VALUE))
 
-    def _dataframe_column_types(self, df, **kwargs):
+    def _dataframe_wire_payload(self, df, **kwargs):
         kwargs.setdefault('table_name', 'date_wire')
         with QwpAckServer(record_payloads=True) as server:
             conf = (
@@ -3218,10 +3218,13 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 client.dataframe(df, **kwargs)
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
-        payload = next(
+        return next(
             payload for payload in stats['binary_payloads']
             if int.from_bytes(payload[6:8], 'little') > 0)
-        return dict(_first_qwp_table_column_types(payload))
+
+    def _dataframe_column_types(self, df, **kwargs):
+        return dict(_first_qwp_table_column_types(
+            self._dataframe_wire_payload(df, **kwargs)))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
@@ -3374,6 +3377,78 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(types['ip'], 0x05)
         self.assertEqual(types['ch'], 0x04)
         self.assertEqual(types['gh'], 0x05)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_long256_round_trips_through_an_object_int_column(self):
+        # Plain `to_pandas()` has no pyarrow to hold 32 raw bytes, so it
+        # hands a LONG256 column back as Python ints. Going the other
+        # way the claim is the only thing separating those ints from the
+        # LONG column they would otherwise become.
+        value = 2 ** 255 + 7
+        frame = pd.DataFrame({
+            'l': pd.array([value, 5, None], dtype=object),
+            'ts': pd.to_datetime(
+                ['2025-01-01', '2025-01-02', '2025-01-03']),
+        })
+        frame.attrs['questdb'] = {'version': 1, 'columns': {
+            'l': {'kind': 'long256'}}}
+        payload = self._dataframe_wire_payload(
+            frame, table_name='long256_attrs', at='ts')
+        self.assertEqual(
+            dict(_first_qwp_table_column_types(payload))['l'], 0x0D)
+        # 32 unsigned little-endian bytes a row — the order the reader
+        # took the integer out of.
+        self.assertIn(value.to_bytes(32, 'little'), payload)
+        self.assertIn((5).to_bytes(32, 'little'), payload)
+
+        # Without the claim the same column is a plain LONG, and a value
+        # too wide for one names the claim that would carry it.
+        bare = frame.iloc[1:].copy()
+        bare.attrs = {}
+        self.assertEqual(
+            self._dataframe_column_types(
+                bare, table_name='long256_attrs', at='ts')['l'],
+            0x05)
+        wide = frame.copy()
+        wide.attrs = {}
+        with self.assertRaisesRegex(
+                qi.QuestDBError, "'kind': 'long256'") as caught:
+            self._dataframe_column_types(
+                wide, table_name='long256_attrs', at='ts')
+        self.assertIn('out of range for a LONG column', str(caught.exception))
+
+        # The claim says LONG256, so a value that is not one is refused
+        # rather than truncated.
+        for bad in (-1, 2 ** 256):
+            with self.subTest(value=bad):
+                odd = frame.copy()
+                odd['l'] = pd.array([bad, 5, None], dtype=object)
+                odd.attrs = dict(frame.attrs)
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, r'0 <= value < 2\*\*256'):
+                    self._dataframe_column_types(
+                        odd, table_name='long256_attrs', at='ts')
+
+    def test_row_names_long256_for_an_oversized_int(self):
+        # A bare int is a 64-bit LONG. CPython's own "int too large to
+        # convert" says nothing about what carries a wider value.
+        buffer = qi.Buffer._new_qwp()
+        buffer.row('long256_row', columns={'v': 1}, at=qi.TimestampNanos(1))
+        before = len(buffer)
+        for value in (2 ** 255 + 7, 2 ** 63, -(2 ** 63) - 1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                        OverflowError, 'Long256') as caught:
+                    buffer.row(
+                        'long256_row', columns={'v': value},
+                        at=qi.TimestampNanos(2))
+                self.assertIn("Bad column 'v'", str(caught.exception))
+                self.assertEqual(len(buffer), before)
+        for value in (2 ** 63 - 1, -(2 ** 63)):
+            buffer.row(
+                'long256_row', columns={'v': value},
+                at=qi.TimestampNanos(3))
+        self.assertGreater(len(buffer), before)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
