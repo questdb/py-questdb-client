@@ -6047,7 +6047,6 @@ cdef bint _dataframe_client_try_capsule_path(
         uint64_t budget_ms,
         object df,
         object table_name,
-        object table_name_col,
         object symbols,
         object at,
         size_t max_rows_per_batch,
@@ -6086,8 +6085,6 @@ cdef bint _dataframe_client_try_capsule_path(
     if _pandas_dataframe_requires_manual_planner(df):
         return False
     if _pandas_dataframe_is_timestamp_only_at(df, at):
-        return False
-    if table_name_col is not None:
         return False
 
     # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
@@ -6344,6 +6341,27 @@ cdef void_int _direct_dataframe_run(
         schema_overrides)
     if max_rows_per_batch <= 0:
         raise ValueError('max_rows_per_batch must be >= 1.')
+    if table_name is not None and table_name_col is not None:
+        raise ValueError(
+            'Can specify only one of `table_name` or `table_name_col`.')
+    if table_name_col is not None:
+        # This path writes one table per call, so it has nowhere to put
+        # a table-name column. The check runs before the planner looks
+        # at any column, so the error always says the same thing. Later
+        # on, a column the planner cannot type by itself — a 32-byte
+        # binary with no type claim, say — would raise first and point
+        # at the wrong problem.
+        raise UnsupportedDataFrameShapeError(
+            'QuestDB.dataframe() writes one table per call and does '
+            'not accept `table_name_col`. Split the frame on that '
+            'column and make one call per table, e.g. '
+            "`for name, group in df.groupby('tbl'): "
+            "client.dataframe(group.drop(columns='tbl'), "
+            "table_name=name, at='ts')`. Those calls take `symbols` "
+            "and `schema_overrides` and read `df.attrs['questdb']`, "
+            'so LONG256 and the other column types work as normal. To '
+            'write rows whose table name comes from a column, use '
+            '`Sender.row()`.')
     if isinstance(at, datetime.datetime):
         if at != at:
             raise QuestDBError(
@@ -6383,7 +6401,6 @@ cdef void_int _direct_dataframe_run(
                     budget_ms,
                     df,
                     table_name,
-                    table_name_col,
                     symbols,
                     at,
                     max_rows_per_batch,
@@ -6395,10 +6412,9 @@ cdef void_int _direct_dataframe_run(
                 raise UnsupportedDataFrameShapeError(
                     'schema_overrides requires the Arrow columnar path: '
                     'fully Arrow-backed input (pyarrow / polars, or pandas '
-                    'where every column uses ArrowDtype) without '
-                    '`table_name_col`. This input falls back to the NumPy '
-                    'planner, which does not apply schema_overrides; '
-                    'convert the frame, e.g. '
+                    'where every column uses ArrowDtype). This input falls '
+                    'back to the NumPy planner, which does not apply '
+                    'schema_overrides; convert the frame, e.g. '
                     "df.convert_dtypes(dtype_backend='pyarrow'), or drop "
                     'schema_overrides.')
             _dataframe_numpy_publish(

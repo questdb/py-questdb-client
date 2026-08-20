@@ -3340,6 +3340,54 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(types['ip'], 0x18)
         self.assertEqual(types['sym'], 0x0F)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_table_name_col_names_the_split_remedy(self):
+        # QuestDB.dataframe() writes one table per call, so it turns
+        # `table_name_col` down. It does that before it looks at any
+        # column, so the 32-byte binary column here — which the NumPy
+        # planner cannot type as LONG256 by itself — does not raise
+        # first and point at the wrong problem. Splitting the frame and
+        # making one call per table is the fix, and LONG256 goes
+        # through that way.
+        value = bytes(range(32))
+        frame = pd.DataFrame({
+            'tbl': pd.array(
+                ['split_a', 'split_b'],
+                dtype=pd.ArrowDtype(pyarrow.string())),
+            'l': pd.array(
+                [value, value],
+                dtype=pd.ArrowDtype(pyarrow.binary(32))),
+            'ts': pd.array(
+                [datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc),
+                 datetime.datetime(2025, 1, 2, tzinfo=datetime.timezone.utc)],
+                dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with self.assertRaises(
+                        qi.UnsupportedDataFrameShapeError) as caught:
+                    client.dataframe(frame, table_name_col='tbl', at='ts')
+                with self.assertRaises(
+                        qi.UnsupportedDataFrameShapeError):
+                    client.dataframe(
+                        frame, table_name_col='tbl', at='ts',
+                        schema_overrides={'l': 'long256'})
+        message = str(caught.exception)
+        self.assertIn('does not accept `table_name_col`', message)
+        self.assertIn('table_name=name', message)
+        # The problem is `table_name_col`, not the column's type.
+        self.assertNotIn('32-byte', message)
+
+        for name, group in frame.groupby('tbl'):
+            types = self._dataframe_column_types(
+                group.drop(columns='tbl'), table_name=name, at='ts',
+                schema_overrides={'l': 'long256'})
+            self.assertEqual(types['l'], 0x0D)
+
     def _roundtrip_frame(self):
         """A fully Arrow-backed frame shaped like what
         ``to_pandas(dtype_backend='pyarrow')`` returns for a table of

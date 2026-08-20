@@ -45,6 +45,16 @@ Changelog
   a valid UUID, so a column that keeps sending QuestDB's old wire layout is
   accepted and stored with the two halves transposed. Drop your own byte
   swapping at the same time and pass ``uuid.UUID.bytes``.
+- ``QuestDB.dataframe()`` writes one table per call and has never taken
+  ``table_name_col``, but it did not always say so. A column it could not
+  type by itself — a 32-byte binary with no type claim, say — raised first
+  and told you to use ``schema_overrides``, which the same call then turned
+  down for using ``table_name_col``. It now checks ``table_name_col``
+  before it looks at any column, and the error says what to do instead:
+  split the frame and make one call per table, each with its own
+  ``table_name``. Those calls take ``schema_overrides``, so LONG256 and the
+  other column types work as normal. To write rows whose table name comes
+  from a column, use ``Sender.row()``.
 - polars ``Object`` columns are now rejected with a clear error instead of
   being ingested as meaningless in-process handles.
 - ``row()`` on QWP senders now supports UUID, IPV4, BINARY, CHAR, DATE,
