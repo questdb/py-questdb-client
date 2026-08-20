@@ -168,7 +168,11 @@ from test_client_polars_fuzz import (
     TestClientPolarsDataframeFuzz,
     TestClientPolarsDataframeRoundTrip,
 )
-from test_dataframe_leaks import TestCategoricalArrowLeak, TestPyobjColumnarLeak
+from test_dataframe_leaks import (
+    TestCategoricalArrowLeak,
+    TestPyobjColumnarLeak,
+    TestBinaryBufferRelease,
+)
 
 if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV1
@@ -176,6 +180,7 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV3
     from test_dataframe import TestNaTScalarDatetime
     from test_dataframe import TestColumnarPlanWithoutPyarrow
+    from test_dataframe import TestDecimalWithoutCAccelerator
 elif pd is None:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
