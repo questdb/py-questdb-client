@@ -36,7 +36,17 @@ except ImportError:
 import questdb._client as qi
 
 
-QUESTDB_VERSION = '9.4.3'
+# The released server the integration suite downloads. A CI leg pins a
+# different one through `QDB_VERSION`; `QDB_REPO_PATH` overrides both and
+# builds from a checkout instead.
+QUESTDB_VERSION = os.environ.get('QDB_VERSION') or '9.4.3'
+
+# Set by the CI legs whose job is to cover the QWP-only column types.
+# Where it is set, a server too old for them fails the run instead of
+# skipping it: a leg that silently covers nothing is indistinguishable
+# from one that passes.
+REQUIRE_QWP_ROW_TYPES = (
+    os.environ.get('TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES') == '1')
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
@@ -131,8 +141,19 @@ class TestWithDatabase(unittest.TestCase):
         them."""
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_QWP_ROW_TYPES_RELEASE:
+            version = '.'.join(str(part) for part in self.qdb_plain.version)
+            if REQUIRE_QWP_ROW_TYPES:
+                self.fail(
+                    f'This run is supposed to cover the QWP-only column '
+                    f'types, but the server reports {version} and they '
+                    f'need '
+                    f'{".".join(str(p) for p in FIRST_QWP_ROW_TYPES_RELEASE)} '
+                    f'or newer. Point QDB_VERSION or QDB_REPO_PATH at a '
+                    f'server that has them, or clear '
+                    f'TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES.')
             self.skipTest(
-                'QWP-only column types require QuestDB 10+')
+                f'QWP-only column types require QuestDB 10+, '
+                f'server reports {version}')
 
     def _require_qwp_fuzz(self):
         self._require_qwp_ws()

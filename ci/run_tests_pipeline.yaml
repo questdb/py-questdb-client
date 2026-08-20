@@ -12,29 +12,52 @@ stages:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             linux-pandas2:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
               pandasVersion: "2.3.3"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             linux-pandas310:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.10"
               pandasVersion: "2.3.3"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             linux-qdb-master:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
               vsQuestDbMaster: true
+              questdbVersion: ""
+              requireQwpRowTypes: ""
+            # The QWP-only column types need QuestDB 10, so the legs above
+            # skip every test that covers them. This one pins a 10 release
+            # and sets requireQwpRowTypes, which turns those skips into
+            # failures -- otherwise a run covering none of it looks exactly
+            # like a run that passed.
+            linux-qdb10:
+              imageName: "ubuntu-latest"
+              poolName: "Azure Pipelines"
+              pythonVersion: "3.12"
+              questdbVersion: "10.0.0"
+              requireQwpRowTypes: "1"
             mac:
               imageName: "macos-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             windows-msvc-2022:
               imageName: "windows-2025"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
         pool:
           name: $(poolName)
           vmImage: $(imageName)
@@ -90,11 +113,14 @@ stages:
             displayName: "Test vs released"
             env:
               JAVA_HOME: $(JAVA_HOME_25_X64)
+              QDB_VERSION: $(questdbVersion)
+              TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES: $(requireQwpRowTypes)
           - script: python3 proj.py test 1
             displayName: "Test vs master"
             env:
               JAVA_HOME: $(JAVA_HOME)
               QDB_REPO_PATH: "./questdb"
+              TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES: "1"
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:
