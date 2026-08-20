@@ -12,6 +12,8 @@ import timeit
 import time
 import threading
 import uuid
+import copy
+import json
 from enum import Enum
 import random
 import pathlib
@@ -3489,14 +3491,15 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 [datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)],
                 dtype='datetime64[us, UTC]'),
         })
-        frame.attrs['questdb'] = {'version': 1, 'columns': {
-            'u': {'kind': 'uuid'},
-            'l': {'kind': 'long256'},
-            'ip': {'kind': 'ipv4'},
-            'ch': {'kind': 'char'},
-            'gh': {'kind': 'geohash', 'precision_bits': 20},
-            'ts': {'kind': 'timestamp'},
-        }}
+        frame.attrs['questdb'] = qi._RoundtripClaim({
+            'version': 1, 'columns': {
+                'u': {'kind': 'uuid'},
+                'l': {'kind': 'long256'},
+                'ip': {'kind': 'ipv4'},
+                'ch': {'kind': 'char'},
+                'gh': {'kind': 'geohash', 'precision_bits': 20},
+                'ts': {'kind': 'timestamp'},
+            }})
         return frame
 
     @unittest.skipIf(pd is None, 'pandas not installed')
@@ -3623,6 +3626,51 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_the_round_trip_claim_is_frozen_and_never_copied(self):
+        """pandas deep-copies the whole of `df.attrs` every time it
+        propagates it, and that runs once per column while a frame is
+        sliced or exported. A per-column claim would therefore make
+        that pass quadratic in the column count -- 950 ms of a 1000 ms
+        Arrow export at 1024 columns, all of it inside
+        `copy.deepcopy`. The claim declines to be copied, which is only
+        sound because it cannot be edited."""
+        frame = self._roundtrip_frame()
+        claim = frame.attrs['questdb']
+
+        # The two ways pandas would otherwise pay for it.
+        self.assertIs(copy.deepcopy(frame.attrs)['questdb'], claim)
+        self.assertIs(frame.head(1).attrs['questdb'], claim)
+
+        # Sharing is unobservable because nothing can be edited, at any
+        # depth.
+        for target in (claim, claim['columns'], claim['columns']['ip']):
+            with self.subTest(level=type(target).__name__):
+                with self.assertRaisesRegex(
+                        TypeError, 'cannot be edited in place'):
+                    target['x'] = 1
+                with self.assertRaises(TypeError):
+                    target.update({'x': 1})
+
+        # To everything that reads it, it is the mapping it replaced.
+        self.assertIsInstance(claim, dict)
+        self.assertEqual(claim['columns']['ip'], {'kind': 'ipv4'})
+        self.assertEqual(claim['version'], 1)
+        self.assertEqual(json.loads(json.dumps(claim)), dict(claim))
+
+        # Replacing it is how a frame's claim is changed, and a plain
+        # hand-written dict is read just the same.
+        edited = frame.copy()
+        edited.attrs = dict(frame.attrs)
+        edited.attrs['questdb'] = {
+            'version': 1, 'columns': {'ip': {'kind': 'char'}}}
+        self.assertEqual(
+            self._dataframe_column_types(
+                edited, table_name='attrs_frozen', at='ts')['ip'],
+            0x05)
+        self.assertEqual(frame.attrs['questdb'], claim)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_malformed_roundtrip_attrs_are_ignored_by_both_readers(self):
         """`df.attrs` is user data — hand-written, or reloaded from JSON
         where a string became a list — and the claim promises to be
@@ -3689,7 +3737,10 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             ['a'] * len(frame),
             dtype=pd.ArrowDtype(pyarrow.dictionary(
                 pyarrow.int32(), pyarrow.utf8())))
-        frame.attrs['questdb']['columns']['sym'] = {'kind': 'symbol'}
+        claim = dict(frame.attrs['questdb'])
+        claim['columns'] = dict(claim['columns'])
+        claim['columns']['sym'] = {'kind': 'symbol'}
+        frame.attrs['questdb'] = qi._RoundtripClaim(claim)
         types = self._dataframe_column_types(
             frame, table_name='attrs_precedence', at='ts',
             symbols=False, schema_overrides={'ip': 'ipv4'})
@@ -3765,14 +3816,15 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 [datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)],
                 dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))),
         })
-        frame.attrs['questdb'] = {'version': 1, 'columns': {
-            'u': {'kind': 'uuid'},
-            'l': {'kind': 'long256'},
-            'ip': {'kind': 'ipv4'},
-            'ch': {'kind': 'char'},
-            'gh': {'kind': 'geohash', 'precision_bits': 20},
-            'ts': {'kind': 'timestamp'},
-        }}
+        frame.attrs['questdb'] = qi._RoundtripClaim({
+            'version': 1, 'columns': {
+                'u': {'kind': 'uuid'},
+                'l': {'kind': 'long256'},
+                'ip': {'kind': 'ipv4'},
+                'ch': {'kind': 'char'},
+                'gh': {'kind': 'geohash', 'precision_bits': 20},
+                'ts': {'kind': 'timestamp'},
+            }})
         return frame
 
 

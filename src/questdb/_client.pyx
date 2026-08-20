@@ -7482,6 +7482,12 @@ cdef class QuestDB:
         ``uuid`` or ``long256`` — is refused rather than written into a
         column of the claimed type.
 
+        The claim a query result carries reads as an ordinary mapping
+        but cannot be edited in place, because every copy of the frame
+        shares it; assign a new mapping to ``df.attrs['questdb']`` to
+        change it. A plain hand-written ``dict`` is read here just the
+        same.
+
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded

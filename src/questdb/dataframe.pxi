@@ -153,6 +153,69 @@ cdef enum col_target_t:
 cdef int _ROUNDTRIP_META_VERSION = 1
 
 
+class _RoundtripClaim(dict):
+    """The ``df.attrs['questdb']`` payload: a ``dict`` that declines to
+    be copied.
+
+    pandas deep-copies the whole of ``attrs`` every time it propagates
+    it -- ``NDFrame.__finalize__`` does ``self.attrs =
+    deepcopy(other.attrs)`` -- and that runs once per column while a
+    frame is being exported or sliced. With a per-column claim the copy
+    is itself the size of the frame, so the pass is quadratic in the
+    column count: exporting a 1024-column result to Arrow spent 950 ms
+    of its 1000 inside ``copy.deepcopy``.
+
+    Declining to copy is sound because the claim cannot be edited. It
+    only recalls what each column held when it was read, so there is
+    nothing two copies of a frame could legitimately disagree about,
+    and every mutating method raises rather than let one try.
+
+    It is still a ``dict``, so it indexes, iterates, compares and
+    serializes exactly like the plain mapping it replaces, and a
+    hand-written plain ``dict`` is read on the way in just the same. To
+    change what a frame claims, assign a new mapping to
+    ``df.attrs['questdb']``, or state the type outright with
+    ``schema_overrides`` / ``symbols``, which outrank the claim.
+    """
+    __slots__ = ()
+
+    def __init__(self, mapping=()):
+        # Every mapping inside the claim is frozen too, so no part of
+        # it can be edited in place. `dict.__init__` inserts at the C
+        # level and so is not turned away by the override below.
+        items = mapping.items() if isinstance(mapping, dict) else mapping
+        dict.__init__(self, [
+            (key, _RoundtripClaim(value) if isinstance(value, dict) else value)
+            for key, value in items])
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __copy__(self):
+        return self
+
+    def __reduce__(self):
+        # Pickling round-trips through a plain dict payload, so an
+        # unpickled claim is a claim and not a bare dict.
+        return (_RoundtripClaim, (dict(self),))
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError(
+            "df.attrs['questdb'] records what each column held when it "
+            'was read and cannot be edited in place, because every copy '
+            'of the frame shares it. Assign a new mapping to '
+            "df.attrs['questdb'], or state the type outright with "
+            'schema_overrides / symbols, which outrank the claim.')
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    setdefault = _immutable
+    pop = _immutable
+    popitem = _immutable
+    update = _immutable
+    clear = _immutable
+
+
 cdef object _roundtrip_columns_meta(object frame):
     """The ``columns`` map of a frame's ``df.attrs['questdb']``, or
     ``None`` where the frame carries no claim this client can read.

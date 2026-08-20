@@ -154,6 +154,22 @@ Changelog
   re-reading ``schema.names`` and ``frame.dtypes`` once per column; at 1024
   columns the read pass drops from about 85 ms to 0.7 ms, and
   ``iter_pandas`` paid it per batch.
+- ``df.attrs['questdb']`` is now a mapping that declines to be copied and
+  refuses to be edited in place. pandas deep-copies the whole of ``attrs``
+  every time it propagates it — ``NDFrame.__finalize__`` does
+  ``self.attrs = deepcopy(other.attrs)`` — and that runs once per column
+  while a frame is sliced or exported, so a per-column claim made those
+  passes quadratic in the column count. Exporting a 1024-column result to
+  Arrow took 934 ms, of which 950 ms across 1025 deep copies was the claim;
+  it now takes 32 ms against 26 ms for the same frame carrying no claim at
+  all. Declining to copy is sound only because the claim cannot be edited:
+  it records what each column held when it was read, so no two copies of a
+  frame have anything to disagree about. It is still a ``dict`` — it
+  indexes, iterates, compares, pickles and serializes to JSON exactly as
+  before, and a hand-written plain ``dict`` is read on the way in just the
+  same. To change what a frame claims, assign a new mapping to
+  ``df.attrs['questdb']``, or use ``schema_overrides`` / ``symbols``, which
+  outrank it.
 - DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix. Pass an
   ``ipaddress.IPv4Address`` value instead.

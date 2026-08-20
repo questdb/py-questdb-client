@@ -1800,8 +1800,8 @@ cdef object _numpy_assemble_frame(
         if col_precision[col_idx] is not None:
             entry['precision_bits'] = col_precision[col_idx]
         columns_meta[col_names[col_idx]] = entry
-    frame.attrs['questdb'] = {
-        'version': _ROUNDTRIP_META_VERSION, 'columns': columns_meta}
+    frame.attrs['questdb'] = _RoundtripClaim(
+        {'version': _ROUNDTRIP_META_VERSION, 'columns': columns_meta})
     return frame
 
 
@@ -2306,9 +2306,9 @@ cdef object _attach_arrow_roundtrip_attrs(object frame, object schema):
     IPV4 / CHAR / GEOHASH / UUID / LONG256 columns, which are otherwise
     indistinguishable from their storage types on the way back in.
     """
-    frame.attrs['questdb'] = {
-        'version': _ROUNDTRIP_META_VERSION,
-        'columns': _arrow_roundtrip_columns_meta(schema)}
+    frame.attrs['questdb'] = _RoundtripClaim(
+        {'version': _ROUNDTRIP_META_VERSION,
+         'columns': _arrow_roundtrip_columns_meta(schema)})
     return frame
 
 
@@ -2500,6 +2500,15 @@ class QueryResult:
         object-dtype columns ``"numpy_nullable"`` produces for those five
         — so writing the result out again gives the same column types,
         and for those five the same wire bytes.
+
+        ``df.attrs['questdb']`` reads as an ordinary mapping but cannot
+        be edited in place: pandas deep-copies the whole of ``attrs``
+        once per column whenever it propagates it, so a per-column claim
+        that copied would make slicing and exporting quadratic in the
+        column count. Every copy of the frame shares the one claim
+        instead. To change what a frame claims, assign a new mapping to
+        ``df.attrs['questdb']``, or state the type outright with
+        ``schema_overrides`` / ``symbols``, which outrank it.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
