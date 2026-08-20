@@ -3142,6 +3142,45 @@ print('OK')
         self.assertIn('OK', result.stdout)
 
 
+class TestDecimalWithoutCAccelerator(unittest.TestCase):
+    """`Decimal` cells are read through CPython's `_decimal` object layout, so
+    the pure-Python `decimal` module has to be turned away rather than punned."""
+
+    _SCRIPT = """
+import sys
+
+# `decimal` falls back to its pure-Python implementation when the accelerator
+# cannot be imported, and keeps the `Decimal` name.
+sys.modules['_decimal'] = None
+
+from decimal import Decimal
+import questdb.ingress as qi
+
+assert hasattr(Decimal, '_int'), 'expected the pure-Python Decimal'
+
+buf = qi.Buffer._new_qwp()
+try:
+    buf.row('t', columns={'d': Decimal('1.25')}, at=qi.ServerTimestamp)
+except ValueError as ve:
+    assert '_decimal' in str(ve), ve
+else:
+    raise AssertionError('a punned Decimal was accepted')
+print('OK')
+"""
+
+    def test_pure_python_decimal_is_refused(self):
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        env['PYTHONWARNINGS'] = 'ignore'
+        result = subprocess.run(
+            [sys.executable, '-c', self._SCRIPT],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK', result.stdout)
+
+
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile

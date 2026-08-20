@@ -7,6 +7,17 @@ import uuid as _uuid
 from cpython.bytes cimport PyBytes_AsString
 from .mpdecimal_compat cimport decimal_pyobj_to_binary
 
+# `decimal_pyobj_to_binary` reads a Decimal's memory with the layout that
+# CPython's `_decimal` accelerator uses. A pure-Python `decimal` supplies a
+# `Decimal` of the same name and a different shape, so the accelerator has to
+# be the one in play before that path can run.
+cdef bint _DECIMAL_IS_C
+try:
+    import _decimal as _decimal_accel
+    _DECIMAL_IS_C = Decimal is getattr(_decimal_accel, 'Decimal', None)
+except ImportError:
+    _DECIMAL_IS_C = False
+
 # Auto-flush settings.
 # The individual `interval`, `row_count` and `byte_count`
 # settings are set to `-1` when disabled.
@@ -2918,6 +2929,11 @@ cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_colu
         raise ValueError(
             'Expected an object of type Decimal, got an object of type ' +
             _fqn(type(<object>value)) + '.')
+    if not _DECIMAL_IS_C:
+        raise ValueError(
+            'Decimal columns require the `_decimal` accelerator that CPython '
+            'normally provides. This interpreter supplies the pure-Python '
+            '`decimal` module, whose objects have a different memory layout.')
 
     unscaled_length = decimal_pyobj_to_binary(
         value,
