@@ -11,7 +11,8 @@ including uncommitted changes. Ask for a target when none is supplied and reject
 ambiguous invocations containing both forms. Use Bash for read-only Git/GitHub
 queries and test execution (`python3 proj.py build`, `python3 proj.py test`,
 `python3 proj.py test all`, `python3 proj.py valgrind_test`); do not edit files,
-commit, or push.
+commit, or push. Reproducing at the base revision happens in a throwaway
+worktree, never by checking the review tree out (Step 3b).
 
 ## Repository map
 
@@ -73,25 +74,45 @@ State the chosen level in one line at the start of the review so the user knows 
 
 ## Step 1: Gather PR context
 
-Every mode must establish `$BASE`, the revision against which attribution is
-measured. A behavioral finding without an identical-trigger base comparison is
-not attributable to the change.
+Every mode must establish `$BASE`, the revision that attribution is measured
+against: the **merge base** of the target and the branch it lands on, not that
+branch's current tip. Once the tip has advanced past the branch point, a
+tip-relative comparison pulls unrelated commits into the review — inventing
+regressions and masking real ones — and disagrees with `gh pr diff`, which is
+itself merge-base-relative. A behavioral finding without an identical-trigger
+base comparison is not attributable to the change.
 
-For a PR, capture `$PR` after stripping the level token, then fetch context and base in a single bash call so `$PR` is in scope throughout:
+For a PR, capture `$PR` after stripping the level token, then fetch context and
+resolve both revisions in a single bash call so `$PR` is in scope throughout.
+The merge base needs both commits in the local object store, so fetch the head
+by its `pull/N/head` ref — a head that lives on a fork is otherwise absent. Name
+whichever remote hosts the PR; `origin` below assumes the common case:
 
 ```bash
 PR='<PR number or URL from $ARGUMENTS, with any --level=N / -lN / bare-digit level token removed>'
 gh pr view "$PR" --json number,title,body,labels,state
 gh pr diff "$PR"
 gh pr view "$PR" --comments
-BASE=$(gh pr view "$PR" --json baseRefOid --jq .baseRefOid)
+PR_NUM=$(gh pr view "$PR" --json number --jq .number)
+BASE_REF=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
 HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+git fetch -q origin "pull/$PR_NUM/head"
+git fetch -q origin "$BASE_REF"
+BASE=$(git merge-base "$HEAD" "origin/$BASE_REF")
+echo "BASE=$BASE"; echo "HEAD=$HEAD"
 ```
 
-For `--range=<base>..<head>`, set `$BASE`; use `git diff "$BASE...$HEAD"` when
-the head is present. With an omitted head, inspect `git diff "$BASE"`,
-`git status --porcelain`, and relevant untracked files because they do not
-appear in the diff.
+For `--range=<base>..<head>`, resolve the same way — `BASE=$(git merge-base <base> <head>)`
+— then review `git diff "$BASE" "<head>"`. The `..` in the argument names the two
+endpoints; the comparison is always against their merge base. With an omitted
+head the head is the working tree: resolve `BASE=$(git merge-base <base> HEAD)`,
+then inspect `git diff "$BASE"`, `git status --porcelain`, and relevant untracked
+files because they do not appear in the diff.
+
+**Write the resolved SHAs down.** Each Bash call runs in a fresh shell, so the
+variables assigned above are gone by the next call. Record the literal `$BASE`
+and `$HEAD` SHAs next to the level line and use those literals from Step 2.4
+onward — Step 3b's base comparison depends on them.
 
 If the diff modifies the `c-questdb-client` submodule pointer or any `.pxd` file, note it now — a submodule bump or binding change is the highest-risk class of change in this repo and forces level-3 scrutiny of the C-ABI surface regardless of the requested level.
 
@@ -110,12 +131,19 @@ Check:
 ## Step 2.4: Submodule provenance
 
 The repo has one submodule, `c-questdb-client`. If its pointer moved, determine
-whether the new commit is already on the submodule's default branch:
+whether the new commit is already on the submodule's default branch. `origin/HEAD`
+tracks that branch, and ancestry against it is the exact question. The submodule
+carries many long-lived topic branches, so a commit contained by *some* remote
+branch is not thereby on the default one — test ancestry directly:
 
 ```bash
-git -C c-questdb-client fetch origin
-git -C c-questdb-client branch -r --contains <new-commit>
+git -C c-questdb-client fetch -q origin
+git -C c-questdb-client merge-base --is-ancestor <new-commit> origin/HEAD; echo "exit=$?"
 ```
+
+Exit 0 means the commit is on the default branch, exit 1 means it is not, and any
+other status is `UNRESOLVED` — including the exit 129 / `error: no such commit`
+that a commit which never reached `origin` produces.
 
 Classify the move as:
 
@@ -358,6 +386,24 @@ Static declaration mismatches (`.pxd` vs header, `.pyi` vs implementation,
 
 If base behaves the same or worse under an identical trigger, the issue is not a
 finding against this PR.
+
+**Run base comparisons in a throwaway worktree.** Reproducing at `$BASE` needs
+base's sources checked out, and checking them out in the review tree moves it off
+the revision under review — in working-tree mode that destroys the uncommitted
+changes being reviewed. Check base out under the session scratchpad instead, and
+build there:
+
+```bash
+git worktree add --detach <scratch>/base <BASE-sha>
+git -C <scratch>/base submodule update --init --recursive
+(cd <scratch>/base && python3 proj.py build && python3 proj.py test <selector>)
+git worktree remove --force <scratch>/base   # when the review ends
+```
+
+Head-side reproduction runs in the review tree as it stands: `python3 proj.py build`
+writes `src/questdb/_client.c` and the in-tree `.so`, both gitignored build
+artifacts, so no tracked file and no uncommitted change is touched. The review
+never checks the tree out, stages, commits, or pushes.
 
 For each candidate in the private ledger:
 
