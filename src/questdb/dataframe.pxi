@@ -85,12 +85,24 @@ cdef inline uint64_t bswap64(uint64_t value) noexcept:
       ((value & 0x000000000000FF00u) << 40u) |
       ((value & 0x00000000000000FFu) << 56u))
 
+# Bound once at import. The test below runs per cell in the DataFrame
+# IPV4 builder and per column value in `Buffer.row`, where reaching
+# through the module for each of the two classes is the whole cost.
+cdef object _IPV4_ADDRESS = _ipaddress.IPv4Address
+cdef object _IPV4_INTERFACE = _ipaddress.IPv4Interface
+
+
 cdef inline bint _is_ipv4_address(object value):
     """``IPv4Interface`` subclasses ``IPv4Address`` but carries a network
     prefix that QuestDB's IPV4 column has nowhere to keep, so it is not
     accepted as an address. Every other subclass is."""
-    return (isinstance(value, _ipaddress.IPv4Address)
-            and not isinstance(value, _ipaddress.IPv4Interface))
+    # An exact `IPv4Address` is the overwhelmingly common cell and
+    # settles both questions at once: it is an address, and it is not
+    # the interface subclass.
+    if type(value) is _IPV4_ADDRESS:
+        return True
+    return (isinstance(value, _IPV4_ADDRESS)
+            and not isinstance(value, _IPV4_INTERFACE))
 
 
 cdef struct col_chunks_t:

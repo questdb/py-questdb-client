@@ -1656,16 +1656,25 @@ cdef class Buffer:
             self._column_dt(c_name, value)
         elif isinstance(value, Decimal):
             self._column_decimal(c_name, value)
-        elif isinstance(value, bytes):
+        else:
+            self._column_qwp_only(c_name, name, value)
+
+    cdef void_int _column_qwp_only(
+            self, line_sender_column_name c_name, str name,
+            object value) except -1:
+        # The QWP-only cell types and the unsupported-type error live
+        # out of line, and deliberately not `inline`. `_column` is
+        # inlined into the loop in `_row`, so every branch here would
+        # otherwise be code the common bool / int / float / str /
+        # datetime cells have to be laid out around.
+        #
+        # Within this function the four wrapper classes come before
+        # `uuid.UUID` and the IPV4 test. They are the cheapest checks in
+        # the chain -- an exact type test against a cdef class -- and
+        # none of them can be a UUID or an address, so nothing becomes
+        # reachable only through the more expensive pair.
+        if isinstance(value, (bytes, bytearray, memoryview)):
             self._column_binary(c_name, value)
-        elif isinstance(value, bytearray):
-            self._column_binary(c_name, value)
-        elif isinstance(value, memoryview):
-            self._column_binary(c_name, value)
-        elif isinstance(value, uuid.UUID):
-            self._column_uuid(name, value)
-        elif _is_ipv4_address(value):
-            self._column_ipv4(name, value)
         elif isinstance(value, Char):
             self._column_char(c_name, value)
         elif isinstance(value, DateMillis):
@@ -1674,6 +1683,10 @@ cdef class Buffer:
             self._column_long256(c_name, value)
         elif isinstance(value, Geohash):
             self._column_geohash(c_name, value)
+        elif isinstance(value, uuid.UUID):
+            self._column_uuid(name, value)
+        elif _is_ipv4_address(value):
+            self._column_ipv4(name, value)
         else:
             if isinstance(value, ipaddress.IPv6Address):
                 raise TypeError(
@@ -6193,16 +6206,22 @@ cdef dict _ATTRS_OVERRIDE_KINDS = {
 }
 
 
-cdef object _capsule_pandas_arrow_type(object frame, object name):
-    """The Arrow storage type backing column `name` of a pandas frame,
-    or None where the column is missing or not Arrow-backed."""
-    cdef object arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+cdef object _capsule_pandas_arrow_type(
+        object dtypes, object arrow_dtype, object name):
+    """The Arrow storage type backing column `name`, or None where the
+    column is missing or not Arrow-backed.
+
+    Takes the frame's `dtypes` rather than the frame: reading
+    `frame.dtypes` builds a fresh Series every time, so looking it up
+    per column was quadratic in the column count, on a path a streaming
+    `iter_pandas` feeds per batch.
+    """
     cdef object dtype
     cdef object ty
     if arrow_dtype is None:
         return None
     try:
-        dtype = frame.dtypes[name]
+        dtype = dtypes[name]
     except Exception:
         return None
     if not isinstance(dtype, arrow_dtype):
@@ -6213,7 +6232,8 @@ cdef object _capsule_pandas_arrow_type(object frame, object name):
     return ty
 
 
-cdef bint _attrs_override_fits(object ty, str kind, object bits) except -1:
+cdef bint _attrs_override_fits(
+        object types, object ty, str kind, object bits) except -1:
     """Whether the Arrow type can carry the claimed kind.
 
     Mirrors what the native client accepts, so a claim that no longer
@@ -6221,8 +6241,10 @@ cdef bint _attrs_override_fits(object ty, str kind, object bits) except -1:
     and LONG256 are held to their fixed widths: those are what the
     egress emits, and a variable-width binary claim would only be
     caught value by value at encode time.
+
+    `types` is `pyarrow.types`, passed in so the caller reads it once
+    for the whole frame rather than once per column.
     """
-    cdef object types = _PYARROW.types
     if kind == 'ipv4':
         return types.is_uint32(ty)
     if kind == 'char':
@@ -6259,7 +6281,7 @@ cdef object _capsule_roundtrip_overrides(object frame):
     rather than rejected.
     """
     cdef list out = []
-    cdef object cols_meta, meta, ty, bits
+    cdef object cols_meta, meta, ty, bits, dtypes, arrow_dtype, types
     cdef str kind
     cdef int kind_int
     cdef int arg_int
@@ -6271,6 +6293,10 @@ cdef object _capsule_roundtrip_overrides(object frame):
     _dataframe_may_import_deps()
     if not _dataframe_try_import_pyarrow():
         return out
+    # Read once for the whole frame, not once per column.
+    dtypes = frame.dtypes
+    arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+    types = _PYARROW.types
     for name, meta in cols_meta.items():
         if not isinstance(name, str):
             continue
@@ -6279,8 +6305,8 @@ cdef object _capsule_roundtrip_overrides(object frame):
             continue
         kind_int = <int>_ATTRS_OVERRIDE_KINDS[kind]
         bits = meta.get('precision_bits') or 0
-        ty = _capsule_pandas_arrow_type(frame, name)
-        if ty is None or not _attrs_override_fits(ty, kind, bits):
+        ty = _capsule_pandas_arrow_type(dtypes, arrow_dtype, name)
+        if ty is None or not _attrs_override_fits(types, ty, kind, bits):
             continue
         # Only GEOHASH takes an argument, and `_attrs_override_fits` has
         # already held it to 1..=60.

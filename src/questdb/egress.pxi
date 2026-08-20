@@ -2284,10 +2284,15 @@ cdef dict _arrow_roundtrip_columns_meta(object schema):
     cdef dict columns_meta = {}
     cdef Py_ssize_t i
     cdef object entry
-    for i in range(len(schema.names)):
+    # `schema.names` rebuilds the list and decodes every field name on
+    # each read, so it is read once. Every column of a QuestDB result
+    # carries type metadata, which made the old per-column read
+    # quadratic in the column count and `iter_pandas` paid it per batch.
+    cdef list names = schema.names
+    for i in range(len(names)):
         entry = _arrow_field_roundtrip_meta(schema.field(i))
         if entry is not None:
-            columns_meta[schema.names[i]] = entry
+            columns_meta[names[i]] = entry
     return columns_meta
 
 

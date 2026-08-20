@@ -139,6 +139,21 @@ Changelog
   by a JSON round trip, raised ``TypeError`` from the Arrow path, and
   ``attrs['questdb']`` that was not a dict raised ``AttributeError`` from
   the NumPy one.
+- Four measured speed-ups on paths this release touched. The DataFrame
+  IPV4 builder looked ``IPv4Address`` and ``IPv4Interface`` up through the
+  ``ipaddress`` module on every cell; both are now bound once at import and
+  an exact-type fast path settles the common cell, taking the builder from
+  about 65 ns a row to under 2. ``Buffer.row``'s QWP-only cell types moved
+  out of the inlined dispatch function into a separate one, and within it
+  the four wrapper classes now come before the ``uuid.UUID`` and IPV4
+  tests, which they cannot be: a ``Geohash`` cell is about 33% cheaper, an
+  ``IPv4Address`` cell about 15%, and an ordinary ``int`` cell slightly
+  cheaper too, since the common path no longer has that code laid out
+  around it. Reading the round-trip metadata off an Arrow schema and
+  applying it to a pandas frame were both quadratic in the column count,
+  re-reading ``schema.names`` and ``frame.dtypes`` once per column; at 1024
+  columns the read pass drops from about 85 ms to 0.7 ms, and
+  ``iter_pandas`` paid it per batch.
 - DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix. Pass an
   ``ipaddress.IPv4Address`` value instead.
