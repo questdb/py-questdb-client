@@ -241,8 +241,8 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         its offset table, which the unwind has to free. The bad cell is
         caught by the itemsize / contiguity check, so this exercises the
         pre-`PyObject_GetBuffer` branch. ``PyBuffer_Release`` itself is a
-        refcount question RSS cannot answer; it is asserted directly in
-        ``test_binary_memoryview_buffers_are_released``.
+        refcount question RSS cannot answer; it is asserted directly by
+        ``TestBinaryBufferRelease`` below.
         """
         from qwp_ws_ack_server import QwpAckServer
 
@@ -374,6 +374,41 @@ class TestBinaryBufferRelease(unittest.TestCase):
                         frame, table_name='t', at=qi.ServerTimestamp,
                         symbols=False)
         del frame
+        gc.collect()
+        self._assert_released(backing, view)
+
+    def test_row_path_releases(self):
+        """`Buffer.row` borrows the same way `dataframe()` does, through
+        its own `PyObject_GetBuffer` / `PyBuffer_Release` pair in
+        `_column_binary`. Both tests above drive `client.dataframe`, so
+        without this one the row API -- which is where BINARY cells were
+        added -- has nothing asserting it lets the buffer go."""
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        buffer = qi.Buffer._new_qwp()
+        buffer.row('t', columns={'by': view}, at=qi.TimestampNanos(1))
+        del buffer
+        gc.collect()
+        self._assert_released(backing, view)
+
+    def test_row_path_releases_on_a_rejected_row(self):
+        """A row that fails after the BINARY cell has been borrowed
+        unwinds through the `finally`, so the export is dropped there
+        too. `Geohash` is rejected for mixing precisions within the
+        column, which happens after the earlier cells are written."""
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        buffer = qi.Buffer._new_qwp()
+        buffer.row(
+            't', columns={'by': memoryview(b'first'), 'g': qi.Geohash(1, 1)},
+            at=qi.TimestampNanos(1))
+        before = len(buffer)
+        with self.assertRaises(qi.QuestDBError):
+            buffer.row(
+                't', columns={'by': view, 'g': qi.Geohash(1, 5)},
+                at=qi.TimestampNanos(2))
+        self.assertEqual(len(buffer), before)
+        del buffer
         gc.collect()
         self._assert_released(backing, view)
 

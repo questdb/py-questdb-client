@@ -2356,6 +2356,64 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_numpy_uuid_decode_across_rows_and_nulls(self):
+        """`_numpy_uuid_chunk` walks the column with raw pointer
+        arithmetic, a row stride and a byte swap of each half. One
+        non-null row exercises none of that: not the stride past row 0,
+        not the validity bitmap, not a batch boundary. Read the same
+        column through both decoders -- the pyarrow-free one and the
+        Arrow one, which share no code -- and require them to agree
+        across many rows, mixed nulls, and batch-at-a-time reads.
+        """
+        table_name = 't_uuid_rows_' + uuid.uuid4().hex[:8]
+        # Values that differ in every 64-bit half, so a stride or swap
+        # that is off by a row or a half shows up as a mismatch rather
+        # than as the same bytes read twice.
+        rows = 257
+        expected = [
+            None if i % 7 == 3
+            else uuid.UUID(
+                int=((i * 0x0123456789ABCDEF0FEDCBA987654321) % (1 << 128)))
+            for i in range(rows)]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} (ts TIMESTAMP, uu UUID) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            values = ', '.join(
+                "('2024-01-01T00:00:00Z', "
+                + ('null)' if value is None else f"'{value}')")
+                for value in expected)
+            self._exec(f'INSERT INTO {table_name} VALUES {values}')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT uu FROM {table_name}'
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                native = list(client.query(sql).to_pandas()['uu'])
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                arrow = client.query(sql).to_arrow().column('uu').to_pylist()
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                batched = [
+                    value
+                    for batch in client.query(sql).iter_pandas()
+                    for value in batch['uu']]
+
+            def norm(value):
+                if value is None or value != value:
+                    return None
+                if isinstance(value, uuid.UUID):
+                    return value
+                return uuid.UUID(bytes=value)
+
+            self.assertEqual(len(native), rows)
+            self.assertEqual([norm(v) for v in native], expected)
+            self.assertEqual([norm(v) for v in arrow], expected)
+            self.assertEqual([norm(v) for v in batched], expected)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_empty_result(self):
         """A SELECT matching zero rows. Per the QWP egress spec the server
         still ships one zero-row RESULT_BATCH carrying the schema, so the

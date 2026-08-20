@@ -5621,6 +5621,57 @@ class TestReinitRejected(unittest.TestCase):
             cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
 
 
+class TestEveryTestClassIsReachable(unittest.TestCase):
+    """`proj.py test` and CI both run this file and nothing else, so a
+    `TestCase` defined in a sibling module only runs if it is imported
+    here by name. Three review rounds in a row found a class that was
+    not: the one asserting the new buffer-protocol code releases what it
+    borrows, and the one covering the `_decimal` guard. Both were
+    written for exactly the regression they then could not catch.
+
+    A class may opt out by starting its name with an underscore, which
+    is how a shared base gets excluded.
+    """
+
+    #: Modules whose classes are expected to be reachable from here.
+    SIBLINGS = (
+        'test_client_capsule_path',
+        'test_client_dataframe_failures',
+        'test_client_dataframe_fuzz',
+        'test_client_polars_fuzz',
+        'test_dataframe',
+        'test_dataframe_fuzz',
+        'test_dataframe_leaks',
+    )
+
+    def test_every_sibling_test_class_is_imported_here(self):
+        import importlib
+        this_module = sys.modules[__name__]
+        missing = []
+        for module_name in self.SIBLINGS:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                # Optional dependency absent; the import guard above
+                # already skipped the module for this run.
+                continue
+            for name in dir(module):
+                if name.startswith('_'):
+                    continue
+                obj = getattr(module, name)
+                if (isinstance(obj, type)
+                        and issubclass(obj, unittest.TestCase)
+                        and obj.__module__ == module_name
+                        and getattr(this_module, name, None) is not obj):
+                    missing.append(f'{module_name}.{name}')
+        self.assertEqual(
+            missing, [],
+            'These TestCase classes are defined in a sibling module but '
+            'never imported into test/test.py, so neither `proj.py test` '
+            'nor CI runs them. Add them to the import list, or prefix the '
+            'class name with an underscore if it is a base class.')
+
+
 if __name__ == '__main__':
     if os.environ.get('TEST_QUESTDB_PROFILE') == '1':
         import cProfile
