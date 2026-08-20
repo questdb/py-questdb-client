@@ -1390,7 +1390,11 @@ cdef void_int _dataframe_category_series_as_arrow(
             'Expected a category of strings, ' +
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
-cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
+cdef void_int _dataframe_series_resolve_arrow(
+        PandasCol pandas_col,
+        object arrowtype,
+        col_t *col,
+        bint qwp_planner) except -1:
     cdef bint is_decimal_col = False
     _dataframe_require_pyarrow()
     if arrowtype.id == _PYARROW.lib.Type_STRING:
@@ -1426,14 +1430,31 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         ext_name = arrowtype.extension_name
         arrowtype = arrowtype.storage_type
 
-    # A 32-byte fixed-size binary column is the one shape this planner
-    # cannot resolve either way. LONG256 is claimed only by
-    # `questdb.column_type=long256` field metadata, which pyarrow drops
-    # when pandas exports a column on its own, and `schema_overrides` is
-    # unavailable here. Passing the bytes through as BINARY would let a
-    # LONG256 auto-create the wrong column type without a word, so the
-    # column is refused and the message names both ways out.
-    if (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+    # Sixteen and thirty-two bytes are the two fixed-size binary widths
+    # that mean something else in QuestDB: UUID and LONG256. On the
+    # column-QWP planner an unlabelled column of either width is refused
+    # rather than sent as BINARY, because this planner cannot tell "I
+    # want opaque bytes" from "I meant UUID and the claim did not
+    # survive pandas", and guessing wrong auto-creates a table with the
+    # wrong column type and says nothing.
+    #
+    # The Arrow capsule path makes the opposite choice deliberately: it
+    # accepts an unlabelled column of either width as BINARY, because
+    # `schema_overrides` gives the caller a way to say otherwise there
+    # and this planner has none. That asymmetry is the whole of it, and
+    # `QuestDB.dataframe`'s docstring states it for users.
+    #
+    # The check does not consult the pyarrow version. `pa.uuid()` exists
+    # from pyarrow 18 on, so which remedies the message can name varies,
+    # but which columns are accepted must not: an optional dependency's
+    # version deciding whether a write errors or lands as the wrong type
+    # is a worse trap than either outcome on its own.
+    #
+    # Row-ILP takes neither branch. It has no LONG256 and no BINARY at
+    # all, so every remedy below is a dead end there; the column falls
+    # through to the resolver's own "could not map to any ILP type".
+    if (qwp_planner
+            and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 32):
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
@@ -1450,26 +1471,24 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
             f'frame cannot carry. To store the bytes as BINARY, pass '
             f'them as an object column of bytes.')
 
-    # Below pyarrow 18 the `arrow.uuid` canonical extension type does
-    # not exist, so no column can carry the label and a 16-byte
-    # fixed-size binary column stands where a 32-byte one does: no route
-    # on this planner claims it as UUID. Passing the bytes through as
-    # BINARY would let a UUID column auto-create as BINARY without a
-    # word, so the column is refused and the message names the ways out.
-    if (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+    if (qwp_planner
+            and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 16
-            and ext_name is None
-            and not hasattr(_PYARROW, 'uuid')):
+            and ext_name is None):
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: a 16-byte '
-            f'fixed_size_binary column claims no QuestDB type, and '
-            f'pyarrow {_PYARROW.__version__} can label none: the '
-            f'`arrow.uuid` extension type needs pyarrow 18 or newer. '
-            f'To store UUIDs, either upgrade pyarrow and build the '
-            f'column as `pa.uuid()`, or pass the values as an '
-            f'object-dtype column of `uuid.UUID`, or claim the type '
-            f'with `schema_overrides={{{pandas_col.name!r}: \'uuid\'}}`, '
+            f'fixed_size_binary column claims no QuestDB type on this '
+            f'path. To store UUIDs, either '
+            + (f'build the column as `pa.uuid()`, or '
+               if hasattr(_PYARROW, 'uuid')
+               else f'upgrade to pyarrow 18 or newer and build the '
+                    f'column as `pa.uuid()` — the `arrow.uuid` '
+                    f'extension type does not exist in pyarrow '
+                    f'{_PYARROW.__version__} — or ')
+            + f'pass the values as an object-dtype column of '
+            f'`uuid.UUID`, or claim the type with '
+            f'`schema_overrides={{{pandas_col.name!r}: \'uuid\'}}`, '
             f'which needs QuestDB.dataframe() with a fully Arrow-backed '
             f'frame — every column an ArrowDtype, e.g. '
             f'df.convert_dtypes(dtype_backend="pyarrow"). To store the '
@@ -1614,7 +1633,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
     
 
 cdef void_int _dataframe_resolve_source_and_buffers(
-        PandasCol pandas_col, col_t* col) except -1:
+        PandasCol pandas_col, col_t* col, bint qwp_planner) except -1:
     cdef object dtype = pandas_col.dtype
     cdef int ts_col_source = _dataframe_classify_timestamp_dtype(dtype)
     if ts_col_source != 0:
@@ -1721,7 +1740,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
     elif isinstance(dtype, _NUMPY_OBJECT):
         _dataframe_series_sniff_pyobj(pandas_col, col)
     elif isinstance(dtype, _PANDAS.ArrowDtype):
-        _dataframe_series_resolve_arrow(pandas_col, dtype.pyarrow_dtype, col)
+        _dataframe_series_resolve_arrow(
+            pandas_col, dtype.pyarrow_dtype, col, qwp_planner)
     else:
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
@@ -1775,7 +1795,8 @@ cdef void_int _dataframe_resolve_cols(
         qdb_pystr_buf* b,
         list pandas_cols,
         col_t_arr* cols,
-        bint* any_cols_need_gil_out) except -1:
+        bint* any_cols_need_gil_out,
+        bint qwp_planner) except -1:
     cdef size_t index
     cdef size_t len_dataframe_cols = len(pandas_cols)
     cdef PandasCol pandas_col
@@ -1798,7 +1819,7 @@ cdef void_int _dataframe_resolve_cols(
         # sort among columns with the same `.meta_target`.
         col.setup.orig_index = index
 
-        _dataframe_resolve_source_and_buffers(pandas_col, col)
+        _dataframe_resolve_source_and_buffers(pandas_col, col, qwp_planner)
         _dataframe_init_cursor(col)
         if col_source_needs_gil(col.setup.source):
             any_cols_need_gil_out[0] = True
@@ -1860,7 +1881,9 @@ cdef void_int _dataframe_resolve_args(
     cdef list pandas_cols = [
         PandasCol(name, df.dtypes.iloc[index], series)
         for index, (name, series) in enumerate(df.items())]
-    _dataframe_resolve_cols(b, pandas_cols, cols, any_cols_need_gil_out)
+    cdef bint qwp_planner = field_targets is _FIELD_TARGETS_QWP
+    _dataframe_resolve_cols(
+        b, pandas_cols, cols, any_cols_need_gil_out, qwp_planner)
     name_col = _dataframe_resolve_table_name(
         b,
         df,
@@ -1871,8 +1894,7 @@ cdef void_int _dataframe_resolve_args(
         col_count,
         c_table_name_out)
     at_col = _dataframe_resolve_at(
-        df, cols, at, col_count, at_value_out,
-        field_targets is _FIELD_TARGETS_QWP)
+        df, cols, at, col_count, at_value_out, qwp_planner)
     _dataframe_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
     _dataframe_resolve_cols_target_name_and_dc(
         b, pandas_cols, cols, field_targets)

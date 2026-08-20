@@ -1780,6 +1780,10 @@ class Sender:
         ordering relationship with rows buffered via :meth:`row` and does not
         flush them.
 
+        ``table_name_col`` follows the same split: the row-serializing
+        protocols accept it, QWP/WebSocket writes one table per call and
+        rejects it with ``UnsupportedDataFrameShapeError``.
+
         Example:
 
         .. code-block:: python

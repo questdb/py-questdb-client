@@ -19,20 +19,27 @@ Changelog
   UUID or LONG256 on the strength of its width alone. 16- and 32-byte
   columns are opaque bytes and land as BINARY unless the column claims a
   type: the ``arrow.uuid`` extension type, ``questdb.column_type`` field
-  metadata, or the new ``schema_overrides`` kinds below. A pandas frame
-  where any column is not an ``ArrowDtype`` takes the NumPy planner, where a
-  32-byte ``fixed_size_binary`` column claims nothing by itself and is
-  rejected with an error telling you to convert the frame, rather than
-  quietly auto-creating a BINARY column.
+  metadata, or the new ``schema_overrides`` kinds below.
   The ``arrow.uuid`` route needs pyarrow >= 18 and a column built from
   ``pa.uuid()``: pyarrow registers that canonical extension type from 18
   on, and only an extension *type* survives into a pandas ``ArrowDtype``,
-  which carries no field and so no ``ARROW:extension:name`` metadata. On
-  pyarrow < 18 no column can carry the label, so a 16-byte
-  ``fixed_size_binary`` column on the NumPy planner is likewise rejected
-  rather than landing as BINARY; use ``uuid.UUID`` cells or
-  ``schema_overrides={'col': 'uuid'}``, neither of which depends on the
-  pyarrow version.
+  which carries no field and so no ``ARROW:extension:name`` metadata.
+  ``uuid.UUID`` cells and ``schema_overrides={'col': 'uuid'}`` work on
+  every pyarrow version.
+- **Breaking:** the two planners now differ on unlabelled fixed-size binary
+  columns, deliberately, and this is stated in the ``QuestDB.dataframe()``
+  docstring. On the Arrow columnar path a 16- or 32-byte column with no
+  claim lands as BINARY, because ``schema_overrides`` is there to say
+  otherwise. A pandas frame where any column is not an ``ArrowDtype`` takes
+  the NumPy planner instead, which has no such argument and so cannot tell
+  *I want opaque bytes* from *I meant UUID and the claim did not survive
+  pandas*; it refuses both widths rather than auto-create a table with the
+  wrong column type and say nothing. To send either width as BINARY there,
+  pass the values as an object-dtype column of ``bytes``. The refusal does
+  not depend on the pyarrow version: which remedies the message names
+  varies with it, which columns are accepted does not — an optional
+  dependency's version deciding whether a write errors or lands as the
+  wrong type is a worse trap than either outcome on its own.
 - ``schema_overrides`` accepts two new kinds, ``'uuid'`` and ``'long256'``,
   which claim a column of that QuestDB type. They apply to fixed-size and
   variable-length binary columns alike — the route polars frames take, since

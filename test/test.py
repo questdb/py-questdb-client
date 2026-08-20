@@ -2745,123 +2745,155 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
-    def test_numpy_planner_rejects_fsb32(self):
-        """On the NumPy planner nothing can claim a 32-byte column as
-        LONG256: there is no Arrow extension type for it, pandas drops
-        the field metadata, and `schema_overrides` needs the Arrow
-        route. The column is refused rather than auto-creating a BINARY
-        column. One plain numpy column sends the whole frame down that
-        planner."""
-        value = bytes(range(32))
-        frame = pd.DataFrame({
-            'l': pd.Series(
-                [value, value],
-                dtype=pd.ArrowDtype(pyarrow.binary(32))),
-            'n': [1, 2],
-            'ts': pd.to_datetime(['2025-01-01', '2025-01-02']),
-        })
-        with QwpAckServer(record_payloads=True) as server:
-            conf = (
-                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
-                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
-            with qi.QuestDB.from_conf(conf) as client:
+    def test_numpy_planner_refuses_unlabelled_fixed_size_binary(self):
+        """Sixteen and thirty-two bytes are the two fixed-size binary
+        widths that mean something else in QuestDB. The NumPy planner
+        has no `schema_overrides` and so cannot tell "I want opaque
+        bytes" from "I meant UUID and the claim did not survive
+        pandas"; it refuses both rather than auto-create a table with
+        the wrong column type. The refusal does not depend on the
+        pyarrow version — `pa.uuid()` decides which remedies the
+        message can name, not which columns are accepted — so this
+        runs with the extension type present and hidden."""
+        uuid_factory = getattr(pyarrow, 'uuid', None)
+        for hide_uuid in (False, True):
+            if hide_uuid and uuid_factory is None:
+                continue
+            if hide_uuid:
+                del pyarrow.uuid
+            try:
+                for width in (16, 32):
+                    with self.subTest(width=width, hide_uuid=hide_uuid):
+                        # One plain numpy column sends the whole frame
+                        # down the NumPy planner.
+                        frame = pd.DataFrame({
+                            'v': pd.Series(
+                                [bytes(range(width))] * 2,
+                                dtype=pd.ArrowDtype(pyarrow.binary(width))),
+                            'n': [1, 2],
+                            'ts': pd.to_datetime(
+                                ['2025-01-01', '2025-01-02']),
+                        })
+                        with self.assertRaisesRegex(
+                                qi.QuestDBError,
+                                f"Bad column 'v': a {width}-byte "
+                                'fixed_size_binary column claims no '
+                                'QuestDB type'):
+                            self._dataframe_column_types(
+                                frame, table_name='blobs', at='ts')
+            finally:
+                if hide_uuid:
+                    pyarrow.uuid = uuid_factory
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_fixed_size_binary_refusal_names_remedies_that_work(self):
+        """Every route the two refusals name is executed here and the
+        wire type it produces is asserted. A message that sends someone
+        to a route which cannot work on the path they are already on is
+        worse than the plain "could not map" it replaced."""
+        value16 = uuid.UUID(bytes=bytes(range(16)))
+        value32 = bytes(range(32))
+        stamps = pd.to_datetime(['2025-01-01', '2025-01-02'])
+
+        # "pass the values as an object-dtype column of `uuid.UUID`"
+        self.assertEqual(
+            self._dataframe_column_types(
+                pd.DataFrame({'v': pd.Series([value16] * 2, dtype=object),
+                              'n': [1, 2], 'ts': stamps}),
+                table_name='blobs', at='ts')['v'],
+            0x0C)
+
+        # "build the column as `pa.uuid()`"
+        if hasattr(pyarrow, 'uuid'):
+            self.assertEqual(
+                self._dataframe_column_types(
+                    pd.DataFrame({
+                        'v': pd.Series([value16.bytes] * 2,
+                                       dtype=pd.ArrowDtype(pyarrow.uuid())),
+                        'n': [1, 2], 'ts': stamps}),
+                    table_name='blobs', at='ts')['v'],
+                0x0C)
+
+        # "claim the type with `schema_overrides=...`, which needs a
+        # fully Arrow-backed frame"
+        for width, kind, wire in ((16, 'uuid', 0x0C), (32, 'long256', 0x0D)):
+            with self.subTest(schema_overrides=kind):
+                arrow_frame = pd.DataFrame({
+                    'v': pd.Series(
+                        [bytes(range(width))] * 2,
+                        dtype=pd.ArrowDtype(pyarrow.binary(width))),
+                    'n': pd.array([1, 2], dtype=pd.ArrowDtype(
+                        pyarrow.int64())),
+                    'ts': pd.array(stamps, dtype=pd.ArrowDtype(
+                        pyarrow.timestamp('us'))),
+                })
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        arrow_frame, table_name='blobs', at='ts',
+                        schema_overrides={'v': kind})['v'],
+                    wire)
+
+        # "to store the bytes as BINARY, pass them as an object column
+        # of bytes"
+        for width in (16, 32):
+            with self.subTest(binary_width=width):
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        pd.DataFrame({
+                            'v': pd.Series([bytes(range(width))] * 2,
+                                           dtype=object),
+                            'n': [1, 2], 'ts': stamps}),
+                        table_name='blobs', at='ts')['v'],
+                    0x17)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_capsule_path_takes_unlabelled_fixed_size_binary_as_binary(self):
+        """The Arrow columnar path makes the opposite choice, and means
+        it: `schema_overrides` is there to say otherwise, so an
+        unlabelled column of either width is opaque bytes rather than an
+        error. This asymmetry with the NumPy planner is deliberate and
+        is what `QuestDB.dataframe`'s docstring describes."""
+        stamps = pd.to_datetime(['2025-01-01', '2025-01-02'])
+        for width in (16, 32):
+            with self.subTest(width=width):
+                arrow_frame = pd.DataFrame({
+                    'v': pd.Series(
+                        [bytes(range(width))] * 2,
+                        dtype=pd.ArrowDtype(pyarrow.binary(width))),
+                    'ts': pd.array(stamps, dtype=pd.ArrowDtype(
+                        pyarrow.timestamp('us'))),
+                })
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        arrow_frame, table_name='blobs', at='ts')['v'],
+                    0x17)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_row_ilp_planner_gets_no_qwp_advice(self):
+        """The two refusals are QWP advice, and every part of it is a
+        dead end on a row-serializing protocol: LONG256 and BINARY do
+        not exist there, `schema_overrides` is turned down, and
+        `QuestDB.dataframe()` is a different class. An ILP buffer gets
+        the resolver's own message instead."""
+        for width in (16, 32):
+            with self.subTest(width=width):
+                frame = pd.DataFrame({
+                    'v': pd.Series(
+                        [bytes(range(width))] * 2,
+                        dtype=pd.ArrowDtype(pyarrow.binary(width))),
+                    'ts': pd.to_datetime(['2025-01-01', '2025-01-02']),
+                })
                 with self.assertRaisesRegex(
                         qi.QuestDBError,
-                        "Bad column 'l': a 32-byte fixed_size_binary "
-                        'column claims no QuestDB type'):
-                    client.dataframe(
-                        frame, table_name='long256s', at='ts')
-
-                # The same values go through once every column is
-                # Arrow-backed and the claim can be made.
-                arrow_frame = frame.astype({
-                    'n': pd.ArrowDtype(pyarrow.int64()),
-                    'ts': pd.ArrowDtype(pyarrow.timestamp('us')),
-                })
-                client.dataframe(
-                    arrow_frame, table_name='long256s', at='ts',
-                    schema_overrides={'l': 'long256'})
-            stats = server.snapshot()
-
-        self.assertEqual(stats['errors'], [])
-        self.assertGreaterEqual(stats['binary_frames'], 1)
-
-    @unittest.skipIf(pd is None, 'pandas not installed')
-    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
-    def test_numpy_planner_rejects_fsb16_without_arrow_uuid(self):
-        """pyarrow registers the `arrow.uuid` canonical extension type
-        from version 18 on. Where it is absent no column can carry the
-        label, so a bare 16-byte column has no route to UUID on this
-        planner and is refused rather than auto-creating a BINARY
-        column. Hiding `pyarrow.uuid` stands in for an older build."""
-        value = bytes(range(16))
-        frame = pd.DataFrame({
-            'u': pd.Series(
-                [value, value],
-                dtype=pd.ArrowDtype(pyarrow.binary(16))),
-            'n': [1, 2],
-            'ts': pd.to_datetime(['2025-01-01', '2025-01-02']),
-        })
-        uuid_factory = getattr(pyarrow, 'uuid', None)
-        if uuid_factory is not None:
-            del pyarrow.uuid
-        try:
-            with QwpAckServer(record_payloads=True) as server:
-                conf = (
-                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
-                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
-                with qi.QuestDB.from_conf(conf) as client:
-                    with self.assertRaisesRegex(
-                            qi.QuestDBError,
-                            "Bad column 'u': a 16-byte fixed_size_binary "
-                            'column claims no QuestDB type'):
-                        client.dataframe(
-                            frame, table_name='uuids', at='ts')
-
-                    # `uuid.UUID` cells reach UUID without the extension
-                    # type, so the refusal names a route that works.
-                    obj_frame = pd.DataFrame({
-                        'u': pd.Series(
-                            [uuid.UUID(bytes=value)] * 2, dtype=object),
-                        'n': [1, 2],
-                        'ts': frame['ts'],
-                    })
-                    client.dataframe(
-                        obj_frame, table_name='uuids', at='ts')
-                stats = server.snapshot()
-        finally:
-            if uuid_factory is not None:
-                pyarrow.uuid = uuid_factory
-
-        self.assertEqual(stats['errors'], [])
-        self.assertGreaterEqual(stats['binary_frames'], 1)
-
-    @unittest.skipIf(pd is None, 'pandas not installed')
-    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
-    def test_numpy_planner_sends_unlabeled_fsb16_as_binary(self):
-        """Where `arrow.uuid` exists, an unlabeled 16-byte column is
-        opaque bytes by design and goes through as BINARY: the pyarrow
-        version guard is the only thing that refuses this shape."""
-        if not hasattr(pyarrow, 'uuid'):
-            self.skipTest('pyarrow.uuid() not available in this build')
-        value = bytes(range(16))
-        frame = pd.DataFrame({
-            'u': pd.Series(
-                [value, value],
-                dtype=pd.ArrowDtype(pyarrow.binary(16))),
-            'n': [1, 2],
-            'ts': pd.to_datetime(['2025-01-01', '2025-01-02']),
-        })
-        with QwpAckServer(record_payloads=True) as server:
-            conf = (
-                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
-                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
-            with qi.QuestDB.from_conf(conf) as client:
-                client.dataframe(frame, table_name='blobs', at='ts')
-            stats = server.snapshot()
-
-        self.assertEqual(stats['errors'], [])
-        self.assertGreaterEqual(stats['binary_frames'], 1)
+                        'Could not map column source type') as caught:
+                    qi.Buffer(protocol_version=2).dataframe(
+                        frame, table_name='blobs', at='ts')
+                message = str(caught.exception)
+                self.assertNotIn('schema_overrides', message)
+                self.assertNotIn('QuestDB.dataframe', message)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

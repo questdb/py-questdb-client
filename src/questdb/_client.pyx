@@ -6743,16 +6743,18 @@ cdef void_int _direct_dataframe_run(
         # binary with no type claim, say — would raise first and point
         # at the wrong problem.
         raise UnsupportedDataFrameShapeError(
-            'QuestDB.dataframe() writes one table per call and does '
-            'not accept `table_name_col`. Split the frame on that '
-            'column and make one call per table, e.g. '
+            'QWP column ingestion writes one table per call and does '
+            'not accept `table_name_col`. That is QuestDB.dataframe() '
+            'and Sender.dataframe() over ws:: / wss::. Split the frame '
+            'on that column and make one call per table, e.g. '
             "`for name, group in df.groupby('tbl'): "
-            "client.dataframe(group.drop(columns='tbl'), "
-            "table_name=name, at='ts')`. Those calls take `symbols` "
-            "and `schema_overrides` and read `df.attrs['questdb']`, "
-            'so LONG256 and the other column types work as normal. To '
-            'write rows whose table name comes from a column, use '
-            '`Sender.row()`.')
+            "dataframe(group.drop(columns='tbl'), table_name=name, "
+            "at='ts')`. Those calls take `symbols` and "
+            "`schema_overrides` and read `df.attrs['questdb']`, so "
+            'LONG256 and the other column types work as normal. '
+            'Sender.dataframe() over tcp:: / http:: does accept '
+            '`table_name_col`: it serializes row by row, so it can '
+            'change table between rows.')
     if isinstance(at, datetime.datetime):
         if at != at:
             raise QuestDBError(
@@ -7380,8 +7382,8 @@ cdef class QuestDB:
           must be exactly 32 bytes. LONG256 has no Arrow extension type,
           so a ``pa.fixed_size_binary(32)`` column reaching the NumPy
           planner claims nothing by itself and is rejected rather than
-          sent as opaque bytes, since it would otherwise auto-create a
-          BINARY column without a word.
+          sent as opaque bytes — see **Binary** below for why that
+          planner refuses where the Arrow columnar path accepts.
         - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
           C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
           the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`
@@ -7389,12 +7391,21 @@ cdef class QuestDB:
           ``pa.fixed_size_binary(n)`` columns also land as BINARY: a
           16- or 32-byte width on its own claims nothing, so an
           unlabeled fixed-size column is opaque bytes rather than a
-          UUID or a LONG256. Two widths are rejected instead on the
-          NumPy planner, both because no route there can claim them and
-          a silent BINARY would auto-create the wrong column type:
-          ``pa.fixed_size_binary(32)``, described under **LONG256**
-          above, and ``pa.fixed_size_binary(16)`` on pyarrow < 18,
-          described under **UUID**. Requires QuestDB 10 or newer.
+          UUID or a LONG256.
+
+          The two planners differ here, and deliberately. On the Arrow
+          columnar path an unlabeled 16- or 32-byte column lands as
+          BINARY, because ``schema_overrides`` is there to say otherwise
+          when that is not what you meant. The NumPy planner has no such
+          argument, so it cannot tell *I want opaque bytes* from *I meant
+          UUID and the claim did not survive pandas*; it refuses both
+          widths rather than auto-create a table with the wrong column
+          type and say nothing. The refusal does not depend on the
+          pyarrow version — which remedies the message can name does,
+          since ``pa.uuid()`` needs pyarrow 18, but which columns are
+          accepted does not. To send either width as BINARY on that
+          planner, pass the values as an object-dtype column of
+          ``bytes``. Requires QuestDB 10 or newer.
         - **DATE**: Arrow ``pa.timestamp('ms')`` (tz-aware or naive),
           ``pa.date32()``, and ``pa.date64()`` columns land as DATE. The
           Arrow type is itself the claim, so there is no DATE cell type
@@ -8871,6 +8882,13 @@ cdef class Sender:
         raises. The direct load has no
         ordering relationship with rows buffered via :meth:`row` and does not
         flush them.
+
+        ``table_name_col`` follows the same split. The row-serializing
+        protocols accept it, because they can change table between rows.
+        QWP/WebSocket writes one table per call and rejects it with
+        :class:`UnsupportedDataFrameShapeError
+        <questdb.UnsupportedDataFrameShapeError>`; split the frame and make
+        one call per table, or send those rows with :meth:`row`.
 
         Example:
 
