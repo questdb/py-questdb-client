@@ -3074,11 +3074,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     def test_clear_from_inside_uuid_or_ipv4_conversion(self):
         """The conversion of a UUID or IPV4 value can re-enter the buffer
-        and call `clear()` while the row is half-written. The value is
-        already held as C scalars by then and the column name has not been
-        encoded yet, so nothing points into the recycled arena. The row
-        itself still fails: `clear()` drops the marker that the failure
-        path rewinds to."""
+        while the row is half-written. `clear()` refuses to run there and
+        says why; the half-written row then rewinds normally and the rows
+        buffered before it are untouched."""
         buffer = qi.Buffer._new_qwp()
 
         class HostileAddr(ipaddress.IPv4Address):
@@ -3100,15 +3098,42 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                       HostileUuid(str(self.UUID_VALUE))):
             with self.subTest(value=type(value).__name__):
                 buffer.clear()
-                with self.assertRaises(qi.QuestDBError):
+                buffer.row(
+                    'good', columns={'ok': 1}, at=qi.ServerTimestamp)
+                before = len(buffer)
+
+                with self.assertRaises(qi.QuestDBError) as cm:
                     buffer.row(
                         'hostile', columns={'ñame': value},
                         at=qi.ServerTimestamp)
-                # The buffer is still healthy and takes further rows.
-                buffer.clear()
+                self.assertEqual(
+                    cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+                self.assertIn(
+                    "Can't clear the buffer while a row is being written",
+                    str(cm.exception))
+
+                self.assertEqual(len(buffer), before)
                 buffer.row(
-                    'hostile', columns={'ok': 1}, at=qi.ServerTimestamp)
-                self.assertGreater(len(buffer), 0)
+                    'good', columns={'ok': 2}, at=qi.ServerTimestamp)
+                self.assertGreater(len(buffer), before)
+
+    def test_clear_is_allowed_between_rows(self):
+        """The guard on `clear()` only covers a row that is part-way
+        through being written. Ordinary use — clearing a buffer that
+        holds finished rows, and clearing one whose last `row()` call
+        failed — keeps working."""
+        buffer = qi.Buffer._new_qwp()
+        buffer.row('t', columns={'ok': 1}, at=qi.ServerTimestamp)
+        self.assertGreater(len(buffer), 0)
+        buffer.clear()
+        self.assertEqual(len(buffer), 0)
+
+        with self.assertRaises(TypeError):
+            buffer.row('t', columns={'bad': object()}, at=qi.ServerTimestamp)
+        buffer.clear()
+        self.assertEqual(len(buffer), 0)
+        buffer.row('t', columns={'ok': 1}, at=qi.ServerTimestamp)
+        self.assertGreater(len(buffer), 0)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

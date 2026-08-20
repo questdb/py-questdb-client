@@ -1227,6 +1227,7 @@ cdef class Buffer:
     cdef size_t _init_buf_size
     cdef size_t _max_name_len
     cdef bint _qwp
+    cdef bint _marker_set
     cdef object _row_complete_sender
 
     def __cinit__(self):
@@ -1235,6 +1236,7 @@ cdef class Buffer:
         self._init_buf_size = 0
         self._max_name_len = 0
         self._qwp = False
+        self._marker_set = False
         self._row_complete_sender = None
 
     def __init__(
@@ -1329,8 +1331,20 @@ cdef class Buffer:
 
         This method is designed to be called only in conjunction with
         ``sender.flush(buffer, clear=False)``.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) if a
+        :func:`Buffer.row <questdb.ingress.Buffer.row>` call on this
+        buffer is still in progress.
         """
         self._check_impl()
+        if self._marker_set:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "Can't clear the buffer while a row is being written. "
+                "`row()` is part-way through assembling a row and "
+                "something it called has come back into this buffer, "
+                "most likely a column value whose conversion runs "
+                "Python code.")
         line_sender_buffer_clear(self._impl)
         qdb_pystr_buf_clear(self._b)
 
@@ -1356,14 +1370,37 @@ cdef class Buffer:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_set_marker(self._impl, &err):
             raise c_err_to_py(err)
+        self._marker_set = True
 
     cdef inline void_int _rewind_to_marker(self) except -1:
         cdef line_sender_error* err = NULL
+        # The rewind point is spent either way: a successful rewind
+        # consumes it, and a failed one leaves nothing worth keeping.
+        self._marker_set = False
         if not line_sender_buffer_rewind_to_marker(self._impl, &err):
             raise c_err_to_py(err)
 
     cdef inline _clear_marker(self):
         line_sender_buffer_clear_marker(self._impl)
+        self._marker_set = False
+
+    cdef inline _rewind_after_failure(self):
+        """
+        Drop the part-written row while an error is already on its way
+        out to the caller.
+
+        A flush the row itself triggered takes the rewind point with it,
+        and so does anything that re-enters the buffer while the row is
+        being assembled. Either way there is no rewind point left, the
+        part-written row is gone with it, and the error already being
+        raised is the one the caller needs to see.
+        """
+        cdef line_sender_error* err = NULL
+        if not self._marker_set:
+            return
+        self._marker_set = False
+        if not line_sender_buffer_rewind_to_marker(self._impl, &err):
+            line_sender_error_free(err)
 
     cdef inline void_int _table(self, str table_name) except -1:
         cdef line_sender_error* err = NULL
@@ -1722,7 +1759,7 @@ cdef class Buffer:
             else:
                 self._rewind_to_marker()
         except:
-            self._rewind_to_marker()
+            self._rewind_after_failure()
             raise
         if wrote_fields and allow_auto_flush:
             self._may_trigger_row_complete()
