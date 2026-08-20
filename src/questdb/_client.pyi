@@ -351,9 +351,12 @@ class Char:
 class DateMillis:
     """A QuestDB DATE millisecond timestamp, not a civil date.
 
-    The only way to write a DATE column: the DataFrame paths have no DATE
-    cell type and no ``'date'`` kind for ``schema_overrides``, so every
-    datetime column they send lands as TIMESTAMP.
+    How ``row()`` writes a DATE column. DataFrames claim DATE from the
+    column's Arrow type instead — ``pa.timestamp('ms')``, ``pa.date32()``,
+    or ``pa.date64()`` on a fully Arrow-backed frame — so there is no DATE
+    cell type and no ``'date'`` kind for ``schema_overrides``. The NumPy
+    planner has no DATE route and widens ``datetime64[ms]`` to TIMESTAMP.
+    DATE is QWP-only: over ILP, datetime columns all land as TIMESTAMP.
     """
 
     def __init__(self, millis: int): ...

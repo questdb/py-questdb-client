@@ -58,12 +58,19 @@ Changelog
   of ``TypeError``.
 - DataFrame BINARY columns now accept ``bytearray`` and ``memoryview`` cells
   in addition to ``bytes``.
-- DATE columns can be written only with ``row()``, using the new
-  ``DateMillis`` wrapper. The DataFrame paths have no DATE cell type and no
-  ``'date'`` kind for ``schema_overrides``. Reading is unaffected: a DATE
-  column comes back as ``datetime64[ms]``, but feeding that column back in
-  writes TIMESTAMP, so a query-then-DataFrame-then-ingest cycle changes the
-  column type on a table it creates.
+- DATE columns are written differently by the two ingestion styles.
+  ``row()`` takes the new ``DateMillis`` wrapper; ``dataframe()`` takes the
+  column's Arrow type — ``pa.timestamp('ms')``, ``pa.date32()``, or
+  ``pa.date64()`` on a fully Arrow-backed frame — so there is no DATE cell
+  type and no ``'date'`` kind for ``schema_overrides``. The NumPy planner
+  has no DATE route: it widens a NumPy ``datetime64[ms]`` column to
+  TIMESTAMP and rejects the tz-aware ``datetime64[ms, tz]`` dtype. Both
+  styles need a QWP sender; ILP senders have no DATE type, so the datetime
+  columns they accept all land as TIMESTAMP. Reading round-trips: a DATE
+  column comes back as ``pa.timestamp('ms', 'UTC')``, so ``to_arrow()`` and
+  ``to_pandas(dtype_backend='pyarrow')`` feed it back as DATE, while plain
+  ``to_pandas()`` yields ``datetime64[ms, UTC]``, which ``dataframe()``
+  rejects.
 - DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix. Pass an
   ``ipaddress.IPv4Address`` value instead.

@@ -895,11 +895,15 @@ cdef class DateMillis:
     64-bit range is accepted, including pre-epoch values. ``INT64_MIN`` is
     accepted but reads back from QuestDB as ``NULL``.
 
-    This is the only way to write a DATE column. The DataFrame paths have
-    no DATE cell type and no ``'date'`` kind for ``schema_overrides``, so
-    they write TIMESTAMP for every datetime column — including one read
-    back from a DATE column, which :meth:`QuestDB.query
-    <questdb.QuestDB.query>` returns as ``datetime64[ms]``.
+    This is how :func:`Buffer.row <questdb.ingress.Buffer.row>` writes a
+    DATE column. DataFrames claim DATE from the column's Arrow type
+    instead — ``pa.timestamp('ms')``, ``pa.date32()``, or ``pa.date64()``
+    on a fully Arrow-backed frame — so there is no DATE cell type and no
+    ``'date'`` kind for ``schema_overrides``. The NumPy planner has no
+    DATE route and widens a ``datetime64[ms]`` column to TIMESTAMP. Like
+    the other QWP-only types, DATE needs a QWP sender; ILP senders have
+    no DATE type, so the datetime columns they accept all land as
+    TIMESTAMP.
     """
     cdef int64_t _value
 
@@ -6778,8 +6782,11 @@ cdef class QuestDB:
         - **String / Symbol**: object-dtype ``str``, ``pa.string()``,
           ``pa.large_string()``, ``pd.CategoricalDtype`` of strings.
         - **Timestamp**: NumPy ``datetime64`` units accepted by pandas and
-          ``pa.timestamp`` with unit ``s``, ``ms``, ``us``, or ``ns``
-          (tz-aware accepted on Arrow-backed columns in the Rust Arrow route).
+          ``pa.timestamp`` with unit ``s``, ``us``, or ``ns`` (tz-aware
+          accepted on Arrow-backed columns in the Rust Arrow route). An
+          Arrow ``ms`` timestamp field lands as DATE instead — see
+          **DATE** below — while a NumPy ``datetime64[ms]`` field is
+          widened to a microsecond TIMESTAMP.
           Timestamp *field* columns accept null timestamps (``NaT`` /
           ``None``) and values before the Unix epoch; a ``datetime64[ns]``
           field carrying ``NaT`` is re-exported through Arrow so its
@@ -6845,16 +6852,23 @@ cdef class QuestDB:
           ``pa.fixed_size_binary(32)``, described under **LONG256**
           above, and ``pa.fixed_size_binary(16)`` on pyarrow < 18,
           described under **UUID**. Requires QuestDB 10 or newer.
-        - **DATE**: not writable from a DataFrame. There is no DATE cell
-          type and no ``'date'`` kind for ``schema_overrides``, so a DATE
-          column can only be written one row at a time, with
+        - **DATE**: Arrow ``pa.timestamp('ms')`` (tz-aware or naive),
+          ``pa.date32()``, and ``pa.date64()`` columns land as DATE. The
+          Arrow type is itself the claim, so there is no DATE cell type
+          and no ``'date'`` kind for ``schema_overrides``, and DATE needs
+          a fully Arrow-backed frame: the NumPy planner has no DATE
+          route, widening a NumPy ``datetime64[ms]`` column to TIMESTAMP
+          and rejecting the tz-aware ``datetime64[ms, tz]`` dtype
+          outright. A millisecond column named by ``at=`` becomes the
+          table's designated TIMESTAMP, like any other ``at`` column.
+          Round-tripping keeps the type: :meth:`query
+          <questdb.QuestDB.query>` returns a DATE column as
+          ``pa.timestamp('ms', 'UTC')``, so ``to_arrow()`` and
+          ``to_pandas(dtype_backend='pyarrow')`` feed it back as DATE,
+          while plain ``to_pandas()`` yields ``datetime64[ms, UTC]``,
+          which this method rejects. Row-at-a-time, DATE is written with
           :class:`DateMillis <questdb.DateMillis>` through
-          :func:`Buffer.row <questdb.ingress.Buffer.row>`. Reading is
-          unaffected: :meth:`query <questdb.QuestDB.query>` returns a DATE
-          column as ``datetime64[ms]``. Feeding that column straight back
-          in writes a TIMESTAMP, not a DATE, so a
-          query-then-DataFrame-then-ingest cycle changes the column type
-          on a table it creates.
+          :func:`Buffer.row <questdb.ingress.Buffer.row>`.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints

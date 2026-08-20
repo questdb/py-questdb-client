@@ -104,6 +104,40 @@ def _first_qwp_table_row_count(payload):
     row_count, _ = _read_qwp_varint(payload, pos)
     return row_count
 
+
+def _first_qwp_table_column_types(payload):
+    """Decode the first table's (column name, type tag) pairs from a
+    captured QWP1 frame. The designated timestamp column carries an empty
+    name."""
+    if len(payload) < 12 or payload[:4] != b'QWP1':
+        raise AssertionError('not a QWP1 frame')
+    if int.from_bytes(payload[6:8], 'little') < 1:
+        raise AssertionError('QWP1 frame contains no table')
+
+    pos = 12
+    _delta_start, pos = _read_qwp_varint(payload, pos)
+    delta_count, pos = _read_qwp_varint(payload, pos)
+    for _ in range(delta_count):
+        entry_len, pos = _read_qwp_varint(payload, pos)
+        pos += entry_len
+        if pos > len(payload):
+            raise AssertionError('truncated QWP symbol dictionary')
+
+    table_name_len, pos = _read_qwp_varint(payload, pos)
+    pos += table_name_len
+    _row_count, pos = _read_qwp_varint(payload, pos)
+    column_count, pos = _read_qwp_varint(payload, pos)
+    columns = []
+    for _ in range(column_count):
+        name_len, pos = _read_qwp_varint(payload, pos)
+        name = payload[pos:pos + name_len]
+        pos += name_len
+        if pos >= len(payload):
+            raise AssertionError('truncated QWP column schema')
+        columns.append((name.decode('utf-8'), payload[pos]))
+        pos += 1
+    return columns
+
 from test_client_capsule_path import (
     TestCapsulePathPyArrow,
     TestCapsulePathPolars,
@@ -3063,6 +3097,95 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(poisoned.int.to_bytes(16, 'big'), b'')
 
         self.assertEqual(capture(poisoned), capture(self.UUID_VALUE))
+
+    def _dataframe_column_types(self, df, **kwargs):
+        kwargs.setdefault('table_name', 'date_wire')
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                client.dataframe(df, **kwargs)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            payload for payload in stats['binary_payloads']
+            if int.from_bytes(payload[6:8], 'little') > 0)
+        return dict(_first_qwp_table_column_types(payload))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_dataframe_date_columns_wire_types(self):
+        # A DataFrame claims DATE through the column's Arrow type, so
+        # millisecond timestamps and both Arrow date types land as DATE
+        # while microsecond timestamps stay TIMESTAMP. There is no DATE
+        # cell type and no 'date' kind for `schema_overrides`, and the
+        # NumPy planner has no route to DATE at all.
+        millis = 1704164645678
+        micros = millis * 1000
+        types = self._dataframe_column_types(
+            pyarrow.table({
+                'ms': pyarrow.array([millis], pyarrow.timestamp('ms')),
+                'ms_utc': pyarrow.array(
+                    [millis], pyarrow.timestamp('ms', 'UTC')),
+                'd32': pyarrow.array([19724], pyarrow.date32()),
+                'd64': pyarrow.array([millis], pyarrow.date64()),
+                'us': pyarrow.array([micros], pyarrow.timestamp('us')),
+                'ts': pyarrow.array([micros], pyarrow.timestamp('us')),
+            }),
+            at='ts')
+        self.assertEqual(types['ms'], 0x0B)
+        self.assertEqual(types['ms_utc'], 0x0B)
+        self.assertEqual(types['d32'], 0x0B)
+        self.assertEqual(types['d64'], 0x0B)
+        self.assertEqual(types['us'], 0x0A)
+        # The designated timestamp is a TIMESTAMP whatever its unit.
+        self.assertEqual(types[''], 0x0A)
+        self.assertEqual(
+            self._dataframe_column_types(
+                pyarrow.table({
+                    'v': pyarrow.array([1]),
+                    'ts': pyarrow.array([millis], pyarrow.timestamp('ms')),
+                }),
+                at='ts')[''],
+            0x0A)
+
+        # A fully Arrow-backed pandas frame takes the same route.
+        stamps = pd.to_datetime([millis], unit='ms')
+        arrow_frame = pd.DataFrame({
+            'ms': pd.array(
+                stamps, dtype=pd.ArrowDtype(pyarrow.timestamp('ms'))),
+            'ts': pd.array(
+                stamps, dtype=pd.ArrowDtype(pyarrow.timestamp('us'))),
+        })
+        self.assertEqual(
+            self._dataframe_column_types(arrow_frame, at='ts')['ms'], 0x0B)
+
+        # The NumPy planner widens `datetime64[ms]` to a microsecond
+        # TIMESTAMP, and refuses the tz-aware dtype outright.
+        numpy_frame = pd.DataFrame({
+            'ms': stamps.astype('datetime64[ms]'),
+            'ts': stamps.astype('datetime64[us]'),
+        })
+        self.assertEqual(
+            self._dataframe_column_types(numpy_frame, at='ts')['ms'], 0x0A)
+        tz_frame = pd.DataFrame({
+            'ms': stamps.tz_localize('UTC').astype('datetime64[ms, UTC]'),
+            'ts': stamps.tz_localize('UTC').astype('datetime64[us, UTC]'),
+        })
+        with self.assertRaisesRegex(
+                qi.QuestDBError, r'datetime64\[ms, UTC\] unit ms'):
+            self._dataframe_column_types(tz_frame, at='ts')
+
+        # `schema_overrides` has no 'date' kind: the Arrow type is the
+        # only claim.
+        with self.assertRaisesRegex(ValueError, r"kind 'date' not in"):
+            self._dataframe_column_types(
+                pyarrow.table({
+                    'ms': pyarrow.array([micros], pyarrow.timestamp('us')),
+                    'ts': pyarrow.array([micros], pyarrow.timestamp('us')),
+                }),
+                at='ts', schema_overrides={'ms': 'date'})
 
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
