@@ -1439,13 +1439,16 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
             QuestDBErrorCode.BadDataFrame,
             f'Bad column {pandas_col.name!r}: a 32-byte '
             f'fixed_size_binary column claims no QuestDB type on this '
-            f'path. To store LONG256, claim the type with '
-            f'`questdb.column_type=long256` field metadata or '
-            f'`schema_overrides={{{pandas_col.name!r}: \'long256\'}}`, '
-            f'both of which need QuestDB.dataframe() with a fully '
-            f'Arrow-backed frame — every column an ArrowDtype, e.g. '
-            f'df.convert_dtypes(dtype_backend="pyarrow"). To store the '
-            f'bytes as BINARY, pass them as an object column of bytes.')
+            f'path. To store LONG256, either pass '
+            f'`schema_overrides={{{pandas_col.name!r}: \'long256\'}}` to '
+            f'QuestDB.dataframe() with a fully Arrow-backed frame — '
+            f'every column an ArrowDtype, e.g. '
+            f'df.convert_dtypes(dtype_backend="pyarrow") — or hand '
+            f'QuestDB.dataframe() a pa.Table or pa.RecordBatch whose '
+            f'field for this column carries '
+            f'`questdb.column_type=long256` metadata, which a pandas '
+            f'frame cannot carry. To store the bytes as BINARY, pass '
+            f'them as an object column of bytes.')
 
     # Below pyarrow 18 the `arrow.uuid` canonical extension type does
     # not exist, so no column can carry the label and a 16-byte

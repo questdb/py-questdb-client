@@ -6828,18 +6828,21 @@ cdef class QuestDB:
           label at all, a bare ``pa.fixed_size_binary(16)`` column is
           rejected on the NumPy planner rather than quietly landing as
           BINARY.
-        - **LONG256**: 32-byte binary columns claimed with
-          ``schema_overrides={'col': 'long256'}``. Bytes are
-          little-endian limbs, least-significant limb first, forwarded
-          verbatim. LONG256 needs a fully Arrow-backed frame: it has no
-          Arrow extension type, and its ``questdb.column_type=long256``
-          field metadata is dropped by pyarrow when pandas exports a
-          column on its own, so the NumPy planner can claim it by no
-          route at all. A ``pa.fixed_size_binary(32)`` column on that
+        - **LONG256**: 32-byte binary columns. Bytes are little-endian
+          limbs, least-significant limb first, forwarded verbatim. Two
+          routes claim the type, and they need different inputs.
+          ``schema_overrides={'col': 'long256'}`` needs a fully
+          Arrow-backed frame — every column an ArrowDtype, e.g.
+          ``df.convert_dtypes(dtype_backend='pyarrow')``.
+          ``questdb.column_type=long256`` *field* metadata needs a
+          ``pa.Table`` or ``pa.RecordBatch`` handed straight to this
+          method: field metadata lives on the field, a pandas
+          ``ArrowDtype`` carries a type and no field, so a column that
+          passed through pandas has already lost the claim. LONG256 has
+          no Arrow extension type, so the NumPy planner can claim it by
+          no route at all; a ``pa.fixed_size_binary(32)`` column on that
           planner is rejected rather than sent as opaque bytes, since it
           would otherwise auto-create a BINARY column without a word.
-          Convert the frame, e.g.
-          ``df.convert_dtypes(dtype_backend='pyarrow')``.
         - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
           C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
           the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`
