@@ -2543,13 +2543,25 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 at=qi.TimestampNanos(10))
         self.assertEqual(len(buffer), before)
 
+        # `IPv4Interface` subclasses `IPv4Address`, so the generic
+        # message's list of accepted types appeared to contain the very
+        # thing it had just rejected, and never mentioned the prefix
+        # that is the actual reason.
+        interface = ipaddress.IPv4Interface('192.0.2.1/24')
         with self.assertRaisesRegex(
-                TypeError, 'Unsupported type: ipaddress.IPv4Interface'):
+                TypeError, 'carries a network prefix') as caught:
             buffer.row(
-                'binary_values',
-                columns={'value': ipaddress.IPv4Interface('192.0.2.1/24')},
+                'binary_values', columns={'value': interface},
                 at=qi.TimestampNanos(10))
+        self.assertNotIn('Unsupported type', str(caught.exception))
         self.assertEqual(len(buffer), before)
+
+        # The remedy the message names has to work. It goes to its own
+        # column, since `value` already holds BINARY in this buffer.
+        buffer.row(
+            'binary_values', columns={'addr': interface.ip},
+            at=qi.TimestampNanos(11))
+        self.assertGreater(len(buffer), before)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

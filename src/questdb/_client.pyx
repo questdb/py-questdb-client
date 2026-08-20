@@ -31,9 +31,9 @@ API for fast data ingestion into and querying from QuestDB.
 """
 
 __all__ = [
+    'Char',
     'ConnectionEvent',
     'ConnectionEventKind',
-    'Char',
     'DateMillis',
     'Geohash',
     'Long256',
@@ -59,7 +59,7 @@ __all__ = [
     'TimestampNanos',
     'TlsCa',
     'UnsupportedDataFrameShapeError',
-    'WARN_HIGH_RECONNECTS'
+    'WARN_HIGH_RECONNECTS',
 ]
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
@@ -98,6 +98,11 @@ from ._client_helper cimport *
 ctypedef int void_int
 
 import cython
+
+# Imported before the includes because `dataframe.pxi` binds two of its
+# classes at module-init time.
+import ipaddress
+
 include "dataframe.pxi"
 include "egress.pxi"
 
@@ -112,7 +117,6 @@ from cpython.long cimport PyLong_AsLongLongAndOverflow
 from cpython.memoryview cimport PyMemoryView_Check
 
 import datetime
-import ipaddress
 import os
 import threading
 import time
@@ -967,8 +971,11 @@ cdef class Long256:
 cdef class Geohash:
     """A QuestDB GEOHASH value represented by bits and precision.
 
-    Precision is pinned per column; mixing precisions for one column fails
-    when the buffer is flushed.
+    Precision is pinned per column. A row whose GEOHASH cell has a
+    different precision from the one the column already holds is
+    rejected by :func:`Buffer.row <questdb.ingress.Buffer.row>` itself,
+    and the buffer is rewound to what it held before that row -- the
+    bad row is not left waiting for a flush.
     """
     cdef uint64_t _bits
     cdef uint8_t _precision
@@ -1016,6 +1023,21 @@ cdef class Geohash:
 
     def __repr__(self):
         return f'Geohash({self._bits}, {self._precision})'
+
+
+# The two value unions the `row()` family accepts, defined here as well
+# as in the stub. Annotating with them used to type-check and then
+# `ImportError` at runtime, because they existed only in `_client.pyi`.
+# Not exported: they name a parameter type, they are not part of the
+# ingestion surface.
+TransactionColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos,
+    datetime.datetime, cnp.ndarray, Decimal]
+RowColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos,
+    datetime.datetime, cnp.ndarray, Decimal, uuid.UUID,
+    ipaddress.IPv4Address, bytes, bytearray, memoryview, Char, DateMillis,
+    Long256, Geohash]
 
 
 cdef class QuestDB
@@ -1691,6 +1713,13 @@ cdef class Buffer:
             if isinstance(value, ipaddress.IPv6Address):
                 raise TypeError(
                     'IPv6 is not supported; QuestDB has no IPv6 column type.')
+            if isinstance(value, ipaddress.IPv4Interface):
+                # It subclasses IPv4Address, so the list below would
+                # otherwise appear to contain the thing just rejected.
+                raise TypeError(
+                    'ipaddress.IPv4Interface carries a network prefix, '
+                    'which a QuestDB IPV4 column has nowhere to keep. '
+                    'Pass its address instead, as `value.ip`.')
             valid = ', '.join((
                 'bool',
                 'int',
@@ -3350,7 +3379,6 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
-                col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
                 col_target_t.col_target_column_binary,
                 col_target_t.col_target_column_arrow):
@@ -4803,8 +4831,7 @@ cdef void_int _dataframe_columnar_append_field(
             col_target_t.col_target_column_i8,
             col_target_t.col_target_column_i16,
             col_target_t.col_target_column_i32,
-            col_target_t.col_target_column_f32,
-            col_target_t.col_target_column_long256):
+            col_target_t.col_target_column_f32):
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
         return 0
@@ -5148,7 +5175,6 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
-                col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
                 col_target_t.col_target_column_binary,
                 col_target_t.col_target_column_arrow,

@@ -1,7 +1,6 @@
 # See: dataframe.md for technical overview.
 
 from decimal import Decimal
-import ipaddress as _ipaddress
 import uuid as _uuid
 
 from cpython.bytes cimport PyBytes_AsString
@@ -88,8 +87,8 @@ cdef inline uint64_t bswap64(uint64_t value) noexcept:
 # Bound once at import. The test below runs per cell in the DataFrame
 # IPV4 builder and per column value in `Buffer.row`, where reaching
 # through the module for each of the two classes is the whole cost.
-cdef object _IPV4_ADDRESS = _ipaddress.IPv4Address
-cdef object _IPV4_INTERFACE = _ipaddress.IPv4Interface
+cdef object _IPV4_ADDRESS = ipaddress.IPv4Address
+cdef object _IPV4_INTERFACE = ipaddress.IPv4Interface
 
 
 cdef inline bint _is_ipv4_address(object value):
@@ -140,6 +139,12 @@ cdef enum col_target_t:
     col_target_column_i32 = 13
     col_target_column_f32 = 14
     col_target_column_uuid = 15
+    # Reserved. No source resolves to it: LONG256 on the Arrow columnar
+    # path is claimed by field metadata or `schema_overrides` and goes
+    # out through `col_target_column_arrow`, and on the NumPy planner a
+    # `long256` round-trip claim rides on `col_target_column_i64` with a
+    # `qwp_numpy_s32` override. Re-listing it means giving it an entry in
+    # `_TARGET_TO_SOURCES` as well, which is otherwise indexed unguarded.
     col_target_column_long256 = 16
     col_target_column_ipv4 = 17
     col_target_column_binary = 18

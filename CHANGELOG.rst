@@ -170,9 +170,24 @@ Changelog
   same. To change what a frame claims, assign a new mapping to
   ``df.attrs['questdb']``, or use ``schema_overrides`` / ``symbols``, which
   outrank it.
-- DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
-  of silently discarding their network prefix. Pass an
-  ``ipaddress.IPv4Address`` value instead.
+- Both ingestion styles now reject ``ipaddress.IPv4Interface`` cells instead
+  of silently discarding their network prefix, and say why. ``row()`` used
+  to give the generic unsupported-type error, whose list of accepted types
+  names ``ipaddress.IPv4Address`` — which ``IPv4Interface`` subclasses — so
+  it read as a contradiction and never mentioned the prefix. Pass
+  ``value.ip``.
+- An object column of ``numpy.bytes_`` now lands as BINARY. Previously the
+  DataFrame path tested for an exact ``bytes``, so a NumPy ``S``-dtype
+  scalar column was rejected as an unsupported object column.
+- ``RowColumnValue`` and ``TransactionColumnValue`` exist at runtime.
+  They were declared only in ``_client.pyi``, so annotating with them
+  type-checked and then raised ``ImportError``.
+- The four value wrappers' stub docstrings carry their ``NULL``-sentinel
+  and range notes again. ``py.typed`` ships, so an IDE shows the stub, and
+  the sentinels are exactly the detail whose absence causes silent data
+  loss. The ``Geohash`` docstring also said a precision mismatch "fails
+  when the buffer is flushed"; it is rejected by ``row()`` itself, with the
+  buffer rewound to what it held before that row.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a

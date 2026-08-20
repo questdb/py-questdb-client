@@ -23,9 +23,9 @@
 ################################################################################
 
 __all__ = [
+    "Char",
     "ConnectionEvent",
     "ConnectionEventKind",
-    "Char",
     "DateMillis",
     "Geohash",
     "Long256",
@@ -341,7 +341,13 @@ class TimestampNanos:
 
 
 class Char:
-    """A QuestDB CHAR value stored as one UTF-16 code unit."""
+    """A QuestDB CHAR value stored as one UTF-16 code unit.
+
+    A character outside the Basic Multilingual Plane needs a surrogate
+    pair and cannot fit. CHAR has no physical ``NULL`` sentinel:
+    ``'\\x00'`` is stored as code unit 0, though some SQL operations
+    treat it as CHAR's null/absent marker.
+    """
 
     def __init__(self, value: str): ...
     @property
@@ -357,6 +363,9 @@ class DateMillis:
     cell type and no ``'date'`` kind for ``schema_overrides``. The NumPy
     planner has no DATE route and widens ``datetime64[ms]`` to TIMESTAMP.
     DATE is QWP-only: over ILP, datetime columns all land as TIMESTAMP.
+
+    ``INT64_MIN`` is QuestDB's ``NULL`` sentinel for DATE. It is accepted
+    and reads back as ``NULL``.
     """
 
     def __init__(self, millis: int): ...
@@ -369,7 +378,12 @@ class DateMillis:
 
 
 class Long256:
-    """An unsigned 256-bit integer for a QuestDB LONG256 column."""
+    """An unsigned 256-bit integer for a QuestDB LONG256 column.
+
+    The value must satisfy ``0 <= value < 2**256``. The one whose four
+    64-bit limbs are all ``0x8000000000000000`` is accepted but reads
+    back from QuestDB as ``NULL``.
+    """
 
     def __init__(self, value: int): ...
     @property
@@ -377,7 +391,13 @@ class Long256:
 
 
 class Geohash:
-    """A QuestDB GEOHASH value represented by bits and precision."""
+    """A QuestDB GEOHASH value represented by bits and precision.
+
+    ``bits`` is the value and ``precision`` its width in bits, 1 to 60.
+    Precision is pinned per column: a row whose GEOHASH cell disagrees
+    with the column's is rejected by ``row()`` itself, and the buffer is
+    rewound to what it held before that row.
+    """
 
     def __init__(self, bits: int, precision: int): ...
     @classmethod
