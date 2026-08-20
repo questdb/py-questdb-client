@@ -111,6 +111,7 @@ from cpython.bytearray cimport (PyByteArray_AsString, PyByteArray_Size,
 from cpython.memoryview cimport PyMemoryView_Check
 
 import datetime
+import ipaddress
 import os
 import threading
 import time
@@ -1602,7 +1603,7 @@ cdef class Buffer:
         elif isinstance(value, Geohash):
             self._column_geohash(c_name, value)
         else:
-            if isinstance(value, _ipaddress.IPv6Address):
+            if isinstance(value, ipaddress.IPv6Address):
                 raise TypeError(
                     'IPv6 is not supported; QuestDB has no IPv6 column type.')
             valid = ', '.join((
@@ -1719,7 +1720,7 @@ cdef class Buffer:
                 str,
                 Union[None, bool, int, float, str, TimestampMicros,
                       TimestampNanos, datetime.datetime, numpy.ndarray,
-                      Decimal, uuid.UUID, _ipaddress.IPv4Address, bytes,
+                      Decimal, uuid.UUID, ipaddress.IPv4Address, bytes,
                       bytearray, memoryview, Char, DateMillis, Long256,
                       Geohash]]
                 ]=None,
@@ -8246,7 +8247,7 @@ cdef class Sender:
                 str,
                 Union[None, bool, int, float, str, TimestampMicros,
                       TimestampNanos, datetime.datetime, numpy.ndarray,
-                      Decimal, uuid.UUID, _ipaddress.IPv4Address, bytes,
+                      Decimal, uuid.UUID, ipaddress.IPv4Address, bytes,
                       bytearray, memoryview, Char, DateMillis, Long256,
                       Geohash]]]=None,
             at: Union[TimestampNanos, datetime.datetime, ServerTimestampType]):
@@ -9017,7 +9018,7 @@ cdef class PooledSender:
                 str,
                 Union[None, bool, int, float, str, TimestampMicros,
                       TimestampNanos, datetime.datetime, numpy.ndarray,
-                      Decimal, uuid.UUID, _ipaddress.IPv4Address, bytes,
+                      Decimal, uuid.UUID, ipaddress.IPv4Address, bytes,
                       bytearray, memoryview, Char, DateMillis, Long256,
                       Geohash]]] = None,
             at: Union[ServerTimestampType, TimestampNanos,
