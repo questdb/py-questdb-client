@@ -3379,6 +3379,95 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(types['gh'], 0x05)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_attrs_restore_types_on_a_nullable_frame(self):
+        # `to_pandas(dtype_backend='numpy_nullable')` returns IPV4, CHAR
+        # and GEOHASH as pandas masked columns — which normalisation
+        # turns into object-dtype Python ints — and UUID and LONG256 as
+        # object columns of `bytes`. None of those shapes claims a
+        # QuestDB type on its own, so `df.attrs['questdb']` is the whole
+        # claim, and it has to survive the object columns to be worth
+        # attaching.
+        nullable = self._nullable_roundtrip_frame()
+        types = self._dataframe_column_types(
+            nullable, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['u'], 0x0C)
+        self.assertEqual(types['l'], 0x0D)
+        self.assertEqual(types['ip'], 0x18)
+        self.assertEqual(types['ch'], 0x16)
+        self.assertEqual(types['gh'], 0x0E)
+
+        # Same rows, same claims, same bytes: a result read back with
+        # `numpy_nullable` and one read with `pyarrow` write the same
+        # frame out, byte for byte, though they take different planners.
+        self.assertEqual(
+            self._dataframe_wire_payload(
+                nullable, table_name='attrs_round_trip', at='ts'),
+            self._dataframe_wire_payload(
+                self._roundtrip_frame(), table_name='attrs_round_trip',
+                at='ts'))
+
+        # Drop the claims and all five degrade.
+        bare = nullable.copy()
+        bare.attrs = {}
+        types = self._dataframe_column_types(
+            bare, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['u'], 0x17)
+        self.assertEqual(types['l'], 0x17)
+        self.assertEqual(types['ip'], 0x05)
+        self.assertEqual(types['ch'], 0x05)
+        self.assertEqual(types['gh'], 0x05)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_claim_refuses_a_value_that_is_not_one(self):
+        # An object column carries no width or range of its own, so the
+        # claim is checked value by value. A value the claimed type
+        # cannot hold is refused rather than written into a column of
+        # that type.
+        frame = self._nullable_roundtrip_frame()
+        cases = (
+            ('ip', [2 ** 32], 'IPV4 values must be in the range'),
+            ('ch', [70000], 'CHAR values must be in the range'),
+            ('u', [b'short'], 'a UUID value is exactly 16 bytes'),
+            ('l', [b'short'], 'a LONG256 value is exactly 32 bytes'),
+        )
+        for name, values, message in cases:
+            with self.subTest(column=name):
+                odd = frame.copy()
+                odd[name] = pd.array(values, dtype=object)
+                odd.attrs = dict(frame.attrs)
+                with self.assertRaisesRegex(qi.QuestDBError, message):
+                    self._dataframe_column_types(
+                        odd, table_name='attrs_round_trip', at='ts')
+
+    def _nullable_roundtrip_frame(self):
+        """The rows of :meth:`_roundtrip_frame` in the shape
+        ``to_pandas(dtype_backend='numpy_nullable')`` returns them:
+        masked extension columns for the integer-backed kinds and
+        object columns of ``bytes`` for the two fixed-size binary
+        ones."""
+        frame = pd.DataFrame({
+            'u': pd.array([self.UUID_VALUE.bytes], dtype=object),
+            'l': pd.array([bytes(range(32))], dtype=object),
+            'ip': pd.array([0x01020304], dtype=pd.UInt32Dtype()),
+            'ch': pd.array([ord('Q')], dtype=pd.UInt16Dtype()),
+            'gh': pd.array([100], dtype=pd.Int32Dtype()),
+            'ts': pd.array(
+                [datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)],
+                dtype='datetime64[us, UTC]'),
+        })
+        frame.attrs['questdb'] = {'version': 1, 'columns': {
+            'u': {'kind': 'uuid'},
+            'l': {'kind': 'long256'},
+            'ip': {'kind': 'ipv4'},
+            'ch': {'kind': 'char'},
+            'gh': {'kind': 'geohash', 'precision_bits': 20},
+            'ts': {'kind': 'timestamp'},
+        }}
+        return frame
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_long256_round_trips_through_an_object_int_column(self):
         # Plain `to_pandas()` has no pyarrow to hold 32 raw bytes, so it
         # hands a LONG256 column back as Python ints. Going the other

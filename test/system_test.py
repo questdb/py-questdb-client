@@ -3048,13 +3048,22 @@ class TestEgressWithDatabase(unittest.TestCase):
 
     def test_arrow_backed_egress_round_trip_overrides(self):
         """uuid / long256 / ipv4 / char / geohash round-trip through
-        ``to_pandas(dtype_backend='pyarrow')``. The claims the egress
-        writes as Arrow field metadata cannot ride on a pandas frame,
-        which holds Arrow types and no fields, so they travel in
+        ``to_pandas(dtype_backend='pyarrow')`` and through
+        ``to_pandas(dtype_backend='numpy_nullable')``. The claims the
+        egress writes as Arrow field metadata cannot ride on a pandas
+        frame, which holds Arrow types and no fields, so they travel in
         ``df.attrs['questdb']`` and are turned back into column types on
-        the way in. The destination table is auto-created, so its column
-        types are exactly what the client asked for.
+        the way in. The two backends hand the same five columns back in
+        different shapes — Arrow-backed dtypes on one, masked extension
+        and object-dtype ``bytes`` columns on the other — and the claim
+        has to survive both. The destination table is auto-created, so
+        its column types are exactly what the client asked for.
         """
+        for backend in ('pyarrow', 'numpy_nullable'):
+            with self.subTest(dtype_backend=backend):
+                self._check_arrow_backed_round_trip(backend)
+
+    def _check_arrow_backed_round_trip(self, backend):
         src = 't_rta_src_' + uuid.uuid4().hex[:8]
         dst = 't_rta_dst_' + uuid.uuid4().hex[:8]
         value = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
@@ -3075,7 +3084,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             with qi.QuestDB.from_conf(self._conf()) as client:
                 df = client.query(
                     f'SELECT {cols} FROM {src} ORDER BY ts'
-                ).to_pandas(dtype_backend='pyarrow')
+                ).to_pandas(dtype_backend=backend)
             meta = df.attrs['questdb']['columns']
             self.assertEqual(meta['u']['kind'], 'uuid')
             self.assertEqual(meta['l']['kind'], 'long256')
@@ -3091,7 +3100,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             with qi.QuestDB.from_conf(self._conf()) as client:
                 back = client.query(
                     f'SELECT {cols} FROM {dst}').to_pandas(
-                        dtype_backend='pyarrow')
+                        dtype_backend=backend)
             bmeta = back.attrs['questdb']['columns']
             self.assertEqual(bmeta['u']['kind'], 'uuid')
             self.assertEqual(bmeta['l']['kind'], 'long256')

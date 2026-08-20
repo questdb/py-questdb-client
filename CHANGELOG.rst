@@ -99,6 +99,23 @@ Changelog
   each value as 32 unsigned little-endian bytes. Every non-null value must
   satisfy ``0 <= value < 2**256``. Without the claim an object-dtype int
   column is still a LONG.
+- ``to_pandas(dtype_backend='numpy_nullable')`` round-trips its column
+  types too, as does any column that reaches ``dataframe()`` as object
+  dtype. That backend returns IPV4, CHAR, and GEOHASH as pandas masked
+  extension columns and UUID and LONG256 as object columns of ``bytes``,
+  and none of those shapes could carry a claim through ingestion: the five
+  went back out as plain integers and BINARY, auto-creating a destination
+  table with the wrong column types. ``dataframe()`` now applies a
+  ``df.attrs['questdb']`` claim to object-dtype integer and ``bytes``
+  columns as well as to the NumPy and Arrow ones, so a result read with
+  ``'numpy_nullable'`` and the same result read with ``'pyarrow'`` write
+  the same bytes. This also covers a nullable IPV4, CHAR, or GEOHASH
+  column read by plain ``to_pandas()``: nulls make it a masked column,
+  which becomes object dtype before planning. An object column states no
+  width or range of its own, so a claimed value the type cannot hold — an
+  integer past ``2**32-1`` under ``ipv4``, a cell that is not exactly 16
+  or 32 bytes under ``uuid`` or ``long256`` — is refused rather than
+  written into a column of the claimed type.
 - An ``int`` too wide for a 64-bit LONG column now says so. ``row()`` raises
   ``OverflowError`` naming :class:`Long256 <questdb.Long256>`, the wrapper
   that sends a 256-bit value, and ``dataframe()`` raises

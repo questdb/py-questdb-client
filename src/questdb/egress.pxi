@@ -2488,6 +2488,11 @@ class QueryResult:
         attach ``df.attrs['questdb']`` too: a pandas dtype holds an Arrow
         type and no field, so ``attrs`` is what carries the IPV4 / CHAR /
         GEOHASH / UUID / LONG256 claims that live in Arrow field metadata.
+        :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads the
+        claim back whichever backend wrote it — including the masked and
+        object-dtype columns ``"numpy_nullable"`` produces for those five
+        — so writing the result out again gives the same column types,
+        and for those five the same wire bytes.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
