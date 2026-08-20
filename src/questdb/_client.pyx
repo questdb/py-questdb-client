@@ -944,7 +944,10 @@ cdef class Long256:
             raise TypeError('value must be an int.')
         if value < 0 or value >= (1 << 256):
             raise ValueError('value must be in the range 0 <= value < 2**256.')
-        self._bytes = value.to_bytes(32, 'little')
+        # The column write reads exactly 32 bytes from the pointer. The
+        # unbound `int.to_bytes` keeps a subclass override out of the way,
+        # so the result is always a `bytes` of exactly that width.
+        self._bytes = int.to_bytes(value, 32, 'little')
 
     @property
     def value(self) -> int:

@@ -2452,6 +2452,30 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         finally:
             qi._NAIVE_DATETIME_WARNED = naive_datetime_warned
 
+    def test_long256_ignores_overridden_to_bytes(self):
+        # The column write reads exactly 32 bytes from the pointer, so the
+        # unbound `int.to_bytes` is called and a subclass override cannot
+        # change what is stored or how wide it is.
+        def bad_int(value, result):
+            return type('BadInt', (int,), {
+                'to_bytes': lambda self, *a, **k: result})(value)
+
+        for result in (b'AB', b'\x00' * 64, None, bytearray(32)):
+            with self.subTest(to_bytes_returns=result):
+                self.assertEqual(qi.Long256(bad_int(5, result)).value, 5)
+
+        # Defeating the range check as well still cannot get a value of the
+        # wrong magnitude through.
+        def lying_int(value):
+            return type('LyingInt', (int,), {
+                '__lt__': lambda self, other: False,
+                '__ge__': lambda self, other: False,
+                'to_bytes': lambda self, *a, **k: b'\xff' * 32})(value)
+
+        for value in (-1, 2 ** 256):
+            with self.subTest(lying=value), self.assertRaises(OverflowError):
+                qi.Long256(lying_int(value))
+
     def test_binary_memoryview_validation_and_ipv6_error(self):
         buffer = qi.Buffer._new_qwp()
         for i, value in enumerate((b'', bytearray(b'x'), memoryview(b'yz'))):
