@@ -3029,6 +3029,41 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertTrue(row_payload.endswith(b'\x00' + expected))
         self.assertEqual(row_payload, dataframe_payload)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_dataframe_uuid_ignores_replaced_int_to_bytes(self):
+        # `UUID.int` is a slot a caller can overwrite, and the column build
+        # copies exactly 16 bytes out of whatever `to_bytes` hands back. The
+        # unbound `int.to_bytes` keeps a short return from narrowing the copy
+        # and putting the bytes that follow the object on the wire.
+        class ShortInt(int):
+            def to_bytes(self, *a, **k):
+                return b''
+
+        def capture(value):
+            with QwpAckServer(record_payloads=True) as server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+                frame = pd.DataFrame({
+                    'value': pd.Series([value], dtype=object)})
+                with qi.QuestDB.from_conf(conf) as client:
+                    client.dataframe(
+                        frame, table_name='uuid_wire', at=qi.ServerTimestamp)
+                return next(
+                    payload
+                    for payload in server.snapshot()['binary_payloads']
+                    if int.from_bytes(payload[6:8], 'little') > 0)
+
+        poisoned = uuid.UUID(str(self.UUID_VALUE))
+        object.__setattr__(poisoned, 'int', ShortInt(poisoned.int))
+        # The cell still passes `isinstance(cell, uuid.UUID)`, and the bound
+        # call it would otherwise reach returns nothing to copy.
+        self.assertIs(type(poisoned), uuid.UUID)
+        self.assertEqual(poisoned.int.to_bytes(16, 'big'), b'')
+
+        self.assertEqual(capture(poisoned), capture(self.UUID_VALUE))
+
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     class TestQwpOnlyRowTypesIntegration(TestWithDatabase):
