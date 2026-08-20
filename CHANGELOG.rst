@@ -170,6 +170,19 @@ Changelog
   same. To change what a frame claims, assign a new mapping to
   ``df.attrs['questdb']``, or use ``schema_overrides`` / ``symbols``, which
   outrank it.
+- DECIMAL values are now refused on interpreters where writing them would
+  be undefined behaviour, rather than punned. The encoder reinterprets a
+  ``decimal.Decimal``'s memory with the struct layout CPython's ``_decimal``
+  accelerator gives it, without checking that is what it is looking at. It
+  now requires both CPython and that accelerator; ``row()`` and
+  ``dataframe()`` alike raise ``ValueError`` naming the interpreter and
+  suggesting a float or a string instead. This affects the PyPy wheels
+  this package publishes: DECIMAL columns were never safe there and now
+  say so. Testing only ``decimal.Decimal is _decimal.Decimal`` was not
+  enough — it says the ``decimal`` module is backed by something *named*
+  ``_decimal``, which is true on interpreters that ship their own under
+  that name and a different shape, so on its own it admitted exactly the
+  case it was meant to exclude.
 - Both ingestion styles now reject ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix, and say why. ``row()`` used
   to give the generic unsupported-type error, whose list of accepted types

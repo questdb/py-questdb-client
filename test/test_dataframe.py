@@ -3168,14 +3168,54 @@ else:
 print('OK')
 """
 
+    _FOREIGN_INTERPRETER_SCRIPT = """
+import sys, types
+
+# Stand in for an interpreter that is not CPython but does ship a
+# module named `_decimal`, so `Decimal is _decimal.Decimal` holds and
+# the module check alone would let the reinterpretation through.
+sys.implementation = types.SimpleNamespace(
+    name='pypy', version=sys.implementation.version,
+    hexversion=sys.implementation.hexversion,
+    cache_tag=sys.implementation.cache_tag)
+
+from decimal import Decimal
+import _decimal
+import questdb.ingress as qi
+
+assert Decimal is _decimal.Decimal, 'expected the accelerated Decimal'
+
+buf = qi.Buffer._new_qwp()
+try:
+    buf.row('t', columns={'d': Decimal('1.25')}, at=qi.ServerTimestamp)
+except ValueError as ve:
+    message = str(ve)
+    assert 'pypy' in message, message
+    assert 'float' in message and 'string' in message, message
+else:
+    raise AssertionError('a non-CPython Decimal layout was assumed')
+print('OK')
+"""
+
+    def test_a_non_cpython_interpreter_is_refused(self):
+        """`Decimal is _decimal.Decimal` only says the `decimal` module
+        is backed by something called `_decimal`. An interpreter that
+        ships its own under that name passes the module check while
+        laying its objects out differently -- which is the case the
+        guard exists for -- so the interpreter is checked too."""
+        self._run_script(self._FOREIGN_INTERPRETER_SCRIPT)
+
     def test_pure_python_decimal_is_refused(self):
+        self._run_script(self._SCRIPT)
+
+    def _run_script(self, script):
         env = dict(os.environ)
         env['PYTHONPATH'] = os.pathsep.join(
             [str(pathlib.Path(qi.__file__).parent.parent)]
             + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
         env['PYTHONWARNINGS'] = 'ignore'
         result = subprocess.run(
-            [sys.executable, '-c', self._SCRIPT],
+            [sys.executable, '-c', script],
             capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('OK', result.stdout)

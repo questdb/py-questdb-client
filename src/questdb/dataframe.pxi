@@ -1,20 +1,31 @@
 # See: dataframe.md for technical overview.
 
 from decimal import Decimal
+import sys
 import uuid as _uuid
 
 from cpython.bytes cimport PyBytes_AsString
 from .mpdecimal_compat cimport decimal_pyobj_to_binary
 
-# `decimal_pyobj_to_binary` reads a Decimal's memory with the layout that
-# CPython's `_decimal` accelerator uses. A pure-Python `decimal` supplies a
-# `Decimal` of the same name and a different shape, so the accelerator has to
-# be the one in play before that path can run.
+# `decimal_pyobj_to_binary` reinterprets a Decimal's memory with the struct
+# layout of CPython's `_decimal` accelerator, without checking that it is
+# looking at one. Reading any other interpreter's Decimal that way is
+# undefined behaviour, so the layout has to be established first.
+#
+# The interpreter is checked as well as the module. `Decimal is
+# _decimal.Decimal` only says that the `decimal` module is backed by
+# something named `_decimal`, which is true on other interpreters that ship
+# their own `_decimal` under the same name and a different shape -- so on
+# its own it admits exactly the case it is meant to exclude.
+cdef str _PY_IMPL_NAME = sys.implementation.name
 cdef bint _DECIMAL_IS_C
-try:
-    import _decimal as _decimal_accel
-    _DECIMAL_IS_C = Decimal is getattr(_decimal_accel, 'Decimal', None)
-except ImportError:
+if _PY_IMPL_NAME == 'cpython':
+    try:
+        import _decimal as _decimal_accel
+        _DECIMAL_IS_C = Decimal is getattr(_decimal_accel, 'Decimal', None)
+    except ImportError:
+        _DECIMAL_IS_C = False
+else:
     _DECIMAL_IS_C = False
 
 # Auto-flush settings.
@@ -3089,9 +3100,12 @@ cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_colu
             _fqn(type(<object>value)) + '.')
     if not _DECIMAL_IS_C:
         raise ValueError(
-            'Decimal columns require the `_decimal` accelerator that CPython '
-            'normally provides. This interpreter supplies the pure-Python '
-            '`decimal` module, whose objects have a different memory layout.')
+            f'DECIMAL columns are encoded by reading the memory of a '
+            f'`decimal.Decimal` in the layout CPython\'s `_decimal` '
+            f'accelerator gives it, so they need CPython with that '
+            f'accelerator present; this interpreter is '
+            f'{_PY_IMPL_NAME!r}. Send the value as a float or as a '
+            f'string instead, or use a CPython build.')
 
     unscaled_length = decimal_pyobj_to_binary(
         value,
