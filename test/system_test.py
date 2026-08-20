@@ -3067,7 +3067,8 @@ class TestEgressWithDatabase(unittest.TestCase):
         src = 't_rta_src_' + uuid.uuid4().hex[:8]
         dst = 't_rta_dst_' + uuid.uuid4().hex[:8]
         value = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
-        cols = 'ts, u, l, ip, gh, c'
+        value_cols = 'u, l, ip, gh, c'
+        cols = f'ts, {value_cols}'
         try:
             self._exec(
                 f'CREATE TABLE {src} '
@@ -3097,9 +3098,11 @@ class TestEgressWithDatabase(unittest.TestCase):
                 client.dataframe(df, table_name=dst, at='ts')
             self.qdb_plain.retry_check_table(dst, min_rows=1)
 
+            # An auto-created table names its designated timestamp column
+            # `timestamp`, so only the value columns carry over by name.
             with qi.QuestDB.from_conf(self._conf()) as client:
                 back = client.query(
-                    f'SELECT {cols} FROM {dst}').to_pandas(
+                    f'SELECT {value_cols} FROM {dst}').to_pandas(
                         dtype_backend=backend)
             bmeta = back.attrs['questdb']['columns']
             self.assertEqual(bmeta['u']['kind'], 'uuid')
@@ -3110,11 +3113,11 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(bmeta['gh']['precision_bits'], 20)
 
             rows = self.qdb_plain.http_sql_query(
-                f'SELECT u, l, ip, gh, c FROM {dst}')['dataset']
+                f'SELECT {value_cols} FROM {dst}')['dataset']
             self.assertEqual(
                 rows,
                 self.qdb_plain.http_sql_query(
-                    f'SELECT u, l, ip, gh, c FROM {src}')['dataset'])
+                    f'SELECT {value_cols} FROM {src}')['dataset'])
         finally:
             for t in (src, dst):
                 try:
