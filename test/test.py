@@ -3030,6 +3030,86 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 8, 'little', signed=True))
         self.assertEqual(pos, len(payload))
 
+    def test_non_ascii_uuid_and_ipv4_column_names(self):
+        """A UUID or IPV4 value reaches C through Python — `UUID.int` is a
+        slot a subclass can turn into a property, and `IPv4Address.__int__`
+        is pure Python — so `row()` converts the value first and encodes
+        the column name afterwards. A non-ASCII name is the case that
+        matters: it lands in the string arena, whereas an ASCII name is
+        borrowed straight from the `str` object."""
+        class MyAddr(ipaddress.IPv4Address):
+            pass
+
+        class MyUuid(uuid.UUID):
+            pass
+
+        names = ('ũuid', 'ĩpv4')
+        with QwpAckServer(record_payloads=True) as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
+                    auto_flush=False) as sender:
+                sender.row(
+                    'qwp_unicode_names',
+                    columns={
+                        names[0]: MyUuid(str(self.UUID_VALUE)),
+                        names[1]: MyAddr('192.0.2.1'),
+                    },
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+                fsn = sender.flush_and_get_fsn()
+                self.assertTrue(sender.await_acked_fsn(fsn, 10000))
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['qwp1_frames'], 1)
+        payload = next(
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0))
+        for name in names:
+            self.assertIn(name.encode('utf-8'), payload)
+        self.assertIn(self.UUID_VALUE.int.to_bytes(16, 'little'), payload)
+        self.assertIn(
+            int(ipaddress.IPv4Address('192.0.2.1')).to_bytes(4, 'little'),
+            payload)
+
+    def test_clear_from_inside_uuid_or_ipv4_conversion(self):
+        """The conversion of a UUID or IPV4 value can re-enter the buffer
+        and call `clear()` while the row is half-written. The value is
+        already held as C scalars by then and the column name has not been
+        encoded yet, so nothing points into the recycled arena. The row
+        itself still fails: `clear()` drops the marker that the failure
+        path rewinds to."""
+        buffer = qi.Buffer._new_qwp()
+
+        class HostileAddr(ipaddress.IPv4Address):
+            def __int__(self):
+                buffer.clear()
+                return 0x01020304
+
+        class HostileUuid(uuid.UUID):
+            @property
+            def int(self):
+                buffer.clear()
+                return 0x0102030405060708090a0b0c0d0e0f10
+
+            @int.setter
+            def int(self, value):
+                pass
+
+        for value in (HostileAddr('192.0.2.1'),
+                      HostileUuid(str(self.UUID_VALUE))):
+            with self.subTest(value=type(value).__name__):
+                buffer.clear()
+                with self.assertRaises(qi.QuestDBError):
+                    buffer.row(
+                        'hostile', columns={'ñame': value},
+                        at=qi.ServerTimestamp)
+                # The buffer is still healthy and takes further rows.
+                buffer.clear()
+                buffer.row(
+                    'hostile', columns={'ok': 1}, at=qi.ServerTimestamp)
+                self.assertGreater(len(buffer), 0)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_row_uuid_wire_bytes_match_dataframe_object_column(self):

@@ -1437,22 +1437,34 @@ cdef class Buffer:
                 PyBuffer_Release(&view)
 
     cdef inline void_int _column_uuid(
-            self, line_sender_column_name c_name, object value) except -1:
+            self, str name, object value) except -1:
         self._require_qwp_column('UUID')
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        # Reading `value.int` runs Python code: `UUID` accepts subclasses and
+        # a subclass may define `int` as a property. That code can recycle
+        # the string arena an encoded column name borrows from, so the value
+        # is reduced to C scalars first and the name is encoded after.
         cdef object i = value.int
         cdef uint64_t lo = <uint64_t>(i & 0xFFFFFFFFFFFFFFFF)
         cdef uint64_t hi = <uint64_t>(i >> 64)
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_uuid(
                 self._impl, c_name, lo, hi, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_ipv4(
-            self, line_sender_column_name c_name, object value) except -1:
+            self, str name, object value) except -1:
         self._require_qwp_column('IPV4')
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        # `IPv4Address.__int__` is pure Python and can recycle the string
+        # arena an encoded column name borrows from, so the value is reduced
+        # to a C scalar first and the name is encoded after.
+        cdef uint32_t bits = <uint32_t>int(value)
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_ipv4(
-                self._impl, c_name, <uint32_t>int(value), &err):
+                self._impl, c_name, bits, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_char(
@@ -1565,6 +1577,10 @@ cdef class Buffer:
 
     cdef inline void_int _column(self, str name, object value) except -1:
         cdef line_sender_column_name c_name
+        # `c_name` borrows storage that `Buffer.clear()` recycles, so it stays
+        # valid only while no Python code runs. A branch whose value needs
+        # Python to convert takes `name` instead and encodes it itself, once
+        # the conversion is done.
         str_to_column_name(self._cleared_b(), name, &c_name)
         if PyBool_Check(<PyObject*>value):
             self._column_bool(c_name, value)
@@ -1591,9 +1607,9 @@ cdef class Buffer:
         elif isinstance(value, memoryview):
             self._column_binary(c_name, value)
         elif isinstance(value, uuid.UUID):
-            self._column_uuid(c_name, value)
+            self._column_uuid(name, value)
         elif _is_ipv4_address(value):
-            self._column_ipv4(c_name, value)
+            self._column_ipv4(name, value)
         elif isinstance(value, Char):
             self._column_char(c_name, value)
         elif isinstance(value, DateMillis):
