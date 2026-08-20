@@ -2231,6 +2231,90 @@ cdef class _NumpyBatchIter:
             self.handle._free()
 
 
+cdef bytes _ARROW_MD_COLUMN_TYPE = b'questdb.column_type'
+cdef bytes _ARROW_MD_GEOHASH_BITS = b'questdb.geohash_bits'
+
+
+# The Rust egress spells a few kinds differently on the Arrow field than
+# the QWP reader reports them, so map them onto the `_KIND_NAMES`
+# vocabulary: `df.attrs['questdb']` then means the same thing whichever
+# backend built the frame.
+cdef dict _ARROW_KIND_ALIASES = {
+    'timestamp_nanos': 'timestamp_ns',
+    'decimal64': 'decimal',
+    'decimal128': 'decimal',
+    'decimal256': 'decimal',
+}
+
+
+cdef object _arrow_field_roundtrip_meta(object field):
+    """One `df.attrs['questdb']['columns']` entry built from an Arrow
+    field's QuestDB metadata, or None where the field claims no kind."""
+    cdef object md = field.metadata
+    cdef object raw
+    cdef object bits
+    cdef object scale
+    cdef dict entry
+    if not md:
+        return None
+    raw = md.get(_ARROW_MD_COLUMN_TYPE)
+    if raw is None:
+        return None
+    kind = raw.decode('utf-8', 'replace')
+    kind = _ARROW_KIND_ALIASES.get(kind, kind)
+    entry = {'kind': kind}
+    if kind == 'geohash':
+        bits = md.get(_ARROW_MD_GEOHASH_BITS)
+        if bits is not None:
+            try:
+                entry['precision_bits'] = int(bits)
+            except ValueError:
+                pass
+    elif kind == 'decimal':
+        scale = getattr(field.type, 'scale', None)
+        if scale is not None:
+            entry['scale'] = scale
+    return entry
+
+
+cdef dict _arrow_roundtrip_columns_meta(object schema):
+    """The `columns` map of `df.attrs['questdb']`, read off the Arrow
+    schema's QuestDB field metadata."""
+    cdef dict columns_meta = {}
+    cdef Py_ssize_t i
+    cdef object entry
+    for i in range(len(schema.names)):
+        entry = _arrow_field_roundtrip_meta(schema.field(i))
+        if entry is not None:
+            columns_meta[schema.names[i]] = entry
+    return columns_meta
+
+
+cdef object _attach_arrow_roundtrip_attrs(object frame, object schema):
+    """Carry the per-column QuestDB kinds into `df.attrs['questdb']`,
+    matching what the native numpy path attaches.
+
+    The kind claim rides on the Arrow *field*, while a pandas dtype holds
+    only the *type*, so `Table.to_pandas` drops it. `attrs` is the
+    pandas-level carrier `QuestDB.dataframe()` reads back to restore
+    IPV4 / CHAR / GEOHASH / UUID / LONG256 columns, which are otherwise
+    indistinguishable from their storage types on the way back in.
+    """
+    frame.attrs['questdb'] = {
+        'version': 1, 'columns': _arrow_roundtrip_columns_meta(schema)}
+    return frame
+
+
+def _debug_arrow_roundtrip_columns_meta(schema):
+    """Internal: the ``df.attrs['questdb']['columns']`` map that the
+    pyarrow-backed ``to_pandas`` / ``iter_pandas`` attach for a
+    ``pyarrow.Schema``. Lets the mapping be tested without a server.
+
+    Not part of the public API.
+    """
+    return _arrow_roundtrip_columns_meta(schema)
+
+
 cdef object _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper):
     kwargs = {}
     if types_mapper is not None:
@@ -2400,7 +2484,10 @@ class QueryResult:
         ``dtype_backend="pyarrow"`` / ``"numpy_nullable"`` / ``types_mapper``
         select the pyarrow-backed path instead (``pd.ArrowDtype``, pandas
         nullable extension dtypes, or a custom mapper) — matching the
-        ``pd.read_sql`` / ``pd.read_parquet`` convention.
+        ``pd.read_sql`` / ``pd.read_parquet`` convention. Those paths
+        attach ``df.attrs['questdb']`` too: a pandas dtype holds an Arrow
+        type and no field, so ``attrs`` is what carries the IPV4 / CHAR /
+        GEOHASH / UUID / LONG256 claims that live in Arrow field metadata.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
@@ -2413,8 +2500,9 @@ class QueryResult:
         table = (pa.table({}) if schema is None
                  else _table_shared_symbol_dict(
                      pa.Table.from_batches(batches, schema)))
-        return table.to_pandas(
+        frame = table.to_pandas(
             **_resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper))
+        return _attach_arrow_roundtrip_attrs(frame, table.schema)
 
     def to_polars(self):
         """Read the full result into a ``polars.DataFrame``. Requires polars
@@ -2481,9 +2569,9 @@ class QueryResult:
         """Iterate result batches as ``pandas.DataFrame``.
 
         Mirrors :meth:`to_pandas`: with no arguments each batch is
-        materialised straight into numpy (no pyarrow, sentinel-preserving,
-        ``df.attrs['questdb']`` per batch). ``dtype_backend`` /
-        ``types_mapper`` select the pyarrow-backed path instead.
+        materialised straight into numpy (no pyarrow, sentinel-preserving).
+        ``dtype_backend`` / ``types_mapper`` select the pyarrow-backed path
+        instead. Either way every batch carries ``df.attrs['questdb']``.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
@@ -2498,7 +2586,8 @@ class QueryResult:
         reader = _build_record_batch_reader(self._take_cursor_handle())
         for batch in reader:
             table = _table_shared_symbol_dict(pa.Table.from_batches([batch]))
-            yield table.to_pandas(**kwargs)
+            yield _attach_arrow_roundtrip_attrs(
+                table.to_pandas(**kwargs), table.schema)
 
     def iter_polars(self):
         """Iterate result batches as ``polars.DataFrame``.

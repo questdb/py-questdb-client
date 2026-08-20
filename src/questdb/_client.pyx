@@ -5770,24 +5770,143 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
 
 
 cdef object _merge_capsule_overrides(
-        object symbol_overrides, object validated_overrides):
-    """Merge symbol overrides into validated schema_overrides.
-    schema_overrides take precedence on name collision."""
-    cdef set explicit_names
+        object weaker, object stronger):
+    """Merge two override lists, `stronger` winning on name collision.
+
+    The three sources rank: `schema_overrides` states a type outright,
+    `symbols` states one for string columns, and `df.attrs['questdb']`
+    only recalls what a column held when it was read back out of
+    QuestDB.
+    """
+    cdef set stronger_names
     cdef list merged
     cdef object entry
-    if not symbol_overrides and validated_overrides is None:
+    if not weaker and stronger is None:
         return None
-    if not symbol_overrides:
-        return validated_overrides
-    if validated_overrides is None:
-        return symbol_overrides
-    explicit_names = {entry[0] for entry in validated_overrides}
-    merged = list(validated_overrides)
-    for entry in symbol_overrides:
-        if entry[0] not in explicit_names:
+    if not weaker:
+        return stronger
+    if stronger is None:
+        return weaker
+    stronger_names = {entry[0] for entry in stronger}
+    merged = list(stronger)
+    for entry in weaker:
+        if entry[0] not in stronger_names:
             merged.append(entry)
     return merged
+
+
+# `df.attrs['questdb']` column kinds that an Arrow override can restore.
+# The other kinds either survive on their storage type alone (VARCHAR,
+# SYMBOL, TIMESTAMP, DATE, ...) or have no override to restore them
+# with (BYTE / SHORT / INT, which the Arrow classifier widens).
+cdef dict _ATTRS_OVERRIDE_KINDS = {
+    'ipv4': <int>qwp_arrow_override_ipv4,
+    'char': <int>qwp_arrow_override_char,
+    'uuid': <int>qwp_arrow_override_uuid,
+    'long256': <int>qwp_arrow_override_long256,
+    'geohash': <int>qwp_arrow_override_geohash,
+}
+
+
+cdef object _capsule_pandas_arrow_type(object frame, object name):
+    """The Arrow storage type backing column `name` of a pandas frame,
+    or None where the column is missing or not Arrow-backed."""
+    cdef object arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+    cdef object dtype
+    cdef object ty
+    if arrow_dtype is None:
+        return None
+    try:
+        dtype = frame.dtypes[name]
+    except Exception:
+        return None
+    if not isinstance(dtype, arrow_dtype):
+        return None
+    ty = dtype.pyarrow_dtype
+    if isinstance(ty, _PYARROW.lib.BaseExtensionType):
+        ty = ty.storage_type
+    return ty
+
+
+cdef bint _attrs_override_fits(object ty, str kind, object bits) except -1:
+    """Whether the Arrow type can carry the claimed kind.
+
+    Mirrors what the native client accepts, so a claim that no longer
+    matches the column is dropped here instead of erroring there. UUID
+    and LONG256 are held to their fixed widths: those are what the
+    egress emits, and a variable-width binary claim would only be
+    caught value by value at encode time.
+    """
+    cdef object types = _PYARROW.types
+    if kind == 'ipv4':
+        return types.is_uint32(ty)
+    if kind == 'char':
+        return types.is_uint16(ty)
+    if kind == 'uuid':
+        return types.is_fixed_size_binary(ty) and ty.byte_width == 16
+    if kind == 'long256':
+        return types.is_fixed_size_binary(ty) and ty.byte_width == 32
+    if kind == 'geohash':
+        if not _is_int_not_bool(bits) or bits < 1 or bits > 60:
+            return False
+        if types.is_int8(ty):
+            return bits <= 8
+        if types.is_int16(ty):
+            return bits <= 16
+        if types.is_int32(ty):
+            return bits <= 32
+        if types.is_int64(ty):
+            return bits <= 60
+        return False
+    return False
+
+
+cdef object _capsule_roundtrip_overrides(object frame):
+    """Arrow overrides rebuilt from the `df.attrs['questdb']` metadata
+    that `QueryResult.to_pandas()` attaches.
+
+    A pandas dtype holds an Arrow type and no field, so the
+    `questdb.column_type` claim the egress stamps on the field is gone
+    by the time a frame comes back in; without it a UUID or LONG256
+    column would go back out as BINARY and IPV4 / CHAR / GEOHASH as
+    plain integers. The claim recalls what the frame held when it was
+    read, so a column since dropped, renamed or retyped is skipped
+    rather than rejected.
+    """
+    cdef list out = []
+    cdef object attrs, qmeta, cols_meta, meta, ty, bits, kind
+    cdef int kind_int
+    cdef int arg_int
+    if not _is_pandas_dataframe_object(frame):
+        return out
+    attrs = getattr(frame, 'attrs', None)
+    if not isinstance(attrs, dict):
+        return out
+    qmeta = attrs.get('questdb')
+    if not isinstance(qmeta, dict):
+        return out
+    cols_meta = qmeta.get('columns')
+    if not isinstance(cols_meta, dict):
+        return out
+    _dataframe_may_import_deps()
+    if not _dataframe_try_import_pyarrow():
+        return out
+    for name, meta in cols_meta.items():
+        if not isinstance(name, str) or not isinstance(meta, dict):
+            continue
+        kind = meta.get('kind')
+        if kind not in _ATTRS_OVERRIDE_KINDS:
+            continue
+        kind_int = <int>_ATTRS_OVERRIDE_KINDS[kind]
+        bits = meta.get('precision_bits') or 0
+        ty = _capsule_pandas_arrow_type(frame, name)
+        if ty is None or not _attrs_override_fits(ty, kind, bits):
+            continue
+        # Only GEOHASH takes an argument, and `_attrs_override_fits` has
+        # already held it to 1..=60.
+        arg_int = <int>bits if kind == 'geohash' else 0
+        out.append((name.encode('utf-8'), kind_int, arg_int))
+    return out
 
 
 cdef bint _is_pandas_dataframe_object(object obj):
@@ -6026,6 +6145,8 @@ cdef bint _dataframe_client_try_capsule_path(
         return False
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
+    merged_overrides = _merge_capsule_overrides(
+        _capsule_roundtrip_overrides(sliceable), merged_overrides)
 
     can_slice = (total_rows >= 0) and (
         hasattr(sliceable, 'slice')
@@ -6891,6 +7012,19 @@ cdef class QuestDB:
         Arrow columnar path (fully Arrow-backed input without
         ``table_name_col``); on input that falls back to the NumPy planner
         it raises :class:`UnsupportedDataFrameShapeError`.
+
+        A pandas frame that came out of :meth:`QueryResult.to_pandas`
+        carries its source column types in ``df.attrs['questdb']``, and
+        this method reads them back. That is what keeps UUID, LONG256,
+        IPV4, CHAR, and GEOHASH columns their own type on a
+        read-modify-write round trip: their claim lives in Arrow *field*
+        metadata, which a pandas dtype — an Arrow type and no field —
+        cannot hold. The metadata recalls what the frame held when it was
+        read, so a column since dropped, renamed, or retyped simply loses
+        its claim, and ``symbols`` / ``schema_overrides`` outrank it.
+        BYTE, SHORT, and INT columns still widen one step on the way back
+        in; the Arrow ingest API has no override that pins them.
+
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded

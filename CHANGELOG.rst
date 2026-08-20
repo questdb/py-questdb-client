@@ -71,6 +71,17 @@ Changelog
   ``to_pandas(dtype_backend='pyarrow')`` feed it back as DATE, while plain
   ``to_pandas()`` yields ``datetime64[ms, UTC]``, which ``dataframe()``
   rejects.
+- ``to_pandas(dtype_backend=...)`` and ``iter_pandas(dtype_backend=...)``
+  now attach ``df.attrs['questdb']``, the round-trip metadata that plain
+  ``to_pandas()`` already carried, and ``dataframe()`` reads it back. This
+  is what keeps UUID, LONG256, IPV4, CHAR, and GEOHASH columns their own
+  type when a query result is written back out: their claim lives in Arrow
+  *field* metadata, and a pandas dtype holds an Arrow type and no field, so
+  before this those columns went back out as BINARY and plain integers, and
+  a new destination table was auto-created with the wrong types. BYTE,
+  SHORT, and INT columns still widen one step on the way back in. Editing
+  the frame is safe: a column that has been dropped, renamed, or retyped
+  simply loses its claim, and ``symbols`` / ``schema_overrides`` outrank it.
 - DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix. Pass an
   ``ipaddress.IPv4Address`` value instead.

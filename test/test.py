@@ -3192,6 +3192,185 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 }),
                 at='ts', schema_overrides={'ms': 'date'})
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_arrow_egress_metadata_becomes_roundtrip_attrs(self):
+        # The read side of the pandas round trip: the QuestDB claims the
+        # egress stamps on each Arrow field are copied into
+        # `df.attrs['questdb']`, spelled the way the native numpy path
+        # spells them, because a pandas dtype carries the Arrow type and
+        # not the field it came on.
+        def field(name, arrow_type, **md):
+            return pyarrow.field(
+                name, arrow_type,
+                metadata={k.encode(): v.encode() for k, v in md.items()})
+
+        schema = pyarrow.schema([
+            field('u', pyarrow.binary(16),
+                  **{'questdb.column_type': 'uuid',
+                     'ARROW:extension:name': 'arrow.uuid'}),
+            field('l', pyarrow.binary(32),
+                  **{'questdb.column_type': 'long256'}),
+            field('ip', pyarrow.uint32(), **{'questdb.column_type': 'ipv4'}),
+            field('ch', pyarrow.uint16(), **{'questdb.column_type': 'char'}),
+            field('gh', pyarrow.int32(),
+                  **{'questdb.column_type': 'geohash',
+                     'questdb.geohash_bits': '20'}),
+            field('sym', pyarrow.dictionary(pyarrow.int32(), pyarrow.utf8()),
+                  **{'questdb.column_type': 'symbol',
+                     'questdb.symbol': 'true'}),
+            field('tns', pyarrow.timestamp('ns', 'UTC'),
+                  **{'questdb.column_type': 'timestamp_nanos'}),
+            field('dec', pyarrow.decimal128(38, 4),
+                  **{'questdb.column_type': 'decimal128'}),
+            pyarrow.field('plain', pyarrow.int64()),
+        ])
+        self.assertEqual(
+            qi._debug_arrow_roundtrip_columns_meta(schema),
+            {
+                'u': {'kind': 'uuid'},
+                'l': {'kind': 'long256'},
+                'ip': {'kind': 'ipv4'},
+                'ch': {'kind': 'char'},
+                'gh': {'kind': 'geohash', 'precision_bits': 20},
+                'sym': {'kind': 'symbol'},
+                # The reader reports these two kinds under shorter names;
+                # `attrs` uses the reader's spelling on either backend.
+                'tns': {'kind': 'timestamp_ns'},
+                'dec': {'kind': 'decimal', 'scale': 4},
+            })
+        # A field with no QuestDB claim contributes no entry.
+        self.assertNotIn('plain', qi._debug_arrow_roundtrip_columns_meta(schema))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_attrs_restore_column_types(self):
+        # The write side of the pandas round trip. An Arrow-backed frame
+        # takes the capsule path, where the field metadata is already
+        # gone, so `df.attrs['questdb']` is the only thing left claiming
+        # the column types. Without it these five land as BINARY and
+        # plain integers on a table the server auto-creates.
+        frame = self._roundtrip_frame()
+        types = self._dataframe_column_types(
+            frame, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['u'], 0x0C)
+        self.assertEqual(types['l'], 0x0D)
+        self.assertEqual(types['ip'], 0x18)
+        self.assertEqual(types['ch'], 0x16)
+        self.assertEqual(types['gh'], 0x0E)
+
+        # Drop the metadata and the same frame degrades — this is what
+        # the claim is buying.
+        bare = frame.copy()
+        bare.attrs = {}
+        types = self._dataframe_column_types(
+            bare, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['u'], 0x17)
+        self.assertEqual(types['l'], 0x17)
+        self.assertEqual(types['ip'], 0x05)
+        self.assertEqual(types['ch'], 0x04)
+        self.assertEqual(types['gh'], 0x05)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_attrs_are_a_hint_not_a_command(self):
+        # The claim recalls what the frame held when it was read, so it
+        # is dropped wherever the frame has moved on. Rejecting it would
+        # break frames that ingest fine today.
+        frame = self._roundtrip_frame()
+        retyped = frame.astype({'ip': pd.ArrowDtype(pyarrow.int64())})
+        retyped.attrs = dict(frame.attrs)
+        types = self._dataframe_column_types(
+            retyped, table_name='attrs_stale', at='ts')
+        self.assertEqual(types['ip'], 0x05)
+
+        renamed = frame.rename(columns={'ch': 'ch2'})
+        renamed.attrs = dict(frame.attrs)
+        types = self._dataframe_column_types(
+            renamed, table_name='attrs_stale', at='ts')
+        self.assertEqual(types['ch2'], 0x04)
+
+        # A GEOHASH precision the storage type cannot hold is dropped
+        # rather than sent as an out-of-range claim.
+        narrow = frame.astype({'gh': pd.ArrowDtype(pyarrow.int8())})
+        narrow.attrs = dict(frame.attrs)
+        types = self._dataframe_column_types(
+            narrow, table_name='attrs_stale', at='ts')
+        self.assertEqual(types['gh'], 0x04)
+
+        # A stray argument on a kind that takes none is ignored; only
+        # GEOHASH reads `precision_bits`.
+        for junk in (10 ** 30, 'x', None, -1):
+            with self.subTest(precision_bits=junk):
+                odd = frame.copy()
+                odd.attrs = {'questdb': {'version': 1, 'columns': {
+                    'ip': {'kind': 'ipv4', 'precision_bits': junk}}}}
+                types = self._dataframe_column_types(
+                    odd, table_name='attrs_stale', at='ts')
+                self.assertEqual(types['ip'], 0x18)
+
+        # Metadata of the wrong shape is ignored, not diagnosed.
+        for junk in ('nonsense',
+                     {'version': 1, 'columns': 'nope'},
+                     {'version': 1, 'columns': {'ip': {'kind': 42}}},
+                     {'version': 1, 'columns': {7: {'kind': 'ipv4'}}}):
+            with self.subTest(junk=junk):
+                odd = frame.copy()
+                odd.attrs = {'questdb': junk}
+                types = self._dataframe_column_types(
+                    odd, table_name='attrs_stale', at='ts')
+                self.assertEqual(types['ip'], 0x05)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_explicit_claims_outrank_roundtrip_attrs(self):
+        # `schema_overrides` and `symbols` state a type outright and
+        # `attrs` only recalls one, so the two are merged with the
+        # explicit claim winning: a column named by both produces one
+        # override, not the duplicate the native client rejects, and
+        # `symbols=False` still turns the SYMBOL column into a VARCHAR.
+        frame = self._roundtrip_frame()
+        frame['sym'] = pd.array(
+            ['a'] * len(frame),
+            dtype=pd.ArrowDtype(pyarrow.dictionary(
+                pyarrow.int32(), pyarrow.utf8())))
+        frame.attrs['questdb']['columns']['sym'] = {'kind': 'symbol'}
+        types = self._dataframe_column_types(
+            frame, table_name='attrs_precedence', at='ts',
+            symbols=False, schema_overrides={'ip': 'ipv4'})
+        self.assertEqual(types['ip'], 0x18)
+        self.assertEqual(types['sym'], 0x0F)
+
+    def _roundtrip_frame(self):
+        """A fully Arrow-backed frame shaped like what
+        ``to_pandas(dtype_backend='pyarrow')`` returns for a table of
+        UUID / LONG256 / IPV4 / CHAR / GEOHASH columns."""
+        frame = pd.DataFrame({
+            'u': pd.array(
+                [self.UUID_VALUE.bytes],
+                dtype=pd.ArrowDtype(pyarrow.binary(16))),
+            'l': pd.array(
+                [bytes(range(32))],
+                dtype=pd.ArrowDtype(pyarrow.binary(32))),
+            'ip': pd.array(
+                [0x01020304], dtype=pd.ArrowDtype(pyarrow.uint32())),
+            'ch': pd.array(
+                [ord('Q')], dtype=pd.ArrowDtype(pyarrow.uint16())),
+            'gh': pd.array(
+                [100], dtype=pd.ArrowDtype(pyarrow.int32())),
+            'ts': pd.array(
+                [datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)],
+                dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))),
+        })
+        frame.attrs['questdb'] = {'version': 1, 'columns': {
+            'u': {'kind': 'uuid'},
+            'l': {'kind': 'long256'},
+            'ip': {'kind': 'ipv4'},
+            'ch': {'kind': 'char'},
+            'gh': {'kind': 'geohash', 'precision_bits': 20},
+            'ts': {'kind': 'timestamp'},
+        }}
+        return frame
+
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     class TestQwpOnlyRowTypesIntegration(TestWithDatabase):

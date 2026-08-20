@@ -3021,6 +3021,73 @@ class TestEgressWithDatabase(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_arrow_backed_egress_round_trip_overrides(self):
+        """uuid / long256 / ipv4 / char / geohash round-trip through
+        ``to_pandas(dtype_backend='pyarrow')``. The claims the egress
+        writes as Arrow field metadata cannot ride on a pandas frame,
+        which holds Arrow types and no fields, so they travel in
+        ``df.attrs['questdb']`` and are turned back into column types on
+        the way in. The destination table is auto-created, so its column
+        types are exactly what the client asked for.
+        """
+        src = 't_rta_src_' + uuid.uuid4().hex[:8]
+        dst = 't_rta_dst_' + uuid.uuid4().hex[:8]
+        value = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+        cols = 'ts, u, l, ip, gh, c'
+        try:
+            self._exec(
+                f'CREATE TABLE {src} '
+                '(ts TIMESTAMP, u UUID, l LONG256, ip IPV4, '
+                'gh GEOHASH(4c), c CHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', '{value}', "
+                "'0x0001020304050607080910111213141516171819202122232425262728293031', "
+                "'1.2.3.4', #u33d, 'A')")
+            self.qdb_plain.retry_check_table(src, min_rows=1)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT {cols} FROM {src} ORDER BY ts'
+                ).to_pandas(dtype_backend='pyarrow')
+            meta = df.attrs['questdb']['columns']
+            self.assertEqual(meta['u']['kind'], 'uuid')
+            self.assertEqual(meta['l']['kind'], 'long256')
+            self.assertEqual(meta['ip']['kind'], 'ipv4')
+            self.assertEqual(meta['c']['kind'], 'char')
+            self.assertEqual(meta['gh']['kind'], 'geohash')
+            self.assertEqual(meta['gh']['precision_bits'], 20)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=1)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                back = client.query(
+                    f'SELECT {cols} FROM {dst}').to_pandas(
+                        dtype_backend='pyarrow')
+            bmeta = back.attrs['questdb']['columns']
+            self.assertEqual(bmeta['u']['kind'], 'uuid')
+            self.assertEqual(bmeta['l']['kind'], 'long256')
+            self.assertEqual(bmeta['ip']['kind'], 'ipv4')
+            self.assertEqual(bmeta['c']['kind'], 'char')
+            self.assertEqual(bmeta['gh']['kind'], 'geohash')
+            self.assertEqual(bmeta['gh']['precision_bits'], 20)
+
+            rows = self.qdb_plain.http_sql_query(
+                f'SELECT u, l, ip, gh, c FROM {dst}')['dataset']
+            self.assertEqual(
+                rows,
+                self.qdb_plain.http_sql_query(
+                    f'SELECT u, l, ip, gh, c FROM {src}')['dataset'])
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
+
     def test_null_round_trip_per_dtype_backend(self):
         """Pin the null contract across the three dtype_backend variants.
 
