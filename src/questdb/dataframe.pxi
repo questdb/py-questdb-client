@@ -135,6 +135,59 @@ cdef enum col_target_t:
     col_target_column_arrow = 19
 
 
+# The version stamped into `df.attrs['questdb']` by the egress and
+# required by the two ingest-side readers. Bump it only when the claim
+# vocabulary changes in a way an older client would misread.
+cdef int _ROUNDTRIP_META_VERSION = 1
+
+
+cdef object _roundtrip_columns_meta(object frame):
+    """The ``columns`` map of a frame's ``df.attrs['questdb']``, or
+    ``None`` where the frame carries no claim this client can read.
+
+    Both ingest-side readers start here, so a malformed or
+    future-versioned ``attrs`` is turned away in one place rather than
+    at two call sites with two different sets of guards.
+
+    The version is checked rather than merely carried. The claim's
+    vocabulary can gain kinds, and a client that applied a version it
+    does not understand would silently write the wrong column type --
+    the outcome the claim exists to prevent.
+    """
+    cdef object attrs, qmeta, cols_meta
+    attrs = getattr(frame, 'attrs', None)
+    if not isinstance(attrs, dict):
+        return None
+    qmeta = attrs.get('questdb')
+    if not isinstance(qmeta, dict):
+        return None
+    if qmeta.get('version') != _ROUNDTRIP_META_VERSION:
+        return None
+    cols_meta = qmeta.get('columns')
+    if not isinstance(cols_meta, dict):
+        return None
+    return cols_meta
+
+
+cdef str _roundtrip_kind(object meta):
+    """The ``kind`` of one column's claim, or ``None`` where the entry
+    is not a claim.
+
+    ``kind`` is user data, and one of its readers looks it up in a dict.
+    Hashing is the only step there that can fail, so an unhashable value
+    -- a list, say, from metadata that went through JSON -- would raise
+    ``TypeError`` where the contract promises the claim is skipped.
+    Holding it to ``str`` here settles that for both readers.
+    """
+    cdef object kind
+    if not isinstance(meta, dict):
+        return None
+    kind = meta.get('kind')
+    if not isinstance(kind, str):
+        return None
+    return kind
+
+
 cdef dict _TARGET_NAMES = {
     col_target_t.col_target_skip: "skipped",
     col_target_t.col_target_table: "table name",

@@ -1800,7 +1800,8 @@ cdef object _numpy_assemble_frame(
         if col_precision[col_idx] is not None:
             entry['precision_bits'] = col_precision[col_idx]
         columns_meta[col_names[col_idx]] = entry
-    frame.attrs['questdb'] = {'version': 1, 'columns': columns_meta}
+    frame.attrs['questdb'] = {
+        'version': _ROUNDTRIP_META_VERSION, 'columns': columns_meta}
     return frame
 
 
@@ -2301,7 +2302,8 @@ cdef object _attach_arrow_roundtrip_attrs(object frame, object schema):
     indistinguishable from their storage types on the way back in.
     """
     frame.attrs['questdb'] = {
-        'version': 1, 'columns': _arrow_roundtrip_columns_meta(schema)}
+        'version': _ROUNDTRIP_META_VERSION,
+        'columns': _arrow_roundtrip_columns_meta(schema)}
     return frame
 
 

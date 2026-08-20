@@ -5046,13 +5046,7 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
     cdef int gh
     for col_index in range(plan.col_count):
         plan.cols.d[col_index].setup.has_override = False
-    attrs = getattr(df, 'attrs', None)
-    if not attrs:
-        return 0
-    qmeta = attrs.get('questdb')
-    if not qmeta:
-        return 0
-    cols_meta = qmeta.get('columns')
+    cols_meta = _roundtrip_columns_meta(df)
     if not cols_meta:
         return 0
     df_cols = list(df.columns)
@@ -5061,9 +5055,9 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
         if col.setup.orig_index >= <size_t>len(df_cols):
             continue
         meta = cols_meta.get(df_cols[col.setup.orig_index])
-        if not meta:
+        kind = _roundtrip_kind(meta)
+        if kind is None:
             continue
-        kind = meta.get('kind')
         # `col_source_int_pyobj` is what a pandas masked dtype turns
         # into: `to_pandas(dtype_backend='numpy_nullable')` returns
         # IPV4 / CHAR / GEOHASH as UInt32 / UInt16 / Int* extension
@@ -6265,28 +6259,23 @@ cdef object _capsule_roundtrip_overrides(object frame):
     rather than rejected.
     """
     cdef list out = []
-    cdef object attrs, qmeta, cols_meta, meta, ty, bits, kind
+    cdef object cols_meta, meta, ty, bits
+    cdef str kind
     cdef int kind_int
     cdef int arg_int
     if not _is_pandas_dataframe_object(frame):
         return out
-    attrs = getattr(frame, 'attrs', None)
-    if not isinstance(attrs, dict):
-        return out
-    qmeta = attrs.get('questdb')
-    if not isinstance(qmeta, dict):
-        return out
-    cols_meta = qmeta.get('columns')
-    if not isinstance(cols_meta, dict):
+    cols_meta = _roundtrip_columns_meta(frame)
+    if not cols_meta:
         return out
     _dataframe_may_import_deps()
     if not _dataframe_try_import_pyarrow():
         return out
     for name, meta in cols_meta.items():
-        if not isinstance(name, str) or not isinstance(meta, dict):
+        if not isinstance(name, str):
             continue
-        kind = meta.get('kind')
-        if kind not in _ATTRS_OVERRIDE_KINDS:
+        kind = _roundtrip_kind(meta)
+        if kind is None or kind not in _ATTRS_OVERRIDE_KINDS:
             continue
         kind_int = <int>_ATTRS_OVERRIDE_KINDS[kind]
         bits = meta.get('precision_bits') or 0

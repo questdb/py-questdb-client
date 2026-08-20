@@ -129,6 +129,16 @@ Changelog
   :class:`QuestDBError <questdb.QuestDBError>` naming the
   ``df.attrs['questdb']`` claim that makes the column a LONG256. Both used
   to surface CPython's bare "int too large to convert", which named neither.
+- The ``df.attrs['questdb']`` claim is now read through one shared entry
+  point on both ingest paths, so the two readers cannot drift apart. The
+  ``version`` key the egress stamps is checked rather than only carried: a
+  frame claiming a version this client does not know loses its claim
+  instead of having it applied under the old vocabulary. Malformed
+  metadata is skipped on both paths, as the documented contract always
+  said — previously a ``kind`` that was not hashable, such as a list left
+  by a JSON round trip, raised ``TypeError`` from the Arrow path, and
+  ``attrs['questdb']`` that was not a dict raised ``AttributeError`` from
+  the NumPy one.
 - DataFrame ingestion now rejects ``ipaddress.IPv4Interface`` cells instead
   of silently discarding their network prefix. Pass an
   ``ipaddress.IPv4Address`` value instead.

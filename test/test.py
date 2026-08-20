@@ -3623,6 +3623,61 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_malformed_roundtrip_attrs_are_ignored_by_both_readers(self):
+        """`df.attrs` is user data — hand-written, or reloaded from JSON
+        where a string became a list — and the claim promises to be
+        skipped when it no longer fits. There are two readers, one per
+        planner, so every shape is run through both: hardening one and
+        not the other is how this went wrong before.
+
+        The version is part of it. Both producers stamp one, so a frame
+        carrying a version this client does not know must lose its
+        claim rather than have it applied under the old vocabulary.
+        """
+        cases = (
+            ('a known version', {
+                'version': 1, 'columns': {'ip': {'kind': 'ipv4'}}}, 0x18),
+            ('a future version', {
+                'version': 99, 'columns': {'ip': {'kind': 'ipv4'}}}, 0x05),
+            ('no version at all', {
+                'columns': {'ip': {'kind': 'ipv4'}}}, 0x05),
+            ('an unhashable kind', {
+                'version': 1, 'columns': {'ip': {'kind': ['ipv4']}}}, 0x05),
+            ('a non-string kind', {
+                'version': 1, 'columns': {'ip': {'kind': 42}}}, 0x05),
+            ('a non-dict entry', {
+                'version': 1, 'columns': {'ip': 'ipv4'}}, 0x05),
+            ('a non-dict columns', {
+                'version': 1, 'columns': 'nope'}, 0x05),
+            ('attrs that are not a dict', 'nonsense', 0x05),
+        )
+        stamps = pd.to_datetime(['2025-01-01'])
+        planners = {
+            # Fully Arrow-backed: the capsule path.
+            'capsule': lambda: pd.DataFrame({
+                'ip': pd.array(
+                    [0x01020304], dtype=pd.ArrowDtype(pyarrow.uint32())),
+                'ts': pd.array(
+                    stamps, dtype=pd.ArrowDtype(pyarrow.timestamp('us'))),
+            }),
+            # Plain numpy dtypes: the NumPy planner.
+            'numpy': lambda: pd.DataFrame({
+                'ip': pd.array([0x01020304], dtype='uint32'),
+                'ts': stamps,
+            }),
+        }
+        for planner, build in planners.items():
+            for label, meta, expected in cases:
+                with self.subTest(planner=planner, attrs=label):
+                    frame = build()
+                    frame.attrs['questdb'] = meta
+                    self.assertEqual(
+                        self._dataframe_column_types(
+                            frame, table_name='attrs_junk', at='ts')['ip'],
+                        expected)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_explicit_claims_outrank_roundtrip_attrs(self):
         # `schema_overrides` and `symbols` state a type outright and
         # `attrs` only recalls one, so the two are merged with the
