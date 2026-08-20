@@ -14,6 +14,7 @@ stages:
               pythonVersion: "3.12"
               questdbVersion: ""
               requireQwpRowTypes: ""
+              buildDocs: true
             linux-pandas2:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
@@ -82,6 +83,17 @@ stages:
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
+          # `proj.py doc` runs Sphinx with `-nW`, so an unresolvable
+          # reference in a docstring fails here. Read the Docs builds
+          # without it and renders the dangling reference instead, so
+          # without this step nothing catches one: the build was left
+          # broken twice during review, once by a private-alias
+          # annotation and once by an unqualified `:class:` target.
+          - script: |
+              python3 -m pip install -r docs/requirements.txt
+              python3 proj.py doc
+            displayName: "Build docs"
+            condition: eq(variables.buildDocs, true)
           - template: templates/clone_questdb.yaml
             parameters:
               condition: eq(variables.vsQuestDbMaster, true)
