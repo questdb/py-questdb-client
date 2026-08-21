@@ -228,11 +228,17 @@ Changelog
   that name and a different shape, so on its own it admitted exactly the
   case it was meant to exclude.
 - Both ingestion styles now reject ``ipaddress.IPv4Interface`` cells instead
-  of silently discarding their network prefix, and say why. ``row()`` used
-  to give the generic unsupported-type error, whose list of accepted types
-  names ``ipaddress.IPv4Address`` — which ``IPv4Interface`` subclasses — so
-  it read as a contradiction and never mentioned the prefix. Pass
-  ``value.ip``.
+  of silently discarding their network prefix, and say why. Every message
+  about one used to read as a contradiction, because ``IPv4Interface``
+  subclasses ``IPv4Address``: ``row()`` gave the generic unsupported-type
+  error, whose list of accepted types names ``ipaddress.IPv4Address``;
+  ``dataframe()`` said ``Unsupported object column containing an object of
+  type ipaddress.IPv4Interface`` for one in the column's first cell, and
+  ``expected ipaddress.IPv4Address, got ipaddress.IPv4Interface`` for one
+  further down. None of the three mentioned the prefix, which is the
+  reason. All three now give it, along with the remedy their shape calls
+  for: ``row()`` names ``value.ip``, and ``dataframe()`` names the whole
+  column, as ``df['col'] = df['col'].map(lambda value: value.ip)``.
 - An object column of ``numpy.bytes_`` now lands as BINARY. Previously the
   DataFrame path tested for an exact ``bytes``, so a NumPy ``S``-dtype
   scalar column was rejected as an unsupported object column.

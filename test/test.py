@@ -2691,26 +2691,34 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_dataframe_rejects_ipv4_interface(self):
+        # Both generic messages read as a contradiction here, because
+        # `IPv4Interface` subclasses `IPv4Address`: the planner's names
+        # the types it accepts, one of which is the parent of the thing
+        # it just turned away, and the per-cell one asks for an
+        # `ipaddress.IPv4Address` having been handed a subclass of
+        # exactly that. Neither said anything about the prefix, which is
+        # the reason. Both now do, wherever in the column it sits.
         address = ipaddress.IPv4Address('192.0.2.129')
         interface = ipaddress.IPv4Interface('192.0.2.129/24')
+        reason = (
+            'ipaddress.IPv4Interface carries a network prefix, which a '
+            'QuestDB IPV4 column has nowhere to keep.')
+        remedy = (
+            "Pass the addresses instead, e.g. df['value'] = "
+            "df['value'].map(lambda value: value.ip).")
         cases = (
-            (
-                [interface],
-                'Unsupported object column containing an object of type '
-                'ipaddress.IPv4Interface',
-            ),
-            (
-                [address, interface],
-                "Bad column 'value' at row 1: expected "
-                'ipaddress.IPv4Address, got ipaddress.IPv4Interface',
-            ),
+            # The first non-null cell decides the column's type, so an
+            # interface there is refused by the planner...
+            ([interface], "Bad column 'value': "),
+            # ...and one further down by the writer, which names the row.
+            ([address, interface], "Bad column 'value' at row 1: "),
         )
         with QwpAckServer(record_payloads=True) as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
             with qi.QuestDB.from_conf(conf) as client:
-                for values, message in cases:
+                for values, prefix in cases:
                     frame = pd.DataFrame({
                         'value': pd.Series(values, dtype=object)})
                     with self.subTest(values=values):
@@ -2721,11 +2729,50 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         self.assertEqual(
                             cm.exception.code,
                             qi.QuestDBErrorCode.BadDataFrame)
-                        self.assertIn(message, str(cm.exception))
+                        message = str(cm.exception)
+                        self.assertIn(prefix + reason, message)
+                        self.assertIn(remedy, message)
+                        self.assertNotIn(
+                            'Unsupported object column', message)
+                        self.assertNotIn(
+                            'expected ipaddress.IPv4Address', message)
             stats = server.snapshot()
 
         self.assertEqual(stats['binary_frames'], 0)
         self.assertEqual(stats['errors'], [])
+
+        # `row()` gives the same reason for the same cell, with the
+        # remedy a single value calls for. The two are worded from one
+        # string so they cannot drift apart.
+        buffer = qi.Buffer._new_qwp()
+        with self.assertRaises(TypeError) as caught:
+            buffer.row(
+                'ipv4_values', columns={'value': interface},
+                at=qi.ServerTimestamp)
+        self.assertIn(reason, str(caught.exception))
+        self.assertIn('`value.ip`', str(caught.exception))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_ipv4_interface_remedy_quotes_an_awkward_column_name(self):
+        # The remedy is a line of code naming the column, so the name
+        # goes in as a repr rather than bare: a name with a space in it
+        # would otherwise print advice that does not parse.
+        frame = pd.DataFrame({
+            'my col': pd.Series(
+                [ipaddress.IPv4Interface('192.0.2.129/24')], dtype=object)})
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    client.dataframe(
+                        frame, table_name='ipv4_values',
+                        at=qi.ServerTimestamp)
+        self.assertIn(
+            "df['my col'] = df['my col'].map(lambda value: value.ip)",
+            str(cm.exception))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

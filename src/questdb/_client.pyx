@@ -1724,9 +1724,8 @@ cdef class Buffer:
                 # It subclasses IPv4Address, so the list below would
                 # otherwise appear to contain the thing just rejected.
                 raise TypeError(
-                    'ipaddress.IPv4Interface carries a network prefix, '
-                    'which a QuestDB IPV4 column has nowhere to keep. '
-                    'Pass its address instead, as `value.ip`.')
+                    _IPV4_INTERFACE_REASON
+                    + ' Pass its address instead, as `value.ip`.')
             valid = ', '.join((
                 'bool',
                 'int',
@@ -4170,6 +4169,11 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
                     _pyobj_set_validity_bit(b.validity, i)
             elif _dataframe_is_null_pyobj(cell):
                 b.has_nulls = True
+            elif isinstance(<object>cell, _IPV4_INTERFACE):
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
+                    f'Bad column {df_col_name!r} at row {i}: '
+                    + _ipv4_interface_df_message(df_col_name))
             else:
                 raise QuestDBError(
                     QuestDBErrorCode.BadDataFrame,

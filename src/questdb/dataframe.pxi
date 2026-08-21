@@ -127,6 +127,26 @@ cdef object _IPV4_ADDRESS = ipaddress.IPv4Address
 cdef object _IPV4_INTERFACE = ipaddress.IPv4Interface
 
 
+# Why an `IPv4Interface` is refused, worded once for the three places
+# that refuse one. `IPv4Interface` subclasses `IPv4Address`, so any
+# message listing the accepted types reads as a contradiction on its
+# own: it names the parent of the thing it has just turned away, and
+# says nothing about the prefix that is the actual reason. Each caller
+# adds the remedy its own shape calls for.
+cdef str _IPV4_INTERFACE_REASON = (
+    'ipaddress.IPv4Interface carries a network prefix, which a QuestDB '
+    'IPV4 column has nowhere to keep.')
+
+
+cdef str _ipv4_interface_df_message(object df_col_name):
+    """The DataFrame-path refusal for an ``IPv4Interface`` cell, naming
+    a remedy that works on a whole column."""
+    return (
+        _IPV4_INTERFACE_REASON
+        + f' Pass the addresses instead, e.g. df[{df_col_name!r}] = '
+        + f'df[{df_col_name!r}].map(lambda value: value.ip).')
+
+
 cdef inline bint _is_ipv4_address(object value):
     """``IPv4Interface`` subclasses ``IPv4Address`` but carries a network
     prefix that QuestDB's IPV4 column has nowhere to keep, so it is not
@@ -1802,6 +1822,11 @@ cdef void_int _dataframe_series_sniff_pyobj(
                 col.setup.source = col_source_t.col_source_datetime_pyobj
             elif _is_decimal(<object>obj):
                 col.setup.source = col_source_t.col_source_decimal_pyobj
+            elif isinstance(<object>obj, _IPV4_INTERFACE):
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
+                    f'Bad column {pandas_col.name!r}: ' +
+                    _ipv4_interface_df_message(pandas_col.name))
             else:
                 raise QuestDBError(
                     QuestDBErrorCode.BadDataFrame,
