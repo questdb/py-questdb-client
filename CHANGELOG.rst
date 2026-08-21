@@ -135,13 +135,27 @@ Changelog
   integer past ``2**32-1`` under ``ipv4``, a cell that is not exactly 16
   or 32 bytes under ``uuid`` or ``long256`` — is refused rather than
   written into a column of the claimed type.
-- A claimed ``geohash`` value wider than its ``precision_bits`` is refused,
-  on every shape a claim can arrive in rather than only the object ones.
+- A GEOHASH value wider than the precision it is written at is refused.
   A GEOHASH column keeps only the claimed low bits, and the high bits are
   the coarse position, so a wider value used to reach the database as a
   valid geohash for somewhere else entirely, with nothing said. This is
-  the one claimed type whose range is narrower than the integer carrying
-  it; IPV4 and CHAR fill their storage width exactly.
+  the one type whose range is narrower than the integer carrying it;
+  IPV4 and CHAR fill their storage width exactly.
+  The check covers every route the type can be claimed by --
+  ``schema_overrides``, a ``df.attrs['questdb']`` claim, and
+  ``questdb.column_type=geohash`` Arrow field metadata -- and every
+  input shape, so pandas, polars, ``pa.Table``, ``pa.RecordBatch`` and a
+  one-shot ``RecordBatchReader`` are all held to it. Values are checked
+  batch by batch on their way out, so nothing that does not fit reaches
+  the wire, and the row named is the caller's own rather than its
+  position inside a batch they never chose.
+  A ``df.attrs['questdb']`` geohash claim is also held to the width of
+  the column carrying it -- at most 8 bits on an ``int8`` column, 16 on
+  ``int16``, 32 on ``int32`` and 60 on ``int64``. A claim past that is
+  one the column cannot express, so it is dropped like any other claim
+  that no longer fits, and both planners now answer a given frame the
+  same way: retyping a claimed column narrower used to be silently
+  dropped on the Arrow path and refused mid-flush on the NumPy one.
 - An object that only claims to be a ``decimal.Decimal`` is now refused
   instead of being read as one. DECIMAL cells are encoded by reading the
   object's raw memory with CPython's ``Decimal`` struct layout, and the

@@ -3455,16 +3455,26 @@ cdef bint _dataframe_columnar_geohash_scan(
         bint is_signed,
         size_t row_count,
         int64_t max_value,
+        size_t offset,
         size_t* bad_row) noexcept nogil:
     """The first row holding a value the claimed precision cannot hold,
-    if there is one. A null slot carries no value and is skipped."""
+    if there is one. A null slot carries no value and is skipped.
+
+    `offset` is the Arrow array's own start row, which a sliced batch
+    carries instead of rebasing its buffers. It shifts both the value
+    slot and the validity bit, so a bitmap that does not start on a
+    byte boundary is read correctly. `bad_row` is reported relative to
+    the array, not to the buffer, so it is the row the caller named.
+    """
     cdef size_t row
+    cdef size_t slot
     for row in range(row_count):
+        slot = offset + row
         if (validity != NULL
-                and not ((validity[row >> 3] >> (row & 7)) & 1)):
+                and not ((validity[slot >> 3] >> (slot & 7)) & 1)):
             continue
         if _geohash_slot_out_of_range(
-                data, row, elem_size, is_signed, max_value):
+                data, slot, elem_size, is_signed, max_value):
             bad_row[0] = row
             return True
     return False
@@ -3555,6 +3565,9 @@ cdef void_int _dataframe_columnar_check_geohash_ranges(
                 is_signed,
                 plan.row_count,
                 max_value,
+                # `_dataframe_columnar_validate_plan` has already held
+                # every column to a zero-offset chunk.
+                0,
                 &bad_row)
         if bad:
             raise QuestDBError(
@@ -5179,6 +5192,27 @@ cdef int _geohash_override_dtype(col_source_t source) noexcept:
     return -1
 
 
+cdef int _geohash_dtype_max_bits(int gh) noexcept:
+    """The widest precision a GEOHASH slot of this width can hold.
+
+    The encoder writes the low ``ceil(bits/8)`` bytes out of the slot,
+    so a precision past the slot's own width is a claim the column
+    cannot carry. These are `qwp_numpy_dtype`'s own caps, which the
+    native writer holds the column to a second time; the Arrow path
+    states the same four numbers against Arrow types in
+    `_attrs_override_fits`.
+    """
+    if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i8:
+        return 8
+    if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i16:
+        return 16
+    if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i32:
+        return 32
+    if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i64:
+        return 60
+    return -1
+
+
 cdef object _dataframe_normalize_nullable(object df):
     if not _is_pandas_dataframe_object(df):
         return df
@@ -5490,7 +5524,17 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
         elif kind == 'geohash':
             gh = _geohash_override_dtype(col.setup.source)
             bits = meta.get('precision_bits') or 0
-            if gh != -1 and _is_int_not_bool(bits) and 1 <= bits <= 60:
+            # The precision is held to the column's own width, not just
+            # to 1..=60. A claim wider than the slot carrying it is one
+            # the column cannot express, and a claim that no longer
+            # fits is dropped -- the same silence the Arrow path
+            # answers one with, through `_attrs_override_fits`. Letting
+            # it through instead would leave the native writer to
+            # refuse the column mid-flush, with the connection already
+            # open and a message naming neither the column nor the
+            # claim.
+            if (gh != -1 and _is_int_not_bool(bits)
+                    and 1 <= bits <= _geohash_dtype_max_bits(gh)):
                 col.setup.has_override = True
                 col.setup.override_dtype = <qwp_numpy_dtype>gh
                 col.setup.override_geohash_bits = <uint8_t>bits
@@ -5911,7 +5955,7 @@ def _bench_dataframe_flush_arrow_batch(
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
                     False, 0, &c_schema, NULL, 0, &any_flushed,
-                    &deferred_since_sync, &committed_prefix)
+                    &deferred_since_sync, &committed_prefix, 0)
             if any_flushed:
                 _dataframe_columnar_sync(conn)
             completed = iterations
@@ -6102,6 +6146,235 @@ cdef void_int _reject_polars_object_columns(object frame) except -1:
     return 0
 
 
+cdef const char* _ARROW_MD_KEY_COLUMN_TYPE = "questdb.column_type"
+cdef size_t _ARROW_MD_KEY_COLUMN_TYPE_LEN = 19
+cdef const char* _ARROW_MD_KEY_GEOHASH_BITS = "questdb.geohash_bits"
+cdef size_t _ARROW_MD_KEY_GEOHASH_BITS_LEN = 20
+cdef const char* _ARROW_MD_VALUE_GEOHASH = "geohash"
+cdef const char* _ARROW_FMT_INT64 = "l"
+# `questdb.geohash_bits` is written as decimal digits.
+cdef char _ASCII_ZERO = 48
+cdef char _ASCII_NINE = 57
+
+
+cdef bint _arrow_md_lookup(
+        const char* metadata,
+        const char* key,
+        size_t key_len,
+        const char** value_out,
+        int32_t* value_len_out) noexcept nogil:
+    """One value out of an ``ArrowSchema`` metadata blob.
+
+    The blob is the Arrow C data interface's packed form: a pair count,
+    then each key and each value as a length followed by its bytes.
+    None of those lengths is aligned, so each is copied out rather than
+    read through a cast.
+    """
+    cdef int32_t n_pairs = 0
+    cdef int32_t pair
+    cdef int32_t len_bytes = 0
+    cdef const char* pos = metadata
+    if metadata == NULL:
+        return False
+    memcpy(&n_pairs, pos, 4)
+    pos += 4
+    for pair in range(n_pairs):
+        memcpy(&len_bytes, pos, 4)
+        pos += 4
+        if len_bytes < 0:
+            return False
+        if (<size_t>len_bytes == key_len
+                and strncmp(pos, key, key_len) == 0):
+            pos += len_bytes
+            memcpy(&len_bytes, pos, 4)
+            pos += 4
+            if len_bytes < 0:
+                return False
+            value_out[0] = pos
+            value_len_out[0] = len_bytes
+            return True
+        pos += len_bytes
+        memcpy(&len_bytes, pos, 4)
+        pos += 4
+        if len_bytes < 0:
+            return False
+        pos += len_bytes
+    return False
+
+
+cdef int _arrow_md_geohash_bits(
+        const char* value, int32_t value_len) noexcept nogil:
+    """A ``questdb.geohash_bits`` value as an int, or -1 where it is not
+    a bare number in 1..=60. The native importer rejects the malformed
+    spellings with a message of its own; this only decides whether
+    there is a precision here to hold the values to."""
+    cdef int32_t i
+    cdef int out = 0
+    cdef char ch
+    if value_len < 1 or value_len > 2:
+        return -1
+    for i in range(value_len):
+        ch = value[i]
+        if ch < _ASCII_ZERO or ch > _ASCII_NINE:
+            return -1
+        out = out * 10 + <int>(ch - _ASCII_ZERO)
+    if out < 1 or out > 60:
+        return -1
+    return out
+
+
+cdef int _arrow_column_geohash_bits(
+        const ArrowSchema* field,
+        const qwp_arrow_override* overrides,
+        size_t overrides_len) noexcept nogil:
+    """The GEOHASH precision this column goes out at, or -1 where it is
+    not a GEOHASH column.
+
+    An override wins over the field's own metadata, and an override
+    naming some other type takes the column out of GEOHASH altogether
+    -- the precedence ``qwp_arrow_override`` documents.
+    """
+    cdef size_t i
+    cdef const char* value = NULL
+    cdef int32_t value_len = 0
+    cdef size_t name_len
+    if field.name != NULL:
+        name_len = strlen(field.name)
+        for i in range(overrides_len):
+            if (overrides[i].column == NULL
+                    or overrides[i].column_len != name_len
+                    or strncmp(overrides[i].column, field.name,
+                               name_len) != 0):
+                continue
+            if overrides[i].kind == <uint32_t>qwp_arrow_override_geohash:
+                return <int>overrides[i].arg
+            return -1
+    if not _arrow_md_lookup(
+            field.metadata, _ARROW_MD_KEY_COLUMN_TYPE,
+            _ARROW_MD_KEY_COLUMN_TYPE_LEN, &value, &value_len):
+        return -1
+    # The native importer reads any `geohash`-prefixed spelling as the
+    # kind, so the prefix is what claims the column here too.
+    if value_len < 7 or strncmp(value, _ARROW_MD_VALUE_GEOHASH, 7) != 0:
+        return -1
+    if not _arrow_md_lookup(
+            field.metadata, _ARROW_MD_KEY_GEOHASH_BITS,
+            _ARROW_MD_KEY_GEOHASH_BITS_LEN, &value, &value_len):
+        return -1
+    return _arrow_md_geohash_bits(value, value_len)
+
+
+cdef int _arrow_signed_int_width(const char* fmt) noexcept nogil:
+    """The byte width of a signed Arrow integer format, or 0 for
+    anything else. GEOHASH rides only on the signed widths, so an
+    unsigned or non-integer column is the native importer's to refuse.
+    """
+    if fmt == NULL:
+        return 0
+    # Compared with the terminator, so a one-character format matches
+    # exactly and a wider one that merely starts with it does not.
+    if strncmp(fmt, _ARROW_FMT_INT8, 2) == 0:
+        return 1
+    if strncmp(fmt, _ARROW_FMT_INT16, 2) == 0:
+        return 2
+    if strncmp(fmt, _ARROW_FMT_INT32, 2) == 0:
+        return 4
+    if strncmp(fmt, _ARROW_FMT_INT64, 2) == 0:
+        return 8
+    return 0
+
+
+cdef void_int _arrow_batch_check_geohash_ranges(
+        const ArrowArray* batch,
+        const ArrowSchema* schema,
+        const qwp_arrow_override* overrides,
+        size_t overrides_len,
+        size_t row_base) except -1:
+    """Refuse a GEOHASH value the claimed precision cannot hold.
+
+    A GEOHASH column keeps only the claimed low bits, and the high bits
+    are the coarse position, so a value that does not fit reaches the
+    database as a valid geohash for somewhere else entirely. The wire
+    encoder writes the low ``ceil(bits/8)`` bytes of whatever it is
+    handed and reports nothing, so the value has to be turned away on
+    this side.
+
+    Every batch this path sends passes through here -- pandas, polars,
+    ``pa.Table``, ``pa.RecordBatch`` and one-shot streams alike, sliced
+    or whole -- so there is one rule and one place that applies it. The
+    scan is a linear pass over the claimed columns only, and a frame
+    that claims no GEOHASH pays one pointer test per column.
+
+    ``row_base`` is the number of rows of this frame already sent, so
+    the row named is the caller's own rather than its position inside a
+    batch they never chose.
+    """
+    cdef int64_t child_index
+    cdef const ArrowSchema* field
+    cdef const ArrowArray* col
+    cdef int bits
+    cdef int elem_size
+    cdef int64_t max_value
+    cdef const void* data
+    cdef const uint8_t* validity
+    cdef size_t bad_row = 0
+    cdef bint bad = False
+    cdef str col_name
+    if batch.length == 0 or schema.n_children == 0:
+        return 0
+    if batch.n_children != schema.n_children or batch.children == NULL:
+        return 0
+    # A struct-level offset would shift every child, and producers do
+    # not set one on a record batch: the columns carry their own. Rather
+    # than guess which reading a producer meant, leave such a batch to
+    # the importer instead of scanning at the wrong place.
+    if batch.offset != 0:
+        return 0
+    for child_index in range(schema.n_children):
+        field = schema.children[child_index]
+        col = batch.children[child_index]
+        if field == NULL or col == NULL:
+            continue
+        bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
+        if bits < 0:
+            continue
+        elem_size = _arrow_signed_int_width(field.format)
+        if elem_size == 0:
+            continue
+        if (col.n_buffers < 2 or col.buffers == NULL
+                or col.length < batch.length):
+            continue
+        data = col.buffers[1]
+        if data == NULL:
+            continue
+        validity = NULL
+        if col.null_count != 0:
+            validity = <const uint8_t*>col.buffers[0]
+            if validity == NULL:
+                continue
+        max_value = (<int64_t>1 << bits) - 1
+        with nogil:
+            bad = _dataframe_columnar_geohash_scan(
+                data,
+                validity,
+                <size_t>elem_size,
+                True,
+                <size_t>batch.length,
+                max_value,
+                <size_t>col.offset,
+                &bad_row)
+        if bad:
+            col_name = (
+                field.name.decode('utf-8', 'replace')
+                if field.name != NULL else '?')
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {col_name!r} at row {row_base + bad_row}: '
+                f'GEOHASH({bits}b) values must be in the range '
+                f'0 .. {max_value}.')
+    return 0
+
+
 cdef void_int _capsule_consume_stream(
         qwp_direct_sender* conn,
         object stream_owner,
@@ -6114,7 +6387,8 @@ cdef void_int _capsule_consume_stream(
         size_t c_overrides_len,
         bint* any_flushed,
         size_t* deferred_since_sync,
-        bint* committed_prefix) except -1:
+        bint* committed_prefix,
+        size_t row_base) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
     # call (this function populates it via get_schema), reused as-is on
     # subsequent calls (Arrow C Data Interface guarantees slices of the
@@ -6157,6 +6431,11 @@ cdef void_int _capsule_consume_stream(
         if batch.release == NULL:
             break
         try:
+            # Before the flush: a value the claimed GEOHASH precision
+            # cannot hold is truncated by the encoder without a word,
+            # so it has to be caught while it is still on this side.
+            _arrow_batch_check_geohash_ranges(
+                &batch, c_schema, c_overrides, c_overrides_len, row_base)
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)
                 committed_prefix[0] = True
@@ -6169,6 +6448,7 @@ cdef void_int _capsule_consume_stream(
                 deferred_since_sync)
             any_flushed[0] = True
             deferred_since_sync[0] += 1
+            row_base += <size_t>batch.length
         finally:
             if batch.release != NULL:
                 batch.release(&batch)
@@ -6647,65 +6927,6 @@ cdef bint _attrs_override_fits(
     return False
 
 
-cdef void_int _capsule_check_geohash_ranges(
-        object frame, object overrides) except -1:
-    """Refuse a claimed GEOHASH value that its precision cannot hold.
-
-    The Arrow path hands the column to the native importer whole, so
-    there is no per-value walk to check as it goes. pyarrow's own
-    min/max does it in one vectorised pass that skips nulls, and the
-    offending row is located only once a violation is known, so the
-    common case pays a single scan of one column.
-
-    Takes the merged override list, so every GEOHASH claim that
-    reaches the wire is checked whichever of the three sources stated
-    it, and a claim that lost the merge is not. A
-    `questdb.column_type` on an Arrow field is the caller stating the
-    type to the native importer directly, and is that importer's to
-    validate.
-    """
-    cdef object name_bytes, name, column, bounds, low, high, compute, mask
-    cdef int kind_int, arg_int
-    cdef int64_t max_value
-    if not overrides:
-        return 0
-    if not _is_pandas_dataframe_object(frame):
-        return 0
-    if not _dataframe_try_import_pyarrow():
-        return 0
-    compute = _PYARROW.compute
-    for name_bytes, kind_int, arg_int in overrides:
-        if kind_int != <int>qwp_arrow_override_geohash:
-            continue
-        max_value = (<int64_t>1 << arg_int) - 1
-        name = name_bytes.decode('utf-8')
-        try:
-            column = _PYARROW.array(frame[name])
-        except Exception:
-            continue
-        if not _PYARROW.types.is_integer(column.type):
-            # A GEOHASH override applies to an integer column only, and
-            # the native importer names the mismatch on any other type.
-            continue
-        bounds = compute.min_max(column).as_py()
-        low = bounds.get('min')
-        high = bounds.get('max')
-        if low is None and high is None:
-            continue
-        if (low is None or low >= 0) and (high is None or high <= max_value):
-            continue
-        mask = compute.or_(
-            compute.less(column, 0),
-            compute.greater(column, max_value))
-        raise QuestDBError(
-            QuestDBErrorCode.BadDataFrame,
-            f'Bad column {name!r} at row '
-            f'{compute.index(mask, True).as_py()}: '
-            f'GEOHASH({arg_int}b) values must be in the range '
-            f'0 .. {max_value}.')
-    return 0
-
-
 cdef object _capsule_roundtrip_overrides(object frame):
     """Arrow overrides rebuilt from the `df.attrs['questdb']` metadata
     that `QueryResult.to_pandas()` attaches.
@@ -6990,9 +7211,6 @@ cdef bint _dataframe_client_try_capsule_path(
     roundtrip_overrides = _capsule_roundtrip_overrides(sliceable)
     merged_overrides = _merge_capsule_overrides(
         roundtrip_overrides, merged_overrides)
-    # After the merge, so a claim that lost to `symbols` or
-    # `schema_overrides` has no say in whether the write goes through.
-    _capsule_check_geohash_ranges(sliceable, merged_overrides)
 
     can_slice = (total_rows >= 0) and (
         hasattr(sliceable, 'slice')
@@ -7036,7 +7254,7 @@ cdef bint _dataframe_client_try_capsule_path(
                     at_scalar_set, at_scalar_nanos,
                     &c_schema, c_overrides, c_overrides_len,
                     &any_flushed, &deferred_since_sync,
-                    committed_prefix, max_rows_per_batch, False)
+                    committed_prefix, max_rows_per_batch, False, 0)
             else:
                 offset = 0
                 while offset < total_rows:
@@ -7050,7 +7268,8 @@ cdef bint _dataframe_client_try_capsule_path(
                         at_scalar_set, at_scalar_nanos,
                         &c_schema, c_overrides, c_overrides_len,
                         &any_flushed, &deferred_since_sync,
-                        committed_prefix, max_rows_per_batch, True)
+                        committed_prefix, max_rows_per_batch, True,
+                        <size_t>offset)
                     offset += chunk_rows
             if any_flushed:
                 _dataframe_columnar_sync(conn)
@@ -7316,14 +7535,15 @@ cdef void_int _capsule_consume_stream_with_hint(
         size_t* deferred_since_sync,
         bint* committed_prefix,
         size_t max_rows_per_batch,
-        bint can_slice) except -1:
+        bint can_slice,
+        size_t row_base) except -1:
     cdef str hint
     try:
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr,
             at_scalar_set, at_scalar_nanos, c_schema,
             c_overrides, c_overrides_len, any_flushed,
-            deferred_since_sync, committed_prefix)
+            deferred_since_sync, committed_prefix, row_base)
     except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
             if exc.code == QuestDBErrorCode.BatchTooLarge:
@@ -7931,12 +8151,17 @@ cdef class QuestDB:
         value the type cannot hold — an integer past ``2**32-1`` under
         ``ipv4``, a cell that is not exactly 16 or 32 bytes under
         ``uuid`` or ``long256`` — is refused rather than written into a
-        column of the claimed type. A ``geohash`` value wider than its
-        ``precision_bits`` is refused on every shape, Arrow-backed
-        columns included: a GEOHASH column keeps only the claimed low
-        bits, and the high bits are the coarse position, so a wider
-        value would reach the database as a valid geohash for somewhere
-        else entirely.
+        column of the claimed type. A GEOHASH value wider than the
+        precision it is written at is refused whichever route named the
+        type — ``schema_overrides``, a ``df.attrs['questdb']`` claim, or
+        ``questdb.column_type=geohash`` field metadata — and on every
+        input shape, pandas, polars, ``pa.Table``, ``pa.RecordBatch``
+        and a one-shot ``RecordBatchReader`` alike: a GEOHASH column
+        keeps only the claimed low bits, and the high bits are the
+        coarse position, so a wider value would reach the database as a
+        valid geohash for somewhere else entirely. The values are
+        checked batch by batch on their way out, so none that does not
+        fit reaches the wire.
 
         A column of nothing but nulls names no type of its own, and
         without a claim it is left out of the write and out of the

@@ -3770,6 +3770,216 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_claim_wider_than_the_column_is_dropped(self):
+        # A precision the column's own width cannot hold is a claim
+        # that no longer fits, and a claim that no longer fits is
+        # dropped rather than carried to the wire. Both planners have
+        # to answer that the same way: the same frame differing only in
+        # dtype backend cannot land as GEOHASH on one and as a plain
+        # integer -- or a mid-flush error -- on the other.
+        widths = (
+            (pyarrow.int8(), 8),
+            (pyarrow.int16(), 16),
+            (pyarrow.int32(), 32),
+            (pyarrow.int64(), 60))
+        for ty, cap in widths:
+            for bits, fits in ((cap, True), (cap + 1, False)):
+                if bits > 60:
+                    continue
+                seen = {}
+                for mixed in (False, True):
+                    planner = 'numpy' if mixed else 'arrow'
+                    with self.subTest(width=str(ty), bits=bits,
+                                      planner=planner):
+                        # `[0, 1]` sits inside every precision here, so
+                        # the only thing under test is the claim.
+                        seen[planner] = self._dataframe_column_types(
+                            self._geohash_frame(
+                                [0, 1], pd.ArrowDtype(ty), bits=bits,
+                                mixed=mixed),
+                            table_name='geo_claim_width', at='ts')['gh']
+                        if fits:
+                            self.assertEqual(seen[planner], 0x0E)
+                        else:
+                            self.assertNotEqual(seen[planner], 0x0E)
+                self.assertEqual(
+                    seen['arrow'], seen['numpy'],
+                    f'the two planners disagree on a {ty} column '
+                    f'claimed at {bits} bits')
+
+    def _geohash_arrow_table(self, values, bits=None, ty=None):
+        """A GEOHASH frame as a `pa.Table`, claiming the type through
+        Arrow field metadata when `bits` is given."""
+        md = None
+        if bits is not None:
+            md = {b'questdb.column_type': b'geohash',
+                  b'questdb.geohash_bits': str(bits).encode()}
+        stamp = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
+        ty = ty or pyarrow.int32()
+        schema = pyarrow.schema([
+            pyarrow.field('gh', ty, metadata=md),
+            pyarrow.field('ts', pyarrow.timestamp('us', 'UTC'))])
+        return pyarrow.table(
+            [pyarrow.array(values, ty),
+             pyarrow.array([stamp] * len(values),
+                           pyarrow.timestamp('us', 'UTC'))],
+            schema=schema)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_covers_every_input_shape(self):
+        # A GEOHASH column keeps only the claimed low bits, and the
+        # high bits are the coarse position, so a value that does not
+        # fit reaches the database as a valid geohash for somewhere
+        # else. The encoder writes the low bytes of whatever it is
+        # handed and reports nothing, so every shape the columnar path
+        # accepts has to be held to the precision on this side --
+        # not just the pandas one.
+        bad = [1000]
+        good = [7]
+        shapes = [('pyarrow Table', self._geohash_arrow_table)]
+        if pd is not None:
+            shapes.append(
+                ('pandas ArrowDtype',
+                 lambda values: self._geohash_frame(
+                     values, pd.ArrowDtype(pyarrow.int32()), bits=5)))
+        try:
+            import polars as pl
+        except ImportError:
+            pl = None
+        if pl is not None:
+            def as_polars(values):
+                return pl.from_arrow(self._geohash_arrow_table(values))
+            shapes.append(('polars DataFrame', as_polars))
+        for label, build in shapes:
+            with self.subTest(shape=label):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r"Bad column 'gh' at row 0: "
+                        r'GEOHASH\(5b\) values must be in the range '
+                        r'0 \.\. 31'):
+                    self._dataframe_wire_payload(
+                        build(bad), table_name='geo_shapes', at='ts',
+                        schema_overrides={'gh': ('geohash', 5)})
+                # The same shape carrying a value that fits still goes.
+                self._dataframe_wire_payload(
+                    build(good), table_name='geo_shapes', at='ts',
+                    schema_overrides={'gh': ('geohash', 5)})
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_reads_arrow_field_metadata(self):
+        # `questdb.column_type=geohash` on the field claims the type
+        # without any `schema_overrides`, and the values behind that
+        # claim are held to its precision the same way.
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 0: "
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_wire_payload(
+                self._geohash_arrow_table([1000], bits=5),
+                table_name='geo_md', at='ts')
+        self._dataframe_wire_payload(
+            self._geohash_arrow_table([7], bits=5),
+            table_name='geo_md', at='ts')
+        # An override outranks the field metadata, so the precision
+        # checked is the one actually being written.
+        self._dataframe_wire_payload(
+            self._geohash_arrow_table([1000], bits=5),
+            table_name='geo_md', at='ts',
+            schema_overrides={'gh': ('geohash', 20)})
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_names_the_row_across_batches(self):
+        # The check runs per batch, so the row it names has to be the
+        # caller's own rather than its position inside a batch they
+        # never chose.
+        values = [7] * 2500 + [1000] + [7] * 10
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 2500: "
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_wire_payload(
+                self._geohash_arrow_table(values),
+                table_name='geo_batched', at='ts',
+                max_rows_per_batch=1000,
+                schema_overrides={'gh': ('geohash', 5)})
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_covers_a_one_shot_stream(self):
+        # A `RecordBatchReader` cannot be scanned ahead of time and
+        # cannot be replayed, so the only place its values can be held
+        # to the claim is on the way past, batch by batch.
+        def reader(values):
+            table = self._geohash_arrow_table(values)
+            return pyarrow.RecordBatchReader.from_batches(
+                table.schema, table.to_batches(max_chunksize=500))
+
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 1200: "
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_wire_payload(
+                reader([7] * 1200 + [1000] + [7] * 50),
+                table_name='geo_stream', at='ts',
+                schema_overrides={'gh': ('geohash', 5)})
+        self._dataframe_wire_payload(
+            reader([7] * 1300), table_name='geo_stream', at='ts',
+            schema_overrides={'gh': ('geohash', 5)})
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_skips_nulls_and_allows_the_edges(self):
+        # A null slot carries no value to be out of range, and both
+        # ends of the claimed range are legal.
+        for values in ([None, 7], [0], [31], [None, None], [0, 31, None]):
+            with self.subTest(values=values):
+                self._dataframe_wire_payload(
+                    self._geohash_arrow_table(values),
+                    table_name='geo_edges', at='ts',
+                    schema_overrides={'gh': ('geohash', 5)})
+        # A null ahead of the offending row does not shift the row it
+        # is reported at.
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 2: "
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_wire_payload(
+                self._geohash_arrow_table([None, 7, 99]),
+                table_name='geo_edges', at='ts',
+                schema_overrides={'gh': ('geohash', 5)})
+        # Negative values cannot be a geohash either.
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 0: "
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_wire_payload(
+                self._geohash_arrow_table([-1]),
+                table_name='geo_edges', at='ts',
+                schema_overrides={'gh': ('geohash', 5)})
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_spans_the_signed_widths(self):
+        # GEOHASH rides on the four signed integer widths, and each one
+        # is read at its own stride.
+        widths = (
+            (pyarrow.int8(), 5, 31),
+            (pyarrow.int16(), 12, (1 << 12) - 1),
+            (pyarrow.int32(), 20, (1 << 20) - 1),
+            (pyarrow.int64(), 60, (1 << 60) - 1))
+        for ty, bits, top in widths:
+            with self.subTest(width=str(ty)):
+                self._dataframe_wire_payload(
+                    self._geohash_arrow_table([0, top], ty=ty),
+                    table_name='geo_widths', at='ts',
+                    schema_overrides={'gh': ('geohash', bits)})
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        rf'GEOHASH\({bits}b\) values must be in the range'):
+                    self._dataframe_wire_payload(
+                        self._geohash_arrow_table([top, top - 1, -1], ty=ty),
+                        table_name='geo_widths', at='ts',
+                        schema_overrides={'gh': ('geohash', bits)})
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_roundtrip_claim_keeps_an_all_null_column(self):
         # A column of nothing but nulls names no type of its own, so
         # the planner skips it and the destination table is created
