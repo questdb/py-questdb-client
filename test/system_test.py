@@ -4550,16 +4550,14 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def tearDownClass(cls):
         TestWithDatabase.tearDownClass.__func__(cls)
 
-    def _require_qwp_ws(self):
-        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
-            self.skipTest(
-                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
-
-    def _require_qwp_row_types(self):
-        self._require_qwp_ws()
-        if self.qdb_plain.version < FIRST_QWP_ROW_TYPES_RELEASE:
-            self.skipTest(
-                'QWP-only column types require QuestDB 10+')
+    # Borrowed rather than restated, like `setUpClass` above. A second
+    # copy of `_require_qwp_row_types` is what
+    # `TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES` exists to catch: the copy
+    # skipped where the shared one fails, so the CI leg that pins a
+    # QuestDB 10 server to prove these tests ran passed while two of
+    # them quietly did not.
+    _require_qwp_ws = TestWithDatabase._require_qwp_ws
+    _require_qwp_row_types = TestWithDatabase._require_qwp_row_types
 
     def setUp(self):
         self._require_qwp_ws()
