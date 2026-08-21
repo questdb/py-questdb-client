@@ -78,7 +78,7 @@ from cpython.datetime cimport (
 from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
-from cpython.object cimport PyObject
+from cpython.object cimport PyObject, PyTypeObject, PyObject_TypeCheck
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
@@ -1683,7 +1683,7 @@ cdef class Buffer:
             self._column_numpy(c_name, value)
         elif isinstance(value, cp_datetime):
             self._column_dt(c_name, value)
-        elif isinstance(value, Decimal):
+        elif _is_decimal(value):
             self._column_decimal(c_name, value)
         else:
             self._column_qwp_only(c_name, name, value)

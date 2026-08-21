@@ -183,6 +183,7 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestNaTScalarDatetime
     from test_dataframe import TestColumnarPlanWithoutPyarrow
     from test_dataframe import TestDecimalWithoutCAccelerator
+    from test_dataframe import TestDecimalImpostorRefused
 elif pd is None:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):

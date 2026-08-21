@@ -28,6 +28,31 @@ if _PY_IMPL_NAME == 'cpython':
 else:
     _DECIMAL_IS_C = False
 
+
+# The type object behind `decimal.Decimal`, for reading an object's real
+# type through `Py_TYPE` rather than its `__class__`.
+cdef PyTypeObject* _DECIMAL_C_TYPE = <PyTypeObject*><PyObject*>Decimal
+
+
+cdef inline bint _is_decimal(object value) noexcept:
+    """Whether `value` really is a `decimal.Decimal`.
+
+    `isinstance` asks the object for its `__class__`, which any object
+    can set to whatever it likes, and `decimal_pyobj_to_binary` goes on
+    to read the object's raw memory with CPython's `Decimal` struct
+    layout: it takes `mpd.len` limbs from the `mpd.data` pointer it
+    finds there. An object that merely claims to be a `Decimal` sends it
+    walking unrelated heap memory, which reaches the wire as a bogus
+    value or takes the interpreter down with a segfault. `Py_TYPE` is
+    the object's real type and nothing can forge it.
+
+    A genuine `Decimal` subclass still passes. A subclass lays its own
+    fields after the base struct, so the fields read here stay at the
+    offsets the layout expects.
+    """
+    return PyObject_TypeCheck(value, _DECIMAL_C_TYPE)
+
+
 # Auto-flush settings.
 # The individual `interval`, `row_count` and `byte_count`
 # settings are set to `-1` when disabled.
@@ -1775,7 +1800,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
                 col.setup.source = col_source_t.col_source_ipv4_pyobj
             elif isinstance(<object>obj, datetime.datetime):
                 col.setup.source = col_source_t.col_source_datetime_pyobj
-            elif isinstance(<object>obj, Decimal):
+            elif _is_decimal(<object>obj):
                 col.setup.source = col_source_t.col_source_decimal_pyobj
             else:
                 raise QuestDBError(
@@ -3108,7 +3133,7 @@ cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_colu
     cdef uint8_t[32] unscaled
     cdef int unscaled_length
 
-    if not isinstance(<object>value, Decimal):
+    if not _is_decimal(<object>value):
         raise ValueError(
             'Expected an object of type Decimal, got an object of type ' +
             _fqn(type(<object>value)) + '.')

@@ -3209,16 +3209,116 @@ print('OK')
         self._run_script(self._SCRIPT)
 
     def _run_script(self, script):
-        env = dict(os.environ)
-        env['PYTHONPATH'] = os.pathsep.join(
-            [str(pathlib.Path(qi.__file__).parent.parent)]
-            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
-        env['PYTHONWARNINGS'] = 'ignore'
-        result = subprocess.run(
-            [sys.executable, '-c', script],
-            capture_output=True, text=True, env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('OK', result.stdout)
+        _run_decimal_script(self, script)
+
+
+def _run_decimal_script(case, script):
+    """Run `script` in a fresh interpreter and require it to print OK.
+
+    A subprocess rather than this one: the behaviour under test is a
+    guard in front of code that reads an object's raw memory, so a
+    regression takes the interpreter down. In a child that reads as a
+    failed assertion on the return code instead of killing the suite.
+    """
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(
+        [str(pathlib.Path(qi.__file__).parent.parent)]
+        + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+    env['PYTHONWARNINGS'] = 'ignore'
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        capture_output=True, text=True, env=env)
+    case.assertEqual(result.returncode, 0, result.stderr)
+    case.assertIn('OK', result.stdout)
+
+
+class TestDecimalImpostorRefused(unittest.TestCase):
+    """An object that only claims to be a `Decimal` must be turned away.
+
+    `isinstance` asks an object for its `__class__`, which any object can
+    set to whatever it likes, so it cannot gate code that reads the
+    object's raw memory with CPython's `Decimal` struct layout. Fed an
+    impostor, that code takes `mpd.len` limbs from whatever the
+    `mpd.data` slot happens to hold: a short object segfaults the
+    interpreter with no traceback, and a longer one reads unrelated heap
+    memory into the mantissa -- a heap address once arrived as
+    ``Decimal exponent 4416345488 exceeds the maximum supported value of
+    76``.
+    """
+
+    _IMPOSTOR_SCRIPT = """
+from decimal import Decimal
+import questdb.ingress as qi
+import pandas as pd
+
+class SlotlessImpostor:
+    # No slots and no dict: the shortest object that can claim to be a
+    # `Decimal`, and the one the encoder used to walk off the end of.
+    __slots__ = ()
+    __class__ = Decimal
+
+class PaddedImpostor:
+    __slots__ = tuple('s%d' % i for i in range(8))
+    __class__ = Decimal
+
+for impostor in (SlotlessImpostor(), PaddedImpostor()):
+    buf = qi.Buffer._new_qwp()
+    try:
+        buf.row('t', columns={'d': impostor}, at=qi.ServerTimestamp)
+    except TypeError as te:
+        message = str(te)
+        assert 'Impostor' in message, message
+        assert 'decimal.Decimal' in message, message
+    else:
+        raise AssertionError('an object claiming to be a Decimal was accepted')
+
+frame = pd.DataFrame({
+    'd': pd.array([SlotlessImpostor()], dtype=object),
+    'ts': pd.to_datetime(['2025-01-01']),
+})
+buf = qi.Buffer._new_qwp()
+try:
+    buf.dataframe(frame, table_name='t', at='ts')
+except qi.QuestDBError as qe:
+    message = str(qe)
+    assert 'Unsupported object column' in message, message
+    assert 'Impostor' in message, message
+else:
+    raise AssertionError('an object claiming to be a Decimal was accepted')
+print('OK')
+"""
+
+    def test_an_object_claiming_to_be_a_decimal_is_refused(self):
+        # The error names the object's real type, on both the row path
+        # and the object-column sniffer.
+        _run_decimal_script(self, self._IMPOSTOR_SCRIPT)
+
+    def test_a_real_decimal_subclass_is_still_accepted(self):
+        """The check reads `Py_TYPE` and admits subtypes, so a genuine
+        `Decimal` subclass still works. Its own fields sit after the base
+        struct, leaving the ones the encoder reads where it expects."""
+        class MyDecimal(Decimal):
+            pass
+
+        plain = qi.Buffer._new_qwp()
+        plain.row('t', columns={'d': Decimal('-12.345')},
+                  at=qi.ServerTimestamp)
+        subclassed = qi.Buffer._new_qwp()
+        subclassed.row('t', columns={'d': MyDecimal('-12.345')},
+                       at=qi.ServerTimestamp)
+        self.assertEqual(bytes(plain), bytes(subclassed))
+
+        frame = pd.DataFrame({
+            'd': pd.array([MyDecimal('-12.345')], dtype=object),
+            'ts': pd.to_datetime(['2025-01-01']),
+        })
+        base = frame.copy()
+        base['d'] = pd.array([Decimal('-12.345')], dtype=object)
+        from_subclass = qi.Buffer._new_qwp()
+        from_subclass.dataframe(frame, table_name='t', at='ts')
+        from_base = qi.Buffer._new_qwp()
+        from_base.dataframe(base, table_name='t', at='ts')
+        self.assertEqual(bytes(from_subclass), bytes(from_base))
 
 
 if __name__ == '__main__':

@@ -139,6 +139,20 @@ Changelog
   valid geohash for somewhere else entirely, with nothing said. This is
   the one claimed type whose range is narrower than the integer carrying
   it; IPV4 and CHAR fill their storage width exactly.
+- An object that only claims to be a ``decimal.Decimal`` is now refused
+  instead of being read as one. DECIMAL cells are encoded by reading the
+  object's raw memory with CPython's ``Decimal`` struct layout, and the
+  check in front of that was ``isinstance``, which asks the object for its
+  ``__class__`` and believes the answer. An object setting
+  ``__class__ = Decimal`` therefore sent the encoder walking whatever its
+  ``mpd.data`` slot happened to hold: a short one crashed the interpreter
+  with no traceback, and a longer one read unrelated heap memory into the
+  mantissa, once surfacing a heap address as ``Decimal exponent
+  4416345488 exceeds the maximum supported value of 76``. The check now
+  reads the object's real type, which nothing can forge, and raises
+  ``TypeError`` naming it. A genuine ``Decimal`` subclass is still
+  accepted: it lays its own fields after the base struct, leaving the
+  ones the encoder reads where it expects them.
 - An ``int`` too wide for a 64-bit LONG column now says so on a QWP sender.
   ``row()`` raises ``OverflowError`` naming
   :class:`Long256 <questdb.Long256>`, the wrapper that sends a 256-bit
