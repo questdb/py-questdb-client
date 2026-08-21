@@ -5257,37 +5257,62 @@ cdef object _dataframe_normalize_at_timestamp(object df, object at):
     return out
 
 
-cdef bint _claimed_arrow_col_needs_reshape(
-        object types, object raw_ty, object ty, str kind) except -1:
-    """Whether an Arrow-backed claimed column has to become object dtype
-    for the manual planner to honour its claim.
+cdef object _claimed_arrow_col_reshape_dtype(
+        object types, object raw_ty, object ty, str kind):
+    """The dtype an Arrow-backed claimed column has to be copied to for
+    the manual planner to honour its claim, or None where the column
+    carries it as it stands.
 
     A claim reaches the wire as the NumPy dtype named in the append
     call, so it only lands on columns the planner sends as raw buffers.
     A column handed to the native Arrow importer instead carries no type
     hint, and `qwp_chunk_append_arrow_column` takes no per-column type
     override, so those are the ones that need reshaping.
+
+    The matching NumPy width is the copy to make where the claim has
+    one: it keeps the column a raw buffer and costs a memcpy, where
+    object dtype costs a boxed Python int per row -- about 100 times
+    more for a column of any size. The caller downgrades a NumPy width
+    to object for a column holding a null, which a NumPy integer dtype
+    cannot express.
+
+    `_attrs_override_fits` has already held each kind to the Arrow
+    types listed here, so the widths not named are the ones it rejects.
     """
     if kind == 'ipv4':
-        # uint32 resolves to the i64 target and goes out as a raw buffer.
-        return not types.is_uint32(ty)
+        # uint32 resolves to the i64 target and goes out as a raw
+        # buffer, claim and all.
+        return None
     if kind == 'geohash':
         # int64 does the same. int8/16/32 take the narrow BYTE/SHORT/INT
-        # targets, which reach the importer as Arrow arrays.
-        return not types.is_int64(ty)
+        # targets, which reach the importer as Arrow arrays; the same
+        # width in NumPy takes the i64 target and the raw-buffer route.
+        if types.is_int64(ty):
+            return None
+        if types.is_int8(ty):
+            return 'int8'
+        if types.is_int16(ty):
+            return 'int16'
+        return 'int32'
+    if kind == 'char':
+        # An Arrow uint16 column goes to the importer, which has no CHAR
+        # hint to read; NumPy uint16 takes the raw-buffer route.
+        return 'uint16'
     if kind == 'uuid':
         # A `pa.uuid()` column states its own type to the importer and
         # already lands as UUID. A bare 16-byte column is refused by the
         # planner outright, which reshaping avoids.
-        return not (isinstance(raw_ty, _PYARROW.lib.BaseExtensionType)
-                    and raw_ty.extension_name == _ARROW_EXT_UUID)
-    # CHAR (uint16) and LONG256 (32-byte fixed binary) have no
-    # buffer-shaped route on this path at all.
-    return True
+        if (isinstance(raw_ty, _PYARROW.lib.BaseExtensionType)
+                and raw_ty.extension_name == _ARROW_EXT_UUID):
+            return None
+        return object
+    # LONG256 is a 32-byte fixed binary, a width NumPy has no integer
+    # dtype for, so object is the only shape left.
+    return object
 
 
 cdef object _dataframe_normalize_claimed_arrow(object df):
-    """Object-dtype copies of the Arrow-backed columns whose round-trip
+    """NumPy-dtype copies of the Arrow-backed columns whose round-trip
     claim the manual planner cannot otherwise honour.
 
     A frame mixing Arrow-backed and NumPy columns routes whole to this
@@ -5296,10 +5321,14 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
     put it, so their claim would be dropped and the column would land as
     its storage type — IPV4, CHAR and GEOHASH as plain integers, UUID
     and LONG256 refused — auto-creating the destination table with the
-    wrong column types. Object dtype is the shape
-    `_dataframe_apply_roundtrip_overrides` already covers for every
-    claimed kind, and it is what `dtype_backend='numpy_nullable'` hands
-    these columns back as, so both backends write the same bytes again.
+    wrong column types.
+
+    An integer claim copies to the NumPy width that carries it, which
+    stays a raw buffer the whole way to the wire. UUID, LONG256, and any
+    column holding a null copy to object dtype instead: that is the
+    shape `_dataframe_apply_roundtrip_overrides` covers for every
+    claimed kind, and what `dtype_backend='numpy_nullable'` hands these
+    columns back as, so both backends write the same bytes again.
 
     Only a frame that already fell back from the zero-copy Arrow path
     reaches here, and within it only the claimed columns that have no
@@ -5307,6 +5336,7 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
     claim natively stay zero-copy.
     """
     cdef object cols_meta, arrow_dtype, types, dtype, raw_ty, ty, meta, out
+    cdef object target_dtype
     cdef str kind
     cdef list convert
     if not _is_pandas_dataframe_object(df):
@@ -5342,13 +5372,20 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
         if not _attrs_override_fits(
                 types, ty, kind, meta.get('precision_bits') or 0):
             continue
-        if _claimed_arrow_col_needs_reshape(types, raw_ty, ty, kind):
-            convert.append(pos)
+        target_dtype = _claimed_arrow_col_reshape_dtype(
+            types, raw_ty, ty, kind)
+        if target_dtype is None:
+            continue
+        if target_dtype is not object and df.iloc[:, pos].isna().any():
+            # A NumPy integer dtype has no null to copy a null into.
+            target_dtype = object
+        convert.append((pos, target_dtype))
     if not convert:
         return df
     out = df.copy(deep=False)
-    for pos in convert:
-        _dataframe_set_column(out, df, pos, df.iloc[:, pos].astype(object))
+    for pos, target_dtype in convert:
+        _dataframe_set_column(
+            out, df, pos, df.iloc[:, pos].astype(target_dtype))
     out.attrs = dict(df.attrs)
     return out
 

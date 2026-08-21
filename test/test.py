@@ -3821,6 +3821,53 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_reshaped_claimed_column_matches_the_arrow_path(self):
+        # A claimed Arrow column the manual planner cannot read as it
+        # stands is copied to the NumPy width that carries the claim,
+        # which stays a raw buffer; a column holding a null is copied to
+        # object dtype instead, since a NumPy integer dtype has no null.
+        # Both routes owe the same bytes the zero-copy Arrow path sends.
+        stamps = [
+            datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)] * 4
+        shapes = (
+            ('char', pyarrow.uint16(), {'kind': 'char'}, [65, 66, 67, 68]),
+            ('geohash int8', pyarrow.int8(),
+             {'kind': 'geohash', 'precision_bits': 5}, [1, 2, 3, 4]),
+            ('geohash int16', pyarrow.int16(),
+             {'kind': 'geohash', 'precision_bits': 12}, [1, 2, 3, 4]),
+            ('geohash int32', pyarrow.int32(),
+             {'kind': 'geohash', 'precision_bits': 20}, [1, 2, 3, 4]),
+        )
+        for label, arrow_type, meta, values in shapes:
+            for holds_null in (False, True):
+                with self.subTest(shape=label, holds_null=holds_null):
+                    cells = list(values)
+                    if holds_null:
+                        cells[1] = None
+
+                    def frame(ts_col):
+                        df = pd.DataFrame({
+                            'c': pd.array(
+                                cells, dtype=pd.ArrowDtype(arrow_type)),
+                            'ts': ts_col,
+                        })
+                        df.attrs['questdb'] = {
+                            'version': 1, 'columns': {'c': meta}}
+                        return df
+
+                    self.assertEqual(
+                        self._dataframe_wire_payload(
+                            # A NumPy timestamp column routes the frame
+                            # onto the manual planner.
+                            frame(pd.to_datetime(stamps)),
+                            table_name='attrs_round_trip', at='ts'),
+                        self._dataframe_wire_payload(
+                            frame(pd.array(stamps, dtype=pd.ArrowDtype(
+                                pyarrow.timestamp('us', 'UTC')))),
+                            table_name='attrs_round_trip', at='ts'))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_an_all_null_column_keeps_only_a_claim_it_can_carry(self):
         # The object and masked shapes reach the planner the same way,
         # and a claim it cannot use leaves the column where it found
