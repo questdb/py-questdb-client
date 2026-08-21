@@ -6583,8 +6583,10 @@ cdef void_int _capsule_check_geohash_ranges(
     offending row is located only once a violation is known, so the
     common case pays a single scan of one column.
 
-    Only claims that came off `df.attrs['questdb']` are checked here.
-    A `questdb.column_type` on an Arrow field is the caller stating the
+    Takes the merged override list, so every GEOHASH claim that
+    reaches the wire is checked whichever of the three sources stated
+    it, and a claim that lost the merge is not. A
+    `questdb.column_type` on an Arrow field is the caller stating the
     type to the native importer directly, and is that importer's to
     validate.
     """
@@ -6606,6 +6608,10 @@ cdef void_int _capsule_check_geohash_ranges(
         try:
             column = _PYARROW.array(frame[name])
         except Exception:
+            continue
+        if not _PYARROW.types.is_integer(column.type):
+            # A GEOHASH override applies to an integer column only, and
+            # the native importer names the mismatch on any other type.
             continue
         bounds = compute.min_max(column).as_py()
         low = bounds.get('min')
@@ -6908,9 +6914,11 @@ cdef bint _dataframe_client_try_capsule_path(
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
     roundtrip_overrides = _capsule_roundtrip_overrides(sliceable)
-    _capsule_check_geohash_ranges(sliceable, roundtrip_overrides)
     merged_overrides = _merge_capsule_overrides(
         roundtrip_overrides, merged_overrides)
+    # After the merge, so a claim that lost to `symbols` or
+    # `schema_overrides` has no say in whether the write goes through.
+    _capsule_check_geohash_ranges(sliceable, merged_overrides)
 
     can_slice = (total_rows >= 0) and (
         hasattr(sliceable, 'slice')

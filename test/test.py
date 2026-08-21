@@ -3740,6 +3740,36 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_schema_overrides_outrank_a_geohash_claim(self):
+        # The range check runs on the overrides that reach the wire, so
+        # the precision it holds a column to is the one being written.
+        # A claim that lost to `schema_overrides` has no say in whether
+        # the write goes through -- reading a wide GEOHASH column back
+        # and stating its real type is how a caller corrects a claim
+        # that no longer matches the data.
+        frame = self._geohash_frame(
+            [1000, 2000], pd.ArrowDtype(pyarrow.int32()), bits=5)
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_column_types(
+                frame, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(
+            self._dataframe_column_types(
+                frame, table_name='attrs_round_trip', at='ts',
+                schema_overrides={'gh': ('geohash', 32)})['gh'],
+            0x0E)
+        # The stated precision is checked in its own right.
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 1: "
+                r'GEOHASH\(10b\) values must be in the range 0 \.\. 1023'):
+            self._dataframe_column_types(
+                frame, table_name='attrs_round_trip', at='ts',
+                schema_overrides={'gh': ('geohash', 10)})
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_roundtrip_claim_on_a_mixed_frame_drops_a_retyped_column(self):
         # The claim recalls what the frame held when it was read, so a
         # column since retyped past what the claim can describe loses it
