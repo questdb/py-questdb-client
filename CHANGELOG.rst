@@ -164,6 +164,15 @@ Changelog
   re-reading ``schema.names`` and ``frame.dtypes`` once per column; at 1024
   columns the read pass drops from about 85 ms to 0.7 ms, and
   ``iter_pandas`` paid it per batch.
+- A streaming read now builds ``df.attrs['questdb']`` once for the whole
+  result rather than once per batch. One schema covers every batch of a
+  result, and the claim declines to be copied and cannot be edited, so
+  every batch can carry the same one. Building it walked the schema and
+  froze one entry per column: at 1024 columns that is 1.2 ms a batch on
+  the pyarrow-backed ``iter_pandas`` — 0.8 ms reading the Arrow fields
+  and 0.4 ms freezing — and about 0.5 ms a batch on the native numpy
+  one, so reading 10 million rows in 10,000-row batches spent about 1.2
+  seconds on nothing else. Both variants build it once now.
 - ``df.attrs['questdb']`` is now a mapping that declines to be copied and
   refuses to be edited in place. pandas deep-copies the whole of ``attrs``
   every time it propagates it — ``NDFrame.__finalize__`` does

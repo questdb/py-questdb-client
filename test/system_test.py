@@ -2521,6 +2521,62 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_iter_pandas_shares_one_round_trip_claim(self):
+        """Every batch of a streaming read carries the same claim
+        object. One schema covers the whole result, so building the
+        claim per batch re-walked the schema and re-froze one entry per
+        column every time -- 1.2 ms a batch at 1024 columns on the
+        pyarrow-backed variant, on the path a large result takes.
+        Handing every batch the same claim is sound for the reason
+        pandas can share one between copies of a frame: the claim
+        declines to be copied and cannot be edited.
+        """
+        rows = 1000
+        table_name = 't_egress_claim_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            # One-second steps rolled over via minutes keep every
+            # timestamp literal inside a single hour.
+            values = ', '.join(
+                f"('2024-01-01T00:{i // 60:02d}:{i % 60:02d}Z', "
+                f"'1.2.3.4', #u33d, {i})"
+                for i in range(rows))
+            self._exec(f'INSERT INTO {table_name} VALUES {values}')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT ip, gh, lg FROM {table_name}'
+            # Small batches so the stream really has several of them.
+            conf = self._conf() + 'max_batch_rows=128;'
+            for backend in (None, 'pyarrow', 'numpy_nullable'):
+                kwargs = {} if backend is None else {'dtype_backend': backend}
+                with self.subTest(dtype_backend=backend):
+                    with qi.QuestDB.from_conf(conf) as client:
+                        claims = [
+                            batch.attrs['questdb'] for batch
+                            in client.query(sql).iter_pandas(**kwargs)]
+                    self.assertGreater(len(claims), 1)
+                    for claim in claims[1:]:
+                        self.assertIs(claim, claims[0])
+
+                    columns = claims[0]['columns']
+                    self.assertEqual(columns['ip']['kind'], 'ipv4')
+                    self.assertEqual(columns['gh']['kind'], 'geohash')
+                    self.assertEqual(columns['gh']['precision_bits'], 20)
+                    self.assertEqual(columns['lg']['kind'], 'long')
+
+                    # The whole-result read says the same thing.
+                    with qi.QuestDB.from_conf(conf) as client:
+                        whole = client.query(sql).to_pandas(**kwargs)
+                    self.assertEqual(whole.attrs['questdb'], claims[0])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def _make_table(self, table_name, rows):
         self._exec(
             f'CREATE TABLE {table_name} '

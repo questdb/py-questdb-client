@@ -1760,10 +1760,36 @@ cdef object _symbol_from_codes(object pd, object arr, object dtype):
     return pd.Categorical.from_codes(arr, dtype=dtype)
 
 
+cdef object _numpy_roundtrip_claim(
+        list col_names, list col_kinds, list col_scales, list col_precision):
+    """The ``df.attrs['questdb']`` claim for a native (no pyarrow) result.
+
+    Built from the schema the first batch reported, which the whole
+    result shares, so a streaming read builds it once and hands the same
+    claim to every batch. That is sound for the same reason pandas can
+    share it between copies of one frame: the claim declines to be
+    copied and cannot be edited.
+    """
+    cdef size_t col_idx
+    cdef size_t n_cols = <size_t>len(col_names)
+    cdef dict columns_meta = {}
+    cdef dict entry
+    for col_idx in range(n_cols):
+        entry = {'kind': _KIND_NAMES.get(col_kinds[col_idx], 'unknown')}
+        if col_scales[col_idx] is not None:
+            entry['scale'] = col_scales[col_idx]
+        if col_precision[col_idx] is not None:
+            entry['precision_bits'] = col_precision[col_idx]
+        columns_meta[col_names[col_idx]] = entry
+    return _RoundtripClaim(
+        {'version': _ROUNDTRIP_META_VERSION, 'columns': columns_meta})
+
+
 cdef object _numpy_assemble_frame(
         list col_names, list col_kinds, list col_scales,
         list col_precision, list col_chunks, list symbol_categories,
-        object np, object pd, list col_masks, object symbol_dtype=None):
+        object np, object pd, list col_masks, object symbol_dtype=None,
+        object claim=None):
     cdef size_t n_cols = <size_t>len(col_names)
     cdef size_t col_idx
     cdef qwp_reader_column_kind kind
@@ -1792,16 +1818,10 @@ cdef object _numpy_assemble_frame(
     frame = pd.DataFrame(dict(enumerate(arrays)), copy=False)
     # Keep pandas 3 from inferring a pyarrow-backed StringDtype Index.
     frame.columns = pd.Index(col_names, dtype=object)
-    columns_meta = {}
-    for col_idx in range(n_cols):
-        entry = {'kind': _KIND_NAMES.get(col_kinds[col_idx], 'unknown')}
-        if col_scales[col_idx] is not None:
-            entry['scale'] = col_scales[col_idx]
-        if col_precision[col_idx] is not None:
-            entry['precision_bits'] = col_precision[col_idx]
-        columns_meta[col_names[col_idx]] = entry
-    frame.attrs['questdb'] = _RoundtripClaim(
-        {'version': _ROUNDTRIP_META_VERSION, 'columns': columns_meta})
+    frame.attrs['questdb'] = (
+        _numpy_roundtrip_claim(
+            col_names, col_kinds, col_scales, col_precision)
+        if claim is None else claim)
     return frame
 
 
@@ -2110,6 +2130,7 @@ cdef class _NumpyBatchIter:
     cdef list col_kinds
     cdef list col_scales
     cdef list col_precision
+    cdef object claim
     cdef bint first
     cdef bint has_symbol
     cdef bint done
@@ -2129,6 +2150,7 @@ cdef class _NumpyBatchIter:
         self.col_kinds = []
         self.col_scales = []
         self.col_precision = []
+        self.claim = None
         self.first = True
         self.has_symbol = False
         self.done = False
@@ -2180,6 +2202,7 @@ cdef class _NumpyBatchIter:
                     # from that stream.
                     self.seen_seq = self.handle._reset_seq
                     self.first = True
+                    self.claim = None
                     self.has_symbol = False
                     self.prev_dict_n = 0
                     self.symbol_categories = []
@@ -2195,6 +2218,9 @@ cdef class _NumpyBatchIter:
                     (self.col_names, self.col_kinds, self.col_scales,
                      self.col_precision, self.has_symbol) = \
                         _numpy_extract_meta(batch)
+                    self.claim = _numpy_roundtrip_claim(
+                        self.col_names, self.col_kinds,
+                        self.col_scales, self.col_precision)
                     self.first = False
                 n_cols = <size_t>len(self.col_names)
                 if self.has_symbol:
@@ -2219,7 +2245,8 @@ cdef class _NumpyBatchIter:
             frame = _numpy_assemble_frame(
                 self.col_names, self.col_kinds, self.col_scales,
                 self.col_precision, col_chunks, self.symbol_categories,
-                self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
+                self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype,
+                claim=self.claim)
         except:
             self.done = True
             self.handle._free()
@@ -2296,6 +2323,18 @@ cdef dict _arrow_roundtrip_columns_meta(object schema):
     return columns_meta
 
 
+cdef object _arrow_roundtrip_claim(object schema):
+    """The ``df.attrs['questdb']`` claim for an Arrow schema.
+
+    One schema covers every batch of a stream, and the claim declines to
+    be copied and cannot be edited, so a streaming read builds it once
+    and hands the same claim to every batch it yields.
+    """
+    return _RoundtripClaim(
+        {'version': _ROUNDTRIP_META_VERSION,
+         'columns': _arrow_roundtrip_columns_meta(schema)})
+
+
 cdef object _attach_arrow_roundtrip_attrs(object frame, object schema):
     """Carry the per-column QuestDB kinds into `df.attrs['questdb']`,
     matching what the native numpy path attaches.
@@ -2306,9 +2345,7 @@ cdef object _attach_arrow_roundtrip_attrs(object frame, object schema):
     IPV4 / CHAR / GEOHASH / UUID / LONG256 columns, which are otherwise
     indistinguishable from their storage types on the way back in.
     """
-    frame.attrs['questdb'] = _RoundtripClaim(
-        {'version': _ROUNDTRIP_META_VERSION,
-         'columns': _arrow_roundtrip_columns_meta(schema)})
+    frame.attrs['questdb'] = _arrow_roundtrip_claim(schema)
     return frame
 
 
@@ -2616,10 +2653,16 @@ class QueryResult:
         import pyarrow as pa
         kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
         reader = _build_record_batch_reader(self._take_cursor_handle())
+        # `_table_shared_symbol_dict` re-types SYMBOL columns but keeps
+        # every field's name and metadata, which is all the claim reads,
+        # so the stream's own schema gives the same answer for every
+        # batch.
+        claim = _arrow_roundtrip_claim(reader.schema)
         for batch in reader:
             table = _table_shared_symbol_dict(pa.Table.from_batches([batch]))
-            yield _attach_arrow_roundtrip_attrs(
-                table.to_pandas(**kwargs), table.schema)
+            frame = table.to_pandas(**kwargs)
+            frame.attrs['questdb'] = claim
+            yield frame
 
     def iter_polars(self):
         """Iterate result batches as ``polars.DataFrame``.
