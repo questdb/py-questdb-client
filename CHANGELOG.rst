@@ -169,17 +169,21 @@ Changelog
   every time it propagates it — ``NDFrame.__finalize__`` does
   ``self.attrs = deepcopy(other.attrs)`` — and that runs once per column
   while a frame is sliced or exported, so a per-column claim made those
-  passes quadratic in the column count. Exporting a 1024-column result to
-  Arrow took 934 ms, of which 950 ms across 1025 deep copies was the claim;
-  it now takes 32 ms against 26 ms for the same frame carrying no claim at
-  all. Declining to copy is sound only because the claim cannot be edited:
-  it records what each column held when it was read, so no two copies of a
+  passes quadratic in the column count. ``pyarrow.table(df)`` on a
+  1024-column frame took 730 ms, of which 710 ms across 1025 deep copies
+  was the claim; it now takes 26 ms, against 23 ms for the same frame
+  carrying no claim at all. Most of those copies are pandas' own — its
+  Arrow export reads the frame a column at a time — so the claim has to be
+  cheap to copy wherever the frame goes, not only inside this client.
+  Declining to copy is sound only because the claim cannot be edited: it
+  records what each column held when it was read, so no two copies of a
   frame have anything to disagree about. It is still a ``dict`` — it
   indexes, iterates, compares, pickles and serializes to JSON exactly as
   before, and a hand-written plain ``dict`` is read on the way in just the
-  same. To change what a frame claims, assign a new mapping to
-  ``df.attrs['questdb']``, or use ``schema_overrides`` / ``symbols``, which
-  outrank it.
+  same. To change what a frame claims, build a new mapping —
+  ``{**df.attrs['questdb']}`` unpacks the claim into an ordinary editable
+  ``dict`` — and assign it to ``df.attrs['questdb']``, or use
+  ``schema_overrides`` / ``symbols``, which outrank it.
 - DECIMAL values are now refused on interpreters where writing them would
   be undefined behaviour, rather than punned. The encoder reinterprets a
   ``decimal.Decimal``'s memory with the struct layout CPython's ``_decimal``

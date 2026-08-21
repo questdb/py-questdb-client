@@ -178,19 +178,25 @@ class _RoundtripClaim(dict):
     deepcopy(other.attrs)`` -- and that runs once per column while a
     frame is being exported or sliced. With a per-column claim the copy
     is itself the size of the frame, so the pass is quadratic in the
-    column count: exporting a 1024-column result to Arrow spent 950 ms
-    of its 1000 inside ``copy.deepcopy``.
+    column count: ``pyarrow.table(df)`` on a 1024-column frame spends
+    710 ms of its 730 ms inside ``copy.deepcopy``, against 26 ms once
+    the claim declines to copy and 23 ms for the same frame carrying no
+    claim at all. Most of those copies are pandas' own -- its Arrow
+    export reads the frame a column at a time -- so the claim has to be
+    cheap to copy wherever the frame goes, not only inside this client.
 
     Declining to copy is sound because the claim cannot be edited. It
     only recalls what each column held when it was read, so there is
     nothing two copies of a frame could legitimately disagree about,
-    and every mutating method raises rather than let one try.
+    and every way ``dict`` offers to change its contents raises here,
+    at every depth.
 
     It is still a ``dict``, so it indexes, iterates, compares and
-    serializes exactly like the plain mapping it replaces, and a
-    hand-written plain ``dict`` is read on the way in just the same. To
-    change what a frame claims, assign a new mapping to
-    ``df.attrs['questdb']``, or state the type outright with
+    serializes exactly like a plain mapping, and a hand-written plain
+    ``dict`` is read on the way in just the same. To change what a
+    frame claims, build a new mapping -- ``{**df.attrs['questdb']}``
+    unpacks the claim into an ordinary editable ``dict`` -- and assign
+    it to ``df.attrs['questdb']``, or state the type outright with
     ``schema_overrides`` / ``symbols``, which outrank the claim.
     """
     __slots__ = ()
@@ -219,12 +225,20 @@ class _RoundtripClaim(dict):
         raise TypeError(
             "df.attrs['questdb'] records what each column held when it "
             'was read and cannot be edited in place, because every copy '
-            'of the frame shares it. Assign a new mapping to '
-            "df.attrs['questdb'], or state the type outright with "
-            'schema_overrides / symbols, which outrank the claim.')
+            'of the frame shares it. Build a new mapping instead -- '
+            "{**df.attrs['questdb']} unpacks it into an ordinary dict "
+            "-- and assign that to df.attrs['questdb'], or state the "
+            'type outright with schema_overrides / symbols, which '
+            'outrank the claim.')
 
+    # Every method `dict` has that changes its contents. Blocking them
+    # one by one is what lets the claim be shared rather than copied,
+    # so the set has to be complete: the test walks `dir(dict)` and
+    # calls each name, which turns a missing entry here into a test
+    # failure rather than a claim that changes under a frame sharing it.
     __setitem__ = _immutable
     __delitem__ = _immutable
+    __ior__ = _immutable
     setdefault = _immutable
     pop = _immutable
     popitem = _immutable

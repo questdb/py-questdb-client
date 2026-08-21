@@ -3663,16 +3663,57 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     odd, table_name='attrs_stale', at='ts')
                 self.assertEqual(types['ip'], 0x05)
 
+    def _assert_nothing_can_edit(self, target):
+        """Every way `dict` offers to change a mapping, refused.
+
+        The names come from `dict` itself rather than from a list this
+        test keeps in step by hand: a ninth mutator in some future
+        Python shows up here as a failure instead of as a claim that
+        changes under every frame sharing it.
+        """
+        before = json.dumps(target, sort_keys=True)
+
+        # The statement forms, each of which reaches a different slot.
+        for label, edit in (
+                ("claim['x'] = 1", lambda t: t.__setitem__('x', 1)),
+                ("del claim['kind']", lambda t: t.__delitem__('kind')),
+                ("claim |= {...}", lambda t: t.__ior__({'x': 1})),
+                ('claim.update({...})', lambda t: t.update({'x': 1}))):
+            with self.subTest(edit=label):
+                with self.assertRaisesRegex(
+                        TypeError, 'cannot be edited in place'):
+                    edit(target)
+
+        # And the whole of `dict`'s surface, called with the argument
+        # shapes its methods take. Anything that gets through leaves the
+        # contents changed, whether or not it raised on the way.
+        for name in sorted(dir(dict)):
+            attr = getattr(target, name, None)
+            if not callable(attr):
+                continue
+            for args in ((), ('kind',), ('x', 1), ({'x': 1},)):
+                try:
+                    attr(*args)
+                except Exception:
+                    continue
+                break
+        self.assertEqual(json.dumps(target, sort_keys=True), before)
+
+        # An ordinary editable copy is one unpacking away.
+        loose = {**target}
+        loose['x'] = 1
+        self.assertNotIn('x', target)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_the_round_trip_claim_is_frozen_and_never_copied(self):
         """pandas deep-copies the whole of `df.attrs` every time it
         propagates it, and that runs once per column while a frame is
         sliced or exported. A per-column claim would therefore make
-        that pass quadratic in the column count -- 950 ms of a 1000 ms
-        Arrow export at 1024 columns, all of it inside
-        `copy.deepcopy`. The claim declines to be copied, which is only
-        sound because it cannot be edited."""
+        that pass quadratic in the column count: `pyarrow.table(df)` on
+        a 1024-column frame spends 710 ms of its 730 ms inside
+        `copy.deepcopy`, against 26 ms once the claim declines to copy.
+        Declining is only sound because the claim cannot be edited."""
         frame = self._roundtrip_frame()
         claim = frame.attrs['questdb']
 
@@ -3683,12 +3724,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         # Sharing is unobservable because nothing can be edited, at any
         # depth.
         for target in (claim, claim['columns'], claim['columns']['ip']):
-            with self.subTest(level=type(target).__name__):
-                with self.assertRaisesRegex(
-                        TypeError, 'cannot be edited in place'):
-                    target['x'] = 1
-                with self.assertRaises(TypeError):
-                    target.update({'x': 1})
+            with self.subTest(level=repr(sorted(target))):
+                self._assert_nothing_can_edit(target)
 
         # To everything that reads it, it is the mapping it replaced.
         self.assertIsInstance(claim, dict)
