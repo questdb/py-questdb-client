@@ -99,6 +99,15 @@ Changelog
   SHORT, and INT columns still widen one step on the way back in. Editing
   the frame is safe: a column that has been dropped, renamed, or retyped
   simply loses its claim, and ``symbols`` / ``schema_overrides`` outrank it.
+  The three built-in backends — plain, ``'pyarrow'``, and
+  ``'numpy_nullable'`` — carry all five column types back out. A custom
+  ``types_mapper`` gets the same ``attrs``, but the claim is only applied
+  where the dtype the mapper picked still holds the values in a shape
+  ``dataframe()`` can attach it to: an Arrow-backed column, a NumPy
+  ``uint32`` / ``uint16`` / integer column, or an object column of Python
+  ints or ``bytes``. Map one of the five to anything else — a float or a
+  string dtype, say — and the claim goes unread and the column lands as
+  that dtype implies, with nothing said.
 - LONG256 columns survive a plain ``to_pandas()`` round trip. That backend
   hands a LONG256 column back as an object column of Python ints — the only
   shape wide enough to hold one without pyarrow — and ``dataframe()`` now

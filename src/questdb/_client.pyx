@@ -7496,13 +7496,19 @@ cdef class QuestDB:
         BYTE, SHORT, and INT columns still widen one step on the way back
         in; the Arrow ingest API has no override that pins them.
 
-        The claim is honoured whichever shape the column arrives in, so
-        every ``to_pandas`` backend round-trips the same way. Besides the
-        Arrow-backed and plain NumPy columns, that covers the object
-        columns the other backends leave behind: Python ints, which is
-        what a pandas masked column becomes and what plain
-        ``to_pandas()`` returns a LONG256 as, and ``bytes``, which is how
-        ``dtype_backend='numpy_nullable'`` returns UUID and LONG256. An
+        The claim is honoured on every shape a ``to_pandas`` backend
+        produces, so plain ``to_pandas()``,
+        ``dtype_backend='pyarrow'`` and ``dtype_backend='numpy_nullable'``
+        round-trip the same way. Besides the Arrow-backed and plain NumPy
+        columns, that covers the object columns the other backends leave
+        behind: Python ints, which is what a pandas masked column becomes
+        and what plain ``to_pandas()`` returns a LONG256 as, and
+        ``bytes``, which is how ``dtype_backend='numpy_nullable'``
+        returns UUID and LONG256. A frame whose columns were retyped
+        past that set — which a custom ``types_mapper`` can do — keeps
+        the claim in ``attrs`` and cannot use it: a claimed column that
+        arrives as a float or a string dtype lands as that dtype
+        implies, with nothing said. An
         object column states no width or range of its own, so a claimed
         value the type cannot hold — an integer past ``2**32-1`` under
         ``ipv4``, a cell that is not exactly 16 or 32 bytes under

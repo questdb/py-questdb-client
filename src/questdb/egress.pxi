@@ -2496,10 +2496,19 @@ class QueryResult:
         type and no field, so ``attrs`` is what carries the IPV4 / CHAR /
         GEOHASH / UUID / LONG256 claims that live in Arrow field metadata.
         :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads the
-        claim back whichever backend wrote it — including the masked and
-        object-dtype columns ``"numpy_nullable"`` produces for those five
-        — so writing the result out again gives the same column types,
-        and for those five the same wire bytes.
+        claim back from either built-in backend — including the masked
+        and object-dtype columns ``"numpy_nullable"`` produces for those
+        five — so writing the result out again gives the same column
+        types, and for those five the same wire bytes.
+
+        A custom ``types_mapper`` gets the same ``attrs``, but whether
+        the claim can be applied depends on the dtype the mapper picked.
+        It has to be a shape that still holds the value:
+        an Arrow-backed column, a NumPy ``uint32`` / ``uint16`` / integer
+        column, or an object column of Python ints or ``bytes``. Map one
+        of those five columns to a float or a string dtype and the claim
+        goes unread — the column lands as that dtype implies, with
+        nothing said.
 
         ``df.attrs['questdb']`` reads as an ordinary mapping but cannot
         be edited in place: pandas deep-copies the whole of ``attrs``
@@ -2592,7 +2601,9 @@ class QueryResult:
         Mirrors :meth:`to_pandas`: with no arguments each batch is
         materialised straight into numpy (no pyarrow, sentinel-preserving).
         ``dtype_backend`` / ``types_mapper`` select the pyarrow-backed path
-        instead. Either way every batch carries ``df.attrs['questdb']``.
+        instead. Either way every batch carries ``df.attrs['questdb']``,
+        and what a custom ``types_mapper`` costs the round trip is the
+        same as it is there.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
