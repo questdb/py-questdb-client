@@ -3770,6 +3770,101 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_claim_keeps_an_all_null_column(self):
+        # A column of nothing but nulls names no type of its own, so
+        # the planner skips it and the destination table is created
+        # without it. The claim names one, which is the whole point of
+        # feeding a query result back in -- so the column goes out as
+        # the claimed type, in the same bytes the zero-copy Arrow path
+        # sends for the same frame.
+        stamps = [
+            datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)] * 3
+        shapes = (
+            ('char', pd.ArrowDtype(pyarrow.uint16()),
+             {'kind': 'char'}, 0x16),
+            ('long256', pd.ArrowDtype(pyarrow.binary(32)),
+             {'kind': 'long256'}, 0x0D),
+            ('uuid', pd.ArrowDtype(pyarrow.binary(16)),
+             {'kind': 'uuid'}, 0x0C),
+            ('geohash', pd.ArrowDtype(pyarrow.int32()),
+             {'kind': 'geohash', 'precision_bits': 20}, 0x0E),
+            ('ipv4', pd.ArrowDtype(pyarrow.uint32()),
+             {'kind': 'ipv4'}, 0x18),
+        )
+        for label, dtype, meta, type_tag in shapes:
+            with self.subTest(claim=label):
+                def frame(ts_col):
+                    df = pd.DataFrame({
+                        'c': pd.array([None] * len(stamps), dtype=dtype),
+                        'ts': ts_col,
+                    })
+                    df.attrs['questdb'] = {
+                        'version': 1, 'columns': {'c': meta}}
+                    return df
+
+                arrow_frame = frame(pd.array(
+                    stamps,
+                    dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))))
+                # A NumPy timestamp column routes the frame off the
+                # zero-copy path and onto the manual planner.
+                mixed_frame = frame(pd.to_datetime(stamps))
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        mixed_frame, table_name='attrs_round_trip',
+                        at='ts')['c'],
+                    type_tag)
+                self.assertEqual(
+                    self._dataframe_wire_payload(
+                        mixed_frame, table_name='attrs_round_trip', at='ts'),
+                    self._dataframe_wire_payload(
+                        arrow_frame, table_name='attrs_round_trip', at='ts'))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_an_all_null_column_keeps_only_a_claim_it_can_carry(self):
+        # The object and masked shapes reach the planner the same way,
+        # and a claim it cannot use leaves the column where it found
+        # it: skipped, the same silence an unusable claim meets
+        # everywhere else.
+        stamps = [
+            datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)] * 2
+
+        def frame(nulls, meta):
+            df = pd.DataFrame({
+                'c': nulls,
+                'v': np.arange(2, dtype=np.int64),
+                'ts': pd.to_datetime(stamps),
+            })
+            if meta is not None:
+                df.attrs['questdb'] = {'version': 1, 'columns': {'c': meta}}
+            return df
+
+        shapes = (
+            ('object', lambda: pd.Series([None] * 2, dtype=object)),
+            ('masked', lambda: pd.array([None] * 2, dtype='UInt16')),
+        )
+        for label, nulls in shapes:
+            with self.subTest(shape=label):
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        frame(nulls(), {'kind': 'char'}),
+                        table_name='attrs_round_trip', at='ts')['c'],
+                    0x16)
+                # 0 bits describes no GEOHASH column.
+                self.assertNotIn(
+                    'c',
+                    self._dataframe_column_types(
+                        frame(nulls(),
+                              {'kind': 'geohash', 'precision_bits': 0}),
+                        table_name='attrs_round_trip', at='ts'))
+                self.assertNotIn(
+                    'c',
+                    self._dataframe_column_types(
+                        frame(nulls(), None),
+                        table_name='attrs_round_trip', at='ts'))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_roundtrip_claim_on_a_mixed_frame_drops_a_retyped_column(self):
         # The claim recalls what the frame held when it was read, so a
         # column since retyped past what the claim can describe loses it

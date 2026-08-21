@@ -99,6 +99,9 @@ Changelog
   SHORT, and INT columns still widen one step on the way back in. Editing
   the frame is safe: a column that has been dropped, renamed, or retyped
   simply loses its claim, and ``symbols`` / ``schema_overrides`` outrank it.
+  A column that is entirely null keeps its claim and is written as the
+  claimed type: on its own such a column names no type at all and is left
+  out of the write, and so out of the table the write auto-creates.
   The three built-in backends — plain, ``'pyarrow'``, and
   ``'numpy_nullable'`` — carry all five column types back out. A custom
   ``types_mapper`` gets the same ``attrs``, but the claim is only applied

@@ -5353,6 +5353,40 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
     return out
 
 
+cdef void_int _dataframe_claim_all_null_source(
+        col_t* col, str kind, object bits) except -1:
+    """Give an all-null claimed column the object-column shape its
+    claim names.
+
+    Every cell being null leaves the planner nothing to sniff a type
+    from, so such a column is skipped and never reaches the wire. A
+    round-trip claim states the type anyway, and a destination table
+    auto-created without the column is the outcome the claim exists to
+    prevent -- so the claim picks the source, and the object-column
+    builder writes a column of nulls in the claimed width. This is the
+    same source the shape would have taken with one non-null cell in
+    it, and what the Arrow path emits for the same frame.
+
+    A claim the column cannot carry -- a geohash precision outside
+    1..=60 -- leaves the column skipped, the same silence a claim that
+    no longer fits meets everywhere else.
+    """
+    if kind == 'uuid':
+        col.setup.source = col_source_t.col_source_bytes_pyobj
+        col.setup.target = col_target_t.col_target_column_binary
+    elif kind in ('ipv4', 'char', 'long256', 'geohash'):
+        if kind == 'geohash' and not (
+                _is_int_not_bool(bits) and 1 <= bits <= 60):
+            return 0
+        col.setup.source = col_source_t.col_source_int_pyobj
+        col.setup.target = col_target_t.col_target_column_i64
+    else:
+        return 0
+    col.dispatch_code = <col_dispatch_code_t>(
+        <int>col.setup.source + <int>col.setup.target)
+    return 0
+
+
 cdef void_int _dataframe_apply_roundtrip_overrides(
         object df, dataframe_plan_t* plan) except -1:
     cdef size_t col_index
@@ -5372,6 +5406,9 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
         kind = _roundtrip_kind(meta)
         if kind is None:
             continue
+        if col.setup.source == col_source_t.col_source_nulls:
+            _dataframe_claim_all_null_source(
+                col, kind, meta.get('precision_bits') or 0)
         # `col_source_int_pyobj` is what a pandas masked dtype turns
         # into: `to_pandas(dtype_backend='numpy_nullable')` returns
         # IPV4 / CHAR / GEOHASH as UInt32 / UInt16 / Int* extension
@@ -7863,6 +7900,13 @@ cdef class QuestDB:
         bits, and the high bits are the coarse position, so a wider
         value would reach the database as a valid geohash for somewhere
         else entirely.
+
+        A column of nothing but nulls names no type of its own, and
+        without a claim it is left out of the write and out of the
+        table the write auto-creates. A claim names one, so a claimed
+        all-null column is written as the claimed type — which is what
+        keeps a batch that happens to hold no value for one column from
+        deciding the shape of the table.
 
         The claim a query result carries reads as an ordinary mapping
         but cannot be edited in place, because every copy of the frame
