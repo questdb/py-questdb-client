@@ -132,6 +132,13 @@ Changelog
   integer past ``2**32-1`` under ``ipv4``, a cell that is not exactly 16
   or 32 bytes under ``uuid`` or ``long256`` — is refused rather than
   written into a column of the claimed type.
+- A claimed ``geohash`` value wider than its ``precision_bits`` is refused,
+  on every shape a claim can arrive in rather than only the object ones.
+  A GEOHASH column keeps only the claimed low bits, and the high bits are
+  the coarse position, so a wider value used to reach the database as a
+  valid geohash for somewhere else entirely, with nothing said. This is
+  the one claimed type whose range is narrower than the integer carrying
+  it; IPV4 and CHAR fill their storage width exactly.
 - An ``int`` too wide for a 64-bit LONG column now says so on a QWP sender.
   ``row()`` raises ``OverflowError`` naming
   :class:`Long256 <questdb.Long256>`, the wrapper that sends a 256-bit

@@ -3421,6 +3421,152 @@ cdef void_int _dataframe_columnar_validate_plan(
             failures)
 
 
+cdef inline bint _geohash_slot_out_of_range(
+        const void* data,
+        size_t row,
+        size_t elem_size,
+        bint is_signed,
+        int64_t max_value) noexcept nogil:
+    cdef int64_t value
+    if is_signed:
+        if elem_size == 8:
+            value = (<const int64_t*>data)[row]
+        elif elem_size == 4:
+            value = (<const int32_t*>data)[row]
+        elif elem_size == 2:
+            value = (<const int16_t*>data)[row]
+        else:
+            value = (<const int8_t*>data)[row]
+        return value < 0 or value > max_value
+    if elem_size == 8:
+        return (<const uint64_t*>data)[row] > <uint64_t>max_value
+    if elem_size == 4:
+        value = (<const uint32_t*>data)[row]
+    elif elem_size == 2:
+        value = (<const uint16_t*>data)[row]
+    else:
+        value = (<const uint8_t*>data)[row]
+    return value > max_value
+
+
+cdef bint _dataframe_columnar_geohash_scan(
+        const void* data,
+        const uint8_t* validity,
+        size_t elem_size,
+        bint is_signed,
+        size_t row_count,
+        int64_t max_value,
+        size_t* bad_row) noexcept nogil:
+    """The first row holding a value the claimed precision cannot hold,
+    if there is one. A null slot carries no value and is skipped."""
+    cdef size_t row
+    for row in range(row_count):
+        if (validity != NULL
+                and not ((validity[row >> 3] >> (row & 7)) & 1)):
+            continue
+        if _geohash_slot_out_of_range(
+                data, row, elem_size, is_signed, max_value):
+            bad_row[0] = row
+            return True
+    return False
+
+
+cdef void_int _dataframe_columnar_check_geohash_ranges(
+        object df,
+        dataframe_plan_t* plan) except -1:
+    """Refuse a claimed GEOHASH value that its precision cannot hold.
+
+    A GEOHASH column keeps the claimed number of low bits, and the high
+    bits are the coarse position, so a wider value reaches the database
+    as a valid geohash for somewhere else entirely — the one claimed
+    type whose range is narrower than the integer carrying it, and so
+    the one that can be silently rewritten this way. IPV4 and CHAR fit
+    their storage width exactly and need no scan.
+
+    Object columns are checked value by value as they are built. The
+    columns that reach the wire as raw buffers are checked here, once
+    for the whole frame and before a connection is opened, so the
+    refusal arrives with the rest of the shape errors rather than
+    mid-flush.
+    """
+    cdef size_t col_index
+    cdef col_t* col
+    cdef ArrowArray* arr
+    cdef const void* data
+    cdef const uint8_t* validity
+    cdef size_t elem_size
+    cdef bint is_signed
+    cdef int64_t max_value
+    cdef size_t bad_row = 0
+    cdef bint bad = False
+    if plan.row_count == 0:
+        return 0
+    for col_index in range(plan.col_count):
+        col = &plan.cols.d[col_index]
+        if not col.setup.has_override:
+            continue
+        if col.setup.override_dtype not in (
+                qwp_numpy_dtype.qwp_numpy_geohash_i8,
+                qwp_numpy_dtype.qwp_numpy_geohash_i16,
+                qwp_numpy_dtype.qwp_numpy_geohash_i32,
+                qwp_numpy_dtype.qwp_numpy_geohash_i64):
+            continue
+        # `_dataframe_columnar_build_int_pyobj` already walks an object
+        # column value by value and checks each one as it goes.
+        if col.setup.source == col_source_t.col_source_int_pyobj:
+            continue
+        if col.setup.source in (
+                col_source_t.col_source_i8_numpy,
+                col_source_t.col_source_u8_numpy):
+            elem_size = 1
+        elif col.setup.source in (
+                col_source_t.col_source_i16_numpy,
+                col_source_t.col_source_u16_numpy):
+            elem_size = 2
+        elif col.setup.source in (
+                col_source_t.col_source_i32_numpy,
+                col_source_t.col_source_u32_numpy):
+            elem_size = 4
+        elif col.setup.source in (
+                col_source_t.col_source_i64_numpy,
+                col_source_t.col_source_u64_numpy,
+                col_source_t.col_source_i64_arrow):
+            elem_size = 8
+        else:
+            raise RuntimeError(
+                'Unsupported columnar GEOHASH source: %d.'
+                % <int>col.setup.source)
+        is_signed = col.setup.source in (
+            col_source_t.col_source_i8_numpy,
+            col_source_t.col_source_i16_numpy,
+            col_source_t.col_source_i32_numpy,
+            col_source_t.col_source_i64_numpy,
+            col_source_t.col_source_i64_arrow)
+        max_value = (<int64_t>1 << col.setup.override_geohash_bits) - 1
+        arr = &col.setup.chunks.chunks[0]
+        data = arr.buffers[1]
+        validity = NULL
+        if arr.null_count != 0:
+            validity = <const uint8_t*>arr.buffers[0]
+        with nogil:
+            bad = _dataframe_columnar_geohash_scan(
+                data,
+                validity,
+                elem_size,
+                is_signed,
+                plan.row_count,
+                max_value,
+                &bad_row)
+        if bad:
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {df.columns[col.setup.orig_index]!r} at row '
+                f'{bad_row}: '
+                f'GEOHASH({col.setup.override_geohash_bits}b) values must '
+                f'be in the range 0 .. {max_value}.')
+    return 0
+
+
 cdef object _dataframe_columnar_ndarray_col_to_arrow(object df, col_t* col):
     cdef object series = df.iloc[:, col.setup.orig_index]
     cdef object cell
@@ -3658,6 +3804,19 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
             elem_size = 2
             narrow_max = 0xFFFF
             narrow_type = 'CHAR'
+        elif col.setup.override_dtype in (
+                qwp_numpy_dtype.qwp_numpy_geohash_i8,
+                qwp_numpy_dtype.qwp_numpy_geohash_i16,
+                qwp_numpy_dtype.qwp_numpy_geohash_i32,
+                qwp_numpy_dtype.qwp_numpy_geohash_i64):
+            # The slot stays 64 bits wide; the claimed precision is what
+            # bounds the value. A value past it is truncated to the low
+            # bits on the wire, putting the row at a different point on
+            # the planet, so it is refused here with the other claims.
+            narrow_max = (
+                (<int64_t>1 << col.setup.override_geohash_bits) - 1)
+            narrow_type = (
+                f'GEOHASH({col.setup.override_geohash_bits}b)')
 
     try:
         values = <uint8_t*>calloc(
@@ -5000,10 +5159,18 @@ cdef int _geohash_override_dtype(col_source_t source) noexcept:
         return <int>qwp_numpy_dtype.qwp_numpy_geohash_i32
     if (source == col_source_t.col_source_u64_numpy
             or source == col_source_t.col_source_i64_numpy
+            or source == col_source_t.col_source_i64_arrow
             or source == col_source_t.col_source_int_pyobj):
         # An object column of Python ints — what a masked pandas dtype
         # becomes — is widened to the 64-bit geohash; the claim carries
         # the precision, so the storage width no longer has to.
+        #
+        # `i64_arrow` is here because it is the one Arrow integer width
+        # that resolves to `col_target_column_i64` and so reaches the
+        # wire as a raw buffer the append call names a dtype for. The
+        # narrower Arrow widths take their own targets and go to the
+        # native importer as Arrow arrays, which carry no type hint;
+        # `_dataframe_normalize_claimed_arrow` reshapes those instead.
         return <int>qwp_numpy_dtype.qwp_numpy_geohash_i64
     return -1
 
@@ -5086,6 +5253,102 @@ cdef object _dataframe_normalize_at_timestamp(object df, object at):
     return out
 
 
+cdef bint _claimed_arrow_col_needs_reshape(
+        object types, object raw_ty, object ty, str kind) except -1:
+    """Whether an Arrow-backed claimed column has to become object dtype
+    for the manual planner to honour its claim.
+
+    A claim reaches the wire as the NumPy dtype named in the append
+    call, so it only lands on columns the planner sends as raw buffers.
+    A column handed to the native Arrow importer instead carries no type
+    hint, and `qwp_chunk_append_arrow_column` takes no per-column type
+    override, so those are the ones that need reshaping.
+    """
+    if kind == 'ipv4':
+        # uint32 resolves to the i64 target and goes out as a raw buffer.
+        return not types.is_uint32(ty)
+    if kind == 'geohash':
+        # int64 does the same. int8/16/32 take the narrow BYTE/SHORT/INT
+        # targets, which reach the importer as Arrow arrays.
+        return not types.is_int64(ty)
+    if kind == 'uuid':
+        # A `pa.uuid()` column states its own type to the importer and
+        # already lands as UUID. A bare 16-byte column is refused by the
+        # planner outright, which reshaping avoids.
+        return not (isinstance(raw_ty, _PYARROW.lib.BaseExtensionType)
+                    and raw_ty.extension_name == _ARROW_EXT_UUID)
+    # CHAR (uint16) and LONG256 (32-byte fixed binary) have no
+    # buffer-shaped route on this path at all.
+    return True
+
+
+cdef object _dataframe_normalize_claimed_arrow(object df):
+    """Object-dtype copies of the Arrow-backed columns whose round-trip
+    claim the manual planner cannot otherwise honour.
+
+    A frame mixing Arrow-backed and NumPy columns routes whole to this
+    planner, where a claim rides on the NumPy dtype named in the append
+    call. Columns handed to the native Arrow importer have nowhere to
+    put it, so their claim would be dropped and the column would land as
+    its storage type — IPV4, CHAR and GEOHASH as plain integers, UUID
+    and LONG256 refused — auto-creating the destination table with the
+    wrong column types. Object dtype is the shape
+    `_dataframe_apply_roundtrip_overrides` already covers for every
+    claimed kind, and it is what `dtype_backend='numpy_nullable'` hands
+    these columns back as, so both backends write the same bytes again.
+
+    Only a frame that already fell back from the zero-copy Arrow path
+    reaches here, and within it only the claimed columns that have no
+    buffer-shaped route are copied, so the shapes that can carry their
+    claim natively stay zero-copy.
+    """
+    cdef object cols_meta, arrow_dtype, types, dtype, raw_ty, ty, meta, out
+    cdef str kind
+    cdef list convert
+    if not _is_pandas_dataframe_object(df):
+        return df
+    cols_meta = _roundtrip_columns_meta(df)
+    if not cols_meta:
+        return df
+    _dataframe_may_import_deps()
+    arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+    if arrow_dtype is None:
+        return df
+    if not _dataframe_try_import_pyarrow():
+        return df
+    types = _PYARROW.types
+    convert = []
+    # Walked by position rather than by label: `dtypes[name]` on a frame
+    # with duplicate column names hands back a Series, not a dtype.
+    for pos, (name, dtype) in enumerate(zip(df.columns, df.dtypes)):
+        if not isinstance(dtype, arrow_dtype):
+            continue
+        meta = cols_meta.get(name)
+        kind = _roundtrip_kind(meta)
+        if kind is None or kind not in _ATTRS_OVERRIDE_KINDS:
+            continue
+        raw_ty = dtype.pyarrow_dtype
+        ty = raw_ty
+        if isinstance(ty, _PYARROW.lib.BaseExtensionType):
+            ty = ty.storage_type
+        # A claim that no longer fits the column is dropped, which is
+        # what the Arrow path does with the same claim. Reshaping first
+        # and refusing value by value later would answer a retyped
+        # column with an error where the contract promises silence.
+        if not _attrs_override_fits(
+                types, ty, kind, meta.get('precision_bits') or 0):
+            continue
+        if _claimed_arrow_col_needs_reshape(types, raw_ty, ty, kind):
+            convert.append(pos)
+    if not convert:
+        return df
+    out = df.copy(deep=False)
+    for pos in convert:
+        _dataframe_set_column(out, df, pos, df.iloc[:, pos].astype(object))
+    out.attrs = dict(df.attrs)
+    return out
+
+
 cdef void_int _dataframe_apply_roundtrip_overrides(
         object df, dataframe_plan_t* plan) except -1:
     cdef size_t col_index
@@ -5112,9 +5375,14 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
         # masked column to object-dtype Python ints before planning.
         # `col_source_bytes_pyobj` is the same story for the two binary
         # kinds, which that backend hands back as object-dtype `bytes`.
+        # `col_source_u32_arrow` is an Arrow uint32 column, which
+        # resolves to `col_target_column_i64` and so reaches the wire as
+        # a raw buffer with the append call naming its dtype — the same
+        # place the claim lands for the NumPy and object shapes.
         if (kind == 'ipv4'
                 and col.setup.source in (
                     col_source_t.col_source_u32_numpy,
+                    col_source_t.col_source_u32_arrow,
                     col_source_t.col_source_int_pyobj)):
             col.setup.has_override = True
             col.setup.override_dtype = \
@@ -6301,6 +6569,59 @@ cdef bint _attrs_override_fits(
     return False
 
 
+cdef void_int _capsule_check_geohash_ranges(
+        object frame, object overrides) except -1:
+    """Refuse a claimed GEOHASH value that its precision cannot hold.
+
+    The Arrow path hands the column to the native importer whole, so
+    there is no per-value walk to check as it goes. pyarrow's own
+    min/max does it in one vectorised pass that skips nulls, and the
+    offending row is located only once a violation is known, so the
+    common case pays a single scan of one column.
+
+    Only claims that came off `df.attrs['questdb']` are checked here.
+    A `questdb.column_type` on an Arrow field is the caller stating the
+    type to the native importer directly, and is that importer's to
+    validate.
+    """
+    cdef object name_bytes, name, column, bounds, low, high, compute, mask
+    cdef int kind_int, arg_int
+    cdef int64_t max_value
+    if not overrides:
+        return 0
+    if not _is_pandas_dataframe_object(frame):
+        return 0
+    if not _dataframe_try_import_pyarrow():
+        return 0
+    compute = _PYARROW.compute
+    for name_bytes, kind_int, arg_int in overrides:
+        if kind_int != <int>qwp_arrow_override_geohash:
+            continue
+        max_value = (<int64_t>1 << arg_int) - 1
+        name = name_bytes.decode('utf-8')
+        try:
+            column = _PYARROW.array(frame[name])
+        except Exception:
+            continue
+        bounds = compute.min_max(column).as_py()
+        low = bounds.get('min')
+        high = bounds.get('max')
+        if low is None and high is None:
+            continue
+        if (low is None or low >= 0) and (high is None or high <= max_value):
+            continue
+        mask = compute.or_(
+            compute.less(column, 0),
+            compute.greater(column, max_value))
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad column {name!r} at row '
+            f'{compute.index(mask, True).as_py()}: '
+            f'GEOHASH({arg_int}b) values must be in the range '
+            f'0 .. {max_value}.')
+    return 0
+
+
 cdef object _capsule_roundtrip_overrides(object frame):
     """Arrow overrides rebuilt from the `df.attrs['questdb']` metadata
     that `QueryResult.to_pandas()` attaches.
@@ -6518,6 +6839,7 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef int64_t at_scalar_nanos = 0
     cdef size_t i
     cdef object name_bytes
+    cdef object roundtrip_overrides
     cdef int kind_int
     cdef int arg_int
 
@@ -6581,8 +6903,10 @@ cdef bint _dataframe_client_try_capsule_path(
         return False
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
+    roundtrip_overrides = _capsule_roundtrip_overrides(sliceable)
+    _capsule_check_geohash_ranges(sliceable, roundtrip_overrides)
     merged_overrides = _merge_capsule_overrides(
-        _capsule_roundtrip_overrides(sliceable), merged_overrides)
+        roundtrip_overrides, merged_overrides)
 
     can_slice = (total_rows >= 0) and (
         hasattr(sliceable, 'slice')
@@ -6686,6 +7010,7 @@ cdef void_int _dataframe_numpy_publish(
     cdef size_t chunk_rows
     try:
         df = _dataframe_normalize_nullable(df)
+        df = _dataframe_normalize_claimed_arrow(df)
         df = _dataframe_normalize_at_timestamp(df, at)
         _dataframe_plan_build(
             b,
@@ -6702,6 +7027,7 @@ cdef void_int _dataframe_numpy_publish(
         _dataframe_apply_roundtrip_overrides(df, plan)
         _dataframe_columnar_promote_cols(df, plan)
         _dataframe_columnar_validate_plan(df, plan)
+        _dataframe_columnar_check_geohash_ranges(df, plan)
         _dataframe_columnar_prebuild_pyobj(df, plan)
         rows_per_chunk = _dataframe_columnar_rows_per_chunk(
             plan, max_rows_per_batch)
@@ -7519,7 +7845,12 @@ cdef class QuestDB:
         value the type cannot hold — an integer past ``2**32-1`` under
         ``ipv4``, a cell that is not exactly 16 or 32 bytes under
         ``uuid`` or ``long256`` — is refused rather than written into a
-        column of the claimed type.
+        column of the claimed type. A ``geohash`` value wider than its
+        ``precision_bits`` is refused on every shape, Arrow-backed
+        columns included: a GEOHASH column keeps only the claimed low
+        bits, and the high bits are the coarse position, so a wider
+        value would reach the database as a valid geohash for somewhere
+        else entirely.
 
         The claim a query result carries reads as an ordinary mapping
         but cannot be edited in place, because every copy of the frame

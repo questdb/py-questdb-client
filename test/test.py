@@ -3487,6 +3487,229 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     self._dataframe_column_types(
                         odd, table_name='attrs_round_trip', at='ts')
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_attrs_survive_a_frame_that_mixes_backends(self):
+        # One NumPy column routes the whole frame to the manual planner,
+        # where the Arrow-backed columns are the ones carrying claims.
+        # `df = result.to_pandas(dtype_backend='pyarrow')` followed by
+        # `df['x'] = ...` is the ordinary shape of a read-modify-write,
+        # and the five have to keep their types through it.
+        frame = self._roundtrip_frame()
+        mixed = frame.copy()
+        mixed['x'] = np.arange(len(mixed), dtype=np.int64)
+        mixed.attrs = dict(frame.attrs)
+        types = self._dataframe_column_types(
+            mixed, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['u'], 0x0C)
+        self.assertEqual(types['l'], 0x0D)
+        self.assertEqual(types['ip'], 0x18)
+        self.assertEqual(types['ch'], 0x16)
+        self.assertEqual(types['gh'], 0x0E)
+        self.assertEqual(types['x'], 0x05)
+
+        # And the same rows read back with the other backend, plus the
+        # same added column, still write the same bytes.
+        nullable = self._nullable_roundtrip_frame()
+        mixed_nullable = nullable.copy()
+        mixed_nullable['x'] = np.arange(len(nullable), dtype=np.int64)
+        mixed_nullable.attrs = dict(nullable.attrs)
+        self.assertEqual(
+            self._dataframe_wire_payload(
+                mixed, table_name='attrs_round_trip', at='ts'),
+            self._dataframe_wire_payload(
+                mixed_nullable, table_name='attrs_round_trip', at='ts'))
+
+        # Drop the claims and the two fixed-size binary columns state
+        # no type at all, which this planner refuses rather than guesses
+        # at -- the asymmetry with the Arrow path, which takes them as
+        # BINARY because `schema_overrides` gives a way to say otherwise
+        # there.
+        bare = mixed.copy()
+        bare.attrs = {}
+        with self.assertRaisesRegex(
+                qi.QuestDBError, '16-byte fixed_size_binary column'):
+            self._dataframe_column_types(
+                bare, table_name='attrs_round_trip', at='ts')
+
+        # The three integer-backed ones degrade quietly to the types
+        # their storage implies, which is what the claim is buying.
+        bare = bare.drop(columns=['u', 'l'])
+        bare.attrs = {}
+        types = self._dataframe_column_types(
+            bare, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['ip'], 0x05)
+        self.assertEqual(types['ch'], 0x04)
+        self.assertEqual(types['gh'], 0x05)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_attrs_on_a_mixed_frame_keep_the_zero_copy_shapes(self):
+        # Arrow uint32 and int64 resolve to the integer target, so they
+        # reach the wire as raw buffers and carry their claim on the
+        # dtype the append call names -- no object-dtype copy. A
+        # `pa.uuid()` column states its own type to the native importer
+        # and needs no claim at all. All three have to keep working on a
+        # frame that also holds a NumPy column.
+        frame = self._roundtrip_frame()
+        mixed = frame.copy()
+        mixed['gh'] = pd.array(
+            [100], dtype=pd.ArrowDtype(pyarrow.int64()))
+        mixed['x'] = np.arange(len(mixed), dtype=np.int64)
+        mixed.attrs = dict(frame.attrs)
+        types = self._dataframe_column_types(
+            mixed, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['ip'], 0x18)
+        self.assertEqual(types['gh'], 0x0E)
+
+        if hasattr(pyarrow, 'uuid'):
+            ext = mixed.copy()
+            ext['u'] = pd.array(
+                [self.UUID_VALUE.bytes], dtype=pd.ArrowDtype(pyarrow.uuid()))
+            ext.attrs = dict(frame.attrs)
+            self.assertEqual(
+                self._dataframe_column_types(
+                    ext, table_name='attrs_round_trip', at='ts')['u'],
+                0x0C)
+
+    def _geohash_frame(self, values, dtype, bits=20, mixed=False):
+        """A minimal claimed-GEOHASH frame in one storage shape.
+
+        ``mixed`` adds a NumPy column, which routes the frame off the
+        zero-copy Arrow path and onto the manual planner. The two check
+        the claim in different places, so both are worth exercising.
+        """
+        frame = pd.DataFrame({
+            'gh': pd.array(values, dtype=dtype),
+            'ts': pd.array(
+                [datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)]
+                * len(values),
+                dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))),
+        })
+        if mixed:
+            frame['x'] = np.arange(len(values), dtype=np.int64)
+        frame.attrs['questdb'] = {'version': 1, 'columns': {
+            'gh': {'kind': 'geohash', 'precision_bits': bits}}}
+        return frame
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_claim_refuses_a_geohash_the_precision_cannot_hold(self):
+        # A GEOHASH column keeps the claimed number of low bits, and the
+        # high bits are the coarse position, so a wider value would
+        # reach the database as a valid geohash for somewhere else. It
+        # is refused whichever integer shape carries it and whichever
+        # planner the frame takes.
+        shapes = (
+            ('arrow int8', pd.ArrowDtype(pyarrow.int8()), 4),
+            ('arrow int16', pd.ArrowDtype(pyarrow.int16()), 12),
+            ('arrow int32', pd.ArrowDtype(pyarrow.int32()), 20),
+            ('arrow int64', pd.ArrowDtype(pyarrow.int64()), 20),
+            ('numpy int64', np.int64, 20),
+            ('numpy uint32', np.uint32, 20),
+            ('numpy int16', np.int16, 12),
+            ('object int', object, 20),
+        )
+        for label, dtype, bits in shapes:
+            top = (1 << bits) - 1
+            for mixed in (False, True):
+                with self.subTest(shape=label, mixed=mixed):
+                    self.assertEqual(
+                        self._dataframe_column_types(
+                            self._geohash_frame(
+                                [top], dtype, bits, mixed=mixed),
+                            table_name='attrs_round_trip', at='ts')['gh'],
+                        0x0E)
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            r'GEOHASH\(%db\) values must be in the range '
+                            r'0 \.\. %d' % (bits, top)):
+                        self._dataframe_column_types(
+                            self._geohash_frame(
+                                [top + 1], dtype, bits, mixed=mixed),
+                            table_name='attrs_round_trip', at='ts')
+
+        # A signed column can also hold a value below the range.
+        for mixed in (False, True):
+            with self.subTest(negative=True, mixed=mixed):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r'GEOHASH\(20b\) values must be in the range'):
+                    self._dataframe_column_types(
+                        self._geohash_frame(
+                            [-1], pd.ArrowDtype(pyarrow.int64()), mixed=mixed),
+                        table_name='attrs_round_trip', at='ts')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_names_the_row_and_skips_nulls(self):
+        # A null slot carries no value, so it is passed over rather than
+        # read as whatever the buffer happens to hold there.
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed):
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        self._geohash_frame(
+                            [None, 3, None],
+                            pd.ArrowDtype(pyarrow.int64()), mixed=mixed),
+                        table_name='attrs_round_trip', at='ts')['gh'],
+                    0x0E)
+
+                # The row named is the offending one, counted past the
+                # nulls, and both planners name it the same way.
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r"Bad column 'gh' at row 3: GEOHASH\(20b\)"):
+                    self._dataframe_column_types(
+                        self._geohash_frame(
+                            [None, 3, 9, 1 << 40],
+                            pd.ArrowDtype(pyarrow.int64()), mixed=mixed),
+                        table_name='attrs_round_trip', at='ts')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_allows_the_widest_precision(self):
+        # 60 bits is the widest a GEOHASH column takes, and the top
+        # value at that precision must still go through.
+        top = (1 << 60) - 1
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed):
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        self._geohash_frame(
+                            [top], pd.ArrowDtype(pyarrow.int64()),
+                            bits=60, mixed=mixed),
+                        table_name='attrs_round_trip', at='ts')['gh'],
+                    0x0E)
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r'GEOHASH\(60b\) values must be in the range'):
+                    self._dataframe_column_types(
+                        self._geohash_frame(
+                            [top + 1], pd.ArrowDtype(pyarrow.int64()),
+                            bits=60, mixed=mixed),
+                        table_name='attrs_round_trip', at='ts')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_claim_on_a_mixed_frame_drops_a_retyped_column(self):
+        # The claim recalls what the frame held when it was read, so a
+        # column since retyped past what the claim can describe loses it
+        # and lands as its own dtype implies -- the same silence the
+        # Arrow path answers a retyped column with, not an error.
+        frame = self._roundtrip_frame()
+        retyped = frame.copy()
+        retyped['ip'] = pd.array(
+            [1.5], dtype=pd.ArrowDtype(pyarrow.float64()))
+        retyped['x'] = np.arange(len(retyped), dtype=np.int64)
+        retyped.attrs = dict(frame.attrs)
+        types = self._dataframe_column_types(
+            retyped, table_name='attrs_round_trip', at='ts')
+        self.assertEqual(types['ip'], 0x07)
+        # The columns beside it keep theirs.
+        self.assertEqual(types['u'], 0x0C)
+        self.assertEqual(types['ch'], 0x16)
+
     def _nullable_roundtrip_frame(self):
         """The rows of :meth:`_roundtrip_frame` in the shape
         ``to_pandas(dtype_backend='numpy_nullable')`` returns them:
