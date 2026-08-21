@@ -132,9 +132,10 @@ Changelog
   integer past ``2**32-1`` under ``ipv4``, a cell that is not exactly 16
   or 32 bytes under ``uuid`` or ``long256`` — is refused rather than
   written into a column of the claimed type.
-- An ``int`` too wide for a 64-bit LONG column now says so. ``row()`` raises
-  ``OverflowError`` naming :class:`Long256 <questdb.Long256>`, the wrapper
-  that sends a 256-bit value, and ``dataframe()`` raises
+- An ``int`` too wide for a 64-bit LONG column now says so on a QWP sender.
+  ``row()`` raises ``OverflowError`` naming
+  :class:`Long256 <questdb.Long256>`, the wrapper that sends a 256-bit
+  value, and ``dataframe()`` raises
   :class:`QuestDBError <questdb.QuestDBError>` naming the
   ``df.attrs['questdb']`` claim that makes the column a LONG256. Both used
   to surface CPython's bare "int too large to convert", which named neither.

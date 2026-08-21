@@ -3586,6 +3586,33 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 at=qi.TimestampNanos(3))
         self.assertGreater(len(buffer), before)
 
+    def test_ilp_row_keeps_its_oversized_int_error(self):
+        # LONG256 is a QWP type, so an ILP buffer has no remedy to name
+        # and keeps the error it always raised. Naming the wrapper there
+        # would hand back advice the very next call turns down.
+        ilp = qi.Buffer(protocol_version=2)
+        for value in (2 ** 255 + 7, 2 ** 63, -(2 ** 63) - 1):
+            with self.subTest(value=value):
+                with self.assertRaises(OverflowError) as caught:
+                    ilp.row(
+                        'long256_row', columns={'v': value},
+                        at=qi.TimestampNanos(1))
+                message = str(caught.exception)
+                self.assertNotIn('Long256', message)
+                self.assertNotIn('out of range for a LONG column', message)
+        # The advice the QWP message gives, on the buffer that cannot act
+        # on it.
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'require a QWP sender'):
+            ilp.row(
+                'long256_row', columns={'v': qi.Long256(2 ** 255 + 7)},
+                at=qi.TimestampNanos(1))
+        # In-range values still land.
+        ilp.row(
+            'long256_row', columns={'v': 2 ** 63 - 1},
+            at=qi.TimestampNanos(1))
+        self.assertGreater(len(ilp), 0)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_roundtrip_attrs_are_a_hint_not_a_command(self):

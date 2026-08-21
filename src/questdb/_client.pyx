@@ -1564,14 +1564,20 @@ cdef class Buffer:
     cdef inline void_int _column_int(
             self, line_sender_column_name c_name, str name,
             object value) except -1:
-        # A bare `int` lands in a LONG column, so one that does not fit in
-        # 64 bits belongs in a LONG256 column and needs the `Long256`
-        # wrapper to say so. `PyLong_AsLongLongAndOverflow` reports that
-        # case by flag rather than by exception, which leaves the message
-        # free to name the wrapper.
+        # A plain `int` goes to a LONG column, which holds 64 bits. A
+        # wider value fits only in a LONG256 column, and the `Long256`
+        # wrapper is what puts it there, so the error names the wrapper.
+        # `PyLong_AsLongLongAndOverflow` sets a flag instead of raising,
+        # which is what lets the message be written here.
+        #
+        # Only QWP senders have a LONG256 column. On an ILP buffer there
+        # is nothing to point the user at, so the value goes straight to
+        # `_column_i64` and the coercion to `int64_t` raises.
         cdef int overflow = 0
-        cdef int64_t as_i64 = <int64_t>PyLong_AsLongLongAndOverflow(
-            value, &overflow)
+        cdef int64_t as_i64
+        if not self._qwp:
+            return self._column_i64(c_name, value)
+        as_i64 = <int64_t>PyLong_AsLongLongAndOverflow(value, &overflow)
         if overflow != 0:
             raise OverflowError(
                 f'Bad column {name!r}: integer out of range for a LONG '
