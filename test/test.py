@@ -4982,6 +4982,55 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     txn.commit()
                     self.assertEqual(len(sender), 0)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_ws_sender_dataframe_is_refused_while_a_row_is_being_written(self):
+        """`Sender.dataframe` over QWP/WebSocket takes its own
+        connection and never reaches `_dataframe`, where the guard
+        stands for every other route. Re-entered from a half-written
+        row it published the inner frame ahead of the row it
+        interrupted, inverting the order of the two."""
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'auto_flush=off;') as sender:
+                seen = []
+
+                class HostileUuid(uuid.UUID):
+                    @property
+                    def int(self):
+                        frame = pd.DataFrame({
+                            'x': [1],
+                            'ts': pd.to_datetime([0], unit='s')})
+                        try:
+                            sender.dataframe(
+                                frame, table_name='inner', at='ts')
+                        except qi.QuestDBError as exc:
+                            seen.append(exc)
+                        else:
+                            seen.append(None)
+                        return self.UUID_INT
+
+                    @int.setter
+                    def int(self, value):
+                        pass
+
+                HostileUuid.UUID_INT = self.UUID_VALUE.int
+
+                sender.row(
+                    'outer',
+                    columns={'value': HostileUuid(str(self.UUID_VALUE))},
+                    at=qi.ServerTimestamp)
+
+                self.assertEqual(len(seen), 1)
+                self.assertIsNotNone(
+                    seen[0], 'dataframe() was allowed mid-row over ws::')
+                self.assertEqual(
+                    seen[0].code, qi.QuestDBErrorCode.InvalidApiCall)
+                self.assertIn(
+                    "dataframe() can't be called while a row is being "
+                    'written into this buffer',
+                    str(seen[0]))
+
     def test_a_claim_no_column_can_carry_is_said_out_loud_on_both_planners(self):
         """A claim the column's type can never carry is a mistake
         rather than drift, and both planners now say so. The NumPy

@@ -3637,9 +3637,11 @@ cdef void_int _dataframe(
     # Refused, not counted, when a row or another frame is already
     # part-way through this buffer: the plan below clears the marker
     # the outer row rewinds to, and an outer failure would then leave
-    # its part-written row in the buffer. One check here covers
-    # `Buffer.dataframe`, `Sender.dataframe` and
-    # `SenderTransaction.dataframe`, which all arrive through here.
+    # its part-written row in the buffer. This covers every route
+    # that arrives here -- `Buffer.dataframe`,
+    # `SenderTransaction.dataframe` and `Sender.dataframe` on the ILP
+    # protocols. `Sender.dataframe` over QWP/WebSocket takes its own
+    # connection and checks there.
     owner._check_not_in_row('dataframe')
     owner._row_depth += 1
     try:

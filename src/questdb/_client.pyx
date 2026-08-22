@@ -10159,6 +10159,13 @@ cdef class Sender:
         cdef direct_conn_source_t src
         cdef qdb_pystr_buf* ws_b = NULL
         cdef dataframe_plan_t ws_plan
+        # The QWP/WebSocket branch below goes straight to its own
+        # connection and never reaches `_dataframe`, where the same
+        # check stands for every other route. Without it here, a frame
+        # re-entered from a half-written row publishes ahead of the row
+        # it interrupted and the order of the two silently inverts.
+        if self._buffer is not None:
+            self._buffer._check_not_in_row('dataframe')
         if _is_qwp_ws_protocol(self._c_protocol):
             if self._qwp_ws_opts == NULL:
                 raise QuestDBError(
