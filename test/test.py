@@ -16,6 +16,7 @@ import threading
 import uuid
 import copy
 import json
+import pickle
 from enum import Enum
 import random
 import pathlib
@@ -2656,6 +2657,81 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             self.assertIn(name, ingress.__all__)
             self.assertIs(getattr(questdb, name), getattr(qi, name))
             self.assertIs(getattr(ingress, name), getattr(qi, name))
+
+    def test_wrapper_edges_and_repr(self):
+        # The four wrappers are in `docs/api.rst` through `autoclass`,
+        # so every constructor branch and every `__repr__` is a surface
+        # a reader can reach.
+        self.assertEqual(qi.DateMillis(-2 ** 63).value, -2 ** 63)
+        self.assertEqual(qi.DateMillis(2 ** 63 - 1).value, 2 ** 63 - 1)
+        for value in (2 ** 63, -2 ** 63 - 1):
+            with self.subTest(date_millis=value):
+                with self.assertRaisesRegex(ValueError, 'signed 64-bit'):
+                    qi.DateMillis(value)
+        with self.assertRaisesRegex(TypeError, 'dt must be a datetime'):
+            qi.DateMillis.from_datetime('2025-01-01')
+        before = int(time.time() * 1000)
+        now = qi.DateMillis.now()
+        after = int(time.time() * 1000)
+        self.assertIsInstance(now, qi.DateMillis)
+        # A second of slack either way: the clock the wrapper reads and
+        # `time.time()` are the same wall clock, not the same call.
+        self.assertGreaterEqual(now.value, before - 1000)
+        self.assertLessEqual(now.value, after + 1000)
+
+        with self.assertRaisesRegex(TypeError, 'value must be a str'):
+            qi.Geohash.from_string(5)
+        single = qi.Geohash.from_string('u')
+        self.assertEqual((single.bits, single.precision), (26, 5))
+        widest = qi.Geohash.from_string('z' * 12)
+        self.assertEqual(
+            (widest.bits, widest.precision), (2 ** 60 - 1, 60))
+
+        self.assertEqual(repr(qi.Char('Q')), "Char('Q')")
+        self.assertEqual(repr(qi.DateMillis(-1)), 'DateMillis(-1)')
+        self.assertEqual(repr(qi.Long256(2 ** 255)), f'Long256({2 ** 255})')
+        self.assertEqual(repr(qi.Geohash(26, 5)), 'Geohash(26, 5)')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_roundtrip_claim_survives_a_pickle(self):
+        # `df.to_pickle`, multiprocessing and dask all pickle the frame,
+        # and pandas pickles `attrs` with it. `__reduce__` is written by
+        # hand so that what comes back is a claim rather than the plain
+        # dict its payload travels as -- an unpickled frame that had
+        # become editable would let one holder of it change what every
+        # other holder claims.
+        frame = self._nullable_roundtrip_frame()
+        restored = pickle.loads(pickle.dumps(frame))
+        claim = restored.attrs['questdb']
+        self.assertIsInstance(claim, qi._RoundtripClaim)
+        self.assertEqual(claim, frame.attrs['questdb'])
+        # Frozen at every depth, the same as the claim it came from.
+        with self.assertRaisesRegex(TypeError, 'cannot be edited in place'):
+            claim['version'] = 2
+        with self.assertRaisesRegex(TypeError, 'cannot be edited in place'):
+            claim['columns']['u']['kind'] = 'long256'
+        self.assertIs(copy.deepcopy(claim), claim)
+        # And it still reads as a claim on the way back in.
+        self.assertEqual(
+            self._dataframe_column_types(
+                restored, table_name='attrs_pickled', at='ts')['u'],
+            0x0C)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_roundtrip_claim_uuid_lands_in_wire_order(self):
+        # A `uuid` claim reads the column as canonical RFC 4122
+        # big-endian and byte-swaps it into QWP wire order (lo half LE,
+        # then hi half LE). Forwarding the bytes unchanged would corrupt
+        # every value, and two paths agreeing with each other would not
+        # notice if they swapped together -- so pin the bytes.
+        payload = self._dataframe_wire_payload(
+            self._nullable_roundtrip_frame(),
+            table_name='attrs_uuid_order', at='ts')
+        self.assertIn(self.UUID_VALUE.bytes[::-1], payload)
+        self.assertNotIn(self.UUID_VALUE.bytes, payload)
+        # LONG256 is already little-endian limbs, low limb first, so its
+        # 32 bytes go out untouched.
+        self.assertIn(bytes(range(32)), payload)
 
     def test_wrapper_validation(self):
         for value in ('', 'ab'):
@@ -6887,6 +6963,93 @@ class TestReinitRejected(unittest.TestCase):
             sender.__init__('tcp', '127.0.0.1', 9009)
         self.assertEqual(
             cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+
+class TestTypeStub(unittest.TestCase):
+    """`_client.pyi` is the type surface every editor and type checker
+    reads, and nothing else in the tree looks at it -- no mypy run, no
+    stubtest, in `test/`, `proj.py` or `ci/`. It can therefore promise
+    names the extension does not have, which is not a typing nicety: the
+    two `row()` value unions were annotated from the stub, type-checked
+    cleanly, and raised `ImportError` at runtime because they existed
+    only there.
+
+    Every name the stub declares is resolved against the built module
+    here, so a name that lives only in the stub fails as a test rather
+    than at a caller's import.
+    """
+
+    @staticmethod
+    def _stub_tree():
+        import ast
+        path = PROJ_ROOT / 'src' / 'questdb' / '_client.pyi'
+        return ast.parse(path.read_text(encoding='utf-8'))
+
+    @staticmethod
+    def _declared(node):
+        """The names a stub class or module body declares."""
+        import ast
+        out = []
+        for statement in node.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                      ast.ClassDef)):
+                out.append(statement.name)
+            elif (isinstance(statement, ast.AnnAssign)
+                    and isinstance(statement.target, ast.Name)):
+                out.append(statement.target.id)
+            elif isinstance(statement, ast.Assign):
+                out.extend(
+                    target.id for target in statement.targets
+                    if isinstance(target, ast.Name))
+        return out
+
+    def _implementation_sources(self):
+        source_dir = PROJ_ROOT / 'src' / 'questdb'
+        return '\n'.join(
+            path.read_text(encoding='utf-8')
+            for path in sorted(source_dir.glob('*.pyx'))
+            + sorted(source_dir.glob('*.pxi')))
+
+    def test_every_stub_name_exists_at_runtime(self):
+        import ast
+        tree = self._stub_tree()
+        sources = self._implementation_sources()
+        missing = []
+        for name in self._declared(tree):
+            if not hasattr(qi, name):
+                missing.append(name)
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            owner = getattr(qi, node.name, None)
+            if owner is None:
+                continue
+            for member in self._declared(node):
+                if hasattr(owner, member):
+                    continue
+                # A dataclass field and an attribute assigned in
+                # `__init__` are both invisible on the class itself.
+                if member in getattr(owner, '__annotations__', {}):
+                    continue
+                if f'self.{member} =' in sources:
+                    continue
+                missing.append(f'{node.name}.{member}')
+        self.assertEqual(
+            missing, [],
+            'declared in _client.pyi and absent from the extension')
+
+    def test_stub_and_module_export_the_same_names(self):
+        import ast
+        for node in self._stub_tree().body:
+            if (isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name)
+                            and target.id == '__all__'
+                            for target in node.targets)):
+                declared = sorted(ast.literal_eval(node.value))
+                break
+        else:
+            self.fail('_client.pyi declares no __all__')
+        self.assertEqual(declared, sorted(qi.__all__))
 
 
 class TestEveryTestClassIsReachable(unittest.TestCase):

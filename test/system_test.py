@@ -3111,6 +3111,77 @@ class TestEgressWithDatabase(unittest.TestCase):
                     pass
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_types_mapper_keeps_the_claim_and_the_dtype_decides(self):
+        """A custom ``types_mapper`` gets the same
+        ``df.attrs['questdb']`` claim the built-in backends get, and
+        whether the claim can be applied depends on the dtype the mapper
+        chose.
+
+        The docstring promises exactly that and nothing tested it. A
+        mapper that leaves the claimed columns Arrow-backed round-trips
+        the types; one that maps a claimed column to a float dtype
+        leaves the claim unread and the column lands as that dtype
+        implies.
+        """
+        import pyarrow as pa
+        src = 't_mapper_src_' + uuid.uuid4().hex[:8]
+        made = []
+        try:
+            self._exec(
+                f'CREATE TABLE {src} (ts TIMESTAMP, ip IPV4, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                "('2024-01-01T00:00:00Z', '1.2.3.4', 7)")
+            self.qdb_plain.retry_check_table(src, min_rows=1)
+            sql = f'SELECT ts, ip, lg FROM {src}'
+
+            # A mapper that keeps every column Arrow-backed: the claim
+            # applies and IPV4 comes back as IPV4.
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                kept = client.query(sql).to_pandas(
+                    types_mapper=pd.ArrowDtype)
+            self.assertEqual(
+                kept.attrs['questdb']['columns']['ip']['kind'], 'ipv4')
+            dst = 't_mapper_kept_' + uuid.uuid4().hex[:8]
+            made.append(dst)
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(kept, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=1)
+            self.assertEqual(self._column_type(dst, 'ip'), 'IPv4')
+
+            # A mapper that retypes the claimed column past every shape
+            # that can hold the claim. The claim is still in `attrs`,
+            # and the column lands as the dtype implies.
+            def to_float(arrow_type):
+                return (pd.Float64Dtype()
+                        if pa.types.is_uint32(arrow_type) else None)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                retyped = client.query(sql).to_pandas(types_mapper=to_float)
+            self.assertEqual(
+                retyped.attrs['questdb']['columns']['ip']['kind'], 'ipv4')
+            self.assertIsInstance(retyped['ip'].dtype, pd.Float64Dtype)
+            dst = 't_mapper_float_' + uuid.uuid4().hex[:8]
+            made.append(dst)
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(retyped, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=1)
+            self.assertEqual(self._column_type(dst, 'ip'), 'DOUBLE')
+        finally:
+            for name in [src] + made:
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {name}')
+                except Exception:
+                    pass
+
+    def _column_type(self, table_name, column):
+        return dict(
+            (row[0], row[1]) for row in
+            self.qdb_plain.http_sql_query(
+                f'SHOW COLUMNS FROM {table_name}')['dataset'])[column]
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_date_column_survives_a_read_modify_write(self):
         """A DATE column read back and written straight out again lands
         as DATE, on all three pandas backends.
@@ -3147,12 +3218,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                     with qi.QuestDB.from_conf(self._conf()) as client:
                         client.dataframe(df, table_name=dst, at='ts')
                     self.qdb_plain.retry_check_table(dst, min_rows=2)
-                    self.assertEqual(
-                        dict(
-                            (row[0], row[1]) for row in
-                            self.qdb_plain.http_sql_query(
-                                f'SHOW COLUMNS FROM {dst}')['dataset'])['d'],
-                        'DATE')
+                    self.assertEqual(self._column_type(dst, 'd'), 'DATE')
                     with qi.QuestDB.from_conf(self._conf()) as client:
                         back = client.query(
                             f'SELECT d FROM {dst} ORDER BY timestamp'

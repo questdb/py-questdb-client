@@ -164,18 +164,30 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
 class TestPyobjColumnarLeak(unittest.TestCase):
     """Guards the calloc'd ``pyobj_built_t`` builders
-    (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes}_pyobj``)
-    reached by ``QuestDB.dataframe`` for object-dtype columns: every native
-    buffer (data, validity bitmap, str byte arena) must be freed on the
-    success and all-valid (bitmap-dropped) paths, borrowed BINARY memoryviews
-    must be released on success and failure, and the pooled connection must
-    be returned on every call."""
+    (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes,
+    long256,fsb}_pyobj``) reached by ``QuestDB.dataframe`` for
+    object-dtype columns: every native buffer (data, validity bitmap, str
+    byte arena) must be freed on the success and all-valid
+    (bitmap-dropped) paths, borrowed BINARY memoryviews must be released
+    on success and failure, and the pooled connection must be returned on
+    every call.
+
+    The last two builders are reached only through a
+    ``df.attrs['questdb']`` claim -- object-dtype ints under ``long256``
+    and object-dtype ``bytes`` under ``uuid`` or ``long256`` -- which is
+    the shape ``to_pandas(dtype_backend='numpy_nullable')`` hands those
+    columns back as. They allocate 16 or 32 bytes a row plus a bitmap, so
+    the frames below carry the claim."""
 
     ROWS = 2048
 
+    @staticmethod
+    def _ts(n):
+        return pd.Series(pd.to_datetime(np.arange(n), unit='s'))
+
     def _frames(self):
         n = self.ROWS
-        ts = pd.Series(pd.to_datetime(np.arange(n), unit='s'))
+        ts = self._ts(n)
 
         def col(values, null_step):
             return pd.Series(
@@ -199,9 +211,13 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 blobs.append(bytearray(value))
             else:
                 blobs.append(memoryview(value))
+        long256_ints = [(1 << 255) + i for i in range(n)]
+        uuid_bytes = [uuid.UUID(int=i).bytes for i in range(n)]
+        long256_bytes = [
+            (i).to_bytes(32, 'little') for i in range(n)]
         frames = []
         for null_step in (0, 7):
-            frames.append(pd.DataFrame({
+            frame = pd.DataFrame({
                 'ts': ts,
                 's': col(strs, null_step),
                 'i': col(ints, null_step),
@@ -210,7 +226,16 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 'u': col(uuids, null_step),
                 'ip': col(ips, null_step),
                 'by': col(blobs, null_step),
-            }))
+                'l256': col(long256_ints, null_step),
+                'u_fsb': col(uuid_bytes, null_step),
+                'l_fsb': col(long256_bytes, null_step),
+            })
+            frame.attrs['questdb'] = {
+                'version': 1, 'columns': {
+                    'l256': {'kind': 'long256'},
+                    'u_fsb': {'kind': 'uuid'},
+                    'l_fsb': {'kind': 'long256'}}}
+            frames.append(frame)
         return frames
 
     def _assert_stable(self, work, warmup, measure):
@@ -283,6 +308,71 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                             'invalid BINARY memoryview was accepted')
 
                 self._assert_stable(work, warmup=200, measure=2400)
+
+    def test_pyobj_error_after_a_partial_bitmap_no_leak(self):
+        """A column rejected part-way through must free what it had
+        already built, bitmap included.
+
+        Every other error-path test puts the bad value at row 0, so
+        ``pyobj_built_free`` only ever runs on a struct with nothing
+        written yet -- the allocations it has to release are not there
+        to be missed. Here the nulls before the bad row have grown the
+        validity bitmap and the values before it have filled the data
+        buffer, so the unwind runs with both live. One frame per
+        builder that raises: the string arena, the fixed-width integer
+        buffer, and the two claimed builders' 16- and 32-byte slots.
+        """
+        from qwp_ws_ack_server import QwpAckServer
+        n = 512
+        bad_at = n - 1
+
+        def col(good, bad, null_step=5):
+            return pd.Series(
+                [None if i % null_step == 0
+                 else (bad if i == bad_at else good(i))
+                 for i in range(n)],
+                dtype=object)
+
+        # A lone surrogate cannot be encoded as UTF-8; an integer past
+        # the signed 64-bit range overflows; a claimed UUID or LONG256
+        # cell has to be exactly 16 or 32 bytes wide.
+        cases = [
+            ('s', col(lambda i: f'value_{i:06}', '\ud800'), None),
+            ('i', col(lambda i: i, 2 ** 63), None),
+            ('l256', col(lambda i: (1 << 255) + i, -1), 'long256'),
+            ('u_fsb', col(lambda i: uuid.UUID(int=i).bytes, b'short'),
+             'uuid'),
+            ('l_fsb', col(lambda i: (i).to_bytes(32, 'little'), b'short'),
+             'long256'),
+        ]
+        frames = []
+        for name, values, kind in cases:
+            frame = pd.DataFrame({'ts': self._ts(n), name: values})
+            if kind is not None:
+                frame.attrs['questdb'] = {
+                    'version': 1, 'columns': {name: {'kind': kind}}}
+            frames.append((name, frame))
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    for name, frame in frames:
+                        try:
+                            client.dataframe(
+                                frame, table_name='t', at='ts',
+                                symbols=False)
+                        except qi.QuestDBError as exc:
+                            if repr(name) not in str(exc):
+                                raise AssertionError(
+                                    f'error did not name {name!r}: {exc}')
+                        else:
+                            raise AssertionError(
+                                f'column {name!r} was accepted')
+
+                self._assert_stable(work, warmup=150, measure=1200)
 
     @unittest.skipUnless(pa is not None, 'pyarrow not installed')
     def test_promoted_columnar_path_no_leak(self):
