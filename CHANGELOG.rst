@@ -198,6 +198,42 @@ New
 Fixed
 ~~~~~
 
+- **A transaction whose commit cannot flush is over.** ``commit()`` used to
+  mark the transaction complete before the flush that carries it, so a flush
+  that failed left the transaction closed with its rows still buffered, for
+  the next ordinary flush to send outside the transaction you asked for. A
+  commit that reached the wire and failed now ends the transaction, and one
+  refused before it got that far leaves the transaction open for you to
+  finish or roll back. A caller who caught the error and called ``commit()``
+  again now gets ``Transaction already completed`` where it previously made
+  a second attempt.
+
+- **``clear()``, ``flush()``, ``close()``, ``commit()`` and ``dataframe()``
+  are all refused while a row is being written.** A column value whose
+  conversion runs Python can call back into the sender that is part-way
+  through a row, and each of these would have destroyed or reordered what
+  that row was writing. ``dataframe()`` is covered on every transport,
+  including the WebSocket route that takes its own connection.
+
+- **A dataframe refused part-way through says what it already stored.** The
+  GEOHASH range check runs batch by batch, and a large enough frame commits
+  a checkpoint every hundred batches, so a value refused after one has rows
+  already in the table. The error now says so and carries ``in_doubt``,
+  rather than reading like a frame that never left and inviting a retry that
+  duplicates the prefix.
+
+- **A claim the column can never carry is reported the same way by both
+  DataFrame planners**, for all five kinds rather than only for GEOHASH. A
+  claim the column *does* carry stays quiet, including the ``uuid.UUID`` and
+  ``ipaddress.IPv4Address`` object columns plain ``to_pandas()`` hands back.
+
+- **A query result whose schema changes between batches is refused** on the
+  pandas NumPy backend. Every batch after the first was decoded against the
+  first one's columns, and the only guard compared byte widths, which agree
+  for any same-width type swap. A GEOHASH precision or DECIMAL scale that
+  changed mid-stream also left the frame's ``df.attrs['questdb']``
+  disagreeing with its own values.
+
 - **A GEOHASH value too wide for its precision is now refused.** A GEOHASH
   column keeps only the low bits it was given, so a wider value used to
   reach the database as a valid geohash for somewhere else entirely, with

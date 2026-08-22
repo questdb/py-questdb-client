@@ -4894,7 +4894,6 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         table_name='geo_md_refused', at='ts')
                 self.assertIn(message, str(caught.exception))
 
-    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_a_commit_whose_flush_fails_at_the_wire_ends_the_transaction(self):
         """A flush that reached the wire clears the buffer whether it
         succeeded or not, so there is nothing left to commit. Keeping
@@ -5166,6 +5165,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     # as its own type either way.
                     self.assertEqual(types['c'], wire_type)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_a_claim_no_column_can_carry_is_said_out_loud_on_both_planners(self):
         """A claim the column's type can never carry is a mistake
         rather than drift, and both planners now say so. The NumPy
@@ -5247,6 +5248,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         f'{[str(w.message) for w in dropped]}')
                     self.assertEqual(types['g'], 0x0E)
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_big_metadata_on_a_non_geohash_column_does_not_stop_the_send(self):
         """The metadata walk is bounded, and a blob it cannot finish
         stops the send -- but only for a column that could carry a
@@ -5266,6 +5268,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self._dataframe_wire_payload(
             table, table_name='big_md_string', at='ts')
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_a_full_width_geohash_claim_reaches_its_top_values(self):
         """A precision that fills the column's width uses every bit,
         including the one that reads as a sign, so its top half sits in
@@ -5309,6 +5312,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 table_name='geo_narrow', at='ts',
                 schema_overrides={'gh': ('geohash', 7)})
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_schema_overrides_geohash_bits_refuses_a_bool(self):
         """`True` is an `int`, and would have been taken as a 1-bit
         precision. Every other bits check in this module rejects it."""
@@ -5319,6 +5323,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 table_name='geo_bool', at='ts',
                 schema_overrides={'gh': ('geohash', True)})
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_geohash_metadata_too_long_to_walk_stops_the_send(self):
         # The walk over an Arrow metadata blob is bounded; the native
         # importer's is not. A claim sitting past either bound would go
@@ -5651,6 +5656,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         return frame
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_long256_round_trips_through_an_object_int_column(self):
         # Plain `to_pandas()` has no pyarrow to hold 32 raw bytes, so it
         # hands a LONG256 column back as Python ints. Going the other
