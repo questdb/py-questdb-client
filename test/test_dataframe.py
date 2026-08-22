@@ -184,8 +184,9 @@ class TestPandasBase:
                 df = pd.DataFrame({'a': [value]})
                 with self.assertRaisesRegex(
                         qi.QuestDBError,
-                        f'{descr} objects, which are only supported on the '
-                        'columnar QuestDB.dataframe'):
+                        f'{descr} objects, which the row-serializing '
+                        'Sender.dataframe\\(\\) cannot write on any '
+                        'protocol'):
                     _dataframe(self.version, df, table_name='t',
                                at=qi.ServerTimestamp)
 

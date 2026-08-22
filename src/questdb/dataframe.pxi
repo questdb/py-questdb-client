@@ -1987,12 +1987,20 @@ cdef void_int _dataframe_resolve_target(
             col.setup.target = target
             return 0
     if col.setup.source in _COLUMNAR_ONLY_PYOBJ_SOURCES:
+        # `QuestDB.dataframe()` is named with the configuration that
+        # reaches it: `questdb.connect()` takes `ws::` / `wss::` only,
+        # so a `udp::` or ILP sender told to go there would find no
+        # door. `Sender.row()` is the one that opens from where they
+        # are, on any QWP protocol.
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
             f'Column {pandas_col.name!r} holds '
-            f'{_PYOBJ_SOURCE_DESCR[col.setup.source]} objects, which are only '
-            f'supported on the columnar QuestDB.dataframe() path, not the '
-            f'row-oriented Sender.dataframe().')
+            f'{_PYOBJ_SOURCE_DESCR[col.setup.source]} objects, which the '
+            f'row-serializing Sender.dataframe() cannot write on any '
+            f'protocol. Pass the values to Sender.row(), which takes them '
+            f'on a udp::, ws:: or wss:: sender, or write the frame with '
+            f'QuestDB.dataframe() over a ws:: or wss:: configuration, '
+            f'which sends it columnar.')
     raise QuestDBError(
         QuestDBErrorCode.BadDataFrame,
         f'Could not map column source type (code {col.setup.source} for ' +
