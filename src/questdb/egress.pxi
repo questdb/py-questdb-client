@@ -1361,28 +1361,48 @@ cdef object _numpy_geohash_chunk(
     cdef object dtype
     cdef size_t stride
     cdef size_t target
+    cdef unsigned int precision
     cdef Py_ssize_t nbytes
     cdef unsigned char* src
     _reader_check(
         qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'qwp_reader_batch_column_data')
     stride = cd.value_stride
-    if stride == 1:
-        dtype = np.dtype(np.uint8)
+    precision = cd.geohash_precision_bits
+    # The width comes from the precision rather than from the wire
+    # stride, and is signed, so that it matches what the Arrow egress
+    # gives the same column. A `geohash` claim rides on the column's
+    # type, and the ingest side carries one only on a signed Int8/16/32/64
+    # -- an unsigned column is refused by the native Arrow importer and
+    # so has its claim dropped -- which makes the signed widths the only
+    # shape a GEOHASH column can be read back in and written out again.
+    #
+    # Each width carries a bit of headroom because a precision fills its
+    # bits: an 8-bit geohash holds 0..255, which is every bit of an
+    # unsigned byte and more than a signed one can express, so it takes
+    # the 16-bit slot. That keeps every value positive in its container,
+    # which is what the range check on the way back in expects.
+    if precision >= 1 and precision <= 7:
+        dtype = np.dtype(np.int8)
         target = 1
-    elif stride == 2:
-        dtype = np.dtype(np.uint16)
+    elif precision <= 15:
+        dtype = np.dtype(np.int16)
         target = 2
-    elif stride == 3 or stride == 4:
-        dtype = np.dtype(np.uint32)
+    elif precision <= 31:
+        dtype = np.dtype(np.int32)
         target = 4
-    elif stride >= 5 and stride <= 8:
-        dtype = np.dtype(np.uint64)
+    elif precision <= 60:
+        dtype = np.dtype(np.int64)
         target = 8
     else:
         raise QuestDBError(
             QuestDBErrorCode.ServerFlushError,
-            'unexpected geohash byte width {}'.format(stride))
+            'unexpected geohash precision {} bits'.format(precision))
+    if stride > target:
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
+            'geohash column of {} bits arrived {} bytes wide'.format(
+                precision, stride))
     if row_count == 0:
         return np.empty(0, dtype=dtype)
     if cd.values == NULL:

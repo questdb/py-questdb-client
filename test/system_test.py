@@ -3184,6 +3184,73 @@ class TestEgressWithDatabase(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_geohash_claim_survives_convert_dtypes_to_pyarrow(self):
+        """A GEOHASH column keeps its type through
+        ``to_pandas()`` followed by
+        ``df.convert_dtypes(dtype_backend='pyarrow')``.
+
+        That conversion is what the ``QuestDB.dataframe`` docstring
+        names, and it moves the frame from the NumPy planner to the
+        Arrow columnar path. The two read the claim in different places,
+        and the Arrow path carries a ``geohash`` claim only on a signed
+        Arrow integer -- an unsigned column is refused by the native
+        importer, so its claim is dropped and the column would land as a
+        plain LONG. The NumPy egress therefore hands the column back
+        signed, at the width the precision needs, which is the same
+        shape the Arrow egress gives it.
+        """
+        src = 't_ghs_src_' + uuid.uuid4().hex[:8]
+        dst = 't_ghs_dst_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {src} '
+                '(ts TIMESTAMP, gh GEOHASH(4c)) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', #u33d), "
+                f"('2024-01-01T00:00:01Z', #u33e)")
+            self.qdb_plain.retry_check_table(src, min_rows=2)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT ts, gh FROM {src} ORDER BY ts').to_pandas()
+            self.assertEqual(df.attrs['questdb']['columns']['gh'], {
+                'kind': 'geohash', 'precision_bits': 20})
+            # 20 bits needs a signed slot wide enough to hold
+            # 0 .. 2**20-1, which is int32 -- the same width the Arrow
+            # egress picks for that precision.
+            self.assertEqual(df['gh'].dtype, np.dtype(np.int32))
+            self.assertTrue((df['gh'] >= 0).all())
+
+            converted = df.convert_dtypes(dtype_backend='pyarrow')
+            self.assertEqual(
+                converted.attrs['questdb']['columns']['gh'],
+                {'kind': 'geohash', 'precision_bits': 20})
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(converted, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=2)
+
+            # The claim survived the conversion, so the auto-created
+            # column is a GEOHASH and not the LONG its storage type
+            # alone would imply.
+            self.assertEqual(
+                self.qdb_plain.http_sql_query(
+                    f"SELECT typeOf(gh) FROM {dst} LIMIT 1")['dataset'],
+                [['GEOHASH(4c)']])
+            self.assertEqual(
+                self.qdb_plain.http_sql_query(
+                    f'SELECT gh FROM {dst} ORDER BY timestamp')['dataset'],
+                self.qdb_plain.http_sql_query(
+                    f'SELECT gh FROM {src} ORDER BY ts')['dataset'])
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
+
     def test_arrow_backed_egress_round_trip_overrides(self):
         """uuid / long256 / ipv4 / char / geohash round-trip through
         ``to_pandas(dtype_backend='pyarrow')`` and through
