@@ -1712,6 +1712,26 @@ cdef object _combine_hybrid_mask(list value_chunks, list mask_chunks, object np)
     return np.concatenate(parts)
 
 
+cdef _numpy_check_meta_pinned(
+        tuple pinned, const qwp_reader_batch* batch):
+    """Refuse a batch whose schema disagrees with the first one's.
+
+    The NumPy path reads the column names, kinds, decimal scales and
+    geohash precisions once and decodes every later batch against them,
+    and the round-trip claim it hands back names them too. A batch that
+    disagrees would be decoded with the wrong dtype and described by a
+    claim that does not match its own values, so it stops here instead.
+    """
+    cdef tuple now = _numpy_extract_meta(batch)
+    if now == pinned:
+        return
+    raise QuestDBError(
+        QuestDBErrorCode.ServerFlushError,
+        'The result schema changed between batches: this reader '
+        'decodes every batch against the first one\'s columns, so a '
+        'later batch that disagrees cannot be read.')
+
+
 cdef tuple _numpy_extract_meta(const qwp_reader_batch* batch):
     cdef size_t n_cols = qwp_reader_batch_column_count(batch)
     cdef size_t col_idx
@@ -1874,6 +1894,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     cdef size_t col_idx
     cdef size_t prev_dict_n = 0
     cdef bint first = True
+    cdef tuple pinned_meta = None
     cdef bint has_symbol = False
     cdef int seen_seq
 
@@ -1914,12 +1935,15 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                     break
                 row_count = qwp_reader_batch_row_count(batch)
                 if first:
+                    pinned_meta = _numpy_extract_meta(batch)
                     (col_names, col_kinds, col_scales, col_precision,
-                     has_symbol) = _numpy_extract_meta(batch)
+                     has_symbol) = pinned_meta
                     n_cols = <size_t>len(col_names)
                     col_chunks = [[] for _ in range(n_cols)]
                     col_masks = [[] for _ in range(n_cols)]
                     first = False
+                else:
+                    _numpy_check_meta_pinned(pinned_meta, batch)
                 if has_symbol:
                     _reader_check(
                         qwp_reader_batch_symbol_dict(batch, &sd, &err), &err,
@@ -2151,6 +2175,7 @@ cdef class _NumpyBatchIter:
     cdef list col_scales
     cdef list col_precision
     cdef object claim
+    cdef tuple pinned_meta
     cdef bint first
     cdef bint has_symbol
     cdef bint done
@@ -2235,13 +2260,16 @@ cdef class _NumpyBatchIter:
                     raise StopIteration
                 row_count = qwp_reader_batch_row_count(batch)
                 if self.first:
+                    self.pinned_meta = _numpy_extract_meta(batch)
                     (self.col_names, self.col_kinds, self.col_scales,
                      self.col_precision, self.has_symbol) = \
-                        _numpy_extract_meta(batch)
+                        self.pinned_meta
                     self.claim = _numpy_roundtrip_claim(
                         self.col_names, self.col_kinds,
                         self.col_scales, self.col_precision)
                     self.first = False
+                else:
+                    _numpy_check_meta_pinned(self.pinned_meta, batch)
                 n_cols = <size_t>len(self.col_names)
                 if self.has_symbol:
                     _reader_check(
