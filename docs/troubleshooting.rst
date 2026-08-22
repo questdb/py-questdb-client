@@ -104,6 +104,42 @@ decimal places or more than 12 total digits will cause errors.
 For more details on decimal types, see the
 `QuestDB DECIMAL documentation <https://questdb.com/docs/reference/sql/datatypes/#decimal>`_.
 
+.. _troubleshooting-qwp-column-types:
+
+UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH Column Errors
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These seven column types need QuestDB server 10.0.0 or later and a QWP
+sender. If a value of one of them is rejected, check the following:
+
+**Sender protocol**: they are QWP-only. Configure ``udp::``, ``ws::`` or
+``wss::``; the legacy ILP transports (``http``, ``https``, ``tcp``, ``tcps``) have no
+such column types and reject the values rather than silently widening
+them.
+
+**GEOHASH precision**: a column's precision is fixed when the column is
+created, and every value written to it has to be at that precision. A
+:class:`Geohash <questdb.Geohash>` cell whose precision differs from the
+one the column already holds is rejected by
+:meth:`Sender.row <questdb.Sender.row>`, and the buffer is rewound to what
+it held before that row. On the DataFrame path a value that does not fit
+the claimed precision is refused before anything reaches the wire: a
+``GEOHASH`` column keeps only the low bits, so a wider value would land as
+a valid geohash for somewhere else entirely.
+
+**Fixed widths**: a ``'uuid'`` claim needs every non-null cell to be
+exactly 16 bytes and a ``'long256'`` claim exactly 32. An object column of
+Python ints under ``'long256'`` must satisfy ``0 <= value < 2**256``, and
+one under ``'ipv4'`` must fit ``uint32``.
+
+**Integer columns need naming**: ``IPV4``, ``CHAR`` and ``GEOHASH`` ride on
+integers, which say nothing about which type they are. Name them with
+``schema_overrides``, or let ``df.attrs['questdb']`` name them on a frame
+that came out of :meth:`QuestDB.query <questdb.QuestDB.query>`. Without
+either, the column lands as a plain integer.
+
+See :ref:`sender_qwp_column_types` for how each type is written.
+
 ILP/TCP Server disconnects
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 

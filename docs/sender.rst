@@ -264,6 +264,97 @@ performance:
                            dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
     })
 
+.. _sender_qwp_column_types:
+
+UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH Columns
+-----------------------------------------------------------
+
+Starting with QuestDB server version 10.0.0, a QWP sender (``udp::``,
+``ws::`` or ``wss::``) can write these seven column types. They are auto-created like
+any other column, except that a ``GEOHASH`` column's precision is fixed
+when the column is created, so a table holding one is usually created up
+front.
+
+Row by row
+~~~~~~~~~~
+
+``UUID``, ``IPV4`` and ``BINARY`` are written with the Python types that
+already mean them — :class:`uuid.UUID`, :class:`ipaddress.IPv4Address`,
+and ``bytes`` / ``bytearray`` / ``memoryview``. The other four need a
+wrapper, because the Python type they would otherwise arrive as already
+means a different QuestDB column type: a ``str`` is VARCHAR, an ``int``
+is LONG, and a ``datetime`` is TIMESTAMP. The wrappers are
+:class:`Char <questdb.Char>`, :class:`DateMillis <questdb.DateMillis>`,
+:class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`.
+
+.. literalinclude:: ../examples/qwp_column_types.py
+   :language: python
+
+A few things worth knowing about the wrappers:
+
+* :class:`DateMillis <questdb.DateMillis>` is a millisecond timestamp, not
+  a civil date — that is what QuestDB ``DATE`` holds. Build it from
+  milliseconds, from a :class:`datetime.datetime` with
+  ``DateMillis.from_datetime``, or from the clock with ``DateMillis.now()``.
+* :class:`Geohash <questdb.Geohash>` carries bits *and* precision.
+  ``Geohash.from_string('u33d8')`` packs one to twelve base32 characters
+  at five bits each. A column's precision is fixed by the first row that
+  reaches it, and a later row at a different precision is rejected by
+  :meth:`Sender.row <questdb.Sender.row>` itself.
+* :class:`Long256 <questdb.Long256>` takes an unsigned integer below
+  ``2**256``.
+* :class:`Char <questdb.Char>` takes exactly one UTF-16 code unit, so a
+  character outside the Basic Multilingual Plane does not fit — use a
+  ``str`` (VARCHAR) for those.
+
+DataFrames
+~~~~~~~~~~
+
+A DataFrame states these types through the column's own Arrow type where
+the type is specific enough to say so, and through ``schema_overrides``
+where it is not:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 43 43
+
+   * - Column type
+     - Arrow type
+     - ``schema_overrides``
+   * - ``UUID``
+     - ``pa.binary(16)``, ``pa.uuid()``
+     - ``'uuid'``
+   * - ``LONG256``
+     - ``pa.binary(32)``
+     - ``'long256'``
+   * - ``IPV4``
+     - —
+     - ``'ipv4'`` on a ``uint32`` column
+   * - ``CHAR``
+     - —
+     - ``'char'`` on a ``uint16`` column
+   * - ``GEOHASH``
+     - —
+     - ``('geohash', bits)`` on a signed integer column
+   * - ``DATE``
+     - ``pa.timestamp('ms')``, ``pa.date32()``, ``pa.date64()``
+     - —
+   * - ``BINARY``
+     - ``pa.binary()``, ``pa.large_binary()``
+     - —
+
+.. literalinclude:: ../examples/qwp_column_types_dataframe.py
+   :language: python
+
+Reading a query result back and writing it out again keeps all of these
+types. A pandas dtype holds an Arrow type and no field, so the claim
+travels in ``df.attrs['questdb']``, which
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads — no second
+round of ``schema_overrides``. All three ``to_pandas`` backends
+round-trip, in whatever shape they hand the columns back. A column you
+dropped, renamed or retyped simply loses its claim, and ``symbols`` /
+``schema_overrides`` outrank it.
+
 Populating Designated Timestamps
 --------------------------------
 
