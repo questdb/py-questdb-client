@@ -6375,6 +6375,36 @@ cdef int _arrow_signed_int_width(const char* fmt) noexcept nogil:
     return 0
 
 
+cdef str _arrow_field_name(const ArrowSchema* field):
+    """A field's name as text, for a message naming the column."""
+    if field == NULL or field.name == NULL:
+        return '?'
+    return field.name.decode('utf-8', 'replace')
+
+
+cdef bint _arrow_schema_claims_geohash(
+        const ArrowSchema* schema,
+        const qwp_arrow_override* overrides,
+        size_t overrides_len) noexcept nogil:
+    """Whether any column of this schema goes out as a GEOHASH.
+
+    Read off the schema alone, which the stream hands over once and
+    keeps for every batch, so a frame that claims no GEOHASH is
+    answered without looking at a single batch.
+    """
+    cdef int64_t child_index
+    cdef const ArrowSchema* field
+    if schema.n_children == 0 or schema.children == NULL:
+        return False
+    for child_index in range(schema.n_children):
+        field = schema.children[child_index]
+        if field == NULL:
+            continue
+        if _arrow_column_geohash_bits(field, overrides, overrides_len) >= 0:
+            return True
+    return False
+
+
 cdef void_int _arrow_batch_check_geohash_ranges(
         const ArrowArray* batch,
         const ArrowSchema* schema,
@@ -6392,13 +6422,21 @@ cdef void_int _arrow_batch_check_geohash_ranges(
 
     Every batch this path sends passes through here -- pandas, polars,
     ``pa.Table``, ``pa.RecordBatch`` and one-shot streams alike, sliced
-    or whole -- so there is one rule and one place that applies it. The
-    scan is a linear pass over the claimed columns only, and a frame
-    that claims no GEOHASH pays one pointer test per column.
+    or whole -- so there is one rule and one place that applies it. A
+    frame claiming no GEOHASH is answered off the schema, which is
+    fetched once and shared by every batch of a stream, and its values
+    are never touched.
 
     ``row_base`` is the number of rows of this frame already sent, so
     the row named is the caller's own rather than its position inside a
     batch they never chose.
+
+    Once a frame does claim a GEOHASH column, a shape this scan cannot
+    read stops the send rather than passing unread: nothing downstream
+    would catch what went by, so "could not check" and "checked, and it
+    was fine" have to end differently. A frame claiming no GEOHASH is
+    left alone whatever shape it is in -- the importer holds it to its
+    own rules.
     """
     cdef int64_t child_index
     cdef const ArrowSchema* field
@@ -6410,18 +6448,26 @@ cdef void_int _arrow_batch_check_geohash_ranges(
     cdef const uint8_t* validity
     cdef size_t bad_row = 0
     cdef bint bad = False
-    cdef str col_name
-    if batch.length == 0 or schema.n_children == 0:
+    cdef int64_t start
+    if batch.length == 0:
+        return 0
+    if not _arrow_schema_claims_geohash(schema, overrides, overrides_len):
         return 0
     if (batch.n_children != schema.n_children
             or batch.children == NULL or schema.children == NULL):
-        return 0
-    # A struct-level offset would shift every child, and producers do
-    # not set one on a record batch: the columns carry their own. Rather
-    # than guess which reading a producer meant, leave such a batch to
-    # the importer instead of scanning at the wrong place.
-    if batch.offset != 0:
-        return 0
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad dataframe: a GEOHASH column cannot be checked because '
+            f'the batch carries {batch.n_children} columns against the '
+            f'schema\'s {schema.n_children}.')
+    # A struct-level offset shifts every child: the importer slices each
+    # column by it before reading, so the scan starts there too and the
+    # rows it reads are the rows that go out.
+    if batch.offset < 0:
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad dataframe: a GEOHASH column cannot be checked because '
+            f'the batch starts at row {batch.offset}.')
     for child_index in range(schema.n_children):
         field = schema.children[child_index]
         col = batch.children[child_index]
@@ -6432,23 +6478,45 @@ cdef void_int _arrow_batch_check_geohash_ranges(
             continue
         elem_size = _arrow_signed_int_width(field.format)
         if elem_size == 0:
+            # A GEOHASH claim rides on a signed Int8/16/32/64 and the
+            # importer refuses it on anything else, naming the type it
+            # got. The column never reaches the wire for an unread
+            # value to have left on it.
             continue
         # `col.offset` is the array's own start row and is cast to
         # `size_t` for the scan, so a negative one would wrap to about
-        # 2**64 and index the value buffer far outside it. The Arrow
-        # length is the row count from that start, which is why the
-        # bound compares it against the batch's rows alone.
+        # 2**64 and index the value buffer far outside it.
         if (col.n_buffers < 2 or col.buffers == NULL
-                or col.offset < 0 or col.length < batch.length):
-            continue
+                or col.offset < 0 or col.buffers[1] == NULL):
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {_arrow_field_name(field)!r}: its '
+                f'GEOHASH({bits}b) values cannot be held to the '
+                f'precision because the column arrived without readable '
+                f'value buffers.')
+        # An Arrow length is the row count measured from the array's own
+        # start, and a struct-level offset picks the row each column is
+        # read from, so the batch's rows are in range when
+        # `batch.offset + batch.length` fits the column's length.
+        if batch.offset + batch.length > col.length:
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {_arrow_field_name(field)!r}: its '
+                f'GEOHASH({bits}b) values cannot be held to the '
+                f'precision because the column holds {col.length} rows '
+                f'and the batch asks for {batch.length} from row '
+                f'{batch.offset}.')
+        start = col.offset + batch.offset
         data = col.buffers[1]
-        if data == NULL:
-            continue
+        # A column with no validity buffer has no nulls, whatever it
+        # says its null count is -- the count is allowed to be -1,
+        # meaning nobody has counted, and a column that never had a
+        # null has no bitmap to count from. Reading the pair as "has
+        # nulls, cannot see them" left every value in an ordinary
+        # bitmap-free column unread.
         validity = NULL
-        if col.null_count != 0:
+        if col.null_count != 0 and col.buffers[0] != NULL:
             validity = <const uint8_t*>col.buffers[0]
-            if validity == NULL:
-                continue
         max_value = (<int64_t>1 << bits) - 1
         with nogil:
             bad = _dataframe_columnar_geohash_scan(
@@ -6458,15 +6526,13 @@ cdef void_int _arrow_batch_check_geohash_ranges(
                 True,
                 <size_t>batch.length,
                 max_value,
-                <size_t>col.offset,
+                <size_t>start,
                 &bad_row)
         if bad:
-            col_name = (
-                field.name.decode('utf-8', 'replace')
-                if field.name != NULL else '?')
             raise QuestDBError(
                 QuestDBErrorCode.BadDataFrame,
-                f'Bad column {col_name!r} at row {row_base + bad_row}: '
+                f'Bad column {_arrow_field_name(field)!r} at row '
+                f'{row_base + bad_row}: '
                 f'GEOHASH({bits}b) values must be in the range '
                 f'0 .. {max_value}.')
     return 0

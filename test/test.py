@@ -8,6 +8,8 @@ from unittest import mock
 import datetime
 import ipaddress
 import array
+import ctypes
+import struct
 import timeit
 import time
 import threading
@@ -2410,6 +2412,237 @@ class TestQwpWebSocketTls(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
 
+class _RawArrowStream:
+    """A hand-rolled ``__arrow_c_stream__`` producer, built straight
+    onto the Arrow C data interface with ctypes.
+
+    ``QuestDB.dataframe()`` accepts any object carrying that method, so
+    the shapes it has to cope with are not only the ones pyarrow and
+    polars emit. pyarrow normalises a few of them away on export -- it
+    writes a counted ``null_count`` even where the array was built
+    without one, and it puts a slice's start on each column rather than
+    on the batch -- so the shapes below are reachable only from a
+    producer written by hand, which is exactly what nanoarrow, DuckDB
+    and arro3 are.
+
+    Everything the stream hands out stays owned by this object and is
+    freed with it; the release callbacks only clear the pointer the
+    consumer is told to clear.
+    """
+
+    _ARRAY_FIELDS = [
+        ('length', ctypes.c_int64),
+        ('null_count', ctypes.c_int64),
+        ('offset', ctypes.c_int64),
+        ('n_buffers', ctypes.c_int64),
+        ('n_children', ctypes.c_int64),
+        ('buffers', ctypes.POINTER(ctypes.c_void_p)),
+        ('children', ctypes.c_void_p),
+        ('dictionary', ctypes.c_void_p),
+        ('release', ctypes.c_void_p),
+        ('private_data', ctypes.c_void_p)]
+    _SCHEMA_FIELDS = [
+        ('format', ctypes.c_char_p),
+        ('name', ctypes.c_char_p),
+        ('metadata', ctypes.c_char_p),
+        ('flags', ctypes.c_int64),
+        ('n_children', ctypes.c_int64),
+        ('children', ctypes.c_void_p),
+        ('dictionary', ctypes.c_void_p),
+        ('release', ctypes.c_void_p),
+        ('private_data', ctypes.c_void_p)]
+    _STREAM_FIELDS = [
+        ('get_schema', ctypes.c_void_p),
+        ('get_next', ctypes.c_void_p),
+        ('get_last_error', ctypes.c_void_p),
+        ('release', ctypes.c_void_p),
+        ('private_data', ctypes.c_void_p)]
+
+    class Array(ctypes.Structure):
+        pass
+
+    class Schema(ctypes.Structure):
+        pass
+
+    class Stream(ctypes.Structure):
+        pass
+
+    def __init__(self, columns, row_count, batch_offset=0):
+        """`columns` is a list of dicts, one per column, each naming its
+        Arrow `format`, its `name`, the `data` bytes of its value
+        buffer, and optionally `metadata`, `null_count`, `validity`,
+        `offset` and `length`. `row_count` and `batch_offset` are the
+        struct-level length and start."""
+        self._keep = []
+        self._released = False
+        self._schema = self._build_schema(columns)
+        self._array = self._build_array(columns, row_count, batch_offset)
+        self._stream = self._build_stream()
+
+    # -- construction --------------------------------------------------
+
+    def _buffer_array(self, blobs):
+        """A `void*[]` over the given buffers; None becomes NULL."""
+        out = (ctypes.c_void_p * len(blobs))()
+        for i, blob in enumerate(blobs):
+            if blob is None:
+                out[i] = None
+            else:
+                held = ctypes.create_string_buffer(blob, len(blob))
+                self._keep.append(held)
+                out[i] = ctypes.cast(held, ctypes.c_void_p)
+        self._keep.append(out)
+        return out
+
+    @staticmethod
+    def _packed_metadata(pairs):
+        """Arrow's packed metadata blob: a pair count, then each key and
+        each value as a little-endian length followed by its bytes."""
+        if not pairs:
+            return None
+        out = struct.pack('<i', len(pairs))
+        for key, value in pairs.items():
+            out += struct.pack('<i', len(key)) + key
+            out += struct.pack('<i', len(value)) + value
+        return out
+
+    def _release_stub(self, struct_type):
+        """A release callback that clears the caller's pointer. The
+        memory itself belongs to this object."""
+        proto = ctypes.CFUNCTYPE(None, ctypes.POINTER(struct_type))
+
+        def release(ptr):
+            ptr.contents.release = None
+
+        held = proto(release)
+        self._keep.append(held)
+        return ctypes.cast(held, ctypes.c_void_p)
+
+    def _build_schema(self, columns):
+        children = (ctypes.POINTER(self.Schema) * len(columns))()
+        for i, column in enumerate(columns):
+            child = self.Schema()
+            child.format = column['format']
+            child.name = column['name']
+            child.metadata = self._packed_metadata(column.get('metadata'))
+            child.flags = 2  # ARROW_FLAG_NULLABLE
+            child.n_children = 0
+            child.children = None
+            child.dictionary = None
+            child.release = self._release_stub(self.Schema)
+            child.private_data = None
+            self._keep.append(child)
+            children[i] = ctypes.pointer(child)
+        self._keep.append(children)
+        top = self.Schema()
+        top.format = b'+s'
+        top.name = None
+        top.metadata = None
+        top.flags = 0
+        top.n_children = len(columns)
+        top.children = ctypes.cast(children, ctypes.c_void_p)
+        top.dictionary = None
+        top.release = self._release_stub(self.Schema)
+        top.private_data = None
+        self._keep.append(top)
+        return top
+
+    def _build_array(self, columns, row_count, batch_offset):
+        children = (ctypes.POINTER(self.Array) * len(columns))()
+        for i, column in enumerate(columns):
+            child = self.Array()
+            child.length = column.get('length', row_count + batch_offset)
+            child.null_count = column.get('null_count', 0)
+            child.offset = column.get('offset', 0)
+            child.n_buffers = column.get('n_buffers', 2)
+            child.n_children = 0
+            child.buffers = self._buffer_array(
+                [column.get('validity'), column['data']])
+            child.children = None
+            child.dictionary = None
+            child.release = self._release_stub(self.Array)
+            child.private_data = None
+            self._keep.append(child)
+            children[i] = ctypes.pointer(child)
+        self._keep.append(children)
+        top = self.Array()
+        top.length = row_count
+        top.null_count = 0
+        top.offset = batch_offset
+        top.n_buffers = 1
+        top.n_children = len(columns)
+        top.buffers = self._buffer_array([None])
+        top.children = ctypes.cast(children, ctypes.c_void_p)
+        top.dictionary = None
+        top.release = self._release_stub(self.Array)
+        top.private_data = None
+        self._keep.append(top)
+        return top
+
+    def _build_stream(self):
+        stream_ptr = ctypes.POINTER(self.Stream)
+        get_schema_t = ctypes.CFUNCTYPE(
+            ctypes.c_int, stream_ptr, ctypes.POINTER(self.Schema))
+        get_next_t = ctypes.CFUNCTYPE(
+            ctypes.c_int, stream_ptr, ctypes.POINTER(self.Array))
+        last_error_t = ctypes.CFUNCTYPE(ctypes.c_char_p, stream_ptr)
+        release_t = ctypes.CFUNCTYPE(None, stream_ptr)
+        source = self
+
+        def get_schema(_stream, out):
+            ctypes.memmove(
+                out, ctypes.byref(source._schema),
+                ctypes.sizeof(source.Schema))
+            return 0
+
+        def get_next(_stream, out):
+            # One batch, then the end-of-stream marker: a released
+            # array with `length` left at zero.
+            if source._released:
+                out.contents.release = None
+                out.contents.length = 0
+                return 0
+            source._released = True
+            ctypes.memmove(
+                out, ctypes.byref(source._array),
+                ctypes.sizeof(source.Array))
+            return 0
+
+        def get_last_error(_stream):
+            return None
+
+        def release(ptr):
+            ptr.contents.release = None
+
+        callbacks = [
+            get_schema_t(get_schema), get_next_t(get_next),
+            last_error_t(get_last_error), release_t(release)]
+        self._keep.extend(callbacks)
+        stream = self.Stream()
+        (stream.get_schema, stream.get_next,
+         stream.get_last_error, stream.release) = [
+            ctypes.cast(cb, ctypes.c_void_p) for cb in callbacks]
+        stream.private_data = None
+        self._keep.append(stream)
+        return stream
+
+    # -- the interface `QuestDB.dataframe()` dispatches on --------------
+
+    def __arrow_c_stream__(self, requested_schema=None):
+        self._released = False
+        new_capsule = ctypes.pythonapi.PyCapsule_New
+        new_capsule.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+        new_capsule.restype = ctypes.py_object
+        return new_capsule(
+            ctypes.addressof(self._stream), b'arrow_array_stream', None)
+
+
+_RawArrowStream.Array._fields_ = _RawArrowStream._ARRAY_FIELDS
+_RawArrowStream.Schema._fields_ = _RawArrowStream._SCHEMA_FIELDS
+_RawArrowStream.Stream._fields_ = _RawArrowStream._STREAM_FIELDS
+
+
 class TestQwpOnlyRowTypes(unittest.TestCase):
     UUID_VALUE = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
 
@@ -3896,6 +4129,93 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             schema=schema)
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def _raw_geohash_stream(self, values, row_count=None,
+                            batch_offset=0, bits=b'5', claimed=True,
+                            **column):
+        """A hand-rolled Arrow stream of one GEOHASH column and its
+        designated timestamp."""
+        stamp = struct.pack('<q', 1735689600000000)
+        metadata = {b'questdb.column_type': b'geohash',
+                    b'questdb.geohash_bits': bits} if claimed else None
+        columns = [
+            dict(format=b'i', name=b'gh',
+                 data=struct.pack('<%di' % len(values), *values),
+                 metadata=metadata, **column),
+            dict(format=b'tsu:UTC', name=b'ts',
+                 data=stamp * len(values))]
+        if row_count is None:
+            row_count = len(values) - batch_offset
+        return _RawArrowStream(columns, row_count, batch_offset)
+
+    def test_geohash_range_check_reads_an_uncounted_null_count(self):
+        # The Arrow C data interface lets a producer leave `null_count`
+        # at -1, meaning nobody has counted, and a column that never
+        # held a null carries no validity buffer to count from. That
+        # pairing is an ordinary export, and every value in such a
+        # column is checked: reading it as "has nulls, cannot see them"
+        # would let the whole column through unread.
+        self._dataframe_wire_payload(
+            self._raw_geohash_stream([7, 8, 9], null_count=-1),
+            table_name='raw_unknown_nulls', at='ts')
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 1: "
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_wire_payload(
+                self._raw_geohash_stream([7, 1000, 7], null_count=-1),
+                table_name='raw_unknown_nulls', at='ts')
+
+    def test_geohash_range_check_follows_a_batch_level_offset(self):
+        # A slice can put its start row on the batch rather than on
+        # each column, and the importer reads every column from there.
+        # The scan starts at the same row, so the values it holds to
+        # the precision are the values that go out -- no more, and no
+        # fewer.
+        sliced = self._dataframe_wire_payload(
+            self._raw_geohash_stream([30, 7, 8], batch_offset=1),
+            table_name='raw_batch_offset', at='ts')
+        whole = self._dataframe_wire_payload(
+            self._raw_geohash_stream([7, 8]),
+            table_name='raw_batch_offset', at='ts')
+        self.assertEqual(sliced, whole)
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 1: "
+                r'GEOHASH\(5b\) values must be in the range 0 \.\. 31'):
+            self._dataframe_wire_payload(
+                self._raw_geohash_stream([7, 8, 1000], batch_offset=1),
+                table_name='raw_batch_offset', at='ts')
+
+    def test_geohash_claim_this_side_cannot_check_stops_the_send(self):
+        # The encoder writes the low bytes of whatever it is handed and
+        # reports nothing, so a claimed column that goes out unread
+        # goes out unchecked. Where the scan cannot read one, the send
+        # stops instead: "could not check" and "checked, and it was
+        # fine" cannot end the same way.
+        unreadable = (
+            ('no value buffer', dict(n_buffers=1)),
+            ('fewer rows than the batch', dict(length=2)))
+        for name, shape in unreadable:
+            with self.subTest(shape=name):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r"Bad column 'gh': its GEOHASH\(5b\) values "
+                        r'cannot be held to the precision'):
+                    self._dataframe_wire_payload(
+                        self._raw_geohash_stream([7, 8, 9], **shape),
+                        table_name='raw_unreadable', at='ts')
+        # The same shapes claim nothing, so they are the importer's to
+        # judge and it turns them away in its own words.
+        for name, shape in unreadable:
+            with self.subTest(shape=name, claimed=False):
+                with self.assertRaises(qi.QuestDBError) as caught:
+                    self._dataframe_wire_payload(
+                        self._raw_geohash_stream(
+                            [7, 8, 9], claimed=False, **shape),
+                        table_name='raw_unreadable', at='ts')
+                self.assertNotIn(
+                    'cannot be held to the precision', str(caught.exception))
+
     def test_geohash_range_check_covers_every_input_shape(self):
         # A GEOHASH column keeps only the claimed low bits, and the
         # high bits are the coarse position, so a value that does not

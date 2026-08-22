@@ -178,6 +178,12 @@ Fixed
   wire. The error names the row you passed, not its position in a batch you
   never chose.
 
+  Where the check cannot read a claimed column — a hand-rolled
+  ``__arrow_c_stream__`` producer can hand over shapes pyarrow and polars
+  never emit — the write stops with an error naming the column. Nothing
+  downstream would catch what went past, so a column that cannot be checked
+  is not sent.
+
   A ``df.attrs['questdb']`` geohash claim is also held to the width of the
   column carrying it: at most 8 bits on ``int8``, 16 on ``int16``, 32 on
   ``int32``, 60 on ``int64``. A wider claim is dropped like any other claim
