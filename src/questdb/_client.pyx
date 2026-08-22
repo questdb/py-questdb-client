@@ -1253,6 +1253,7 @@ cdef class Buffer:
     cdef size_t _max_name_len
     cdef bint _qwp
     cdef bint _marker_set
+    cdef int _row_depth
     cdef object _row_complete_sender
 
     def __cinit__(self):
@@ -1262,6 +1263,7 @@ cdef class Buffer:
         self._max_name_len = 0
         self._qwp = False
         self._marker_set = False
+        self._row_depth = 0
         self._row_complete_sender = None
 
     def __init__(
@@ -1809,6 +1811,12 @@ cdef class Buffer:
         cdef bint wrote_fields = False
         self._check_impl()
         self._set_marker()
+        # A column value whose conversion runs Python code can call back
+        # into whatever owns this buffer. `_row_depth` is how those owners
+        # tell "a row is part-way through" from "a rewind point is held":
+        # `PooledSender.row` deliberately keeps the marker set across its
+        # own flush, so `_marker_set` cannot answer that question.
+        self._row_depth += 1
         try:
             self._table(table_name)
             if symbols is not None:
@@ -1830,6 +1838,8 @@ cdef class Buffer:
         except:
             self._rewind_after_failure()
             raise
+        finally:
+            self._row_depth -= 1
         if wrote_fields and allow_auto_flush:
             self._may_trigger_row_complete()
 
@@ -10478,6 +10488,26 @@ cdef class PooledSender:
                 QuestDBErrorCode.InvalidApiCall,
                 f"{method}() can't be called: Sender is closed.")
 
+    cdef void_int _check_not_in_row(self, str method) except -1:
+        """
+        Refuse a call that arrives while `row()` is part-way through
+        assembling a row on this lease's buffer.
+
+        A column value whose conversion runs Python code re-enters here on
+        the same thread, and `self._lock` is re-entrant, so the lock alone
+        lets it through. Flushing a half-written row cannot succeed, and
+        returning the lease to the pool would free the buffer the row is
+        still writing into.
+        """
+        if self._buffer is not None and self._buffer._row_depth != 0:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{method}() can't be called while a row is being "
+                "written. `row()` is part-way through assembling a row "
+                "and something it called has come back into this sender, "
+                "most likely a column value whose conversion runs Python "
+                "code.")
+
     cdef bint _should_auto_flush_locked(self) except -1:
         cdef auto_flush_mode_t* mode = &self._handle._auto_flush_mode
         cdef size_t row_count
@@ -10542,6 +10572,7 @@ cdef class PooledSender:
         cdef PyThreadState* gs = NULL
         cdef bint ok = False
         self._check_open('flush')
+        self._check_not_in_row('flush')
         if line_sender_buffer_row_count(self._buffer._impl) == 0:
             self._batch_started_ms = 0
             if wait:
@@ -10570,6 +10601,7 @@ cdef class PooledSender:
         cdef PyThreadState* gs = NULL
         if sender == NULL:
             return
+        self._check_not_in_row('close')
         self._qwp = NULL
         self._db = NULL
         self._buffer = None
@@ -10617,6 +10649,7 @@ cdef class PooledSender:
         """
         cdef bint starts_batch
         cdef bint auto_flush
+        cdef Buffer buf
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -10624,34 +10657,39 @@ cdef class PooledSender:
                 "ServerTimestamp")
         with self._lock:
             self._check_open('row')
+            # The lease holds the only reference to the buffer, and a
+            # column value whose conversion runs Python code can reach
+            # back in here. A strong local reference keeps the buffer
+            # alive for the whole row, including its cleanup.
+            buf = self._buffer
             starts_batch = (
-                line_sender_buffer_row_count(self._buffer._impl) == 0)
-            self._buffer._row(
+                line_sender_buffer_row_count(buf._impl) == 0)
+            buf._row(
                 False, table_name, symbols, columns, at, True)
             if starts_batch:
                 self._batch_started_ms = line_sender_now_micros() // 1000
             try:
                 auto_flush = self._should_auto_flush_locked()
             except:
-                self._buffer._clear_marker()
+                buf._clear_marker()
                 raise
             if not auto_flush:
-                self._buffer._clear_marker()
+                buf._clear_marker()
                 return self
             try:
                 self._flush_locked(False)
             except QuestDBError as exc:
                 if (starts_batch and
                         exc.code == QuestDBErrorCode.BatchTooLarge):
-                    self._buffer._rewind_to_marker()
+                    buf._rewind_to_marker()
                     self._batch_started_ms = 0
                 else:
-                    self._buffer._clear_marker()
+                    buf._clear_marker()
                 raise
             except:
-                self._buffer._clear_marker()
+                buf._clear_marker()
                 raise
-            self._buffer._clear_marker()
+            buf._clear_marker()
         return self
 
     def dataframe(
@@ -10755,6 +10793,7 @@ cdef class PooledSender:
         cdef bint ok = False
         with self._lock:
             self._check_open('flush_and_get_fsn')
+            self._check_not_in_row('flush_and_get_fsn')
             _ensure_doesnt_have_gil(&gs)
             ok = qwp_sender_flush_buffer_and_get_fsn(
                 self._qwp, self._buffer._impl, &fsn, &err)
@@ -10776,6 +10815,7 @@ cdef class PooledSender:
         cdef bint ok = False
         with self._lock:
             self._check_open('flush_and_keep_and_get_fsn')
+            self._check_not_in_row('flush_and_keep_and_get_fsn')
             _ensure_doesnt_have_gil(&gs)
             ok = qwp_sender_flush_buffer_and_keep_and_get_fsn(
                 self._qwp, self._buffer._impl, &fsn, &err)
@@ -10918,6 +10958,7 @@ cdef class PooledSender:
         ``error_handler`` (default: the ``questdb`` logger).
         """
         with self._lock:
+            self._check_not_in_row('close')
             try:
                 if flush and self._qwp != NULL:
                     self._flush_locked(wait)

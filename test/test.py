@@ -3538,6 +3538,77 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         buffer.row('t', columns={'ok': 1}, at=qi.ServerTimestamp)
         self.assertGreater(len(buffer), 0)
 
+    def test_lease_cannot_be_closed_or_flushed_from_inside_a_row(self):
+        """A pooled lease holds the only reference to its buffer, so
+        returning it to the pool from inside a UUID or IPV4 conversion
+        would free the buffer the row is still writing into. Every entry
+        point that flushes or releases the lease refuses while a row is
+        part-way through, and the rows buffered before it survive."""
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                sender = client.sender()
+                reentered = []
+
+                def reenter(method):
+                    try:
+                        getattr(sender, method)()
+                    except qi.QuestDBError as exc:
+                        reentered.append((method, exc))
+                    else:
+                        reentered.append((method, None))
+
+                class HostileAddr(ipaddress.IPv4Address):
+                    def __int__(self):
+                        reenter('close')
+                        reenter('flush')
+                        reenter('flush_and_get_fsn')
+                        reenter('flush_and_keep_and_get_fsn')
+                        return 0x01020304
+
+                class HostileUuid(uuid.UUID):
+                    @property
+                    def int(self):
+                        reenter('close')
+                        reenter('flush')
+                        return 0x0102030405060708090a0b0c0d0e0f10
+
+                    @int.setter
+                    def int(self, value):
+                        pass
+
+                sender.row(
+                    'good', columns={'ok': 1}, at=qi.ServerTimestamp)
+                self.assertEqual(len(sender), 1)
+
+                for value in (HostileAddr('192.0.2.1'),
+                              HostileUuid(str(self.UUID_VALUE))):
+                    with self.subTest(value=type(value).__name__):
+                        reentered.clear()
+                        try:
+                            sender.row(
+                                'hostile', columns={'value': value},
+                                at=qi.ServerTimestamp)
+                        except qi.QuestDBError:
+                            pass
+                        self.assertTrue(reentered)
+                        for method, exc in reentered:
+                            self.assertIsNotNone(
+                                exc, f'{method}() was allowed mid-row')
+                            self.assertEqual(
+                                exc.code,
+                                qi.QuestDBErrorCode.InvalidApiCall)
+                            self.assertIn(
+                                "can't be called while a row is being "
+                                "written",
+                                str(exc))
+
+                self.assertGreaterEqual(len(sender), 1)
+                sender.flush()
+                sender.close()
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_row_uuid_wire_bytes_match_dataframe_object_column(self):
