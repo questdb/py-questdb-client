@@ -4249,6 +4249,38 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 schema_overrides={'gh': ('geohash', 10)})
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_column_with_too_few_arrow_buffers_is_refused(self):
+        """pyarrow allocates exactly `n_buffers` pointers, so reading
+        the value buffer of a struct array (1) or a null array (0)
+        reads past the allocation, and whatever is there decides
+        whether the column is accepted. The refusal has to come from
+        the buffer count instead, the same answer every time."""
+        stamp = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
+        arrays = (
+            ('struct', pyarrow.array(
+                [{'a': 1}], pyarrow.struct([('a', pyarrow.int64())]))),
+            ('null', pyarrow.nulls(1, pyarrow.null())))
+        for label, array in arrays:
+            frame = pd.DataFrame({
+                'v': pd.array(array, dtype=pd.ArrowDtype(array.type)),
+                'ts': pd.array(
+                    [stamp],
+                    dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))),
+                # One NumPy column routes the frame onto the manual
+                # planner, which is the one that reads the buffers.
+                'x': np.arange(1, dtype=np.int64)})
+            seen = set()
+            for _ in range(20):
+                with self.assertRaises(
+                        qi.UnsupportedDataFrameShapeError) as caught:
+                    self._dataframe_column_types(
+                        frame, table_name='too_few_buffers', at='ts')
+                seen.add(str(caught.exception))
+            with self.subTest(array=label):
+                self.assertEqual(len(seen), 1, seen)
+
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_geohash_claim_at_the_cap_reaches_its_widest_value(self):
         # A precision fills its bits, and the slot carrying it is

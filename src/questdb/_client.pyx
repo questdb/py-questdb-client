@@ -3012,9 +3012,12 @@ cdef bint _dataframe_columnar_has_single_contiguous_chunk(
     if col.setup.chunks.chunks == NULL:
         return False
     arr = &col.setup.chunks.chunks[0]
+    # pyarrow allocates exactly `n_buffers` pointers, so `buffers[1]` is
+    # past the allocation for a struct array (1) or a null array (0).
     return (
         arr.offset == 0 and
         arr.length == <int64_t>row_count and
+        arr.n_buffers >= 2 and
         arr.buffers != NULL and
         arr.buffers[1] != NULL)
 
@@ -3067,7 +3070,13 @@ cdef const qwp_validity* _dataframe_columnar_validity(
 
 cdef bint _dataframe_columnar_has_validity(
         ArrowArray* arr) noexcept nogil:
-    return arr.null_count == 0 or arr.buffers[0] != NULL
+    # A null array carries no buffer pointers at all, so the bitmap
+    # read is bounded by `n_buffers` before it happens. This is the
+    # gate `_dataframe_columnar_validity` relies on having run.
+    return arr.null_count == 0 or (
+        arr.n_buffers >= 1
+        and arr.buffers != NULL
+        and arr.buffers[0] != NULL)
 
 
 cdef bint _dataframe_columnar_has_utf8_values(
@@ -4771,6 +4780,14 @@ cdef void_int _dataframe_columnar_call_arrow_append(
     return 0
 
 
+cdef str _columnar_col_name(const col_t* col):
+    """A planned column's name as text, for a message naming it."""
+    if col.name.buf == NULL:
+        return '?'
+    return PyUnicode_FromStringAndSize(
+        col.name.buf, <Py_ssize_t>col.name.len)
+
+
 cdef void_int _dataframe_columnar_append_field(
         qwp_chunk* chunk,
         col_t* col,
@@ -4780,7 +4797,7 @@ cdef void_int _dataframe_columnar_append_field(
     cdef line_sender_error* err = NULL
     cdef ArrowArray* arr = &col.setup.chunks.chunks[0]
     cdef ArrowArray* dictionary
-    cdef const void* data = arr.buffers[1]
+    cdef const void* data = NULL
     cdef int32_t* offsets
     cdef int32_t* dict_offsets
     cdef size_t bytes_len
@@ -4795,6 +4812,19 @@ cdef void_int _dataframe_columnar_append_field(
     cdef size_t element_size
     cdef qwp_numpy_extras extras
     cdef const qwp_numpy_extras* extras_ptr
+
+    # pyarrow allocates exactly `n_buffers` pointers, so reading the
+    # value buffer of a column that has fewer reads past the
+    # allocation. The planner turns such a column away, and saying so
+    # here keeps that a property of this read rather than of the checks
+    # upstream of it.
+    if arr.buffers == NULL or arr.n_buffers < 2:
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad column {_columnar_col_name(col)!r}: it arrived '
+            f'with {arr.n_buffers} Arrow buffers, too few to read '
+            f'values from.')
+    data = arr.buffers[1]
 
     if col.setup.target == col_target_t.col_target_column_bool:
         if col.setup.source == col_source_t.col_source_bool_pyobj:
