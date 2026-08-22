@@ -39,12 +39,14 @@ def example(host: str = 'localhost', port: int = 9000):
                 uuid.UUID('123e4567-e89b-12d3-a456-426614174000'),
                 uuid.UUID('00000000-0000-0000-0000-0000000000ff')]
             frame = pd.DataFrame({
-                # A DataFrame states these types through the column's
-                # own Arrow type. UUID and LONG256 are fixed-size
-                # binary of 16 and 32 bytes; IPV4 is uint32 and CHAR is
-                # uint16, both of which need naming through
-                # `schema_overrides` because the integer alone does not
-                # say which type it is.
+                # A DataFrame states a type through the column's own
+                # Arrow type where the type is specific enough to say
+                # so, and through `schema_overrides` where it is not.
+                # Only `pa.uuid()` names a type outright here: a
+                # fixed-size binary of 16 or 32 bytes is a BINARY
+                # column of that width and nothing more, and uint32 and
+                # uint16 are plain integers. Each of those is named
+                # below.
                 'device_id': pd.Series(
                     [value.bytes for value in device_ids],
                     dtype=pd.ArrowDtype(pa.binary(16))),

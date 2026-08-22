@@ -322,10 +322,10 @@ where it is not:
      - Arrow type
      - ``schema_overrides``
    * - ``UUID``
-     - ``pa.binary(16)``, ``pa.uuid()``
+     - ``pa.uuid()``
      - ``'uuid'``
    * - ``LONG256``
-     - ``pa.binary(32)``
+     - —
      - ``'long256'``
    * - ``IPV4``
      - —
