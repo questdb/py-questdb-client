@@ -3533,6 +3533,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         and a failing row rewinds exactly as it does on its own."""
         buffer = qi.Buffer._new_qwp()
 
+        refused = []
+
         class HostileAddr(ipaddress.IPv4Address):
             def __int__(self):
                 frame = pd.DataFrame({
@@ -3542,12 +3544,15 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     buffer.dataframe(
                         frame, table_name='inner', at='ts')
                 except qi.QuestDBError as e:
-                    raise AssertionError(
-                        f'dataframe() should be refused here: {e}') from None
+                    # Recorded and swallowed, so the row carries on to
+                    # the cell that fails it -- what this test is about
+                    # is what the outer row does afterwards.
+                    refused.append(e)
                 return 0x01020304
 
         for hostile in (True, False):
             with self.subTest(hostile=hostile):
+                del refused[:]
                 buffer.clear()
                 buffer.row('good', columns={'ok': 1}, at=qi.ServerTimestamp)
                 before = len(buffer)
@@ -3562,7 +3567,10 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         columns={'addr': value, 'bad': object()},
                         at=qi.ServerTimestamp)
 
-                # The part-written row is gone either way.
+                # Both subtests fail at the same cell -- the
+                # `object()` one -- so they leave the same part-written
+                # row behind, and it is gone either way.
+                self.assertEqual(len(refused), 1 if hostile else 0)
                 self.assertEqual(len(buffer), before)
                 buffer.row('good', columns={'ok': 2}, at=qi.ServerTimestamp)
                 self.assertGreater(len(buffer), before)

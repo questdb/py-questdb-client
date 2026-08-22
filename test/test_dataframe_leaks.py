@@ -539,14 +539,24 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
     object-dtype pandas and no test elsewhere passes `schema_overrides`,
     so nothing entered this path before."""
 
+    # One override is 24 bytes, which `_assert_no_leak`'s 3 MiB-a-window
+    # floor cannot see without attempts in the high hundreds of
+    # thousands. Twenty claimed columns per call raise the signal
+    # instead of the iteration count, so a leak of one array a call
+    # clears the floor in a fraction of the time.
+    COLUMNS = 20
+
     def test_overrides_leak_nothing(self):
         from qwp_ws_ack_server import QwpAckServer
-        frame = pa.table({
-            'u': pa.array([b'\x00' * 16], pa.binary(16)),
-            'gh': pa.array([1], pa.int32()),
-            'ts': pa.array([0], pa.timestamp('us')),
-        })
-        overrides = {'u': 'uuid', 'gh': ('geohash', 20)}
+        data = {}
+        overrides = {}
+        for i in range(self.COLUMNS):
+            data[f'u{i}'] = pa.array([b'\x00' * 16], pa.binary(16))
+            overrides[f'u{i}'] = 'uuid'
+        data['gh'] = pa.array([1], pa.int32())
+        overrides['gh'] = ('geohash', 20)
+        data['ts'] = pa.array([0], pa.timestamp('us'))
+        frame = pa.table(data)
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
                     'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
@@ -559,7 +569,7 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
                         frame, table_name='caps', at='ts',
                         schema_overrides=overrides)
 
-                _assert_no_leak(self, work, warmup=400, measure=12000)
+                _assert_no_leak(self, work, warmup=4000, measure=120000)
 
 
 if __name__ == '__main__':
