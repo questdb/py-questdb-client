@@ -10131,6 +10131,13 @@ cdef class Sender:
         """
         Start a :ref:`sender_transaction` block.
         """
+        # A transaction requires a clear buffer, which a `dataframe()`
+        # part-way through its plan build still has -- it has written
+        # nothing yet. Opening one there put the frame's rows inside a
+        # transaction the caller never asked for, and the rollback that
+        # ends it threw the whole frame away with nothing said.
+        if self._buffer is not None:
+            self._buffer._check_not_in_row('transaction')
         return SenderTransaction(self, table_name)
 
     def row(self,
@@ -10713,6 +10720,12 @@ cdef class Sender:
         cdef bint ok = False
 
         self._check_qwp_ws('close_drain')
+        # The one closing entry point that was not refused mid-row.
+        # Draining stops the sender accepting anything further, so a
+        # row still being written cannot be finished or sent, and the
+        # complete rows buffered before it go with it.
+        if self._buffer is not None:
+            self._buffer._check_not_in_row('close_drain')
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_close_drain(self._impl, &err)
         _ensure_has_gil(&gs)

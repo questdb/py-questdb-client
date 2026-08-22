@@ -5182,6 +5182,95 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             # with it rather than leaking out on their own.
             txn.commit()
 
+    def test_close_drain_is_refused_while_a_row_is_being_written(self):
+        """`close_drain()` was the one closing entry point with no
+        in-progress-row check. Draining stops the sender accepting
+        anything further, so the row being written could never be
+        finished and the complete rows buffered before it went with
+        it -- and the `close(flush=True)` that followed reported
+        success having sent nothing."""
+        refused = []
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'auto_flush=off;') as sender:
+
+                class HostileAddr(ipaddress.IPv4Address):
+                    def __int__(self):
+                        try:
+                            sender.close_drain()
+                        except qi.QuestDBError as exc:
+                            refused.append(exc)
+                        else:
+                            refused.append(None)
+                        return 0x01020304
+
+                sender.row(
+                    'good', columns={'ok': 1}, at=qi.ServerTimestamp)
+                buffered = len(sender)
+                sender.row(
+                    'hostile', columns={'addr': HostileAddr('192.0.2.1')},
+                    at=qi.ServerTimestamp)
+
+                self.assertEqual(len(refused), 1)
+                self.assertIsNotNone(
+                    refused[0], 'close_drain() was allowed mid-row')
+                self.assertIn(
+                    "close_drain() can't be called while a row is being "
+                    'written into this buffer',
+                    str(refused[0]))
+                # Both rows survive and can still be sent.
+                self.assertGreater(len(sender), buffered)
+                sender.flush()
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_transaction_cannot_open_inside_a_dataframe(self):
+        """A transaction needs a clear buffer, which a `dataframe()`
+        part-way through its plan build still has -- it has written
+        nothing yet. Opening one there put the frame's rows inside a
+        transaction the caller never asked for, and the rollback that
+        ended it threw the whole frame away with nothing said."""
+        refused = []
+
+        class HostileFrame(pd.DataFrame):
+            fired = False
+
+            @property
+            def attrs(self):
+                if not HostileFrame.fired:
+                    HostileFrame.fired = True
+                    try:
+                        sender.transaction('inner')
+                    except qi.QuestDBError as exc:
+                        refused.append(exc)
+                    else:
+                        refused.append(None)
+                return {}
+
+            @attrs.setter
+            def attrs(self, value):
+                pass
+
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            frame = HostileFrame({
+                'v': [1, 2],
+                'ts': pd.to_datetime([0, 1], unit='s')})
+            sender.dataframe(frame, table_name='t', at='ts')
+
+            self.assertEqual(len(refused), 1)
+            self.assertIsNotNone(
+                refused[0], 'transaction() was allowed mid-dataframe')
+            self.assertIn(
+                "transaction() can't be called while a row is being "
+                'written into this buffer',
+                str(refused[0]))
+            # The frame is still there, and still ordinary rows.
+            self.assertGreater(len(sender), 0)
+            sender.flush()
+            self.assertEqual(len(server.requests), 1)
+
     def test_a_lease_returned_on_another_thread_still_lets_close_run(self):
         """The per-thread count that stops a self-waiting close must
         only cover calls that begin and end on one thread. A lease is
