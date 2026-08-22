@@ -1195,6 +1195,7 @@ cdef class SenderTransaction:
                 "dataframe() can\'t be called: Sender is closed."
             )
         _dataframe(
+            self._sender._buffer,
             auto_flush_blank(),
             self._sender._buffer._impl,
             self._sender._buffer._b,
@@ -1361,18 +1362,12 @@ cdef class Buffer:
 
         Raises :class:`QuestDBError <questdb.QuestDBError>`
         (``InvalidApiCall``) if a
-        :func:`Buffer.row <questdb.ingress.Buffer.row>` call on this
-        buffer is still in progress.
+        :func:`Buffer.row <questdb.ingress.Buffer.row>` or
+        :func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` call
+        on this buffer is still in progress.
         """
         self._check_impl()
-        if self._marker_set:
-            raise QuestDBError(
-                QuestDBErrorCode.InvalidApiCall,
-                "Can't clear the buffer while a row is being written. "
-                "`row()` is part-way through assembling a row and "
-                "something it called has come back into this buffer, "
-                "most likely a column value whose conversion runs "
-                "Python code.")
+        self._check_not_in_row('clear')
         line_sender_buffer_clear(self._impl)
         qdb_pystr_buf_clear(self._b)
 
@@ -1396,23 +1391,24 @@ cdef class Buffer:
 
     cdef inline void_int _check_not_in_row(self, str method) except -1:
         """
-        Refuse a call that arrives while `row()` is part-way through
-        assembling a row into this buffer.
+        Refuse a call that arrives while a row is part-way through
+        being written into this buffer.
 
-        A column value whose conversion runs Python code re-enters on
-        the same thread, so nothing else stands between it and the
-        buffer. The native buffer refuses a half-written row anyway;
-        what it cannot do is stop the caller's own error handling from
-        acting on the refusal.
+        `row()` and the row-serializing `dataframe()` both hold a
+        rewind point across values whose conversion runs Python code,
+        and that code re-enters on the same thread, so nothing else
+        stands between it and the buffer. The native buffer refuses a
+        half-written row anyway; what it cannot do is stop the caller's
+        own error handling from acting on the refusal.
         """
         if self._row_depth != 0:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f"{method}() can't be called while a row is being "
-                "written. `row()` is part-way through assembling a row "
-                "and something it called has come back into this "
-                "buffer, most likely a column value whose conversion "
-                "runs Python code.")
+                "written into this buffer. `row()` or `dataframe()` is "
+                "part-way through and something it called has come "
+                "back here, most likely a column value whose "
+                "conversion runs Python code.")
 
     cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
@@ -2303,6 +2299,7 @@ cdef class Buffer:
             )
         self._check_impl()
         _dataframe(
+            self,
             auto_flush_blank(),
             self._impl,
             self._b,
@@ -10087,6 +10084,7 @@ cdef class Sender:
                 "dataframe() can\'t be called: Sender is closed."
             )
         _dataframe(
+            self._buffer,
             af,
             self._buffer._impl,
             self._buffer._b,

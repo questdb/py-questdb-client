@@ -538,8 +538,9 @@ class Buffer:
         ``sender.flush(buffer, clear=False)``.
 
         Raises :class:`QuestDBError` (``InvalidApiCall``) if a
-        :func:`Buffer.row <questdb.ingress.Buffer.row>` call on this
-        buffer is still in progress.
+        :func:`Buffer.row <questdb.ingress.Buffer.row>` or
+        :func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` call
+        on this buffer is still in progress.
         """
 
     def __len__(self) -> int:

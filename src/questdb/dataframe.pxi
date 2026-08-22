@@ -3603,6 +3603,7 @@ cdef size_t _CELL_GIL_BLIP_INTERVAL = 40000
 
 
 cdef void_int _dataframe(
+        Buffer owner,
         auto_flush_t af,
         line_sender_buffer* ls_buf,
         qdb_pystr_buf* b,
@@ -3611,6 +3612,16 @@ cdef void_int _dataframe(
         object table_name_col,
         object symbols,
         object at) except -1:
+    """Serialize a whole frame into `owner`'s native buffer, row by row.
+
+    `owner` is the `Buffer` whose `ls_buf` and `b` these are. It drives
+    the same native buffer `Buffer.row` does -- rewind points included
+    -- so it counts into the same `_row_depth`, and everything that
+    refuses to clear or flush a buffer part-way through a row refuses
+    part-way through a frame too. A cell of Python objects can run
+    arbitrary code, so the callers that could come back in are the same
+    ones.
+    """
     cdef dataframe_plan_t plan = dataframe_plan_blank()
     cdef line_sender_error* err = NULL
     cdef size_t row_index
@@ -3623,6 +3634,7 @@ cdef void_int _dataframe(
     cdef bint was_auto_flush = False
     cdef bint plan_has_content
 
+    owner._row_depth += 1
     try:
         _dataframe_plan_build(
             b,
@@ -3723,6 +3735,7 @@ cdef void_int _dataframe(
             raise
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
+        owner._row_depth -= 1
         plan_has_content = (plan.col_count != 0) and (plan.row_count != 0)
         if plan_has_content:
             line_sender_buffer_clear_marker(ls_buf)

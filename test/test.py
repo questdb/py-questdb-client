@@ -3514,13 +3514,56 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertEqual(
                     cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
                 self.assertIn(
-                    "Can't clear the buffer while a row is being written",
+                    "clear() can't be called while a row is being "
+                    'written into this buffer',
                     str(cm.exception))
 
                 self.assertEqual(len(buffer), before)
                 buffer.row(
                     'good', columns={'ok': 2}, at=qi.ServerTimestamp)
                 self.assertGreater(len(buffer), before)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_clear_is_refused_while_a_dataframe_is_being_written(self):
+        """The row-serializing `dataframe()` path drives the same
+        native buffer as `row()`, rewind point and all. Anything it
+        calls that comes back into the buffer meets the same refusal,
+        and the rows buffered before it are untouched."""
+        buffer = qi.Buffer(2)
+        buffer.row('good', columns={'ok': 1}, at=qi.ServerTimestamp)
+        before = len(buffer)
+        refused = []
+
+        class ReentrantFrame(pd.DataFrame):
+            @property
+            def _constructor(self):
+                return ReentrantFrame
+
+            def items(self):
+                try:
+                    buffer.clear()
+                except qi.QuestDBError as exc:
+                    refused.append(exc)
+                else:
+                    refused.append(None)
+                return super().items()
+
+        buffer.dataframe(
+            ReentrantFrame({'a': [1, 2]}),
+            table_name='frame', at=qi.ServerTimestamp)
+
+        self.assertTrue(refused)
+        for exc in refused:
+            self.assertIsNotNone(exc, 'clear() was allowed mid-frame')
+            self.assertEqual(
+                exc.code, qi.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn(
+                "clear() can't be called while a row is being written "
+                'into this buffer', str(exc))
+        self.assertGreater(len(buffer), before)
+        # And the guard lifts once the frame is written.
+        buffer.clear()
+        self.assertEqual(len(buffer), 0)
 
     def test_clear_is_allowed_between_rows(self):
         """The guard on `clear()` only covers a row that is part-way
