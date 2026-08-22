@@ -2693,6 +2693,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertEqual(repr(qi.Geohash(26, 5)), 'Geohash(26, 5)')
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_roundtrip_claim_survives_a_pickle(self):
         # `df.to_pickle`, multiprocessing and dask all pickle the frame,
         # and pandas pickles `attrs` with it. `__reduce__` is written by
@@ -2718,6 +2719,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             0x0C)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_roundtrip_claim_uuid_lands_in_wire_order(self):
         # A `uuid` claim reads the column as canonical RFC 4122
         # big-endian and byte-swaps it into QWP wire order (lo half LE,
@@ -4366,7 +4368,6 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                            pyarrow.timestamp('us', 'UTC'))],
             schema=schema)
 
-    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def _raw_geohash_stream(self, values, row_count=None,
                             batch_offset=0, bits=b'5', claimed=True,
                             **column):
@@ -4518,6 +4519,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertNotIn(
                     'cannot be held to the precision', str(caught.exception))
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_geohash_range_check_covers_every_input_shape(self):
         # A GEOHASH column keeps only the claimed low bits, and the
         # high bits are the coarse position, so a value that does not
