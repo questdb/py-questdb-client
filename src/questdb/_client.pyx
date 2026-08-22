@@ -1988,9 +1988,10 @@ cdef class Buffer:
         distinct from ``NULL``.
 
         A bare ``int`` is a 64-bit LONG, so a value outside
-        ``-2**63 .. 2**63-1`` raises ``OverflowError`` naming
-        :class:`Long256 <questdb.Long256>` — the wrapper that sends it as a
-        256-bit LONG256 instead.
+        ``-2**63 .. 2**63-1`` raises ``OverflowError``. On a QWP buffer the
+        message names :class:`Long256 <questdb.Long256>`, the wrapper that
+        sends it as a 256-bit LONG256 instead; an ILP buffer, which has no
+        LONG256 to offer, reports the bare conversion failure.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible

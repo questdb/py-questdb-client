@@ -19,10 +19,11 @@ Breaking changes
   ``to_pandas()`` gives you.
 
 - **A 16- or 32-byte Arrow column is no longer assumed to be a UUID or a
-  LONG256.** Width alone no longer decides the type; such a column is now
-  opaque bytes and lands as BINARY. To get the old behaviour back, say what
-  the column is: build it with ``pa.uuid()``, attach
-  ``questdb.column_type`` field metadata, or pass
+  LONG256.** Width alone no longer decides the type. On the Arrow columnar
+  path such a column is opaque bytes and lands as BINARY; the NumPy planner
+  refuses both widths outright, as the fourth entry below explains. To get
+  the old behaviour back, say what the column is: build it with
+  ``pa.uuid()``, attach ``questdb.column_type`` field metadata, or pass
   ``schema_overrides={'col': 'uuid'}`` (or ``'long256'``).
 
   ``pa.uuid()`` needs pyarrow 18 or newer, and the column must carry the
@@ -32,9 +33,9 @@ Breaking changes
 
 - **If you write UUIDs as raw bytes, change the byte order too.** Two of the
   changes above affect such a column, and only one of them produces an
-  error. Your 16-byte column now lands as BINARY, and the usual fix for that
-  is ``schema_overrides={'col': 'uuid'}``. It gets the UUID column back and
-  leaves the byte order still wrong. Any 16 bytes are a valid UUID, so
+  error. On the Arrow columnar path your 16-byte column now lands as BINARY,
+  and the usual fix for that is ``schema_overrides={'col': 'uuid'}``. It
+  gets the UUID column back and leaves the byte order still wrong. Any 16 bytes are a valid UUID, so
   nothing fails at any point — the values are simply stored reversed.
 
   Change how you produce the bytes at the same time::
@@ -141,7 +142,7 @@ New
   :class:`DateMillis <questdb.DateMillis>`,
   :class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`
   wrappers. These types need QuestDB 10 or newer and a QWP sender
-  (``ws::`` or ``wss::``).
+  (``udp::``, ``ws::`` or ``wss::``).
 
 - **``schema_overrides`` accepts ``'uuid'`` and ``'long256'``.** Both work on
   fixed-size and variable-length binary columns — which is how polars frames

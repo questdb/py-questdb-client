@@ -58,7 +58,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
 from ipaddress import IPv4Address
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import (
+    Any, Callable, Dict, Iterator, List, Optional, Tuple, Union)
 from uuid import UUID
 
 import numpy as np
@@ -491,6 +492,11 @@ class SenderTransaction:
         """
 
 
+#: What ``schema_overrides`` accepts: a kind on its own, or a kind and its
+#: argument. Only ``'geohash'`` takes one, the precision in bits.
+SchemaOverrides = Dict[str, Union[str, Tuple[str, int]]]
+
+
 class Buffer:
     """
     Internal row-serialization buffer, managed by :class:`Sender`.
@@ -659,8 +665,10 @@ class Buffer:
         collision, and empty BINARY ``b''`` is distinct from ``NULL``.
 
         A bare ``int`` is a 64-bit LONG, so a value outside
-        ``-2**63 .. 2**63-1`` raises ``OverflowError`` naming ``Long256`` —
-        the wrapper that sends it as a 256-bit LONG256 instead.
+        ``-2**63 .. 2**63-1`` raises ``OverflowError``. On a QWP buffer the
+        message names ``Long256``, the wrapper that sends it as a 256-bit
+        LONG256 instead; an ILP buffer, which has no LONG256 to offer,
+        reports the bare conversion failure.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -1116,7 +1124,7 @@ class PooledSender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
@@ -1304,7 +1312,7 @@ class QuestDB:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
@@ -1791,7 +1799,7 @@ class Sender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> Sender:
         """
         Write a Pandas DataFrame to QuestDB.

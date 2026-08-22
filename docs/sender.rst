@@ -343,7 +343,8 @@ where it is not:
      - ``pa.timestamp('ms')``, ``pa.date32()``, ``pa.date64()``
      - —
    * - ``BINARY``
-     - ``pa.binary()``, ``pa.large_binary()``
+     - ``pa.binary()``, ``pa.large_binary()``,
+       ``pa.binary(n)`` on the Arrow columnar path
      - —
 
 .. literalinclude:: ../examples/qwp_column_types_dataframe.py

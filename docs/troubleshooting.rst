@@ -113,9 +113,9 @@ These seven column types need QuestDB server 10.0.0 or later and a QWP
 sender. If a value of one of them is rejected, check the following:
 
 **Sender protocol**: they are QWP-only. Configure ``udp::``, ``ws::`` or
-``wss::``; the legacy ILP transports (``http``, ``https``, ``tcp``, ``tcps``) have no
-such column types and reject the values rather than silently widening
-them.
+``wss::``; the legacy ILP transports (``http``, ``https``, ``tcp``,
+``tcps``) have no such column types and reject the values rather than
+silently widening them.
 
 **GEOHASH precision**: a column's precision is fixed when the column is
 created, and every value written to it has to be at that precision.
@@ -125,8 +125,9 @@ to a column pins the precision for the rest of that batch, a later cell
 that disagrees is rejected, and the buffer is rewound to what it held
 before that row. A flush clears the pin, so ``row()`` knows nothing about
 the precision the server's column already has — writing a batch at the
-wrong one comes back as a server error at flush time. On the DataFrame path a value that does not fit
-the claimed precision is refused before anything reaches the wire: a
+wrong one comes back as a server error at flush time. On the DataFrame
+path a value that does not fit the claimed precision is refused before
+anything reaches the wire: a
 ``GEOHASH`` column keeps only the low bits, so a wider value would land as
 a valid geohash for somewhere else entirely.
 
