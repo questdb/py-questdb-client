@@ -3892,14 +3892,19 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     def test_geohash_range_check_reads_every_metadata_claim(self):
         # `questdb.geohash_bits` is what claims the type: the native
         # importer reads a column carrying those bits as a GEOHASH
-        # whatever else the field says, and `questdb.column_type` only
-        # ever takes the column out of GEOHASH. Every claim that
-        # reaches the wire as a GEOHASH is held to its precision here,
-        # or the value lands as a valid geohash somewhere else.
+        # whatever else the field says, and reads them with
+        # `u8::from_str`, so a leading `+` and a run of leading zeros
+        # name a precision just as a bare number does. Every spelling
+        # that reaches the wire as a GEOHASH is held to its precision
+        # here, or the value lands as a valid geohash somewhere else.
         spellings = (
             {b'questdb.geohash_bits': b'5'},
+            {b'questdb.geohash_bits': b'005'},
+            {b'questdb.geohash_bits': b'+5'},
             {b'questdb.column_type': b'geohash',
-             b'questdb.geohash_bits': b'5'},
+             b'questdb.geohash_bits': b'005'},
+            {b'questdb.column_type': b'geohash',
+             b'questdb.geohash_bits': b'+5'},
             {b'questdb.column_type': b'geohash5b',
              b'questdb.geohash_bits': b'5'})
         for md in spellings:
@@ -3928,6 +3933,14 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         # unchecked behind them. Each one is refused with the
         # importer's own message rather than reaching the wire.
         refused = (
+            ({b'questdb.geohash_bits': b'-5'},
+             "invalid 'questdb.geohash_bits' metadata '-5'"),
+            ({b'questdb.geohash_bits': b'300'},
+             "invalid 'questdb.geohash_bits' metadata '300'"),
+            ({b'questdb.geohash_bits': b'5b'},
+             "invalid 'questdb.geohash_bits' metadata '5b'"),
+            ({b'questdb.geohash_bits': b''},
+             "invalid 'questdb.geohash_bits' metadata ''"),
             ({b'questdb.geohash_bits': b'0'},
              'geohash precision_bits 0 out of range'),
             ({b'questdb.geohash_bits': b'61'},

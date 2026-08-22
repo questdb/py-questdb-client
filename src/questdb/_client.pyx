@@ -6155,6 +6155,9 @@ cdef const char* _ARROW_FMT_INT64 = "l"
 # `questdb.geohash_bits` is written as decimal digits.
 cdef char _ASCII_ZERO = 48
 cdef char _ASCII_NINE = 57
+cdef char _ASCII_PLUS = 43
+# The largest value `u8::from_str` yields before it overflows.
+cdef int _U8_MAX = 255
 
 
 cdef bint _arrow_md_lookup(
@@ -6205,19 +6208,31 @@ cdef bint _arrow_md_lookup(
 cdef int _arrow_md_geohash_bits(
         const char* value, int32_t value_len) noexcept nogil:
     """A ``questdb.geohash_bits`` value as an int, or -1 where it is not
-    a bare number in 1..=60. The native importer rejects the malformed
-    spellings with a message of its own; this only decides whether
-    there is a precision here to hold the values to."""
-    cdef int32_t i
+    a number in 1..=60.
+
+    The native importer reads this key with ``u8::from_str``, so every
+    spelling it accepts -- a leading ``+``, any run of leading zeros --
+    names a precision here too, and a column carrying one is held to
+    it. What is left behind a -1 is what the importer refuses with a
+    message of its own, so no value leaves unchecked either way.
+    """
+    cdef int32_t i = 0
     cdef int out = 0
     cdef char ch
-    if value_len < 1 or value_len > 2:
-        return -1
-    for i in range(value_len):
+    cdef bint any_digit = False
+    if value_len > 0 and value[0] == _ASCII_PLUS:
+        i = 1
+    while i < value_len:
         ch = value[i]
         if ch < _ASCII_ZERO or ch > _ASCII_NINE:
             return -1
         out = out * 10 + <int>(ch - _ASCII_ZERO)
+        if out > _U8_MAX:
+            return -1
+        any_digit = True
+        i += 1
+    if not any_digit:
+        return -1
     if out < 1 or out > 60:
         return -1
     return out
