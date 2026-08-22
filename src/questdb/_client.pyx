@@ -10226,6 +10226,16 @@ cdef class Sender:
             src.opts = self._qwp_ws_opts
             ws_b = qdb_pystr_buf_new()
             ws_plan = dataframe_plan_blank()
+            # Counted as a row in progress for as long as the run
+            # lasts. `src.opts` is the sender's own options struct, and
+            # the plan build below runs caller Python -- reading
+            # `attrs`, sniffing object cells, pulling an Arrow stream --
+            # any of which can call `close()`, which frees that struct
+            # while `_direct_conn_open` is still to read it. The
+            # row-serializing route gets this from `_dataframe`; this
+            # one has to say it itself.
+            if self._buffer is not None:
+                self._buffer._row_depth += 1
             try:
                 _direct_dataframe_run(
                     &src,
@@ -10241,6 +10251,8 @@ cdef class Sender:
                     schema_overrides)
                 return self
             finally:
+                if self._buffer is not None:
+                    self._buffer._row_depth -= 1
                 qdb_pystr_buf_free(ws_b)
         if schema_overrides is not None:
             raise QuestDBError(

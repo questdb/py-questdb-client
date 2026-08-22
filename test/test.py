@@ -4990,6 +4990,54 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     self.assertEqual(len(sender), 0)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_close_is_refused_from_inside_a_ws_dataframe(self):
+        """The WebSocket `dataframe()` route hands its own connection
+        options to the run and then builds the plan, which is caller
+        Python. A `close()` from there freed those options while the
+        run still had to read them -- a use-after-free that took the
+        interpreter down. The run counts as a row in progress for its
+        whole length, so the close is refused instead."""
+        refused = []
+
+        class HostileFrame(pd.DataFrame):
+            fired = False
+
+            @property
+            def attrs(self):
+                if not HostileFrame.fired:
+                    HostileFrame.fired = True
+                    try:
+                        sender.close(flush=False)
+                    except qi.QuestDBError as exc:
+                        refused.append(exc)
+                    else:
+                        refused.append(None)
+                return {}
+
+            @attrs.setter
+            def attrs(self, value):
+                pass
+
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'auto_flush=off;') as sender:
+                frame = HostileFrame({
+                    'v': [1, 2],
+                    'ts': pd.to_datetime([0, 1], unit='s')})
+                sender.dataframe(frame, table_name='t', at='ts')
+
+                self.assertEqual(len(refused), 1)
+                self.assertIsNotNone(
+                    refused[0], 'close() was allowed mid ws dataframe')
+                self.assertEqual(
+                    refused[0].code, qi.QuestDBErrorCode.InvalidApiCall)
+                self.assertIn(
+                    "close() can't be called while a row is being "
+                    'written into this buffer',
+                    str(refused[0]))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_ws_sender_dataframe_is_refused_while_a_row_is_being_written(self):
         """`Sender.dataframe` over QWP/WebSocket takes its own
         connection and never reaches `_dataframe`, where the guard
