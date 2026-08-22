@@ -6188,6 +6188,14 @@ cdef char _ASCII_NINE = 57
 cdef char _ASCII_PLUS = 43
 # The largest value `u8::from_str` yields before it overflows.
 cdef int _U8_MAX = 255
+# How far a metadata walk may go. The Arrow C data interface hands over
+# a bare pointer with no total length, so the blob's own pair count and
+# lengths are the only thing steering the walk, and a producer that
+# gets them wrong steers it off the end of the allocation. These two
+# bounds sit well above any schema a producer writes on purpose, and
+# past either one the lookup answers "not found" rather than reading on.
+cdef int32_t _ARROW_MD_MAX_PAIRS = 4096
+cdef size_t _ARROW_MD_MAX_BYTES = 1 << 20
 
 
 cdef bint _arrow_md_lookup(
@@ -6202,35 +6210,53 @@ cdef bint _arrow_md_lookup(
     then each key and each value as a length followed by its bytes.
     None of those lengths is aligned, so each is copied out rather than
     read through a cast.
+
+    The walk is bounded by ``_ARROW_MD_MAX_PAIRS`` and by a running
+    byte budget, so how far it reads depends on those bounds rather
+    than on numbers the producer wrote.
     """
     cdef int32_t n_pairs = 0
     cdef int32_t pair
     cdef int32_t len_bytes = 0
+    cdef size_t budget = _ARROW_MD_MAX_BYTES
     cdef const char* pos = metadata
     if metadata == NULL:
         return False
     memcpy(&n_pairs, pos, 4)
     pos += 4
+    if n_pairs < 0 or n_pairs > _ARROW_MD_MAX_PAIRS:
+        return False
     for pair in range(n_pairs):
+        if budget < 4:
+            return False
+        budget -= 4
         memcpy(&len_bytes, pos, 4)
         pos += 4
-        if len_bytes < 0:
+        if len_bytes < 0 or <size_t>len_bytes > budget:
             return False
+        budget -= <size_t>len_bytes
         if (<size_t>len_bytes == key_len
                 and strncmp(pos, key, key_len) == 0):
             pos += len_bytes
+            if budget < 4:
+                return False
+            budget -= 4
             memcpy(&len_bytes, pos, 4)
             pos += 4
-            if len_bytes < 0:
+            if len_bytes < 0 or <size_t>len_bytes > budget:
                 return False
             value_out[0] = pos
             value_len_out[0] = len_bytes
             return True
         pos += len_bytes
+        if budget < 4:
+            return False
+        budget -= 4
         memcpy(&len_bytes, pos, 4)
         pos += 4
-        if len_bytes < 0:
+        if len_bytes < 0 or <size_t>len_bytes > budget:
             return False
+        budget -= <size_t>len_bytes
         pos += len_bytes
     return False
 
@@ -6301,7 +6327,15 @@ cdef int _arrow_column_geohash_bits(
                                name_len) != 0):
                 continue
             if overrides[i].kind == <uint32_t>qwp_arrow_override_geohash:
-                return <int>overrides[i].arg
+                bits = <int>overrides[i].arg
+                # The same 1..=60 range `_arrow_md_geohash_bits` holds
+                # a metadata claim to. Both callers of this path check
+                # it before they build the override, and checking it
+                # again here is what lets the caller shift by `bits`
+                # without knowing which of them it came from.
+                if bits < 1 or bits > 60:
+                    return -1
+                return bits
             return -1
     if not _arrow_md_lookup(
             field.metadata, _ARROW_MD_KEY_GEOHASH_BITS,
@@ -6379,7 +6413,8 @@ cdef void_int _arrow_batch_check_geohash_ranges(
     cdef str col_name
     if batch.length == 0 or schema.n_children == 0:
         return 0
-    if batch.n_children != schema.n_children or batch.children == NULL:
+    if (batch.n_children != schema.n_children
+            or batch.children == NULL or schema.children == NULL):
         return 0
     # A struct-level offset would shift every child, and producers do
     # not set one on a record batch: the columns carry their own. Rather
@@ -6398,8 +6433,13 @@ cdef void_int _arrow_batch_check_geohash_ranges(
         elem_size = _arrow_signed_int_width(field.format)
         if elem_size == 0:
             continue
+        # `col.offset` is the array's own start row and is cast to
+        # `size_t` for the scan, so a negative one would wrap to about
+        # 2**64 and index the value buffer far outside it. The Arrow
+        # length is the row count from that start, which is why the
+        # bound compares it against the batch's rows alone.
         if (col.n_buffers < 2 or col.buffers == NULL
-                or col.length < batch.length):
+                or col.offset < 0 or col.length < batch.length):
             continue
         data = col.buffers[1]
         if data == NULL:
