@@ -2538,13 +2538,15 @@ class TestEgressWithDatabase(unittest.TestCase):
                 f'CREATE TABLE {table_name} '
                 '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), lg LONG) '
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
-            # One-second steps rolled over via minutes keep every
-            # timestamp literal inside a single hour.
-            values = ', '.join(
-                f"('2024-01-01T00:{i // 60:02d}:{i % 60:02d}Z', "
-                f"'1.2.3.4', #u33d, {i})"
-                for i in range(rows))
-            self._exec(f'INSERT INTO {table_name} VALUES {values}')
+            # The rows are generated server-side. `_exec` carries the
+            # statement in the query string of a GET, and a VALUES list
+            # this long makes a URL the server rejects as too long.
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), "
+                "'1.2.3.4'::ipv4, #u33d, x "
+                f'FROM long_sequence({rows})')
             self.qdb_plain.retry_check_table(table_name, min_rows=rows)
 
             sql = f'SELECT ip, gh, lg FROM {table_name}'
