@@ -1721,12 +1721,53 @@ cdef _numpy_check_meta_pinned(
     and the round-trip claim it hands back names them too. A batch that
     disagrees would be decoded with the wrong dtype and described by a
     claim that does not match its own values, so it stops here instead.
+
+    Only the count, the kinds and the two numbers the decoders read per
+    batch are compared. The names are read once, with the rest of the
+    schema, and left alone here: a `PyUnicode` per column per batch is
+    the per-batch cost this path had removed, and a name cannot change
+    under a stable kind vector without the server having sent a
+    different result altogether.
     """
-    cdef tuple now = _numpy_extract_meta(batch)
-    if now == pinned:
-        return
+    cdef list pinned_kinds = <list>pinned[1]
+    cdef list pinned_scales = <list>pinned[2]
+    cdef list pinned_precision = <list>pinned[3]
+    cdef size_t n_cols = qwp_reader_batch_column_count(batch)
+    cdef size_t col_idx
+    cdef qwp_reader_column_kind kind = qwp_reader_column_kind_unknown
+    cdef questdb_error* err = NULL
+    cdef qwp_reader_column_data cd_meta
+    cdef object want
+    if n_cols != <size_t>len(pinned_kinds):
+        _numpy_meta_drift()
+    for col_idx in range(n_cols):
+        _reader_check(
+            qwp_reader_batch_column_kind(batch, col_idx, &kind, &err),
+            &err, 'qwp_reader_batch_column_kind')
+        if <int>kind != <int>(<object>pinned_kinds[col_idx]):
+            _numpy_meta_drift()
+        if kind == qwp_reader_column_kind_geohash:
+            want = pinned_precision[col_idx]
+        elif (kind == qwp_reader_column_kind_decimal64
+                or kind == qwp_reader_column_kind_decimal128
+                or kind == qwp_reader_column_kind_decimal256):
+            want = pinned_scales[col_idx]
+        else:
+            continue
+        if qwp_reader_batch_column_data(batch, col_idx, &cd_meta, &err):
+            if kind == qwp_reader_column_kind_geohash:
+                if want is not None and cd_meta.geohash_precision_bits != want:
+                    _numpy_meta_drift()
+            elif want is not None and cd_meta.decimal_scale != want:
+                _numpy_meta_drift()
+        elif err != NULL:
+            questdb_error_free(err)
+            err = NULL
+
+
+cdef _numpy_meta_drift():
     raise QuestDBError(
-        QuestDBErrorCode.ServerFlushError,
+        QuestDBErrorCode.ServerSchemaMismatch,
         'The result schema changed between batches: this reader '
         'decodes every batch against the first one\'s columns, so a '
         'later batch that disagrees cannot be read.')
