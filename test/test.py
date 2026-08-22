@@ -4982,6 +4982,44 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     txn.commit()
                     self.assertEqual(len(sender), 0)
 
+    def test_a_claim_no_column_can_carry_is_said_out_loud_on_both_planners(self):
+        """A claim the column's type can never carry is a mistake
+        rather than drift, and both planners now say so. The NumPy
+        planner used to warn for one geohash case and stay silent for
+        the other four kinds, while the Arrow path warned for all five.
+        Exactly one warning either way -- an Arrow-backed column is
+        answered by `_dataframe_normalize_claimed_arrow`, and saying it
+        twice for one claim would be worse than either."""
+        kinds = ('ipv4', 'char', 'uuid', 'long256', 'geohash')
+        backings = (
+            ('numpy', lambda: np.array([1.5], dtype=np.float64)),
+            ('arrow', lambda: pd.array(
+                [1.5], dtype=pd.ArrowDtype(pyarrow.float64()))),
+        )
+        for kind in kinds:
+            for label, make in backings:
+                with self.subTest(kind=kind, backing=label):
+                    meta = {'kind': kind}
+                    if kind == 'geohash':
+                        meta['precision_bits'] = 20
+                    df = pd.DataFrame({
+                        'g': make(),
+                        'ts': pd.to_datetime([0], unit='s')})
+                    df.attrs['questdb'] = {
+                        'version': 1, 'columns': {'g': meta}}
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter('always')
+                        self._dataframe_column_types(
+                            df, table_name='claim_impossible', at='ts')
+                    dropped = [
+                        w for w in caught
+                        if 'questdb: column' in str(w.message)]
+                    self.assertEqual(
+                        len(dropped), 1,
+                        f'expected exactly one dropped-claim warning, got '
+                        f'{[str(w.message) for w in dropped]}')
+                    self.assertIn(kind, str(dropped[0].message))
+
     def test_geohash_claim_too_wide_for_a_numpy_column_is_said_out_loud(self):
         """A geohash claim wider than the NumPy column carrying it is
         one the column can never hold, not drift, so it is said out

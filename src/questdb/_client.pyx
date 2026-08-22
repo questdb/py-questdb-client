@@ -5689,12 +5689,15 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
     cdef size_t col_index
     cdef col_t* col
     cdef int gh
+    cdef object arrow_dtype, dtype
     for col_index in range(plan.col_count):
         plan.cols.d[col_index].setup.has_override = False
     cols_meta = _roundtrip_columns_meta(df)
     if not cols_meta:
         return 0
     df_cols = list(df.columns)
+    _dataframe_may_import_deps()
+    arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
     for col_index in range(plan.col_count):
         col = &plan.cols.d[col_index]
         if col.setup.orig_index >= <size_t>len(df_cols):
@@ -5756,29 +5759,32 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
             # left for the native writer to refuse mid-flush, with the
             # connection already open and a message naming neither the
             # column nor the claim.
-            if gh == _GEOHASH_DTYPE_UNSIGNED:
-                # Saying so is what makes both planners answer an
-                # unsigned column the same way: the Arrow path drops
-                # the same claim through `_attrs_override_fits`.
-                _warn_roundtrip_claim_dropped(
-                    df_cols[col.setup.orig_index], kind,
-                    df.dtypes.iloc[col.setup.orig_index])
-            elif (gh != _GEOHASH_DTYPE_NONE and _is_int_not_bool(bits)
+            if (gh != _GEOHASH_DTYPE_NONE
+                    and gh != _GEOHASH_DTYPE_UNSIGNED
+                    and _is_int_not_bool(bits)
                     and 1 <= bits <= _geohash_dtype_max_bits(gh)):
                 col.setup.has_override = True
                 col.setup.override_dtype = <qwp_numpy_dtype>gh
                 col.setup.override_geohash_bits = <uint8_t>bits
-            elif gh != _GEOHASH_DTYPE_NONE:
-                # The column carries geohashes, just not this many bits
-                # of one. That is a claim the column can never hold
-                # rather than drift, so it is said out loud -- the
-                # Arrow path says the same thing through
-                # `_attrs_override_fits`. Without it the column went
-                # out as a plain LONG and created the destination
-                # column with that type, silently.
+        if not col.setup.has_override and kind in _ATTRS_OVERRIDE_KINDS:
+            # The claim names a kind this column cannot carry -- a
+            # width that cannot hold the precision, an unsigned column,
+            # or a type with no route to the kind at all. That is a
+            # mistake rather than drift, so it is said out loud, and
+            # saying it here rather than per kind is what makes all
+            # five answer the way the Arrow path already answers them.
+            # The write still goes ahead as the column's own type
+            # implies.
+            #
+            # An Arrow-backed column has already been through
+            # `_dataframe_normalize_claimed_arrow`, which says the same
+            # thing against the Arrow type and is the one that knows
+            # whether the claim could be reshaped. Saying it twice for
+            # one claim would be worse than either.
+            dtype = df.dtypes.iloc[col.setup.orig_index]
+            if arrow_dtype is None or not isinstance(dtype, arrow_dtype):
                 _warn_roundtrip_claim_dropped(
-                    df_cols[col.setup.orig_index], kind,
-                    df.dtypes.iloc[col.setup.orig_index])
+                    df_cols[col.setup.orig_index], kind, dtype)
     return 0
 
 
