@@ -5399,12 +5399,15 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
         ty = raw_ty
         if isinstance(ty, _PYARROW.lib.BaseExtensionType):
             ty = ty.storage_type
-        # A claim that no longer fits the column is dropped, which is
-        # what the Arrow path does with the same claim. Reshaping first
-        # and refusing value by value later would answer a retyped
-        # column with an error where the contract promises silence.
+        # A claim that no longer fits the column is dropped rather than
+        # reshaped: refusing value by value later would answer a retyped
+        # column with an error where the contract promises the write
+        # goes ahead. It says which claim it dropped on the way past,
+        # because a type that can never carry the kind is a mistake
+        # rather than drift, and the two look the same from here.
         if not _attrs_override_fits(
                 types, ty, kind, meta.get('precision_bits') or 0):
+            _warn_roundtrip_claim_dropped(name, kind, dtype)
             continue
         target_dtype = _claimed_arrow_col_reshape_dtype(
             types, raw_ty, ty, kind)
@@ -5456,6 +5459,33 @@ cdef void_int _dataframe_claim_all_null_source(
     col.dispatch_code = <col_dispatch_code_t>(
         <int>col.setup.source + <int>col.setup.target)
     return 0
+
+
+cdef _warn_roundtrip_claim_dropped(object name, str kind, object shape):
+    """Say that a column's ``df.attrs['questdb']`` claim was not applied.
+
+    A claim that no longer matches its column is not an error. The frame
+    may have been retyped since it was read, and the write goes ahead as
+    the column's own type implies -- rejecting it would answer ordinary
+    schema drift with a failure.
+
+    A claim quietly doing nothing is also how a column reaches the
+    database as the wrong type, though, and the two are indistinguishable
+    from the outside. Drift is the case the silence is for; a type that
+    can never carry the kind -- an unsigned integer under ``geohash``,
+    say, which the native Arrow importer only accepts signed -- is a
+    mistake the caller wants to hear about. Naming the claim and the type
+    that turned it away tells them apart without failing either.
+    """
+    warnings.warn(
+        f'questdb: column {name!r} carries a '
+        f"df.attrs['questdb'] claim of kind {kind!r}, which a column of "
+        f'type {shape} cannot carry. The claim is ignored and the column '
+        f'is written as its own type implies. Cast the column to a type '
+        f'the kind fits, state the type outright with schema_overrides, '
+        f'or drop the claim to silence this.',
+        UserWarning,
+        stacklevel=1)
 
 
 cdef void_int _dataframe_apply_roundtrip_overrides(
@@ -6992,7 +7022,12 @@ cdef object _capsule_roundtrip_overrides(object frame):
         kind_int = <int>_ATTRS_OVERRIDE_KINDS[kind]
         bits = meta.get('precision_bits') or 0
         ty = _capsule_pandas_arrow_type(dtypes, arrow_dtype, name)
-        if ty is None or not _attrs_override_fits(types, ty, kind, bits):
+        if ty is None:
+            # The column is gone, renamed, or not Arrow-backed. That is
+            # the drift the claim is meant to survive quietly.
+            continue
+        if not _attrs_override_fits(types, ty, kind, bits):
+            _warn_roundtrip_claim_dropped(name, kind, ty)
             continue
         # Only GEOHASH takes an argument, and `_attrs_override_fits` has
         # already held it to 1..=60.

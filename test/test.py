@@ -3807,6 +3807,75 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     f'the two planners disagree on a {ty} column '
                     f'claimed at {bits} bits')
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_claim_a_column_type_cannot_carry_is_said_out_loud(self):
+        """A claim the column's type can never carry is announced.
+
+        The write still goes ahead as the column's own type implies --
+        a claim is a recollection, and a frame retyped since it was read
+        must not fail on that account. But an unsigned integer can never
+        carry a ``geohash``: the native Arrow importer takes the claim on
+        a signed column only, so the claim is guaranteed to do nothing.
+        That is a mistake rather than drift, and the two are
+        indistinguishable unless the write says which claim it dropped.
+        """
+        for mixed in (False, True):
+            planner = 'numpy' if mixed else 'arrow'
+            with self.subTest(planner=planner):
+                frame = self._geohash_frame(
+                    [0, 1], pd.ArrowDtype(pyarrow.uint32()), bits=20,
+                    mixed=mixed)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    types = self._dataframe_column_types(
+                        frame, table_name='geo_unsigned', at='ts')
+                # 0x0E is GEOHASH: the claim really was dropped.
+                self.assertNotEqual(types['gh'], 0x0E)
+                said = [
+                    str(w.message) for w in caught
+                    if "df.attrs['questdb']" in str(w.message)]
+                self.assertEqual(len(said), 1, said)
+                self.assertIn("column 'gh'", said[0])
+                self.assertIn("'geohash'", said[0])
+                self.assertIn('uint32', said[0])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_claim_the_column_carries_or_has_outlived_stays_quiet(self):
+        """Silence is kept for the two cases that are not mistakes.
+
+        A claim the column does carry has nothing to report, and a claim
+        whose column is gone is the schema drift the claim is designed
+        to survive without a word.
+        """
+        stamp = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
+        cases = (
+            ('claim is carried', self._geohash_frame(
+                [0, 1], pd.ArrowDtype(pyarrow.int32()), bits=20)),
+        )
+        # A frame whose claimed column is no longer in it at all.
+        dropped = pd.DataFrame({
+            'other': pd.array([1, 2], dtype=pd.ArrowDtype(pyarrow.int64())),
+            'ts': pd.array(
+                [stamp] * 2,
+                dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))),
+        })
+        dropped.attrs['questdb'] = {'version': 1, 'columns': {
+            'gh': {'kind': 'geohash', 'precision_bits': 20}}}
+        cases += (('claimed column is gone', dropped),)
+
+        for label, frame in cases:
+            with self.subTest(case=label):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    self._dataframe_column_types(
+                        frame, table_name='geo_quiet', at='ts')
+                self.assertEqual(
+                    [str(w.message) for w in caught
+                     if "df.attrs['questdb']" in str(w.message)],
+                    [])
+
     def _geohash_arrow_table(self, values, bits=None, ty=None, md=None):
         """A GEOHASH frame as a `pa.Table`, claiming the type through
         Arrow field metadata when `bits` is given. `md` carries the
