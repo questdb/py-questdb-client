@@ -6285,12 +6285,24 @@ cdef int _U8_MAX = 255
 # lengths are the only thing steering the walk, and a producer that
 # gets them wrong steers it off the end of the allocation. These two
 # bounds sit well above any schema a producer writes on purpose, and
-# past either one the lookup answers "not found" rather than reading on.
+# past either one the lookup stops reading and says so.
 cdef int32_t _ARROW_MD_MAX_PAIRS = 4096
 cdef size_t _ARROW_MD_MAX_BYTES = 1 << 20
 
+# What a metadata lookup answers with. "Stopped short" is its own
+# answer because the native importer reads the same keys with no such
+# bound: a blob this walk gives up on is one the importer still acts
+# on, so "did not find it" would be a claim this side cannot make.
+cdef int _ARROW_MD_MISSING = 0
+cdef int _ARROW_MD_FOUND = 1
+cdef int _ARROW_MD_STOPPED_SHORT = -1
 
-cdef bint _arrow_md_lookup(
+# What `_arrow_column_geohash_bits` answers with besides a precision.
+cdef int _GEOHASH_BITS_NONE = -1
+cdef int _GEOHASH_BITS_UNREADABLE = -2
+
+
+cdef int _arrow_md_lookup(
         const char* metadata,
         const char* key,
         size_t key_len,
@@ -6305,52 +6317,57 @@ cdef bint _arrow_md_lookup(
 
     The walk is bounded by ``_ARROW_MD_MAX_PAIRS`` and by a running
     byte budget, so how far it reads depends on those bounds rather
-    than on numbers the producer wrote.
+    than on numbers the producer wrote. Reaching either bound answers
+    ``_ARROW_MD_STOPPED_SHORT``, which is what the caller turns into a
+    refusal: the key may well be there, and the importer -- which walks
+    the same blob unbounded -- would act on it.
     """
     cdef int32_t n_pairs = 0
     cdef int32_t pair
     cdef int32_t len_bytes = 0
     cdef size_t budget = _ARROW_MD_MAX_BYTES
     cdef const char* pos = metadata
+    # A field with no metadata blob carries no keys: that is the one
+    # "not found" this walk can state without having read anything.
     if metadata == NULL:
-        return False
+        return _ARROW_MD_MISSING
     memcpy(&n_pairs, pos, 4)
     pos += 4
     if n_pairs < 0 or n_pairs > _ARROW_MD_MAX_PAIRS:
-        return False
+        return _ARROW_MD_STOPPED_SHORT
     for pair in range(n_pairs):
         if budget < 4:
-            return False
+            return _ARROW_MD_STOPPED_SHORT
         budget -= 4
         memcpy(&len_bytes, pos, 4)
         pos += 4
         if len_bytes < 0 or <size_t>len_bytes > budget:
-            return False
+            return _ARROW_MD_STOPPED_SHORT
         budget -= <size_t>len_bytes
         if (<size_t>len_bytes == key_len
                 and strncmp(pos, key, key_len) == 0):
             pos += len_bytes
             if budget < 4:
-                return False
+                return _ARROW_MD_STOPPED_SHORT
             budget -= 4
             memcpy(&len_bytes, pos, 4)
             pos += 4
             if len_bytes < 0 or <size_t>len_bytes > budget:
-                return False
+                return _ARROW_MD_STOPPED_SHORT
             value_out[0] = pos
             value_len_out[0] = len_bytes
-            return True
+            return _ARROW_MD_FOUND
         pos += len_bytes
         if budget < 4:
-            return False
+            return _ARROW_MD_STOPPED_SHORT
         budget -= 4
         memcpy(&len_bytes, pos, 4)
         pos += 4
         if len_bytes < 0 or <size_t>len_bytes > budget:
-            return False
+            return _ARROW_MD_STOPPED_SHORT
         budget -= <size_t>len_bytes
         pos += len_bytes
-    return False
+    return _ARROW_MD_MISSING
 
 
 cdef int _arrow_md_geohash_bits(
@@ -6390,26 +6407,36 @@ cdef int _arrow_column_geohash_bits(
         const ArrowSchema* field,
         const qwp_arrow_override* overrides,
         size_t overrides_len) noexcept nogil:
-    """The GEOHASH precision this column goes out at, or -1 where it is
-    not a GEOHASH column.
+    """The GEOHASH precision this column goes out at,
+    ``_GEOHASH_BITS_NONE`` where it is not a GEOHASH column, or
+    ``_GEOHASH_BITS_UNREADABLE`` where the metadata walk stopped short
+    of an answer.
 
     An override wins over the field's own metadata, and an override
     naming some other type takes the column out of GEOHASH altogether
-    -- the precedence ``qwp_arrow_override`` documents.
+    -- the precedence ``qwp_arrow_override`` documents. An override is
+    read straight off the caller's own words, so a column carrying one
+    is answered without walking any metadata at all.
 
     In the field's own metadata it is ``questdb.geohash_bits`` that
     claims the type, which is the order the native importer reads them
     in: those bits alone make the column a GEOHASH, whatever else the
-    field carries. ``questdb.column_type`` only rules the column out,
-    and only by naming something other than a ``geohash`` spelling --
-    a pairing the importer refuses outright, so the column never
-    reaches the wire for the -1 to have let anything through.
+    field carries. A blob too long for the walk therefore leaves the
+    kind unknown, and ``_GEOHASH_BITS_UNREADABLE`` says so: the
+    importer walks the same blob unbounded and would honour the claim.
+
+    ``questdb.column_type`` only rules the column out, and only by
+    naming something other than a ``geohash`` spelling -- a pairing the
+    importer refuses outright, so the column never reaches the wire for
+    an unread one to have let anything through, and a walk that stops
+    short of it leaves the precision standing.
     """
     cdef size_t i
     cdef const char* value = NULL
     cdef int32_t value_len = 0
     cdef size_t name_len
     cdef int bits
+    cdef int found
     if field.name != NULL:
         name_len = strlen(field.name)
         for i in range(overrides_len):
@@ -6426,24 +6453,28 @@ cdef int _arrow_column_geohash_bits(
                 # again here is what lets the caller shift by `bits`
                 # without knowing which of them it came from.
                 if bits < 1 or bits > 60:
-                    return -1
+                    return _GEOHASH_BITS_NONE
                 return bits
-            return -1
-    if not _arrow_md_lookup(
-            field.metadata, _ARROW_MD_KEY_GEOHASH_BITS,
-            _ARROW_MD_KEY_GEOHASH_BITS_LEN, &value, &value_len):
-        return -1
+            return _GEOHASH_BITS_NONE
+    found = _arrow_md_lookup(
+        field.metadata, _ARROW_MD_KEY_GEOHASH_BITS,
+        _ARROW_MD_KEY_GEOHASH_BITS_LEN, &value, &value_len)
+    if found == _ARROW_MD_STOPPED_SHORT:
+        return _GEOHASH_BITS_UNREADABLE
+    if found != _ARROW_MD_FOUND:
+        return _GEOHASH_BITS_NONE
     bits = _arrow_md_geohash_bits(value, value_len)
     if bits < 0:
-        return -1
+        return _GEOHASH_BITS_NONE
     if _arrow_md_lookup(
             field.metadata, _ARROW_MD_KEY_COLUMN_TYPE,
-            _ARROW_MD_KEY_COLUMN_TYPE_LEN, &value, &value_len):
+            _ARROW_MD_KEY_COLUMN_TYPE_LEN,
+            &value, &value_len) == _ARROW_MD_FOUND:
         # The importer reads any `geohash`-prefixed spelling as the
         # kind, so the prefix is what agrees with the bits here too.
         if value_len < 7 or strncmp(
                 value, _ARROW_MD_VALUE_GEOHASH, 7) != 0:
-            return -1
+            return _GEOHASH_BITS_NONE
     return bits
 
 
@@ -6478,11 +6509,14 @@ cdef bint _arrow_schema_claims_geohash(
         const ArrowSchema* schema,
         const qwp_arrow_override* overrides,
         size_t overrides_len) noexcept nogil:
-    """Whether any column of this schema goes out as a GEOHASH.
+    """Whether any column of this schema goes out as a GEOHASH, or
+    leaves the question unanswered.
 
     Read off the schema alone, which the stream hands over once and
     keeps for every batch, so a frame that claims no GEOHASH is
-    answered without looking at a single batch.
+    answered without looking at a single batch. A column whose
+    metadata the walk stopped short of counts here, so the scan runs
+    and gets to name it.
     """
     cdef int64_t child_index
     cdef const ArrowSchema* field
@@ -6492,7 +6526,8 @@ cdef bint _arrow_schema_claims_geohash(
         field = schema.children[child_index]
         if field == NULL:
             continue
-        if _arrow_column_geohash_bits(field, overrides, overrides_len) >= 0:
+        if (_arrow_column_geohash_bits(field, overrides, overrides_len)
+                != _GEOHASH_BITS_NONE):
             return True
     return False
 
@@ -6566,7 +6601,19 @@ cdef void_int _arrow_batch_check_geohash_ranges(
         if field == NULL or col == NULL:
             continue
         bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
-        if bits < 0:
+        if bits == _GEOHASH_BITS_UNREADABLE:
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {_arrow_field_name(field)!r}: whether it '
+                f'claims a GEOHASH cannot be read, because its Arrow '
+                f'metadata runs past what this scan walks (at most '
+                f'{_ARROW_MD_MAX_PAIRS} pairs and '
+                f'{_ARROW_MD_MAX_BYTES} bytes). The server reads that '
+                f'metadata with no such bound, so a claim hiding past '
+                f'it would ship unchecked. Name the type through '
+                f'`schema_overrides`, which is read before the '
+                f'metadata.')
+        if bits == _GEOHASH_BITS_NONE:
             continue
         elem_size = _arrow_signed_int_width(field.format)
         if elem_size == 0:

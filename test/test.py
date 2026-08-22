@@ -4559,6 +4559,49 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_metadata_too_long_to_walk_stops_the_send(self):
+        # The walk over an Arrow metadata blob is bounded; the native
+        # importer's is not. A claim sitting past either bound would go
+        # out honoured and unchecked, so a blob the walk cannot finish
+        # stops the send rather than reading as "claims nothing".
+        oversized = (
+            ('more pairs than the walk covers',
+             {f'pad.{i}'.encode(): b'x' for i in range(5000)}),
+            ('one value longer than the byte budget',
+             {b'pad.big': b'x' * (2 << 20)}))
+        for name, padding in oversized:
+            for claim in (True, False):
+                md = dict(padding)
+                if claim:
+                    md[b'questdb.column_type'] = b'geohash'
+                    md[b'questdb.geohash_bits'] = b'20'
+                with self.subTest(blob=name, claim=claim):
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError,
+                            r"Bad column 'gh': whether it claims a "
+                            r'GEOHASH cannot be read'):
+                        self._dataframe_wire_payload(
+                            self._geohash_arrow_table([2 ** 21], md=md),
+                            table_name='geo_md_long', at='ts')
+        # `schema_overrides` is read before the metadata, so it names
+        # the type without the walk having to reach an answer.
+        md = {f'pad.{i}'.encode(): b'x' for i in range(5000)}
+        md[b'questdb.column_type'] = b'geohash'
+        md[b'questdb.geohash_bits'] = b'20'
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r"Bad column 'gh' at row 0: GEOHASH\(20b\) values must "
+                r'be in the range 0 \.\. 1048575'):
+            self._dataframe_wire_payload(
+                self._geohash_arrow_table([2 ** 21], md=md),
+                table_name='geo_md_long', at='ts',
+                schema_overrides={'gh': ('geohash', 20)})
+        self._dataframe_wire_payload(
+            self._geohash_arrow_table([7], md=md),
+            table_name='geo_md_long', at='ts',
+            schema_overrides={'gh': ('geohash', 20)})
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_geohash_range_check_names_the_row_across_batches(self):
         # The check runs per batch, so the row it names has to be the
         # caller's own rather than its position inside a batch they
