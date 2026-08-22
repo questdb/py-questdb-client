@@ -8170,7 +8170,8 @@ cdef class QuestDB:
         self._auto_flush_mode.byte_count = -1
         self._auto_flush_bytes_dynamic = False
 
-    cdef questdb_db* _begin_db_use(self, str method) except? NULL:
+    cdef questdb_db* _begin_db_use(
+            self, str method, bint scoped=True) except? NULL:
         cdef questdb_db* db = NULL
         self._state_cond.acquire()
         try:
@@ -8180,21 +8181,29 @@ cdef class QuestDB:
                     QuestDBErrorCode.InvalidApiCall,
                     f"{method}() can't be called: QuestDB is closed.")
             self._active_uses += 1
-            # Counted per thread as well as in total, so `close()` can
-            # tell a caller waiting on other threads from one waiting
-            # on itself.
-            self._use_depth.value = getattr(self._use_depth, 'value', 0) + 1
+            # A scoped use begins and ends inside one call on one
+            # thread, so it can also be counted per thread and let
+            # `close()` tell a caller waiting on other threads from one
+            # waiting on itself. A lease is not scoped: it is handed
+            # out here and may be returned from anywhere, so counting
+            # it per thread would leave the borrower's count standing
+            # and the returner's below zero.
+            if scoped:
+                self._use_depth.value = (
+                    getattr(self._use_depth, 'value', 0) + 1)
             return db
         finally:
             self._state_cond.release()
 
-    cdef void _end_db_use(self) except *:
+    cdef void _end_db_use(self, bint scoped=True) except *:
         self._state_cond.acquire()
         try:
             if self._active_uses == 0:
                 raise RuntimeError('QuestDB use counter underflow.')
             self._active_uses -= 1
-            self._use_depth.value = getattr(self._use_depth, 'value', 0) - 1
+            if scoped:
+                self._use_depth.value = (
+                    getattr(self._use_depth, 'value', 0) - 1)
             if self._active_uses == 0:
                 self._state_cond.notify_all()
         finally:
@@ -8424,7 +8433,7 @@ cdef class QuestDB:
         cdef PooledSender lease = None
         cdef PyThreadState* gs = NULL
         cdef bint db_use = False
-        db = self._begin_db_use('sender')
+        db = self._begin_db_use('sender', scoped=False)
         db_use = True
         try:
             _ensure_doesnt_have_gil(&gs)
@@ -8452,7 +8461,7 @@ cdef class QuestDB:
             if sender != NULL:
                 questdb_db_return_sender(db, sender)
             if db_use:
-                self._end_db_use()
+                self._end_db_use(scoped=False)
 
     def dataframe(
             self,
@@ -8940,7 +8949,7 @@ cdef class QuestDB:
         cdef PooledReader lease
         cdef questdb_db* db
         cdef bint db_use = False
-        db = self._begin_db_use('reader')
+        db = self._begin_db_use('reader', scoped=False)
         db_use = True
         try:
             reader_handle = _borrow_reader_from_pool(db)
@@ -8950,7 +8959,7 @@ cdef class QuestDB:
             return lease
         finally:
             if db_use:
-                self._end_db_use()
+                self._end_db_use(scoped=False)
 
     def server_info(self) -> ServerInfo:
         """
@@ -10956,7 +10965,7 @@ cdef class PooledSender:
         questdb_db_return_sender(db, sender)
         _ensure_has_gil(&gs)
         if handle is not None:
-            handle._end_db_use()
+            handle._end_db_use(scoped=False)
 
     def __enter__(self):
         with self._lock:
@@ -11389,7 +11398,7 @@ cdef class PooledReader:
             last._free()
         reader._close()
         if handle is not None:
-            handle._end_db_use()
+            handle._end_db_use(scoped=False)
 
     def __enter__(self):
         with self._lock:

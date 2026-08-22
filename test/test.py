@@ -5182,6 +5182,37 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             # with it rather than leaking out on their own.
             txn.commit()
 
+    def test_a_lease_returned_on_another_thread_still_lets_close_run(self):
+        """The per-thread count that stops a self-waiting close must
+        only cover calls that begin and end on one thread. A lease is
+        handed out by `sender()` and may be returned from anywhere, so
+        counting it per thread left the borrower's count standing and
+        the returner's below zero -- and `close()`, which is what
+        `__exit__` calls, was then refused for good on those threads."""
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=0;sender_pool_max=4;'
+                    'pool_reap=manual;query_pool_min=0;')
+
+            # Borrowed here, returned on other threads.
+            db = qi.QuestDB.from_conf(conf)
+            leases = [db.sender() for _ in range(3)]
+            for lease in leases:
+                thread = threading.Thread(target=lease.close)
+                thread.start()
+                thread.join()
+            db.close()
+
+            # And the other way round.
+            db = qi.QuestDB.from_conf(conf)
+            borrowed = []
+            thread = threading.Thread(
+                target=lambda: borrowed.append(db.sender()))
+            thread.start()
+            thread.join()
+            borrowed[0].close()
+            db.close()
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_closing_a_handle_from_inside_its_own_call_is_refused(self):
         """`QuestDB.close()` waits for outstanding uses to be released.
