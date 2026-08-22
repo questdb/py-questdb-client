@@ -4996,37 +4996,48 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self._dataframe_wire_payload(
             table, table_name='big_md_string', at='ts')
 
-    def test_geohash_claim_wider_than_the_arrow_column_is_refused(self):
-        """`schema_overrides` bounds a GEOHASH precision to 1..60
-        without seeing the column, so a claim wider than the column can
-        carry reaches the scan. The scan reads every slot as signed, so
-        such a claim would refuse every value with the top bit set and
-        quote a range the column cannot express. It is refused up front,
-        naming the width."""
-        widths = ((pyarrow.int8(), 7), (pyarrow.int16(), 15),
-                  (pyarrow.int32(), 31), (pyarrow.int64(), 60))
+    def test_a_full_width_geohash_claim_reaches_its_top_values(self):
+        """A precision that fills the column's width uses every bit,
+        including the one that reads as a sign, so its top half sits in
+        the column as negative numbers. Reading such a column as signed
+        refused exactly those values while quoting a range the column
+        cannot express."""
+        widths = ((pyarrow.int8(), 8), (pyarrow.int16(), 16),
+                  (pyarrow.int32(), 32))
+        for ty, bits in widths:
+            with self.subTest(width=str(ty), bits=bits):
+                # The widest value at this precision: every bit set,
+                # which the column spells as -1.
+                types = self._dataframe_column_types(
+                    self._geohash_arrow_table([-1], ty=ty),
+                    table_name='geo_full_width', at='ts',
+                    schema_overrides={'gh': ('geohash', bits)})
+                self.assertEqual(types['gh'], 0x0E)
 
-        # 60 is the global maximum, so an int64 has no over-wide claim
-        # to refuse.
-        for ty, cap in widths[:-1]:
-            with self.subTest(width=str(ty), bits=cap + 1):
+        # One bit past the width is a claim the column cannot hold at
+        # all, and is refused by name.
+        for ty, bits in ((pyarrow.int8(), 9), (pyarrow.int16(), 17),
+                         (pyarrow.int32(), 33)):
+            with self.subTest(width=str(ty), bits=bits):
                 with self.assertRaisesRegex(
                         qi.QuestDBError,
-                        rf'Bad column \'gh\': a GEOHASH\({cap + 1}b\) '
+                        rf'Bad column \'gh\': a GEOHASH\({bits}b\) '
                         rf'claim needs more bits than a '
-                        rf'{ty.bit_width}-bit signed column can carry'):
+                        rf'{ty.bit_width}-bit column can carry'):
                     self._dataframe_wire_payload(
                         self._geohash_arrow_table([0], ty=ty),
                         table_name='geo_too_wide', at='ts',
-                        schema_overrides={'gh': ('geohash', cap + 1)})
+                        schema_overrides={'gh': ('geohash', bits)})
 
-        # Each cap itself still goes out, carrying its widest value.
-        for ty, cap in widths:
-            with self.subTest(width=str(ty), bits=cap):
-                self._dataframe_wire_payload(
-                    self._geohash_arrow_table([(1 << cap) - 1], ty=ty),
-                    table_name='geo_at_cap', at='ts',
-                    schema_overrides={'gh': ('geohash', cap)})
+        # A narrower claim still leaves the sign bit clear, so a
+        # negative there is genuinely out of range.
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                r'GEOHASH\(7b\) values must be in the range 0 \.\. 127'):
+            self._dataframe_wire_payload(
+                self._geohash_arrow_table([-1], ty=pyarrow.int8()),
+                table_name='geo_narrow', at='ts',
+                schema_overrides={'gh': ('geohash', 7)})
 
     def test_schema_overrides_geohash_bits_refuses_a_bool(self):
         """`True` is an `int`, and would have been taken as a 1-bit

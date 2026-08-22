@@ -107,7 +107,7 @@ include "dataframe.pxi"
 include "egress.pxi"
 
 from enum import Enum
-from typing import List, Dict, Union, Any, Optional
+from typing import List, Dict, Union, Any, Optional, Tuple
 from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString, PyBytes_Check)
@@ -1045,6 +1045,9 @@ RowColumnValue = Union[
     datetime.datetime, cnp.ndarray, Decimal, uuid.UUID,
     ipaddress.IPv4Address, bytes, bytearray, memoryview, Char, DateMillis,
     Long256, Geohash]
+# What `schema_overrides` accepts: a kind on its own, or a kind and its
+# argument. Only 'geohash' takes one, the precision in bits.
+SchemaOverrides = Dict[str, Union[str, Tuple[str, int]]]
 
 
 cdef class QuestDB
@@ -6605,20 +6608,25 @@ cdef int _arrow_signed_int_width(const char* fmt) noexcept nogil:
 
 
 cdef int _arrow_geohash_width_max_bits(int elem_size) noexcept nogil:
-    """The widest precision a signed Arrow integer of this byte width
-    can carry, or 0 for a width that carries none.
+    """The widest precision an Arrow integer of this byte width can
+    carry, or 0 for a width that carries none.
 
-    The scan reads every GEOHASH slot as signed, so each width stops one
-    bit short of its own size: an 8-bit geohash spans 0..255, which an
-    `int8` has no way of spelling. The same four numbers as
-    `_geohash_dtype_max_bits` and `_attrs_override_fits`.
+    A precision fills its bits, so a width carries a precision its own
+    size -- an `int32` carries a 32-bit geohash, whose top values sit in
+    the column as negative numbers. The 64-bit slot stops at 60, the
+    widest GEOHASH QuestDB has.
+
+    `_geohash_dtype_max_bits` and `_attrs_override_fits` state one bit
+    less per width, because the round-trip claim they answer has to
+    survive a read back into a signed column and so cannot use the
+    sign bit.
     """
     if elem_size == 1:
-        return 7
+        return 8
     if elem_size == 2:
-        return 15
+        return 16
     if elem_size == 4:
-        return 31
+        return 32
     if elem_size == 8:
         return 60
     return 0
@@ -6761,11 +6769,8 @@ cdef void_int _arrow_batch_check_geohash_ranges(
                 QuestDBErrorCode.BadDataFrame,
                 f'Bad column {_arrow_field_name(field)!r}: a '
                 f'GEOHASH({bits}b) claim needs more bits than a '
-                f'{elem_size * 8}-bit signed column can carry (at most '
-                f'{_arrow_geohash_width_max_bits(elem_size)}). A '
-                f'precision fills its bits and the column is signed, so '
-                f'a claim needing that last bit belongs on the next '
-                f'width up.')
+                f'{elem_size * 8}-bit column can carry (at most '
+                f'{_arrow_geohash_width_max_bits(elem_size)}).')
         # `col.offset` is the array's own start row and is cast to
         # `size_t` for the scan, so a negative one would wrap to about
         # 2**64 and index the value buffer far outside it.
@@ -6801,12 +6806,18 @@ cdef void_int _arrow_batch_check_geohash_ranges(
         if col.null_count != 0 and col.buffers[0] != NULL:
             validity = <const uint8_t*>col.buffers[0]
         max_value = (<int64_t>1 << bits) - 1
+        # A precision that fills the column's width uses every bit,
+        # including the one that reads as a sign, so its top half sits
+        # there as negative numbers. Reading such a column as signed
+        # refused every one of those values while quoting a range the
+        # column cannot express. A narrower claim leaves the sign bit
+        # clear, so a negative there is genuinely out of range.
         with nogil:
             bad = _dataframe_columnar_geohash_scan(
                 data,
                 validity,
                 <size_t>elem_size,
-                True,
+                bits < elem_size * 8,
                 <size_t>batch.length,
                 max_value,
                 <size_t>start,
