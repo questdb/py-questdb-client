@@ -4150,6 +4150,34 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_claim_at_the_cap_reaches_its_widest_value(self):
+        # A precision fills its bits, and the slot carrying it is
+        # signed, so the widest value of a claim at the cap is the
+        # largest positive number that slot holds. Every one of them
+        # has to get through: a cap that named a range wider than the
+        # column can express would turn away values the column has no
+        # other way of spelling.
+        caps = (
+            (pyarrow.int8(), np.int8, 7),
+            (pyarrow.int16(), np.int16, 15),
+            (pyarrow.int32(), np.int32, 31),
+            (pyarrow.int64(), np.int64, 60))
+        for arrow_ty, numpy_ty, bits in caps:
+            top = (1 << bits) - 1
+            for label, dtype in (('arrow', pd.ArrowDtype(arrow_ty)),
+                                 ('numpy', numpy_ty)):
+                for mixed in (False, True):
+                    with self.subTest(width=str(arrow_ty), bits=bits,
+                                      backing=label, mixed=mixed):
+                        self.assertEqual(
+                            self._dataframe_column_types(
+                                self._geohash_frame(
+                                    [0, top], dtype, bits, mixed=mixed),
+                                table_name='geo_cap', at='ts')['gh'],
+                            0x0E)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_geohash_claim_wider_than_the_column_is_dropped(self):
         # A precision the column's own width cannot hold is a claim
         # that no longer fits, and a claim that no longer fits is
@@ -4157,10 +4185,13 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         # to answer that the same way: the same frame differing only in
         # dtype backend cannot land as GEOHASH on one and as a plain
         # integer -- or a mid-flush error -- on the other.
+        # One bit short of each signed width: an 8-bit geohash spans
+        # 0..255, which `int8` cannot express, so it takes the next
+        # slot up.
         widths = (
-            (pyarrow.int8(), 8),
-            (pyarrow.int16(), 16),
-            (pyarrow.int32(), 32),
+            (pyarrow.int8(), 7),
+            (pyarrow.int16(), 15),
+            (pyarrow.int32(), 31),
             (pyarrow.int64(), 60))
         for ty, cap in widths:
             for bits, fits in ((cap, True), (cap + 1, False)):

@@ -5225,19 +5225,28 @@ cdef int _geohash_override_dtype(col_source_t source) noexcept:
 cdef int _geohash_dtype_max_bits(int gh) noexcept:
     """The widest precision a GEOHASH slot of this width can hold.
 
-    The encoder writes the low ``ceil(bits/8)`` bytes out of the slot,
-    so a precision past the slot's own width is a claim the column
-    cannot carry. These are `qwp_numpy_dtype`'s own caps, which the
-    native writer holds the column to a second time; the Arrow path
-    states the same four numbers against Arrow types in
-    `_attrs_override_fits`.
+    A precision fills its bits, so an 8-bit geohash spans 0..255 --
+    every bit of a byte, and one more than a signed byte can express.
+    The slots are signed and the range check reads them as signed, so
+    each width stops one bit short of its own size and a precision that
+    needs the last bit belongs in the next slot up. Accepting the full
+    width instead promised a range the column could not hold: no value
+    from 128 to 255 could reach an 8-bit claim on `int8`, which is the
+    only way `int8` has of spelling them.
+
+    The 64-bit slot stops at 60 because that is the widest GEOHASH
+    QuestDB has, well inside a signed 64-bit value.
+
+    `_attrs_override_fits` states the same four numbers against Arrow
+    types, and `egress.pxi`'s read-back table picks the slot a
+    precision comes back in by them.
     """
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i8:
-        return 8
+        return 7
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i16:
-        return 16
+        return 15
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i32:
-        return 32
+        return 31
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i64:
         return 60
     return -1
@@ -7245,12 +7254,16 @@ cdef bint _attrs_override_fits(
     if kind == 'geohash':
         if not _is_int_not_bool(bits) or bits < 1 or bits > 60:
             return False
+        # One bit short of each width: the slot is signed and the range
+        # check reads it as signed, so a precision that fills the width
+        # names values the column has no way of spelling. The same four
+        # numbers as `_geohash_dtype_max_bits`.
         if types.is_int8(ty):
-            return bits <= 8
+            return bits <= 7
         if types.is_int16(ty):
-            return bits <= 16
+            return bits <= 15
         if types.is_int32(ty):
-            return bits <= 32
+            return bits <= 31
         if types.is_int64(ty):
             return bits <= 60
         return False
