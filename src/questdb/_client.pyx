@@ -6952,7 +6952,13 @@ cdef void_int _capsule_consume_stream(
                         f'dataframe are already stored, so retrying the '
                         f'whole dataframe would duplicate them; resume '
                         f'from the named row instead.',
-                        in_doubt=gh_exc.in_doubt) from gh_exc
+                        # The scan raises with `in_doubt` false, being
+                        # a local refusal -- but rows really are stored
+                        # by this point, and `in_doubt` is what a caller
+                        # branches on to decide whether replaying is
+                        # safe. Saying otherwise leaves only the message
+                        # text to carry it.
+                        in_doubt=True) from gh_exc
                 raise
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)

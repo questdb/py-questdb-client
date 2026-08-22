@@ -5833,12 +5833,19 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             attr = getattr(target, name, None)
             if not callable(attr):
                 continue
+            # Every shape, not just up to the first that returns: a
+            # call that succeeds harmlessly on one shape says nothing
+            # about the others. `__init__()` with no arguments is the
+            # case that hid this -- it succeeds, while
+            # `__init__({...})` rewrites the claim in place.
             for args in ((), ('kind',), ('x', 1), ({'x': 1},)):
                 try:
                     attr(*args)
                 except Exception:
-                    continue
-                break
+                    pass
+                self.assertEqual(
+                    json.dumps(target, sort_keys=True), before,
+                    f'{name}{args!r} changed the claim')
         self.assertEqual(json.dumps(target, sort_keys=True), before)
 
         # An ordinary editable copy of this one level is one unpacking

@@ -263,7 +263,12 @@ class _RoundtripClaim(dict):
     def __init__(self, mapping=()):
         # Every mapping inside the claim is frozen too, so no part of
         # it can be edited in place. `dict.__init__` inserts at the C
-        # level and so is not turned away by the override below.
+        # level and so is not turned away by the override below --
+        # which also means calling `__init__` again on a built claim
+        # would edit it in place, past every other guard, so a second
+        # call is refused the same way the mutators are.
+        if len(self):
+            self._immutable()
         items = mapping.items() if isinstance(mapping, dict) else mapping
         dict.__init__(self, [
             (key, _RoundtripClaim(value) if isinstance(value, dict) else value)
