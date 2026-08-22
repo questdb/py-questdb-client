@@ -3110,6 +3110,68 @@ class TestEgressWithDatabase(unittest.TestCase):
                 except Exception:
                     pass
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_date_column_survives_a_read_modify_write(self):
+        """A DATE column read back and written straight out again lands
+        as DATE, on all three pandas backends.
+
+        DATE is claimed by the column's Arrow type, and plain
+        `to_pandas()` hands the column back as a NumPy `datetime64[ms]`,
+        which has no route of its own to DATE. Without the claim putting
+        the Arrow type back on, that frame created the destination table
+        with a microsecond TIMESTAMP column and said nothing -- the
+        outcome the round-trip claim exists to prevent.
+        """
+        src = 't_date_rt_src_' + uuid.uuid4().hex[:8]
+        made = []
+        try:
+            self._exec(
+                f'CREATE TABLE {src} (ts TIMESTAMP, d DATE) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                "('2024-01-01T00:00:00Z', '2024-01-02T03:04:05.678Z'), "
+                "('2024-01-01T00:00:01Z', '1969-07-20T20:17:40.000Z')")
+            self.qdb_plain.retry_check_table(src, min_rows=2)
+            sql = f'SELECT ts, d FROM {src} ORDER BY ts'
+
+            for backend in (None, 'pyarrow', 'numpy_nullable'):
+                kwargs = {} if backend is None else {'dtype_backend': backend}
+                with self.subTest(dtype_backend=backend):
+                    dst = 't_date_rt_dst_' + uuid.uuid4().hex[:8]
+                    made.append(dst)
+                    with qi.QuestDB.from_conf(self._conf()) as client:
+                        df = client.query(sql).to_pandas(**kwargs)
+                    self.assertEqual(
+                        df.attrs['questdb']['columns']['d']['kind'], 'date')
+                    with qi.QuestDB.from_conf(self._conf()) as client:
+                        client.dataframe(df, table_name=dst, at='ts')
+                    self.qdb_plain.retry_check_table(dst, min_rows=2)
+                    self.assertEqual(
+                        dict(
+                            (row[0], row[1]) for row in
+                            self.qdb_plain.http_sql_query(
+                                f'SHOW COLUMNS FROM {dst}')['dataset'])['d'],
+                        'DATE')
+                    with qi.QuestDB.from_conf(self._conf()) as client:
+                        back = client.query(
+                            f'SELECT d FROM {dst} ORDER BY timestamp'
+                        ).to_pandas()
+                    self.assertEqual(
+                        back.attrs['questdb']['columns']['d']['kind'], 'date')
+                    self.assertEqual(
+                        self.qdb_plain.http_sql_query(
+                            f'SELECT d FROM {dst} ORDER BY timestamp')[
+                                'dataset'],
+                        self.qdb_plain.http_sql_query(
+                            f'SELECT d FROM {src} ORDER BY ts')['dataset'])
+        finally:
+            for name in [src] + made:
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {name}')
+                except Exception:
+                    pass
+
     def test_numpy_egress_round_trip_overrides(self):
         """uuid / long256 / ipv4 / char / geohash round-trip through the
         native numpy path driven by df.attrs metadata (no pyarrow). UUID

@@ -241,15 +241,23 @@ Fixed
 - **DATE columns are written differently by the two ingestion styles**, which
   is now documented. ``row()`` takes the new ``DateMillis`` wrapper.
   ``dataframe()`` takes the column's Arrow type — ``pa.timestamp('ms')``,
-  ``pa.date32()`` or ``pa.date64()`` on a fully Arrow-backed frame — so
-  there is no DATE cell type and no ``'date'`` kind for
-  ``schema_overrides``. The NumPy planner has no DATE route: it widens
-  ``datetime64[ms]`` to TIMESTAMP and rejects ``datetime64[ms, tz]``. Both
-  styles need a QWP sender. Reading back, a DATE column arrives as
-  ``pa.timestamp('ms', 'UTC')``, so ``to_arrow()`` and
-  ``dtype_backend='pyarrow'`` feed it back as DATE, while plain
-  ``to_pandas()`` gives ``datetime64[ms, UTC]``, which ``dataframe()``
-  rejects.
+  ``pa.date32()`` or ``pa.date64()``, in a fully Arrow-backed frame or in a
+  mixed one — so there is no DATE cell type and no ``'date'`` kind for
+  ``schema_overrides``. What has no route of its own to DATE is the NumPy
+  ``datetime64[ms]`` dtype, which widens to TIMESTAMP, and its tz-aware
+  ``datetime64[ms, tz]`` form, which is rejected. Both styles need a QWP
+  sender.
+
+- **A DATE column survives a read-modify-write on every pandas backend.**
+  Reading back, a DATE column arrives as ``pa.timestamp('ms', 'UTC')``, so
+  ``to_arrow()`` and ``dtype_backend='pyarrow'`` feed it straight back as
+  DATE. Plain ``to_pandas()`` gives a NumPy ``datetime64[ms]`` column,
+  which used to go back out as a microsecond TIMESTAMP with nothing said,
+  auto-creating the destination table with the wrong column type. The
+  ``df.attrs['questdb']`` claim that comes with the frame names the column
+  DATE, and ``dataframe()`` now puts the Arrow type back on before writing.
+  A column retyped to another unit since it was read is drift and still
+  goes out as its own type implies.
 
 - If a DataFrame load fails, batches waiting in memory are now discarded. Most
   loads commit once at the end, but very large Arrow loads may commit an earlier

@@ -4147,6 +4147,70 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             row_count = len(values) - batch_offset
         return _RawArrowStream(columns, row_count, batch_offset)
 
+    def _date_claim_frame(self, series, claim=True):
+        stamp = pd.to_datetime([1704164645678000], unit='us', utc=True)
+        df = pd.DataFrame({'d': series, 'ts': stamp})
+        if claim:
+            df.attrs['questdb'] = {
+                'version': 1, 'columns': {'d': {'kind': 'date'}}}
+        return df
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_roundtrip_claim_restores_a_date_column(self):
+        # Plain `to_pandas()` hands a DATE column back as a NumPy
+        # `datetime64[ms]`, which has no route of its own to DATE and
+        # widens to a microsecond TIMESTAMP. Writing such a frame back
+        # therefore created the destination table with a TIMESTAMP
+        # column where the source had DATE, and said nothing. The claim
+        # names the column DATE, and that is what puts the Arrow type
+        # back on it.
+        millis = 1704164645678
+        naive = pd.Series(numpy.array([millis], dtype='datetime64[ms]'))
+        self.assertEqual(
+            self._dataframe_column_types(
+                self._date_claim_frame(naive),
+                table_name='date_claim', at='ts')['d'],
+            0x0B)
+        self.assertEqual(
+            self._dataframe_column_types(
+                self._date_claim_frame(naive, claim=False),
+                table_name='date_claim', at='ts')['d'],
+            0x0A)
+        # The claimed NumPy frame writes what the Arrow-backed frame
+        # writes, down to the bytes -- the point of the claim is that
+        # the three backends answer the same read the same way.
+        arrow_backed = pd.Series(
+            [millis], dtype=pd.ArrowDtype(pyarrow.timestamp('ms')))
+        self.assertEqual(
+            self._dataframe_wire_payload(
+                self._date_claim_frame(naive),
+                table_name='date_claim', at='ts'),
+            self._dataframe_wire_payload(
+                self._date_claim_frame(arrow_backed, claim=False),
+                table_name='date_claim', at='ts'))
+        # On its own the tz-aware millisecond dtype is refused; claimed,
+        # it lands as the type the claim names.
+        aware = naive.dt.tz_localize('UTC')
+        self.assertEqual(
+            self._dataframe_column_types(
+                self._date_claim_frame(aware),
+                table_name='date_claim', at='ts')['d'],
+            0x0B)
+        with self.assertRaises(qi.QuestDBError):
+            self._dataframe_wire_payload(
+                self._date_claim_frame(aware, claim=False),
+                table_name='date_claim', at='ts')
+        # A column retyped to another unit since it was read is drift,
+        # and drift goes out as the column's own type implies.
+        self.assertEqual(
+            self._dataframe_column_types(
+                self._date_claim_frame(
+                    pd.Series(numpy.array(
+                        [millis * 1000], dtype='datetime64[us]'))),
+                table_name='date_claim', at='ts')['d'],
+            0x0A)
+
     def test_geohash_range_check_reads_an_uncounted_null_count(self):
         # The Arrow C data interface lets a producer leave `null_count`
         # at -1, meaning nobody has counted, and a column that never

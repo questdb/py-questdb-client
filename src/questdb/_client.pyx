@@ -903,13 +903,15 @@ cdef class DateMillis:
 
     This is how :func:`Buffer.row <questdb.ingress.Buffer.row>` writes a
     DATE column. DataFrames claim DATE from the column's Arrow type
-    instead — ``pa.timestamp('ms')``, ``pa.date32()``, or ``pa.date64()``
-    on a fully Arrow-backed frame — so there is no DATE cell type and no
-    ``'date'`` kind for ``schema_overrides``. The NumPy planner has no
-    DATE route and widens a ``datetime64[ms]`` column to TIMESTAMP. Like
-    the other QWP-only types, DATE needs a QWP sender; ILP senders have
-    no DATE type, so the datetime columns they accept all land as
-    TIMESTAMP.
+    instead — ``pa.timestamp('ms')`` (naive or tz-aware),
+    ``pa.date32()``, or ``pa.date64()`` — so there is no DATE cell type
+    and no ``'date'`` kind for ``schema_overrides``. A NumPy
+    ``datetime64[ms]`` dtype has no route of its own to DATE and widens
+    to a microsecond TIMESTAMP, unless the frame carries a
+    ``df.attrs['questdb']`` claim naming the column DATE, which puts the
+    Arrow type back on it first. Like the other QWP-only types, DATE
+    needs a QWP sender; ILP senders have no DATE type, so the datetime
+    columns they accept all land as TIMESTAMP.
     """
     cdef int64_t _value
 
@@ -5427,6 +5429,86 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
     return out
 
 
+cdef object _dataframe_normalize_claimed_date(object df):
+    """Arrow-backed copies of the millisecond datetime columns claimed
+    as DATE.
+
+    A DATE column is claimed by the column's own Arrow type, and the
+    NumPy planner has no DATE target of any kind: it reaches DATE only
+    through `col_target_column_arrow`, which needs the column to carry
+    a `pa.timestamp('ms')`. Plain `to_pandas()` hands a DATE column back
+    as a NumPy `datetime64[ms]`, which the planner widens to a
+    microsecond TIMESTAMP -- so reading a table and writing the frame
+    straight back created the destination table with a TIMESTAMP column
+    where the source had DATE, and said nothing.
+
+    The claim carries the missing half. `'date'` is not in
+    `_ATTRS_OVERRIDE_KINDS` because there is no Arrow override to
+    restore DATE with; what restores it is the column's type, so the
+    claim reshapes the column and the type does the rest. Both Arrow
+    backends already hand the column back as `pa.timestamp('ms')`, so
+    this is what makes the three backends write the same column type.
+
+    A tz-aware millisecond column is reshaped the same way. On its own
+    the planner refuses that dtype outright, so a claimed one turns a
+    hard rejection into the type the claim names.
+
+    pyarrow is what carries a column to DATE, and without it the frame
+    has no route there to be put back on -- the same early return the
+    rest of the claim machinery takes.
+    """
+    cdef object cols_meta, arrow_dtype, dtype, meta, out, unit, tz
+    cdef str kind
+    cdef list convert
+    if not _is_pandas_dataframe_object(df):
+        return df
+    cols_meta = _roundtrip_columns_meta(df)
+    if not cols_meta:
+        return df
+    _dataframe_may_import_deps()
+    arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+    if arrow_dtype is None:
+        return df
+    if not _dataframe_try_import_pyarrow():
+        return df
+    convert = []
+    # Walked by position rather than by label: `dtypes[name]` on a frame
+    # with duplicate column names hands back a Series, not a dtype.
+    for pos, (name, dtype) in enumerate(zip(df.columns, df.dtypes)):
+        meta = cols_meta.get(name)
+        kind = _roundtrip_kind(meta)
+        if kind != 'date':
+            continue
+        # An Arrow-backed column already states the type itself.
+        if isinstance(dtype, arrow_dtype):
+            continue
+        if getattr(dtype, 'kind', None) != 'M':
+            continue
+        tz = getattr(dtype, 'tz', None)
+        unit = getattr(dtype, 'unit', None)
+        if unit is None:
+            unit = numpy.datetime_data(dtype)[0]
+        # Only a millisecond column holds what a DATE column held. A
+        # column retyped to another unit since it was read is drift, and
+        # drift is written as the column's own type implies.
+        if unit != 'ms':
+            continue
+        convert.append((
+            pos,
+            arrow_dtype(
+                _PYARROW.timestamp('ms')
+                if tz is None
+                else _PYARROW.timestamp('ms', str(tz)))))
+    if not convert:
+        return df
+    out = df.copy(deep=False)
+    for pos, target_dtype in convert:
+        _dataframe_set_column(
+            out, df, pos, df.iloc[:, pos].astype(target_dtype))
+    out.attrs = dict(df.attrs)
+    return out
+
+
 cdef void_int _dataframe_claim_all_null_source(
         col_t* col, str kind, object bits) except -1:
     """Give an all-null claimed column the object-column shape its
@@ -7017,8 +7099,11 @@ cdef object _merge_capsule_overrides(
 
 # `df.attrs['questdb']` column kinds that an Arrow override can restore.
 # The other kinds either survive on their storage type alone (VARCHAR,
-# SYMBOL, TIMESTAMP, DATE, ...) or have no override to restore them
-# with (BYTE / SHORT / INT, which the Arrow classifier widens).
+# SYMBOL, TIMESTAMP, ...) or have no override to restore them with
+# (BYTE / SHORT / INT, which the Arrow classifier widens). DATE is the
+# one kind restored by reshaping the column rather than by an override,
+# in `_dataframe_normalize_claimed_date`: no Arrow override names it,
+# and the Arrow type it needs is the whole claim.
 cdef dict _ATTRS_OVERRIDE_KINDS = {
     'ipv4': <int>qwp_arrow_override_ipv4,
     'char': <int>qwp_arrow_override_char,
@@ -7484,6 +7569,7 @@ cdef void_int _dataframe_numpy_publish(
     try:
         df = _dataframe_normalize_nullable(df)
         df = _dataframe_normalize_claimed_arrow(df)
+        df = _dataframe_normalize_claimed_date(df)
         df = _dataframe_normalize_at_timestamp(df, at)
         _dataframe_plan_build(
             b,
@@ -8165,7 +8251,8 @@ cdef class QuestDB:
           accepted on Arrow-backed columns in the Rust Arrow route). An
           Arrow ``ms`` timestamp field lands as DATE instead — see
           **DATE** below — while a NumPy ``datetime64[ms]`` field is
-          widened to a microsecond TIMESTAMP.
+          widened to a microsecond TIMESTAMP unless a
+          ``df.attrs['questdb']`` claim names it DATE.
           Timestamp *field* columns accept null timestamps (``NaT`` /
           ``None``) and values before the Unix epoch; a ``datetime64[ns]``
           field carrying ``NaT`` is re-exported through Arrow so its
@@ -8257,20 +8344,24 @@ cdef class QuestDB:
         - **DATE**: Arrow ``pa.timestamp('ms')`` (tz-aware or naive),
           ``pa.date32()``, and ``pa.date64()`` columns land as DATE. The
           Arrow type is itself the claim, so there is no DATE cell type
-          and no ``'date'`` kind for ``schema_overrides``, and DATE needs
-          a fully Arrow-backed frame: the NumPy planner has no DATE
-          route, widening a NumPy ``datetime64[ms]`` column to TIMESTAMP
-          and rejecting the tz-aware ``datetime64[ms, tz]`` dtype
-          outright. A millisecond column named by ``at=`` becomes the
-          table's designated TIMESTAMP, like any other ``at`` column.
-          Round-tripping keeps the type: :meth:`query
+          and no ``'date'`` kind for ``schema_overrides``. Such a column
+          lands as DATE whether the frame is fully Arrow-backed or mixed
+          with NumPy columns. What has no route of its own to DATE is
+          the NumPy ``datetime64[ms]`` dtype, which widens to a
+          microsecond TIMESTAMP, and its tz-aware ``datetime64[ms, tz]``
+          form, which is rejected outright. A millisecond column named
+          by ``at=`` becomes the table's designated TIMESTAMP, like any
+          other ``at`` column. Round-tripping keeps the type: :meth:`query
           <questdb.QuestDB.query>` returns a DATE column as
-          ``pa.timestamp('ms', 'UTC')``, so ``to_arrow()`` and
-          ``to_pandas(dtype_backend='pyarrow')`` feed it back as DATE,
-          while plain ``to_pandas()`` yields ``datetime64[ms, UTC]``,
-          which this method rejects. Row-at-a-time, DATE is written with
-          :class:`DateMillis <questdb.DateMillis>` through
-          :func:`Buffer.row <questdb.ingress.Buffer.row>`.
+          ``pa.timestamp('ms', 'UTC')``, which ``to_arrow()`` and
+          ``to_pandas(dtype_backend='pyarrow')`` feed straight back as
+          DATE. Plain ``to_pandas()`` gives a NumPy ``datetime64[ms]``
+          column, and the ``df.attrs['questdb']`` claim it comes with
+          names the column DATE, so this method puts the Arrow type back
+          on before writing and that frame lands as DATE too.
+          Row-at-a-time, DATE is written with :class:`DateMillis
+          <questdb.DateMillis>` through :func:`Buffer.row
+          <questdb.ingress.Buffer.row>`.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints

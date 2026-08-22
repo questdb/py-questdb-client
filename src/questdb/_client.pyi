@@ -359,9 +359,11 @@ class DateMillis:
 
     How ``row()`` writes a DATE column. DataFrames claim DATE from the
     column's Arrow type instead — ``pa.timestamp('ms')``, ``pa.date32()``,
-    or ``pa.date64()`` on a fully Arrow-backed frame — so there is no DATE
-    cell type and no ``'date'`` kind for ``schema_overrides``. The NumPy
-    planner has no DATE route and widens ``datetime64[ms]`` to TIMESTAMP.
+    or ``pa.date64()`` — so there is no DATE cell type and no ``'date'``
+    kind for ``schema_overrides``. A NumPy ``datetime64[ms]`` dtype has no
+    route of its own to DATE and widens to a microsecond TIMESTAMP, unless
+    a ``df.attrs['questdb']`` claim names the column DATE and puts the
+    Arrow type back on it.
     DATE is QWP-only: over ILP, datetime columns all land as TIMESTAMP.
 
     ``INT64_MIN`` is QuestDB's ``NULL`` sentinel for DATE. It is accepted
