@@ -5684,6 +5684,24 @@ cdef _warn_roundtrip_claim_dropped(object name, str kind, object shape):
         stacklevel=1)
 
 
+cdef bint _roundtrip_claim_already_carried(
+        str kind, const col_t* col) noexcept:
+    """Whether the column carries the claimed kind without an override.
+
+    An object column of `uuid.UUID` or `ipaddress.IPv4Address` is
+    already written as UUID or IPV4 by the source alone -- which is the
+    shape plain `to_pandas()` hands back -- so no override is set for
+    it and none is missing. Without this, the claim such a frame comes
+    back with would be reported as dropped on every write, on the one
+    path the claim exists to serve.
+    """
+    if kind == 'uuid':
+        return col.setup.source == col_source_t.col_source_uuid_pyobj
+    if kind == 'ipv4':
+        return col.setup.source == col_source_t.col_source_ipv4_pyobj
+    return False
+
+
 cdef void_int _dataframe_apply_roundtrip_overrides(
         object df, dataframe_plan_t* plan) except -1:
     cdef size_t col_index
@@ -5766,7 +5784,9 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
                 col.setup.has_override = True
                 col.setup.override_dtype = <qwp_numpy_dtype>gh
                 col.setup.override_geohash_bits = <uint8_t>bits
-        if not col.setup.has_override and kind in _ATTRS_OVERRIDE_KINDS:
+        if (not col.setup.has_override
+                and kind in _ATTRS_OVERRIDE_KINDS
+                and not _roundtrip_claim_already_carried(kind, col)):
             # The claim names a kind this column cannot carry -- a
             # width that cannot hold the precision, an unsigned column,
             # or a type with no route to the kind at all. That is a

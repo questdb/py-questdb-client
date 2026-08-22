@@ -5077,6 +5077,45 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 max_rows_per_batch=1)
         self.assertNotIn('already stored', str(cm.exception))
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_claim_the_column_does_carry_stays_quiet(self):
+        """An object column of `uuid.UUID` or `ipaddress.IPv4Address`
+        is written as UUID or IPV4 by its source alone, so no override
+        is set for it and none is missing. That is the shape plain
+        `to_pandas()` hands back, so warning there would put a false
+        'claim ignored' on every round trip -- the one path the claim
+        exists to serve."""
+        cases = (
+            ('uuid', uuid.UUID('12345678-1234-5678-1234-567812345678'),
+             0x0C),
+            ('ipv4', ipaddress.IPv4Address('1.2.3.4'),
+             0x18),
+        )
+        for kind, value, wire_type in cases:
+            for claimed in (True, False):
+                with self.subTest(kind=kind, claimed=claimed):
+                    df = pd.DataFrame({
+                        'c': pd.array([value], dtype=object),
+                        'ts': pd.to_datetime([0], unit='s')})
+                    if claimed:
+                        df.attrs['questdb'] = {
+                            'version': 1,
+                            'columns': {'c': {'kind': kind}}}
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter('always')
+                        types = self._dataframe_column_types(
+                            df, table_name='claim_carried', at='ts')
+                    dropped = [
+                        w for w in caught
+                        if 'questdb: column' in str(w.message)]
+                    self.assertEqual(
+                        dropped, [],
+                        f'claim is carried, should be quiet: '
+                        f'{[str(w.message) for w in dropped]}')
+                    # And the claim changes nothing: the column goes out
+                    # as its own type either way.
+                    self.assertEqual(types['c'], wire_type)
+
     def test_a_claim_no_column_can_carry_is_said_out_loud_on_both_planners(self):
         """A claim the column's type can never carry is a mistake
         rather than drift, and both planners now say so. The NumPy
