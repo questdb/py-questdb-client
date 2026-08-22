@@ -503,5 +503,33 @@ class TestBinaryBufferRelease(unittest.TestCase):
         self._assert_released(backing, view)
 
 
+@unittest.skipUnless(pd is not None, 'pandas not installed')
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestClosedHandleDataframeLeak(unittest.TestCase):
+    """`QuestDB.dataframe()` claims a `qdb_pystr_buf` for the call. The
+    handle check that raises on a closed pool runs first, so an
+    allocation made ahead of it has nothing to free it and a retry loop
+    against a closed handle leaks one per attempt."""
+
+    def test_a_closed_handle_leaks_nothing(self):
+        frame = pd.DataFrame({
+            'a': np.arange(1024, dtype=np.int64),
+            'ts': pd.to_datetime(np.arange(1024), unit='s')})
+        handle = qi.QuestDB.from_conf(
+            'ws::addr=127.0.0.1:1;lazy_connect=true;'
+            'sender_pool_min=0;pool_reap=manual;')
+        handle.close()
+
+        def work():
+            with self.assertRaises(qi.QuestDBError):
+                handle.dataframe(
+                    frame, table_name='closed', at='ts')
+
+        # Enough attempts that a per-call leak of a few dozen bytes
+        # clears the 3 MiB-per-window floor `_assert_no_leak`
+        # allows for allocator noise.
+        _assert_no_leak(self, work, warmup=20000, measure=900000)
+
+
 if __name__ == '__main__':
     unittest.main()

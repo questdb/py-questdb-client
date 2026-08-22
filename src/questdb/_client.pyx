@@ -8612,7 +8612,7 @@ cdef class QuestDB:
         input (``pa.RecordBatchReader``) is not re-batched — the producer's
         batch size governs its checkpoint window.
         """
-        cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        cdef qdb_pystr_buf* b = NULL
         cdef dataframe_plan_t plan = dataframe_plan_blank()
         cdef questdb_db* db = NULL
         cdef bint db_use = False
@@ -8620,6 +8620,11 @@ cdef class QuestDB:
         db = self._begin_db_use('dataframe')
         db_use = True
         try:
+            # Claimed inside the `try`, and after `_begin_db_use`,
+            # which raises on a closed handle: an allocation made
+            # ahead of that raise has nothing to free it, so a retry
+            # loop against a closed handle leaks one per attempt.
+            b = qdb_pystr_buf_new()
             src.db = db
             src.opts = NULL
             _direct_dataframe_run(
@@ -8636,7 +8641,8 @@ cdef class QuestDB:
                 schema_overrides)
             return self
         finally:
-            qdb_pystr_buf_free(b)
+            if b != NULL:
+                qdb_pystr_buf_free(b)
             if db_use:
                 self._end_db_use()
 
