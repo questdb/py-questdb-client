@@ -1712,8 +1712,18 @@ cdef object _combine_hybrid_mask(list value_chunks, list mask_chunks, object np)
     return np.concatenate(parts)
 
 
+cdef list _numpy_pinned_name_bytes(tuple pinned):
+    """The pinned column names as UTF-8, encoded once per result.
+
+    The per-batch check compares them against the borrowed name buffer
+    the reader hands back, so no `PyUnicode` is built per column per
+    batch.
+    """
+    return [(<str>name).encode('utf-8') for name in <list>pinned[0]]
+
+
 cdef _numpy_check_meta_pinned(
-        tuple pinned, const qwp_reader_batch* batch):
+        tuple pinned, list pinned_names, const qwp_reader_batch* batch):
     """Refuse a batch whose schema disagrees with the first one's.
 
     The NumPy path reads the column names, kinds, decimal scales and
@@ -1722,12 +1732,13 @@ cdef _numpy_check_meta_pinned(
     disagrees would be decoded with the wrong dtype and described by a
     claim that does not match its own values, so it stops here instead.
 
-    Only the count, the kinds and the two numbers the decoders read per
-    batch are compared. The names are read once, with the rest of the
-    schema, and left alone here: a `PyUnicode` per column per batch is
-    the per-batch cost this path had removed, and a name cannot change
-    under a stable kind vector without the server having sent a
-    different result altogether.
+    The count, the names, the kinds and the two numbers the decoders
+    read per batch are all compared. The names are compared as raw
+    bytes against the buffer the reader borrows out, because a
+    `PyUnicode` per column per batch is the cost this path had removed
+    -- and a rename is the one alteration that moves neither the count
+    nor the kinds, which is exactly what the reference client checks
+    first.
     """
     cdef list pinned_kinds = <list>pinned[1]
     cdef list pinned_scales = <list>pinned[2]
@@ -1738,9 +1749,21 @@ cdef _numpy_check_meta_pinned(
     cdef questdb_error* err = NULL
     cdef qwp_reader_column_data cd_meta
     cdef object want
+    cdef const char* name_buf = NULL
+    cdef size_t name_len = 0
+    cdef bytes want_name
     if n_cols != <size_t>len(pinned_kinds):
         _numpy_meta_drift()
     for col_idx in range(n_cols):
+        _reader_check(
+            qwp_reader_batch_column_name(
+                batch, col_idx, &name_buf, &name_len, &err),
+            &err, 'qwp_reader_batch_column_name')
+        want_name = <bytes>pinned_names[col_idx]
+        if (name_len != <size_t>len(want_name)
+                or memcmp(name_buf, <const char*>want_name,
+                          name_len) != 0):
+            _numpy_meta_drift()
         _reader_check(
             qwp_reader_batch_column_kind(batch, col_idx, &kind, &err),
             &err, 'qwp_reader_batch_column_kind')
@@ -1766,8 +1789,12 @@ cdef _numpy_check_meta_pinned(
 
 
 cdef _numpy_meta_drift():
+    # `SchemaDrift` is the code the header gives a mid-stream schema
+    # change, and the one `to_arrow()` and `iter_polars()` already raise
+    # for the same event through the Arrow reader. `ServerSchemaMismatch`
+    # is a server-reported ingest status and means something else.
     raise QuestDBError(
-        QuestDBErrorCode.ServerSchemaMismatch,
+        QuestDBErrorCode.SchemaDrift,
         'The result schema changed between batches: this reader '
         'decodes every batch against the first one\'s columns, so a '
         'later batch that disagrees cannot be read.')
@@ -1936,6 +1963,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     cdef size_t prev_dict_n = 0
     cdef bint first = True
     cdef tuple pinned_meta = None
+    cdef list pinned_names_b = None
     cdef bint has_symbol = False
     cdef int seen_seq
 
@@ -1977,6 +2005,7 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                 row_count = qwp_reader_batch_row_count(batch)
                 if first:
                     pinned_meta = _numpy_extract_meta(batch)
+                    pinned_names_b = _numpy_pinned_name_bytes(pinned_meta)
                     (col_names, col_kinds, col_scales, col_precision,
                      has_symbol) = pinned_meta
                     n_cols = <size_t>len(col_names)
@@ -1984,7 +2013,8 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                     col_masks = [[] for _ in range(n_cols)]
                     first = False
                 else:
-                    _numpy_check_meta_pinned(pinned_meta, batch)
+                    _numpy_check_meta_pinned(
+                        pinned_meta, pinned_names_b, batch)
                 if has_symbol:
                     _reader_check(
                         qwp_reader_batch_symbol_dict(batch, &sd, &err), &err,
@@ -2217,6 +2247,7 @@ cdef class _NumpyBatchIter:
     cdef list col_precision
     cdef object claim
     cdef tuple pinned_meta
+    cdef list pinned_names_b
     cdef bint first
     cdef bint has_symbol
     cdef bint done
@@ -2302,6 +2333,8 @@ cdef class _NumpyBatchIter:
                 row_count = qwp_reader_batch_row_count(batch)
                 if self.first:
                     self.pinned_meta = _numpy_extract_meta(batch)
+                    self.pinned_names_b = _numpy_pinned_name_bytes(
+                        self.pinned_meta)
                     (self.col_names, self.col_kinds, self.col_scales,
                      self.col_precision, self.has_symbol) = \
                         self.pinned_meta
@@ -2310,7 +2343,8 @@ cdef class _NumpyBatchIter:
                         self.col_scales, self.col_precision)
                     self.first = False
                 else:
-                    _numpy_check_meta_pinned(self.pinned_meta, batch)
+                    _numpy_check_meta_pinned(
+                        self.pinned_meta, self.pinned_names_b, batch)
                 n_cols = <size_t>len(self.col_names)
                 if self.has_symbol:
                     _reader_check(

@@ -66,7 +66,7 @@ __all__ = [
 from libc.stdint cimport uint8_t, uint16_t, uint64_t, int64_t, int32_t, uint32_t, \
     uintptr_t, INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, qsort
-from libc.string cimport strncmp, memset, memcpy, strlen
+from libc.string cimport strncmp, memset, memcpy, memcmp, strlen
 from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
