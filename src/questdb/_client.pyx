@@ -6706,6 +6706,16 @@ cdef void_int _arrow_batch_check_geohash_ranges(
         col = batch.children[child_index]
         if field == NULL or col == NULL:
             continue
+        elem_size = _arrow_signed_int_width(field.format)
+        if elem_size == 0:
+            # A GEOHASH rides only on a signed Int8/16/32/64, and the
+            # importer refuses the kind on anything else, naming the
+            # type it got. Settling that from the format alone keeps a
+            # column that can never carry one out of the metadata walk
+            # below, whose bound is not a property of this column: a
+            # string column with a large blob of its own metadata would
+            # otherwise stop the send over a claim it cannot hold.
+            continue
         bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
         if bits == _GEOHASH_BITS_UNREADABLE:
             raise QuestDBError(
@@ -6721,8 +6731,7 @@ cdef void_int _arrow_batch_check_geohash_ranges(
                 f'metadata.')
         if bits == _GEOHASH_BITS_NONE:
             continue
-        elem_size = _arrow_signed_int_width(field.format)
-        if elem_size != 0 and bits > _arrow_geohash_width_max_bits(elem_size):
+        if bits > _arrow_geohash_width_max_bits(elem_size):
             # `schema_overrides` bounds the precision to 1..60 without
             # seeing the column, so a claim wider than the column can
             # carry arrives here. Refusing it names the width; letting
@@ -6737,12 +6746,6 @@ cdef void_int _arrow_batch_check_geohash_ranges(
                 f'precision fills its bits and the column is signed, so '
                 f'a claim needing that last bit belongs on the next '
                 f'width up.')
-        if elem_size == 0:
-            # A GEOHASH claim rides on a signed Int8/16/32/64 and the
-            # importer refuses it on anything else, naming the type it
-            # got. The column never reaches the wire for an unread
-            # value to have left on it.
-            continue
         # `col.offset` is the array's own start row and is cast to
         # `size_t` for the scan, so a negative one would wrap to about
         # 2**64 and index the value buffer far outside it.

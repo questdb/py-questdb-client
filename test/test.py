@@ -4886,6 +4886,25 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_big_metadata_on_a_non_geohash_column_does_not_stop_the_send(self):
+        """The metadata walk is bounded, and a blob it cannot finish
+        stops the send -- but only for a column that could carry a
+        GEOHASH. A string column with a large blob of its own metadata
+        claims nothing this scan is entitled to refuse."""
+        padding = {f'pad.{i}'.encode(): b'x' * 400 for i in range(5000)}
+        stamp = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
+        schema = pyarrow.schema([
+            pyarrow.field('s', pyarrow.string(), metadata=padding),
+            pyarrow.field('ts', pyarrow.timestamp('us', 'UTC'))])
+        table = pyarrow.table(
+            [pyarrow.array(['a']),
+             pyarrow.array([stamp], pyarrow.timestamp('us', 'UTC'))],
+            schema=schema)
+        # Reaches the wire rather than raising over a GEOHASH it has no
+        # way of holding.
+        self._dataframe_wire_payload(
+            table, table_name='big_md_string', at='ts')
+
     def test_geohash_claim_wider_than_the_arrow_column_is_refused(self):
         """`schema_overrides` bounds a GEOHASH precision to 1..60
         without seeing the column, so a claim wider than the column can
