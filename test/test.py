@@ -4156,8 +4156,11 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     stamps,
                     dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))))
                 # A NumPy timestamp column routes the frame off the
-                # zero-copy path and onto the manual planner.
-                mixed_frame = frame(pd.to_datetime(stamps))
+                # zero-copy path and onto the manual planner. The unit is
+                # pinned because `to_datetime` picks its own -- ns on
+                # pandas 2, us on pandas 3 -- and the two would otherwise
+                # reach the wire as different timestamp types.
+                mixed_frame = frame(pd.to_datetime(stamps).as_unit('us'))
                 self.assertEqual(
                     self._dataframe_column_types(
                         mixed_frame, table_name='attrs_round_trip',
@@ -4208,8 +4211,14 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     self.assertEqual(
                         self._dataframe_wire_payload(
                             # A NumPy timestamp column routes the frame
-                            # onto the manual planner.
-                            frame(pd.to_datetime(stamps)),
+                            # onto the manual planner. The unit is pinned
+                            # because `to_datetime` picks its own -- ns on
+                            # pandas 2, us on pandas 3 -- and the `at`
+                            # column's precision would otherwise reach the
+                            # wire as TIMESTAMP_NS on one and TIMESTAMP on
+                            # the other, failing a comparison that is about
+                            # the claimed column.
+                            frame(pd.to_datetime(stamps).as_unit('us')),
                             table_name='attrs_round_trip', at='ts'),
                         self._dataframe_wire_payload(
                             frame(pd.array(stamps, dtype=pd.ArrowDtype(
