@@ -10213,6 +10213,7 @@ cdef class Sender:
         cdef direct_conn_source_t src
         cdef qdb_pystr_buf* ws_b = NULL
         cdef dataframe_plan_t ws_plan
+        cdef Buffer ws_owner = None
         # The QWP/WebSocket branch below goes straight to its own
         # connection and never reaches `_dataframe`, where the same
         # check stands for every other route. Without it here, a frame
@@ -10229,6 +10230,7 @@ cdef class Sender:
             src.opts = self._qwp_ws_opts
             ws_b = qdb_pystr_buf_new()
             ws_plan = dataframe_plan_blank()
+            ws_owner = self._buffer
             # Counted as a row in progress for as long as the run
             # lasts. `src.opts` is the sender's own options struct, and
             # the plan build below runs caller Python -- reading
@@ -10237,8 +10239,13 @@ cdef class Sender:
             # while `_direct_conn_open` is still to read it. The
             # row-serializing route gets this from `_dataframe`; this
             # one has to say it itself.
-            if self._buffer is not None:
-                self._buffer._row_depth += 1
+            # Held as a local for both ends of the count: reading
+            # `self._buffer` twice would leave the increment on one
+            # buffer and the decrement on another, or on none, and a
+            # count left standing refuses every later clear, flush and
+            # close on that buffer for good.
+            if ws_owner is not None:
+                ws_owner._row_depth += 1
             try:
                 _direct_dataframe_run(
                     &src,
@@ -10254,8 +10261,8 @@ cdef class Sender:
                     schema_overrides)
                 return self
             finally:
-                if self._buffer is not None:
-                    self._buffer._row_depth -= 1
+                if ws_owner is not None:
+                    ws_owner._row_depth -= 1
                 qdb_pystr_buf_free(ws_b)
         if schema_overrides is not None:
             raise QuestDBError(
