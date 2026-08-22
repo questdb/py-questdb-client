@@ -5183,6 +5183,32 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             txn.commit()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_the_claim_version_takes_any_whole_number_but_not_a_bool(self):
+        """`True == 1`, so the version gate has to reject it by type,
+        and a claim rebuilt from array metadata carries a `numpy.int64`
+        the gate must still accept. Holding it to `int` alone dropped
+        the whole claim over the type of one field."""
+        cases = ((1, True), (np.int64(1), True), (np.int32(1), True),
+                 (True, False), ('1', False), (2, False), (None, False))
+        for version, applies in cases:
+            with self.subTest(version=repr(version)):
+                df = pd.DataFrame({
+                    'c': pd.array([1], dtype=pd.ArrowDtype(pyarrow.uint32())),
+                    'ts': pd.to_datetime([0], unit='s')})
+                df.attrs['questdb'] = {
+                    'version': version,
+                    'columns': {'c': {'kind': 'ipv4'}}}
+                types = self._dataframe_column_types(
+                    df, table_name='claim_version', at='ts')
+                # 0x18 is IPV4, which only the claim can produce here;
+                # without it the uint32 column goes out as a LONG.
+                self.assertEqual(
+                    types['c'] == 0x18, applies,
+                    f'version={version!r} should '
+                    f'{"apply" if applies else "not apply"}')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_claim_the_column_does_carry_stays_quiet(self):
         """An object column of `uuid.UUID` or `ipaddress.IPv4Address`
         is written as UUID or IPV4 by its source alone, so no override

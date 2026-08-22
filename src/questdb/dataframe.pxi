@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 import sys
+import numbers as _numbers
 import uuid as _uuid
 
 from cpython.bytes cimport PyBytes_AsString
@@ -339,10 +340,15 @@ cdef object _roundtrip_columns_meta(object frame):
     qmeta = attrs.get('questdb')
     if not isinstance(qmeta, dict):
         return None
-    # `_is_int_not_bool`, not `!=`: `True == 1`, so a claim carrying
-    # `'version': True` would otherwise be read as a version 1 claim.
+    # `True == 1`, so a plain `!=` would read a claim carrying
+    # `'version': True` as a version 1 claim. Every whole number that
+    # is not a bool counts, `numpy.int64` among them -- a claim rebuilt
+    # from array metadata carries one, and holding the version to
+    # `int` alone would drop the whole claim over its type.
     version = qmeta.get('version')
-    if not _is_int_not_bool(version) or version != _ROUNDTRIP_META_VERSION:
+    if (version is True or version is False
+            or not isinstance(version, _numbers.Integral)
+            or int(version) != _ROUNDTRIP_META_VERSION):
         return None
     cols_meta = qmeta.get('columns')
     if not isinstance(cols_meta, dict):
