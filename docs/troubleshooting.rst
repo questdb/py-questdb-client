@@ -118,11 +118,14 @@ such column types and reject the values rather than silently widening
 them.
 
 **GEOHASH precision**: a column's precision is fixed when the column is
-created, and every value written to it has to be at that precision. A
-:class:`Geohash <questdb.Geohash>` cell whose precision differs from the
-one the column already holds is rejected by
-:meth:`Sender.row <questdb.Sender.row>`, and the buffer is rewound to what
-it held before that row. On the DataFrame path a value that does not fit
+created, and every value written to it has to be at that precision.
+:meth:`Sender.row <questdb.Sender.row>` checks that within one buffer's
+worth of rows: the first :class:`Geohash <questdb.Geohash>` cell written
+to a column pins the precision for the rest of that batch, a later cell
+that disagrees is rejected, and the buffer is rewound to what it held
+before that row. A flush clears the pin, so ``row()`` knows nothing about
+the precision the server's column already has — writing a batch at the
+wrong one comes back as a server error at flush time. On the DataFrame path a value that does not fit
 the claimed precision is refused before anything reaches the wire: a
 ``GEOHASH`` column keeps only the low bits, so a wider value would land as
 a valid geohash for somewhere else entirely.

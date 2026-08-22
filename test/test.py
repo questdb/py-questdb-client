@@ -3565,6 +3565,38 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         buffer.clear()
         self.assertEqual(len(buffer), 0)
 
+    def test_geohash_precision_is_pinned_per_column_per_buffer(self):
+        """`row()` pins a column's GEOHASH precision at the first cell
+        written to it and refuses a later disagreement -- within one
+        buffer's worth of rows. It knows nothing about the precision
+        the server's column already has: another table in the same
+        buffer, and the same table in a fresh buffer, both start over.
+        That is what makes a wrong precision against an existing column
+        a server-side error at flush time."""
+        buffer = qi.Buffer._new_qwp()
+        buffer.row(
+            'pinned', columns={'g': qi.Geohash.from_string('u33d8')},
+            at=qi.ServerTimestamp)
+        before = len(buffer)
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'precision mismatch within column'):
+            buffer.row(
+                'pinned', columns={'g': qi.Geohash.from_string('u3')},
+                at=qi.ServerTimestamp)
+        self.assertEqual(len(buffer), before)
+
+        # A different table in the same buffer carries its own pin.
+        buffer.row(
+            'other', columns={'g': qi.Geohash(1, 10)},
+            at=qi.ServerTimestamp)
+
+        # And the pin does not outlive the buffer.
+        fresh = qi.Buffer._new_qwp()
+        fresh.row(
+            'pinned', columns={'g': qi.Geohash(1, 10)},
+            at=qi.ServerTimestamp)
+        self.assertGreater(len(fresh), 0)
+
     def test_clear_is_allowed_between_rows(self):
         """The guard on `clear()` only covers a row that is part-way
         through being written. Ordinary use — clearing a buffer that

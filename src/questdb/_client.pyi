@@ -396,9 +396,11 @@ class Geohash:
     """A QuestDB GEOHASH value represented by bits and precision.
 
     ``bits`` is the value and ``precision`` its width in bits, 1 to 60.
-    Precision is pinned per column: a row whose GEOHASH cell disagrees
-    with the column's is rejected by ``row()`` itself, and the buffer is
-    rewound to what it held before that row.
+    Precision is pinned per column within one buffer's worth of rows: a
+    later cell disagreeing with the first is rejected by ``row()``
+    itself, and the buffer is rewound to what it held before that row.
+    A flush clears the pin, so a precision the server's column does not
+    have is the server's to reject, at flush time.
     """
 
     def __init__(self, bits: int, precision: int): ...

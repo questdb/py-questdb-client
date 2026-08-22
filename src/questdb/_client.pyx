@@ -973,11 +973,16 @@ cdef class Long256:
 cdef class Geohash:
     """A QuestDB GEOHASH value represented by bits and precision.
 
-    Precision is pinned per column. A row whose GEOHASH cell has a
-    different precision from the one the column already holds is
-    rejected by :func:`Buffer.row <questdb.ingress.Buffer.row>` itself,
-    and the buffer is rewound to what it held before that row -- the
-    bad row is not left waiting for a flush.
+    Precision is pinned per column within one buffer's worth of rows.
+    The first GEOHASH cell written to a column fixes the precision for
+    the rest of that batch, and a later cell at a different precision
+    is rejected by :func:`Buffer.row <questdb.ingress.Buffer.row>`
+    itself, with the buffer rewound to what it held before that row --
+    the bad row is not left waiting for a flush.
+
+    The pin goes with the buffer: a flush clears it and the next batch
+    starts over. A precision the server's column does not have is
+    therefore the server's to reject, at flush time.
     """
     cdef uint64_t _bits
     cdef uint8_t _precision

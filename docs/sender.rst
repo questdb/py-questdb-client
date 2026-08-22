@@ -298,9 +298,12 @@ A few things worth knowing about the wrappers:
   ``DateMillis.from_datetime``, or from the clock with ``DateMillis.now()``.
 * :class:`Geohash <questdb.Geohash>` carries bits *and* precision.
   ``Geohash.from_string('u33d8')`` packs one to twelve base32 characters
-  at five bits each. A column's precision is fixed by the first row that
-  reaches it, and a later row at a different precision is rejected by
-  :meth:`Sender.row <questdb.Sender.row>` itself.
+  at five bits each. Within one buffer's worth of rows a column's
+  precision is fixed by the first row that reaches it, and a later row at
+  a different precision is rejected by
+  :meth:`Sender.row <questdb.Sender.row>` itself. A flush clears the pin,
+  so a precision the server's column does not have comes back from the
+  server rather than being caught locally.
 * :class:`Long256 <questdb.Long256>` takes an unsigned integer below
   ``2**256``.
 * :class:`Char <questdb.Char>` takes exactly one UTF-16 code unit, so a
