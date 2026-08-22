@@ -4034,7 +4034,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             ('arrow int32', pd.ArrowDtype(pyarrow.int32()), 20),
             ('arrow int64', pd.ArrowDtype(pyarrow.int64()), 20),
             ('numpy int64', np.int64, 20),
-            ('numpy uint32', np.uint32, 20),
+            ('numpy int32', np.int32, 20),
             ('numpy int16', np.int16, 12),
             ('object int', object, 20),
         )
@@ -4200,12 +4200,17 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         That is a mistake rather than drift, and the two are
         indistinguishable unless the write says which claim it dropped.
         """
-        for mixed in (False, True):
-            planner = 'numpy' if mixed else 'arrow'
-            with self.subTest(planner=planner):
+        shapes = (
+            ('arrow-backed frame', pd.ArrowDtype(pyarrow.uint32()), False),
+            ('arrow column, mixed frame',
+             pd.ArrowDtype(pyarrow.uint32()), True),
+            ('numpy column', np.dtype(np.uint32), False),
+            ('numpy column, mixed frame', np.dtype(np.uint32), True),
+        )
+        for label, dtype, mixed in shapes:
+            with self.subTest(shape=label):
                 frame = self._geohash_frame(
-                    [0, 1], pd.ArrowDtype(pyarrow.uint32()), bits=20,
-                    mixed=mixed)
+                    [0, 1], dtype, bits=20, mixed=mixed)
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter('always')
                     types = self._dataframe_column_types(

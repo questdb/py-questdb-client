@@ -5176,18 +5176,36 @@ cdef void_int _dataframe_columnar_append_at(
         raise c_err_to_py(err)
 
 
+# What `_geohash_override_dtype` answers with besides a
+# `qwp_numpy_dtype` slot.
+cdef int _GEOHASH_DTYPE_NONE = -1
+cdef int _GEOHASH_DTYPE_UNSIGNED = -2
+
+
 cdef int _geohash_override_dtype(col_source_t source) noexcept:
+    """The GEOHASH slot a column of this source goes out in,
+    ``_GEOHASH_DTYPE_UNSIGNED`` for an unsigned integer column, or
+    ``_GEOHASH_DTYPE_NONE`` for anything else.
+
+    A GEOHASH rides on a signed integer: `qwp_numpy_dtype` names only
+    signed geohash slots, and the native Arrow importer refuses an
+    unsigned column outright, so an unsigned column is one no planner
+    can carry the kind on. It gets its own answer because that is a
+    claim guaranteed to do nothing, which is worth saying out loud
+    rather than dropping in silence.
+    """
     if (source == col_source_t.col_source_u8_numpy
-            or source == col_source_t.col_source_i8_numpy):
+            or source == col_source_t.col_source_u16_numpy
+            or source == col_source_t.col_source_u32_numpy
+            or source == col_source_t.col_source_u64_numpy):
+        return _GEOHASH_DTYPE_UNSIGNED
+    if source == col_source_t.col_source_i8_numpy:
         return <int>qwp_numpy_dtype.qwp_numpy_geohash_i8
-    if (source == col_source_t.col_source_u16_numpy
-            or source == col_source_t.col_source_i16_numpy):
+    if source == col_source_t.col_source_i16_numpy:
         return <int>qwp_numpy_dtype.qwp_numpy_geohash_i16
-    if (source == col_source_t.col_source_u32_numpy
-            or source == col_source_t.col_source_i32_numpy):
+    if source == col_source_t.col_source_i32_numpy:
         return <int>qwp_numpy_dtype.qwp_numpy_geohash_i32
-    if (source == col_source_t.col_source_u64_numpy
-            or source == col_source_t.col_source_i64_numpy
+    if (source == col_source_t.col_source_i64_numpy
             or source == col_source_t.col_source_i64_arrow
             or source == col_source_t.col_source_int_pyobj):
         # An object column of Python ints — what a masked pandas dtype
@@ -5201,7 +5219,7 @@ cdef int _geohash_override_dtype(col_source_t source) noexcept:
         # native importer as Arrow arrays, which carry no type hint;
         # `_dataframe_normalize_claimed_arrow` reshapes those instead.
         return <int>qwp_numpy_dtype.qwp_numpy_geohash_i64
-    return -1
+    return _GEOHASH_DTYPE_NONE
 
 
 cdef int _geohash_dtype_max_bits(int gh) noexcept:
@@ -5655,7 +5673,14 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
             # refuse the column mid-flush, with the connection already
             # open and a message naming neither the column nor the
             # claim.
-            if (gh != -1 and _is_int_not_bool(bits)
+            if gh == _GEOHASH_DTYPE_UNSIGNED:
+                # Saying so is what makes both planners answer an
+                # unsigned column the same way: the Arrow path drops
+                # the same claim through `_attrs_override_fits`.
+                _warn_roundtrip_claim_dropped(
+                    df_cols[col.setup.orig_index], kind,
+                    df.dtypes.iloc[col.setup.orig_index])
+            elif (gh != _GEOHASH_DTYPE_NONE and _is_int_not_bool(bits)
                     and 1 <= bits <= _geohash_dtype_max_bits(gh)):
                 col.setup.has_override = True
                 col.setup.override_dtype = <qwp_numpy_dtype>gh
