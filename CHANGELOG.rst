@@ -143,7 +143,8 @@ Changelog
   IPV4 and CHAR fill their storage width exactly.
   The check covers every route the type can be claimed by --
   ``schema_overrides``, a ``df.attrs['questdb']`` claim, and
-  ``questdb.column_type=geohash`` Arrow field metadata -- and every
+  ``questdb.geohash_bits`` Arrow field metadata, whether or not it is
+  paired with ``questdb.column_type=geohash`` -- and every
   input shape, so pandas, polars, ``pa.Table``, ``pa.RecordBatch`` and a
   one-shot ``RecordBatchReader`` are all held to it. Values are checked
   batch by batch on their way out, so nothing that does not fit reaches

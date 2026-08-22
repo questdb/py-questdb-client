@@ -3807,11 +3807,12 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     f'the two planners disagree on a {ty} column '
                     f'claimed at {bits} bits')
 
-    def _geohash_arrow_table(self, values, bits=None, ty=None):
+    def _geohash_arrow_table(self, values, bits=None, ty=None, md=None):
         """A GEOHASH frame as a `pa.Table`, claiming the type through
-        Arrow field metadata when `bits` is given."""
-        md = None
-        if bits is not None:
+        Arrow field metadata when `bits` is given. `md` carries the
+        field metadata verbatim instead, for the claims that are not
+        the pair of keys `bits` writes."""
+        if md is None and bits is not None:
             md = {b'questdb.column_type': b'geohash',
                   b'questdb.geohash_bits': str(bits).encode()}
         stamp = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
@@ -3886,6 +3887,63 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             self._geohash_arrow_table([1000], bits=5),
             table_name='geo_md', at='ts',
             schema_overrides={'gh': ('geohash', 20)})
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_range_check_reads_every_metadata_claim(self):
+        # `questdb.geohash_bits` is what claims the type: the native
+        # importer reads a column carrying those bits as a GEOHASH
+        # whatever else the field says, and `questdb.column_type` only
+        # ever takes the column out of GEOHASH. Every claim that
+        # reaches the wire as a GEOHASH is held to its precision here,
+        # or the value lands as a valid geohash somewhere else.
+        spellings = (
+            {b'questdb.geohash_bits': b'5'},
+            {b'questdb.column_type': b'geohash',
+             b'questdb.geohash_bits': b'5'},
+            {b'questdb.column_type': b'geohash5b',
+             b'questdb.geohash_bits': b'5'})
+        for md in spellings:
+            with self.subTest(md=md):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r"Bad column 'gh' at row 0: "
+                        r'GEOHASH\(5b\) values must be in the range '
+                        r'0 \.\. 31'):
+                    self._dataframe_wire_payload(
+                        self._geohash_arrow_table([1000], md=md),
+                        table_name='geo_md_claims', at='ts')
+                # The same claim carrying a value that fits still goes,
+                # and goes as a GEOHASH -- so the check above is
+                # holding a column that really does take the type.
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        self._geohash_arrow_table([7], md=md),
+                        table_name='geo_md_claims', at='ts')['gh'],
+                    0x0E)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_metadata_the_check_reads_no_precision_from(self):
+        # The claims the check reads no precision from are the ones the
+        # native importer refuses outright, so nothing goes out
+        # unchecked behind them. Each one is refused with the
+        # importer's own message rather than reaching the wire.
+        refused = (
+            ({b'questdb.geohash_bits': b'0'},
+             'geohash precision_bits 0 out of range'),
+            ({b'questdb.geohash_bits': b'61'},
+             'geohash precision_bits 61 out of range'),
+            ({b'questdb.column_type': b'int',
+              b'questdb.geohash_bits': b'5'},
+             "carries 'questdb.geohash_bits' but column_type='int'"),
+            ({b'questdb.column_type': b'geohash'},
+             "missing 'questdb.geohash_bits' metadata"))
+        for md, message in refused:
+            with self.subTest(md=md):
+                with self.assertRaises(qi.QuestDBError) as caught:
+                    self._dataframe_wire_payload(
+                        self._geohash_arrow_table([1000], md=md),
+                        table_name='geo_md_refused', at='ts')
+                self.assertIn(message, str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_geohash_range_check_names_the_row_across_batches(self):

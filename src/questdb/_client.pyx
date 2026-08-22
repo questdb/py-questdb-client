@@ -6233,11 +6233,20 @@ cdef int _arrow_column_geohash_bits(
     An override wins over the field's own metadata, and an override
     naming some other type takes the column out of GEOHASH altogether
     -- the precedence ``qwp_arrow_override`` documents.
+
+    In the field's own metadata it is ``questdb.geohash_bits`` that
+    claims the type, which is the order the native importer reads them
+    in: those bits alone make the column a GEOHASH, whatever else the
+    field carries. ``questdb.column_type`` only rules the column out,
+    and only by naming something other than a ``geohash`` spelling --
+    a pairing the importer refuses outright, so the column never
+    reaches the wire for the -1 to have let anything through.
     """
     cdef size_t i
     cdef const char* value = NULL
     cdef int32_t value_len = 0
     cdef size_t name_len
+    cdef int bits
     if field.name != NULL:
         name_len = strlen(field.name)
         for i in range(overrides_len):
@@ -6250,18 +6259,21 @@ cdef int _arrow_column_geohash_bits(
                 return <int>overrides[i].arg
             return -1
     if not _arrow_md_lookup(
-            field.metadata, _ARROW_MD_KEY_COLUMN_TYPE,
-            _ARROW_MD_KEY_COLUMN_TYPE_LEN, &value, &value_len):
-        return -1
-    # The native importer reads any `geohash`-prefixed spelling as the
-    # kind, so the prefix is what claims the column here too.
-    if value_len < 7 or strncmp(value, _ARROW_MD_VALUE_GEOHASH, 7) != 0:
-        return -1
-    if not _arrow_md_lookup(
             field.metadata, _ARROW_MD_KEY_GEOHASH_BITS,
             _ARROW_MD_KEY_GEOHASH_BITS_LEN, &value, &value_len):
         return -1
-    return _arrow_md_geohash_bits(value, value_len)
+    bits = _arrow_md_geohash_bits(value, value_len)
+    if bits < 0:
+        return -1
+    if _arrow_md_lookup(
+            field.metadata, _ARROW_MD_KEY_COLUMN_TYPE,
+            _ARROW_MD_KEY_COLUMN_TYPE_LEN, &value, &value_len):
+        # The importer reads any `geohash`-prefixed spelling as the
+        # kind, so the prefix is what agrees with the bits here too.
+        if value_len < 7 or strncmp(
+                value, _ARROW_MD_VALUE_GEOHASH, 7) != 0:
+            return -1
+    return bits
 
 
 cdef int _arrow_signed_int_width(const char* fmt) noexcept nogil:
