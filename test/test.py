@@ -4886,6 +4886,48 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_claim_wider_than_the_arrow_column_is_refused(self):
+        """`schema_overrides` bounds a GEOHASH precision to 1..60
+        without seeing the column, so a claim wider than the column can
+        carry reaches the scan. The scan reads every slot as signed, so
+        such a claim would refuse every value with the top bit set and
+        quote a range the column cannot express. It is refused up front,
+        naming the width."""
+        widths = ((pyarrow.int8(), 7), (pyarrow.int16(), 15),
+                  (pyarrow.int32(), 31), (pyarrow.int64(), 60))
+
+        # 60 is the global maximum, so an int64 has no over-wide claim
+        # to refuse.
+        for ty, cap in widths[:-1]:
+            with self.subTest(width=str(ty), bits=cap + 1):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        rf'Bad column \'gh\': a GEOHASH\({cap + 1}b\) '
+                        rf'claim needs more bits than a '
+                        rf'{ty.bit_width}-bit signed column can carry'):
+                    self._dataframe_wire_payload(
+                        self._geohash_arrow_table([0], ty=ty),
+                        table_name='geo_too_wide', at='ts',
+                        schema_overrides={'gh': ('geohash', cap + 1)})
+
+        # Each cap itself still goes out, carrying its widest value.
+        for ty, cap in widths:
+            with self.subTest(width=str(ty), bits=cap):
+                self._dataframe_wire_payload(
+                    self._geohash_arrow_table([(1 << cap) - 1], ty=ty),
+                    table_name='geo_at_cap', at='ts',
+                    schema_overrides={'gh': ('geohash', cap)})
+
+    def test_schema_overrides_geohash_bits_refuses_a_bool(self):
+        """`True` is an `int`, and would have been taken as a 1-bit
+        precision. Every other bits check in this module rejects it."""
+        with self.assertRaisesRegex(
+                ValueError, r'geohash bits must be int in 1\.\.=60'):
+            self._dataframe_wire_payload(
+                self._geohash_arrow_table([0], ty=pyarrow.int32()),
+                table_name='geo_bool', at='ts',
+                schema_overrides={'gh': ('geohash', True)})
+
     def test_geohash_metadata_too_long_to_walk_stops_the_send(self):
         # The walk over an Arrow metadata blob is bounded; the native
         # importer's is not. A claim sitting past either bound would go

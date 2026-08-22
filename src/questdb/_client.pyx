@@ -6584,6 +6584,26 @@ cdef int _arrow_signed_int_width(const char* fmt) noexcept nogil:
     return 0
 
 
+cdef int _arrow_geohash_width_max_bits(int elem_size) noexcept nogil:
+    """The widest precision a signed Arrow integer of this byte width
+    can carry, or 0 for a width that carries none.
+
+    The scan reads every GEOHASH slot as signed, so each width stops one
+    bit short of its own size: an 8-bit geohash spans 0..255, which an
+    `int8` has no way of spelling. The same four numbers as
+    `_geohash_dtype_max_bits` and `_attrs_override_fits`.
+    """
+    if elem_size == 1:
+        return 7
+    if elem_size == 2:
+        return 15
+    if elem_size == 4:
+        return 31
+    if elem_size == 8:
+        return 60
+    return 0
+
+
 cdef str _arrow_field_name(const ArrowSchema* field):
     """A field's name as text, for a message naming the column."""
     if field == NULL or field.name == NULL:
@@ -6702,6 +6722,21 @@ cdef void_int _arrow_batch_check_geohash_ranges(
         if bits == _GEOHASH_BITS_NONE:
             continue
         elem_size = _arrow_signed_int_width(field.format)
+        if elem_size != 0 and bits > _arrow_geohash_width_max_bits(elem_size):
+            # `schema_overrides` bounds the precision to 1..60 without
+            # seeing the column, so a claim wider than the column can
+            # carry arrives here. Refusing it names the width; letting
+            # it through would refuse every value with the top bit set
+            # and quote a range the column cannot express.
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {_arrow_field_name(field)!r}: a '
+                f'GEOHASH({bits}b) claim needs more bits than a '
+                f'{elem_size * 8}-bit signed column can carry (at most '
+                f'{_arrow_geohash_width_max_bits(elem_size)}). A '
+                f'precision fills its bits and the column is signed, so '
+                f'a claim needing that last bit belongs on the next '
+                f'width up.')
         if elem_size == 0:
             # A GEOHASH claim rides on a signed Int8/16/32/64 and the
             # importer refuses it on anything else, naming the type it
@@ -6886,7 +6921,7 @@ cdef object _validate_schema_overrides(object schema_overrides):
         elif kind == 'long256':
             kind_int = <int>qwp_arrow_override_long256
         elif kind == 'geohash':
-            if not isinstance(value, int) or value < 1 or value > 60:
+            if not _is_int_not_bool(value) or value < 1 or value > 60:
                 raise ValueError(
                     f'schema_overrides[{name!r}] geohash bits must '
                     f'be int in 1..=60, got {value!r}.')
