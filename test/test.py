@@ -5078,6 +5078,56 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertNotIn('already stored', str(cm.exception))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_commit_is_refused_from_inside_a_dataframe(self):
+        """`commit()` reached the flush's in-row guard only when the
+        buffer had something in it. `dataframe()` counts into
+        `_row_depth` before it writes anything, so a commit re-entered
+        from the plan build found nothing to flush, ended the
+        transaction, and left the frame's rows to go out afterwards
+        outside it."""
+        refused = []
+
+        class HostileFrame(pd.DataFrame):
+            fired = False
+
+            @property
+            def attrs(self):
+                if not HostileFrame.fired:
+                    HostileFrame.fired = True
+                    try:
+                        txn.commit()
+                    except qi.QuestDBError as exc:
+                        refused.append(exc)
+                    else:
+                        refused.append(None)
+                return {}
+
+            @attrs.setter
+            def attrs(self, value):
+                pass
+
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            txn = sender.transaction('t')
+            frame = HostileFrame({
+                'v': [1, 2],
+                'ts': pd.to_datetime([0, 1], unit='s')})
+            txn.dataframe(frame, at='ts')
+
+            self.assertEqual(len(refused), 1)
+            self.assertIsNotNone(
+                refused[0], 'commit() was allowed mid-dataframe')
+            self.assertEqual(
+                refused[0].code, qi.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn(
+                "commit() can't be called while a row is being written",
+                str(refused[0]))
+            # Still inside the transaction: the frame's rows commit
+            # with it rather than leaking out on their own.
+            txn.commit()
+
     def test_a_claim_the_column_does_carry_stays_quiet(self):
         """An object column of `uuid.UUID` or `ipaddress.IPv4Address`
         is written as UUID or IPV4 by its source alone, so no override

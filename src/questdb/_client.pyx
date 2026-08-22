@@ -1230,6 +1230,13 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 "commit() can't be called: Sender is closed.")
+        # Checked here rather than left to the flush below, which is
+        # skipped when the buffer is empty. `dataframe()` counts into
+        # `_row_depth` before it writes anything, so a commit re-entered
+        # from the plan build would find nothing to flush, end the
+        # transaction, and leave the frame's rows to go out afterwards
+        # outside it.
+        self._sender._buffer._check_not_in_row('commit')
         # `_in_txn` has to come down first, because an explicit flush
         # inside a transaction is refused.
         self._sender._in_txn = False
