@@ -145,9 +145,16 @@ New
 
   It is still a ``dict`` — it indexes, iterates, compares, pickles and
   serializes to JSON as before, and a hand-written ``dict`` is read the same
-  way. To change what a frame claims, build a new mapping
-  (``{**df.attrs['questdb']}`` unpacks it into an editable ``dict``) and
-  assign that, or use ``schema_overrides`` / ``symbols``.
+  way. To change what a frame claims, assign a whole new mapping — the nested
+  ``columns`` mapping is frozen too, so unpack that one as well::
+
+      df.attrs['questdb'] = {
+          'version': 1,
+          'columns': {
+              **df.attrs['questdb']['columns'],
+              'grade': {'kind': 'char'}}}
+
+  Or use ``schema_overrides`` / ``symbols``, which outrank the claim.
 
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread

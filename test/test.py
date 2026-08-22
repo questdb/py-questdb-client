@@ -5172,10 +5172,42 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 break
         self.assertEqual(json.dumps(target, sort_keys=True), before)
 
-        # An ordinary editable copy is one unpacking away.
+        # An ordinary editable copy of this one level is one unpacking
+        # away. Unpacking is shallow, so anything nested under it is
+        # still the frozen mapping -- which is why the documented
+        # recipe unpacks `columns` too. See
+        # `test_the_documented_way_to_edit_a_claim_works`.
         loose = {**target}
         loose['x'] = 1
         self.assertNotIn('x', target)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_the_documented_way_to_edit_a_claim_works(self):
+        """The recipe the docstrings and the `TypeError` hand out has
+        to run. Unpacking is shallow, so unpacking the claim alone
+        leaves `columns` -- the only part anyone edits -- still frozen,
+        and the advice would raise the same error one level down."""
+        frame = self._roundtrip_frame()
+        claim = frame.attrs['questdb']
+        self.assertIn('ip', claim['columns'])
+
+        # Unpacking the outer mapping alone is not enough.
+        with self.assertRaisesRegex(TypeError, 'cannot be edited in place'):
+            {**claim}['columns']['grade'] = {'kind': 'char'}
+
+        # What the docstrings and the error message actually say.
+        frame.attrs['questdb'] = {
+            'version': 1,
+            'columns': {
+                **claim['columns'],
+                'grade': {'kind': 'char'}}}
+        edited = frame.attrs['questdb']
+        edited['columns']['grade'] = {'kind': 'char'}
+        self.assertEqual(edited['columns']['grade'], {'kind': 'char'})
+        self.assertIn('ip', edited['columns'])
+        # The claim it was built from is untouched.
+        self.assertNotIn('grade', claim['columns'])
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

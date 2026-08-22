@@ -246,11 +246,17 @@ class _RoundtripClaim(dict):
     ``version`` is required and is checked rather than merely carried,
     so a mapping written without it is not a claim this client reads
     and every column in it is ignored. To change what a frame claims,
-    build a new mapping -- ``{**df.attrs['questdb']}`` unpacks the
-    claim into an ordinary editable ``dict``, keeping the version with
-    it -- and assign it to ``df.attrs['questdb']``, or state the type
-    outright with ``schema_overrides`` / ``symbols``, which outrank the
-    claim.
+    assign a whole new mapping to ``df.attrs['questdb']``. The nested
+    ``columns`` mapping is frozen too, so unpack that one as well::
+
+        df.attrs['questdb'] = {
+            'version': 1,
+            'columns': {
+                **df.attrs['questdb']['columns'],
+                'grade': {'kind': 'char'}}}
+
+    Or state the type outright with ``schema_overrides`` / ``symbols``,
+    which outrank the claim.
     """
     __slots__ = ()
 
@@ -278,11 +284,14 @@ class _RoundtripClaim(dict):
         raise TypeError(
             "df.attrs['questdb'] records what each column held when it "
             'was read and cannot be edited in place, because every copy '
-            'of the frame shares it. Build a new mapping instead -- '
-            "{**df.attrs['questdb']} unpacks it into an ordinary dict "
-            "-- and assign that to df.attrs['questdb'], or state the "
-            'type outright with schema_overrides / symbols, which '
-            'outrank the claim.')
+            'of the frame shares it. Assign a whole new mapping to '
+            "df.attrs['questdb'] instead; the nested 'columns' mapping "
+            'is frozen too, so unpack that one as well: '
+            "df.attrs['questdb'] = {'version': 1, 'columns': "
+            "{**df.attrs['questdb']['columns'], "
+            "'grade': {'kind': 'char'}}}. Or state the type outright "
+            'with schema_overrides / symbols, which outrank the '
+            'claim.')
 
     # Every method `dict` has that changes its contents. Blocking them
     # one by one is what lets the claim be shared rather than copied,
