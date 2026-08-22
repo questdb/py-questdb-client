@@ -4043,6 +4043,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 at='ts', schema_overrides={'ms': 'date'})
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_arrow_egress_metadata_becomes_roundtrip_attrs(self):
         # The read side of the pandas round trip: the QuestDB claims the
         # egress stamps on each Arrow field are copied into
@@ -4417,7 +4418,6 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 schema_overrides={'gh': ('geohash', 10)})
 
     @unittest.skipIf(pd is None, 'pandas not installed')
-    @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_a_column_with_too_few_arrow_buffers_is_refused(self):
         """pyarrow allocates exactly `n_buffers` pointers, so reading
@@ -4450,6 +4450,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertEqual(len(seen), 1, seen)
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_geohash_claim_at_the_cap_reaches_its_widest_value(self):
         # A precision fills its bits, and the slot carrying it is
         # signed, so the widest value of a claim at the cap is the
@@ -4763,6 +4764,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     'cannot be held to the precision', str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_geohash_range_check_covers_every_input_shape(self):
         # A GEOHASH column keeps only the claimed low bits, and the
         # high bits are the coarse position, so a value that does not
@@ -5125,7 +5127,6 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertNotIn('already stored', str(cm.exception))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
-    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_commit_is_refused_from_inside_a_dataframe(self):
         """`commit()` reached the flush's in-row guard only when the
         buffer had something in it. `dataframe()` counts into
@@ -5175,6 +5176,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             # with it rather than leaking out on their own.
             txn.commit()
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_claim_the_column_does_carry_stays_quiet(self):
         """An object column of `uuid.UUID` or `ipaddress.IPv4Address`
         is written as UUID or IPV4 by its source alone, so no override
@@ -5253,6 +5255,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         f'{[str(w.message) for w in dropped]}')
                     self.assertIn(kind, str(dropped[0].message))
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_geohash_claim_too_wide_for_a_numpy_column_is_said_out_loud(self):
         """A geohash claim wider than the NumPy column carrying it is
         one the column can never hold, not drift, so it is said out
@@ -5900,6 +5903,14 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertEqual(
                     json.dumps(target, sort_keys=True), before,
                     f'{name}{args!r} changed the claim')
+
+        # An empty claim is a claim: a result with no columns builds
+        # one, and it has to refuse re-initialisation too. Checking
+        # contents alone cannot see this -- there are none to change.
+        empty = type(target)({})
+        with self.assertRaisesRegex(TypeError, 'cannot be edited in place'):
+            empty.__init__({'version': 999})
+        self.assertEqual(dict(empty), {})
         self.assertEqual(json.dumps(target, sort_keys=True), before)
 
         # An ordinary editable copy of this one level is one unpacking

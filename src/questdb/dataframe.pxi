@@ -258,17 +258,23 @@ class _RoundtripClaim(dict):
     Or state the type outright with ``schema_overrides`` / ``symbols``,
     which outrank the claim.
     """
-    __slots__ = ()
+    __slots__ = ('_built',)
 
     def __init__(self, mapping=()):
         # Every mapping inside the claim is frozen too, so no part of
         # it can be edited in place. `dict.__init__` inserts at the C
         # level and so is not turned away by the override below --
         # which also means calling `__init__` again on a built claim
-        # would edit it in place, past every other guard, so a second
-        # call is refused the same way the mutators are.
-        if len(self):
+        # would edit it in place, past every other guard.
+        #
+        # Refused on the second call rather than on a non-empty target:
+        # a result with no columns builds an empty claim, and gating on
+        # emptiness left that one re-initialisable.
+        # An unset slot raises on read, so `getattr` with a default is
+        # what distinguishes the first call from a later one.
+        if getattr(self, '_built', False):
             self._immutable()
+        self._built = True
         items = mapping.items() if isinstance(mapping, dict) else mapping
         dict.__init__(self, [
             (key, _RoundtripClaim(value) if isinstance(value, dict) else value)
