@@ -3525,6 +3525,75 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertGreater(len(buffer), before)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_dataframe_from_inside_a_row_leaves_the_row_rewindable(self):
+        """`dataframe()` clears the marker the outer row rewinds to, so
+        entering it from a half-written row used to strand that row in
+        the buffer when the row went on to fail. It is refused there,
+        and a failing row rewinds exactly as it does on its own."""
+        buffer = qi.Buffer._new_qwp()
+
+        class HostileAddr(ipaddress.IPv4Address):
+            def __int__(self):
+                frame = pd.DataFrame({
+                    'x': [1],
+                    'ts': pd.to_datetime([0], unit='s')})
+                try:
+                    buffer.dataframe(
+                        frame, table_name='inner', at='ts')
+                except qi.QuestDBError as e:
+                    raise AssertionError(
+                        f'dataframe() should be refused here: {e}') from None
+                return 0x01020304
+
+        for hostile in (True, False):
+            with self.subTest(hostile=hostile):
+                buffer.clear()
+                buffer.row('good', columns={'ok': 1}, at=qi.ServerTimestamp)
+                before = len(buffer)
+
+                value = (HostileAddr('192.0.2.1') if hostile
+                         else ipaddress.IPv4Address('192.0.2.1'))
+                # `object()` is unsupported, so the row fails after the
+                # address cell has already been written.
+                with self.assertRaises(Exception):
+                    buffer.row(
+                        'hostile',
+                        columns={'addr': value, 'bad': object()},
+                        at=qi.ServerTimestamp)
+
+                # The part-written row is gone either way.
+                self.assertEqual(len(buffer), before)
+                buffer.row('good', columns={'ok': 2}, at=qi.ServerTimestamp)
+                self.assertGreater(len(buffer), before)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_dataframe_is_refused_while_a_row_is_being_written(self):
+        """The refusal itself, and what it says."""
+        buffer = qi.Buffer._new_qwp()
+        seen = []
+
+        class HostileAddr(ipaddress.IPv4Address):
+            def __int__(self):
+                frame = pd.DataFrame({
+                    'x': [1],
+                    'ts': pd.to_datetime([0], unit='s')})
+                try:
+                    buffer.dataframe(frame, table_name='inner', at='ts')
+                except qi.QuestDBError as e:
+                    seen.append(e)
+                return 0x01020304
+
+        buffer.row(
+            'hostile', columns={'addr': HostileAddr('192.0.2.1')},
+            at=qi.ServerTimestamp)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn(
+            "dataframe() can't be called while a row is being "
+            'written into this buffer',
+            str(seen[0]))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_clear_is_refused_while_a_dataframe_is_being_written(self):
         """The row-serializing `dataframe()` path drives the same
         native buffer as `row()`, rewind point and all. Anything it

@@ -3634,6 +3634,13 @@ cdef void_int _dataframe(
     cdef bint was_auto_flush = False
     cdef bint plan_has_content
 
+    # Refused, not counted, when a row or another frame is already
+    # part-way through this buffer: the plan below clears the marker
+    # the outer row rewinds to, and an outer failure would then leave
+    # its part-written row in the buffer. One check here covers
+    # `Buffer.dataframe`, `Sender.dataframe` and
+    # `SenderTransaction.dataframe`, which all arrive through here.
+    owner._check_not_in_row('dataframe')
     owner._row_depth += 1
     try:
         _dataframe_plan_build(
