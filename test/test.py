@@ -177,6 +177,7 @@ from test_dataframe_leaks import (
     TestCategoricalArrowLeak,
     TestPyobjColumnarLeak,
     TestBinaryBufferRelease,
+    TestCapsuleOverridesLeak,
     TestClosedHandleDataframeLeak,
 )
 

@@ -531,5 +531,36 @@ class TestClosedHandleDataframeLeak(unittest.TestCase):
         _assert_no_leak(self, work, warmup=20000, measure=900000)
 
 
+@unittest.skipUnless(pa is not None, 'pyarrow not installed')
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestCapsuleOverridesLeak(unittest.TestCase):
+    """The Arrow capsule path allocates an override array per call and
+    imports a schema per stream. Every other frame in this module is
+    object-dtype pandas and no test elsewhere passes `schema_overrides`,
+    so nothing entered this path before."""
+
+    def test_overrides_leak_nothing(self):
+        from qwp_ws_ack_server import QwpAckServer
+        frame = pa.table({
+            'u': pa.array([b'\x00' * 16], pa.binary(16)),
+            'gh': pa.array([1], pa.int32()),
+            'ts': pa.array([0], pa.timestamp('us')),
+        })
+        overrides = {'u': 'uuid', 'gh': ('geohash', 20)}
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    # Ingest-only mock server: skip the eager reader-pool
+                    # connect, which would time out waiting for server info.
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    client.dataframe(
+                        frame, table_name='caps', at='ts',
+                        schema_overrides=overrides)
+
+                _assert_no_leak(self, work, warmup=400, measure=12000)
+
+
 if __name__ == '__main__':
     unittest.main()
