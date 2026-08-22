@@ -4886,6 +4886,44 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_geohash_claim_too_wide_for_a_numpy_column_is_said_out_loud(self):
+        """A geohash claim wider than the NumPy column carrying it is
+        one the column can never hold, not drift, so it is said out
+        loud -- the Arrow planner says the same thing through
+        `_attrs_override_fits`. Silently it went out as a plain LONG
+        and created the destination column with that type."""
+        cases = ((np.int8, 8, True), (np.int16, 16, True),
+                 (np.int32, 32, True), (np.int8, 7, False),
+                 (np.int16, 15, False))
+        for dtype, bits, expect_warning in cases:
+            with self.subTest(dtype=dtype.__name__, bits=bits):
+                df = pd.DataFrame({
+                    'g': np.array([1], dtype=dtype),
+                    'ts': pd.to_datetime([0], unit='s')})
+                df.attrs['questdb'] = {
+                    'version': 1,
+                    'columns': {
+                        'g': {'kind': 'geohash', 'precision_bits': bits}}}
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    types = self._dataframe_column_types(
+                        df, table_name='geo_numpy_wide', at='ts')
+                dropped = [
+                    w for w in caught
+                    if 'geohash' in str(w.message)]
+                if expect_warning:
+                    self.assertEqual(
+                        len(dropped), 1,
+                        f'expected a dropped-claim warning, got '
+                        f'{[str(w.message) for w in caught]}')
+                    self.assertIn('g', str(dropped[0].message))
+                else:
+                    self.assertEqual(
+                        len(dropped), 0,
+                        f'claim fits, should be quiet: '
+                        f'{[str(w.message) for w in dropped]}')
+                    self.assertEqual(types['g'], 0x0E)
+
     def test_big_metadata_on_a_non_geohash_column_does_not_stop_the_send(self):
         """The metadata walk is bounded, and a blob it cannot finish
         stops the send -- but only for a column that could carry a

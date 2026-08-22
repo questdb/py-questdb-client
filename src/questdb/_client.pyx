@@ -5727,13 +5727,10 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
             bits = meta.get('precision_bits') or 0
             # The precision is held to the column's own width, not just
             # to 1..=60. A claim wider than the slot carrying it is one
-            # the column cannot express, and a claim that no longer
-            # fits is dropped -- the same silence the Arrow path
-            # answers one with, through `_attrs_override_fits`. Letting
-            # it through instead would leave the native writer to
-            # refuse the column mid-flush, with the connection already
-            # open and a message naming neither the column nor the
-            # claim.
+            # the column cannot express, so it is dropped rather than
+            # left for the native writer to refuse mid-flush, with the
+            # connection already open and a message naming neither the
+            # column nor the claim.
             if gh == _GEOHASH_DTYPE_UNSIGNED:
                 # Saying so is what makes both planners answer an
                 # unsigned column the same way: the Arrow path drops
@@ -5746,6 +5743,17 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
                 col.setup.has_override = True
                 col.setup.override_dtype = <qwp_numpy_dtype>gh
                 col.setup.override_geohash_bits = <uint8_t>bits
+            elif gh != _GEOHASH_DTYPE_NONE:
+                # The column carries geohashes, just not this many bits
+                # of one. That is a claim the column can never hold
+                # rather than drift, so it is said out loud -- the
+                # Arrow path says the same thing through
+                # `_attrs_override_fits`. Without it the column went
+                # out as a plain LONG and created the destination
+                # column with that type, silently.
+                _warn_roundtrip_claim_dropped(
+                    df_cols[col.setup.orig_index], kind,
+                    df.dtypes.iloc[col.setup.orig_index])
     return 0
 
 
