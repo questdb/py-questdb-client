@@ -238,11 +238,19 @@ class _RoundtripClaim(dict):
 
     It is still a ``dict``, so it indexes, iterates, compares and
     serializes exactly like a plain mapping, and a hand-written plain
-    ``dict`` is read on the way in just the same. To change what a
-    frame claims, build a new mapping -- ``{**df.attrs['questdb']}``
-    unpacks the claim into an ordinary editable ``dict`` -- and assign
-    it to ``df.attrs['questdb']``, or state the type outright with
-    ``schema_overrides`` / ``symbols``, which outrank the claim.
+    ``dict`` is read on the way in just the same, provided it carries
+    the same two keys this one does::
+
+        {'version': 1, 'columns': {'src_ip': {'kind': 'ipv4'}}}
+
+    ``version`` is required and is checked rather than merely carried,
+    so a mapping written without it is not a claim this client reads
+    and every column in it is ignored. To change what a frame claims,
+    build a new mapping -- ``{**df.attrs['questdb']}`` unpacks the
+    claim into an ordinary editable ``dict``, keeping the version with
+    it -- and assign it to ``df.attrs['questdb']``, or state the type
+    outright with ``schema_overrides`` / ``symbols``, which outrank the
+    claim.
     """
     __slots__ = ()
 

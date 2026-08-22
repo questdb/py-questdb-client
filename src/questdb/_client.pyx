@@ -8236,7 +8236,29 @@ cdef class QuestDB:
         but cannot be edited in place, because every copy of the frame
         shares it; assign a new mapping to ``df.attrs['questdb']`` to
         change it. A plain hand-written ``dict`` is read here just the
-        same.
+        same, in this shape:
+
+        .. code-block:: python
+
+            df.attrs['questdb'] = {
+                'version': 1,
+                'columns': {
+                    'src_ip': {'kind': 'ipv4'},
+                    'pos': {'kind': 'geohash', 'precision_bits': 20},
+                },
+            }
+
+        ``version`` is required and must be ``1``: the claim's
+        vocabulary can gain kinds, and a client applying a version it
+        does not understand would write the wrong column type, which is
+        the outcome the claim exists to prevent. A mapping without it,
+        or carrying any other version, is not a claim this client can
+        read and every column in it is ignored. ``kind`` is one of
+        ``'uuid'``, ``'long256'``, ``'ipv4'``, ``'char'``, or
+        ``'geohash'`` — the types whose claim cannot ride on a pandas
+        dtype — and ``precision_bits`` accompanies ``'geohash'`` alone.
+        Naming a column that is not in the frame is not an error; the
+        entry is skipped.
 
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte

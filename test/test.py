@@ -4444,11 +4444,17 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     odd, table_name='attrs_stale', at='ts')
                 self.assertEqual(types['ip'], 0x18)
 
-        # Metadata of the wrong shape is ignored, not diagnosed.
+        # Metadata of the wrong shape is ignored, not diagnosed. The
+        # version is part of the shape: it is checked rather than
+        # merely carried, so a mapping written without one is not a
+        # claim this client reads, and neither is a future one whose
+        # vocabulary it would have to guess at.
         for junk in ('nonsense',
                      {'version': 1, 'columns': 'nope'},
                      {'version': 1, 'columns': {'ip': {'kind': 42}}},
-                     {'version': 1, 'columns': {7: {'kind': 'ipv4'}}}):
+                     {'version': 1, 'columns': {7: {'kind': 'ipv4'}}},
+                     {'columns': {'ip': {'kind': 'ipv4'}}},
+                     {'version': 2, 'columns': {'ip': {'kind': 'ipv4'}}}):
             with self.subTest(junk=junk):
                 odd = frame.copy()
                 odd.attrs = {'questdb': junk}
