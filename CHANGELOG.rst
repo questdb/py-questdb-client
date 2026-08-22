@@ -83,6 +83,49 @@ Breaking changes
 - **QWP-only column values raise ``QuestDBError`` on ILP senders**, where
   they previously raised ``TypeError``. See the new ``row()`` types below.
 
+- **``df.attrs['questdb']`` is now cheap to copy and refuses the ordinary
+  mutating ``dict`` operations.** pandas deep-copies the whole of ``attrs``
+  every time it propagates a frame, once per column while slicing or
+  exporting, which made those passes quadratic.
+  ``pyarrow.table(df)`` on a 1024-column frame took
+  730 ms, of which 710 ms was copying the claim; it now takes 26 ms, against
+  23 ms with no claim at all.
+
+  It is still a ``dict`` — it indexes, iterates, compares, pickles and
+  serializes to JSON as before, and a hand-written ``dict`` is read the same
+  way. To change what a frame claims, assign a whole new mapping — the nested
+  ``columns`` mapping is frozen too, so unpack that one as well::
+
+      df.attrs['questdb'] = {
+          'version': 1,
+          'columns': {
+              **df.attrs['questdb']['columns'],
+              'grade': {'kind': 'char'}}}
+
+  Or use ``schema_overrides`` / ``symbols``, which outrank the claim.
+
+- **``ipaddress.IPv4Interface`` cells are rejected** rather than silently
+  written with their network prefix discarded. The old messages read as
+  contradictions, because ``IPv4Interface`` subclasses ``IPv4Address`` and
+  they listed ``IPv4Address`` as accepted. The new ones name the prefix as
+  the reason and give the fix: ``value.ip`` for ``row()``, and
+  ``df['col'] = df['col'].map(lambda value: value.ip)`` for ``dataframe()``.
+
+- **polars ``Object`` columns are rejected** with a clear error. They export
+  as 8-byte handles to in-process memory, which would have been stored as
+  meaningless BINARY blobs.
+
+- **``Buffer.clear()`` now raises while a row is being written.** A column
+  value whose conversion runs Python code — a ``uuid.UUID`` or an
+  ``ipaddress.IPv4Address`` subclass — can call back into the buffer that
+  ``row()`` or ``dataframe()`` is part-way through filling. Clearing there
+  destroyed the rows already buffered and left the write half-finished, so
+  it now raises :class:`QuestDBError <questdb.QuestDBError>` with ``code``
+  set to ``QuestDBErrorCode.InvalidApiCall`` and says which call is in
+  progress. Flushing from the same place, and returning a pooled sender to
+  its pool, are refused for the same reason. Clearing a buffer that holds
+  finished rows, or one whose last ``row()`` failed, is unaffected.
+
 - If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
   ``in_flight_window``, remove it. These options are no longer supported and now
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
@@ -134,27 +177,6 @@ New
   names no type, so it would be left out of the write and out of the table
   the write creates. Claims of other kinds do not rescue an all-null column;
   it is still dropped from the write.
-
-- **``df.attrs['questdb']`` is now cheap to copy and refuses the ordinary
-  mutating ``dict`` operations.** pandas deep-copies the whole of ``attrs``
-  every time it propagates a frame, once per column while slicing or
-  exporting, which made those passes quadratic.
-  ``pyarrow.table(df)`` on a 1024-column frame took
-  730 ms, of which 710 ms was copying the claim; it now takes 26 ms, against
-  23 ms with no claim at all.
-
-  It is still a ``dict`` — it indexes, iterates, compares, pickles and
-  serializes to JSON as before, and a hand-written ``dict`` is read the same
-  way. To change what a frame claims, assign a whole new mapping — the nested
-  ``columns`` mapping is frozen too, so unpack that one as well::
-
-      df.attrs['questdb'] = {
-          'version': 1,
-          'columns': {
-              **df.attrs['questdb']['columns'],
-              'grade': {'kind': 'char'}}}
-
-  Or use ``schema_overrides`` / ``symbols``, which outrank the claim.
 
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
@@ -222,17 +244,6 @@ Fixed
   :class:`Long256 <questdb.Long256>`, and ``dataframe()`` raises
   ``QuestDBError`` pointing at the claim that makes the column a LONG256.
   Both used to surface CPython's bare "int too large to convert".
-
-- **``ipaddress.IPv4Interface`` cells are rejected** rather than silently
-  written with their network prefix discarded. The old messages read as
-  contradictions, because ``IPv4Interface`` subclasses ``IPv4Address`` and
-  they listed ``IPv4Address`` as accepted. The new ones name the prefix as
-  the reason and give the fix: ``value.ip`` for ``row()``, and
-  ``df['col'] = df['col'].map(lambda value: value.ip)`` for ``dataframe()``.
-
-- **polars ``Object`` columns are rejected** with a clear error. They export
-  as 8-byte handles to in-process memory, which would have been stored as
-  meaningless BINARY blobs.
 
 - **``QuestDB.dataframe()`` explains ``table_name_col`` properly.** It writes
   one table per call and has never accepted that argument, but a column it
