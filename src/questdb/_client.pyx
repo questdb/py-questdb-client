@@ -10562,6 +10562,13 @@ cdef class Sender:
             closing.
         """
         self._check_not_in_own_callback('close')
+        # Refused outright while a row is part-way through, not merely
+        # by way of the flush below: `_close()` runs from the `finally`
+        # whatever the flush does, so a refusal there would still close
+        # the sender and take the already-buffered rows with it. With
+        # `flush=False` there is no flush to refuse at all.
+        if self._buffer is not None:
+            self._buffer._check_not_in_row('close')
         try:
             if (flush and (self._impl != NULL) and
                     (not line_sender_must_close(self._impl))):

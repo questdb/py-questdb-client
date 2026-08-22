@@ -3685,6 +3685,63 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         buffer.row('t', columns={'ok': 1}, at=qi.ServerTimestamp)
         self.assertGreater(len(buffer), 0)
 
+    def test_close_from_inside_a_row_keeps_the_rows_already_buffered(self):
+        """`close()` runs `_close()` from a `finally`, so refusing only
+        the flush it attempts would still close the sender and destroy
+        every finished row in the buffer -- and `close(flush=False)`
+        attempts no flush to refuse. Both are refused up front."""
+        for flush in (True, False):
+            with self.subTest(flush=flush):
+                with QwpAckServer() as server:
+                    with qi.Sender.from_conf(
+                            f'ws::addr=127.0.0.1:{server.port};'
+                            'lazy_connect=true;auto_flush=off;') as sender:
+                        refused = []
+
+                        class HostileUuid(uuid.UUID):
+                            @property
+                            def int(self):
+                                try:
+                                    sender.close(flush=flush)
+                                except qi.QuestDBError as exc:
+                                    refused.append(exc)
+                                else:
+                                    refused.append(None)
+                                return self.UUID_INT
+
+                            @int.setter
+                            def int(self, value):
+                                pass
+
+                        HostileUuid.UUID_INT = self.UUID_VALUE.int
+
+                        sender.row(
+                            'good', columns={'ok': 1}, at=qi.ServerTimestamp)
+                        buffered = len(sender)
+                        self.assertGreater(buffered, 0)
+
+                        sender.row(
+                            'hostile',
+                            columns={
+                                'value': HostileUuid(str(self.UUID_VALUE))},
+                            at=qi.ServerTimestamp)
+
+                        self.assertEqual(len(refused), 1)
+                        self.assertIsNotNone(
+                            refused[0], 'close() was allowed mid-row')
+                        self.assertEqual(
+                            refused[0].code,
+                            qi.QuestDBErrorCode.InvalidApiCall)
+                        self.assertIn(
+                            "close() can't be called while a row is being "
+                            'written into this buffer',
+                            str(refused[0]))
+
+                        # The sender is still open and still holds both
+                        # rows: the finished one and the hostile one.
+                        self.assertGreater(len(sender), buffered)
+                        sender.flush()
+
     def test_flush_from_inside_a_row_keeps_the_rows_already_buffered(self):
         """A flush attempted while a row is half-written cannot succeed
         -- the native buffer refuses it -- and the failure path clears
