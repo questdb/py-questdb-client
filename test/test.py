@@ -4939,9 +4939,14 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         loud -- the Arrow planner says the same thing through
         `_attrs_override_fits`. Silently it went out as a plain LONG
         and created the destination column with that type."""
-        cases = ((np.int8, 8, True), (np.int16, 16, True),
-                 (np.int32, 32, True), (np.int8, 7, False),
-                 (np.int16, 15, False))
+        # Each width at its cap is carried; one bit past it is not.
+        # These four caps are `_geohash_dtype_max_bits`, and nothing
+        # else pins them -- a cap one too generous lets a claim ride on
+        # a column that cannot spell its widest value.
+        cases = ((np.int8, 7, False), (np.int8, 8, True),
+                 (np.int16, 15, False), (np.int16, 16, True),
+                 (np.int32, 31, False), (np.int32, 32, True),
+                 (np.int64, 60, False), (np.int64, 61, True))
         for dtype, bits, expect_warning in cases:
             with self.subTest(dtype=dtype.__name__, bits=bits):
                 df = pd.DataFrame({
