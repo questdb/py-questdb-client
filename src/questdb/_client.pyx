@@ -8147,6 +8147,7 @@ cdef class QuestDB:
     cdef object _state_cond
     cdef size_t _active_uses
     cdef bint _closing
+    cdef object _use_depth
     cdef object _connection_listener
     cdef object _error_handler
     cdef size_t _cb_refs_key
@@ -8159,6 +8160,7 @@ cdef class QuestDB:
         self._state_cond = threading.Condition(threading.RLock())
         self._active_uses = 0
         self._closing = False
+        self._use_depth = threading.local()
         self._connection_listener = None
         self._error_handler = None
         self._cb_refs_key = 0
@@ -8178,6 +8180,10 @@ cdef class QuestDB:
                     QuestDBErrorCode.InvalidApiCall,
                     f"{method}() can't be called: QuestDB is closed.")
             self._active_uses += 1
+            # Counted per thread as well as in total, so `close()` can
+            # tell a caller waiting on other threads from one waiting
+            # on itself.
+            self._use_depth.value = getattr(self._use_depth, 'value', 0) + 1
             return db
         finally:
             self._state_cond.release()
@@ -8188,6 +8194,7 @@ cdef class QuestDB:
             if self._active_uses == 0:
                 raise RuntimeError('QuestDB use counter underflow.')
             self._active_uses -= 1
+            self._use_depth.value = getattr(self._use_depth, 'value', 0) - 1
             if self._active_uses == 0:
                 self._state_cond.notify_all()
         finally:
@@ -9070,6 +9077,23 @@ cdef class QuestDB:
             self._closing = True
         try:
             with self._state_cond:
+                # A close from inside one of this handle's own calls --
+                # `dataframe()` reading `attrs`, a cell conversion, an
+                # Arrow producer -- is waiting on the very frame that
+                # would release the use, so the wait below can never
+                # end. Refused rather than hung: the caller gets an
+                # error where it used to get a warning every five
+                # seconds and no return.
+                if getattr(self._use_depth, 'value', 0) != 0:
+                    self._db = db
+                    self._closing = False
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall,
+                        "close() can't be called from inside a call on "
+                        'this QuestDB handle. It would wait for that '
+                        'call to finish, which cannot happen while the '
+                        'call is waiting for close(). Close it after '
+                        'the call returns.')
                 while self._active_uses != 0:
                     if (not self._state_cond.wait(timeout=5.0)
                             and self._active_uses != 0):

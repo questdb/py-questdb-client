@@ -5183,6 +5183,59 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             txn.commit()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_closing_a_handle_from_inside_its_own_call_is_refused(self):
+        """`QuestDB.close()` waits for outstanding uses to be released.
+        Called from inside one of this handle's own calls it is waiting
+        on the frame that would release it, so it never returned -- a
+        warning every five seconds, forever. It is refused instead."""
+        closed = []
+
+        class HostileFrame(pd.DataFrame):
+            fired = False
+
+            @property
+            def attrs(self):
+                if not HostileFrame.fired:
+                    HostileFrame.fired = True
+                    try:
+                        db.close()
+                    except qi.QuestDBError as exc:
+                        closed.append(exc)
+                    else:
+                        closed.append(None)
+                return {}
+
+            @attrs.setter
+            def attrs(self, value):
+                pass
+
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=0;query_pool_min=0;'
+                    'pool_reap=manual;') as db:
+                frame = HostileFrame({
+                    'v': [1, 2],
+                    'ts': pd.to_datetime([0, 1], unit='s')})
+                db.dataframe(frame, table_name='t', at='ts')
+
+                self.assertEqual(len(closed), 1)
+                self.assertIsNotNone(
+                    closed[0], 'close() hung instead of refusing')
+                self.assertEqual(
+                    closed[0].code, qi.QuestDBErrorCode.InvalidApiCall)
+                self.assertIn(
+                    "close() can't be called from inside a call on this "
+                    'QuestDB handle',
+                    str(closed[0]))
+                # The handle survives the refusal and still works.
+                db.dataframe(
+                    pd.DataFrame({
+                        'v': [3],
+                        'ts': pd.to_datetime([2], unit='s')}),
+                    table_name='t', at='ts')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_the_claim_version_takes_any_whole_number_but_not_a_bool(self):
         """`True == 1`, so the version gate has to reject it by type,
