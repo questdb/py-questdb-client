@@ -5039,6 +5039,44 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     'written into this buffer',
                     str(seen[0]))
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_late_geohash_refusal_names_the_rows_already_stored(self):
+        """The GEOHASH scan runs batch by batch, and a large enough
+        frame commits a checkpoint every hundred batches. A refusal past
+        the first checkpoint arrives with rows already stored, so
+        retrying the whole frame after correcting it duplicates them.
+        The error says so rather than reading like nothing was sent."""
+        rows, bad_at = 250, 240
+        values = [1] * rows
+        values[bad_at] = 1 << 21
+        table = pyarrow.table({
+            'g': pyarrow.array(values, pyarrow.int32()),
+            'ts': pyarrow.array(
+                list(range(rows)), pyarrow.timestamp('us'))})
+        with self.assertRaisesRegex(
+                qi.QuestDBError,
+                rf"Bad column 'g' at row {bad_at}: .*already stored"):
+            self._dataframe_wire_payload(
+                table, table_name='geo_late', at='ts',
+                schema_overrides={'g': ('geohash', 20)},
+                max_rows_per_batch=1)
+
+        # A refusal before any checkpoint says nothing of the sort --
+        # nothing was stored, and the whole frame is safe to retry.
+        values = [1] * rows
+        values[0] = 1 << 21
+        table = pyarrow.table({
+            'g': pyarrow.array(values, pyarrow.int32()),
+            'ts': pyarrow.array(
+                list(range(rows)), pyarrow.timestamp('us'))})
+        with self.assertRaises(qi.QuestDBError) as cm:
+            self._dataframe_wire_payload(
+                table, table_name='geo_early', at='ts',
+                schema_overrides={'g': ('geohash', 20)},
+                max_rows_per_batch=1)
+        self.assertNotIn('already stored', str(cm.exception))
+
     def test_a_claim_no_column_can_carry_is_said_out_loud_on_both_planners(self):
         """A claim the column's type can never carry is a mistake
         rather than drift, and both planners now say so. The NumPy

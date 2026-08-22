@@ -6907,8 +6907,26 @@ cdef void_int _capsule_consume_stream(
             # Before the flush: a value the claimed GEOHASH precision
             # cannot hold is truncated by the encoder without a word,
             # so it has to be caught while it is still on this side.
-            _arrow_batch_check_geohash_ranges(
-                &batch, c_schema, c_overrides, c_overrides_len, row_base)
+            try:
+                _arrow_batch_check_geohash_ranges(
+                    &batch, c_schema, c_overrides, c_overrides_len,
+                    row_base)
+            except QuestDBError as gh_exc:
+                # The scan runs batch by batch, and a large enough frame
+                # syncs a checkpoint every
+                # `_QWP_MAX_DEFERRED_ARROW_FRAMES` batches. A refusal
+                # past the first checkpoint therefore arrives with rows
+                # already stored, and retrying the whole frame after
+                # correcting it would duplicate them.
+                if committed_prefix[0]:
+                    raise QuestDBError(
+                        gh_exc.code,
+                        f'{gh_exc} Rows from earlier batches of this '
+                        f'dataframe are already stored, so retrying the '
+                        f'whole dataframe would duplicate them; resume '
+                        f'from the named row instead.',
+                        in_doubt=gh_exc.in_doubt) from gh_exc
+                raise
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)
                 committed_prefix[0] = True
