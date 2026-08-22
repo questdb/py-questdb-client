@@ -7,273 +7,154 @@ Changelog
 5.1.0 (unreleased)
 ------------------
 
-- **Breaking:** UUID values now use canonical RFC 4122 byte order
-  (big-endian, i.e. ``uuid.UUID.bytes``) everywhere they cross the API as
-  raw bytes. This affects Arrow and binary DataFrame columns on ingestion,
-  and the bytes read back from a UUID result column. Code that passed or
-  interpreted the two little-endian 64-bit halves of QuestDB's wire layout
-  must drop its own byte-swapping. Values passed as ``uuid.UUID`` objects —
-  in ``row()``, in object-dtype DataFrame columns, and as query binds — are
-  unaffected, as are the UUIDs that ``to_pandas()`` produces.
-- **Breaking:** an Arrow ``fixed_size_binary`` column is no longer read as
-  UUID or LONG256 on the strength of its width alone. 16- and 32-byte
-  columns are opaque bytes and land as BINARY unless the column claims a
-  type: the ``arrow.uuid`` extension type, ``questdb.column_type`` field
-  metadata, or the new ``schema_overrides`` kinds below.
-  The ``arrow.uuid`` route needs pyarrow >= 18 and a column built from
-  ``pa.uuid()``: pyarrow registers that canonical extension type from 18
-  on, and only an extension *type* survives into a pandas ``ArrowDtype``,
-  which carries no field and so no ``ARROW:extension:name`` metadata.
-  ``uuid.UUID`` cells and ``schema_overrides={'col': 'uuid'}`` work on
-  every pyarrow version.
-- **Breaking:** the two planners now differ on unlabelled fixed-size binary
-  columns, deliberately, and this is stated in the ``QuestDB.dataframe()``
-  docstring. On the Arrow columnar path a 16- or 32-byte column with no
-  claim lands as BINARY, because ``schema_overrides`` is there to say
-  otherwise. A pandas frame where any column is not an ``ArrowDtype`` takes
-  the NumPy planner instead, which has no such argument and so cannot tell
-  *I want opaque bytes* from *I meant UUID and the claim did not survive
-  pandas*; it refuses both widths rather than auto-create a table with the
-  wrong column type and say nothing. To send either width as BINARY there,
-  pass the values as an object-dtype column of ``bytes``. The refusal does
-  not depend on the pyarrow version: which remedies the message names
-  varies with it, which columns are accepted does not — an optional
-  dependency's version deciding whether a write errors or lands as the
-  wrong type is a worse trap than either outcome on its own.
-- ``schema_overrides`` accepts two new kinds, ``'uuid'`` and ``'long256'``,
-  which claim a column of that QuestDB type. They apply to fixed-size and
-  variable-length binary columns alike — the route polars frames take, since
-  polars has no fixed-size binary dtype — and every non-null value must be
-  exactly 16 or 32 bytes respectively.
-- **Read both breaking notes together if you send UUIDs as raw bytes.** The
-  usual repair for the second one is ``schema_overrides={'col': 'uuid'}``,
-  which brings the UUID column back. That alone is not enough: the first
-  note also changed the byte order the client expects, and any 16 bytes are
-  a valid UUID, so a column that keeps sending QuestDB's old wire layout is
-  accepted and stored with the two halves transposed. Drop your own byte
-  swapping at the same time and pass ``uuid.UUID.bytes``.
-- ``QuestDB.dataframe()`` writes one table per call and has never taken
-  ``table_name_col``, but it did not always say so. A column it could not
-  type by itself — a 32-byte binary with no type claim, say — raised first
-  and told you to use ``schema_overrides``, which the same call then turned
-  down for using ``table_name_col``. It now checks ``table_name_col``
-  before it looks at any column, and the error says what to do instead:
-  split the frame and make one call per table, each with its own
-  ``table_name``. Those calls take ``schema_overrides``, so LONG256 and the
-  other column types work as normal. To write rows whose table name comes
-  from a column, use ``Sender.row()``.
-- polars ``Object`` columns are now rejected with a clear error instead of
-  being ingested as meaningless in-process handles.
-- ``row()`` on QWP senders now supports UUID, IPV4, BINARY, CHAR, DATE,
-  LONG256, and GEOHASH columns. Pass ``uuid.UUID``,
-  ``ipaddress.IPv4Address``, or bytes-like values directly, and use the new
-  :class:`Char <questdb.Char>`, :class:`DateMillis <questdb.DateMillis>`,
-  :class:`Long256 <questdb.Long256>`, and :class:`Geohash <questdb.Geohash>`
-  wrappers for the rest. These types require QuestDB 10 or newer. On ILP
-  senders these values now raise
-  :class:`QuestDBError <questdb.QuestDBError>` (``InvalidApiCall``) instead
-  of ``TypeError``.
-- DataFrame BINARY columns now accept ``bytearray`` and ``memoryview`` cells
-  in addition to ``bytes``.
-- DATE columns are written differently by the two ingestion styles.
-  ``row()`` takes the new ``DateMillis`` wrapper; ``dataframe()`` takes the
-  column's Arrow type — ``pa.timestamp('ms')``, ``pa.date32()``, or
-  ``pa.date64()`` on a fully Arrow-backed frame — so there is no DATE cell
-  type and no ``'date'`` kind for ``schema_overrides``. The NumPy planner
-  has no DATE route: it widens a NumPy ``datetime64[ms]`` column to
-  TIMESTAMP and rejects the tz-aware ``datetime64[ms, tz]`` dtype. Both
-  styles need a QWP sender; ILP senders have no DATE type, so the datetime
-  columns they accept all land as TIMESTAMP. Reading round-trips: a DATE
-  column comes back as ``pa.timestamp('ms', 'UTC')``, so ``to_arrow()`` and
-  ``to_pandas(dtype_backend='pyarrow')`` feed it back as DATE, while plain
-  ``to_pandas()`` yields ``datetime64[ms, UTC]``, which ``dataframe()``
-  rejects.
-- ``to_pandas(dtype_backend=...)`` and ``iter_pandas(dtype_backend=...)``
-  now attach ``df.attrs['questdb']``, the round-trip metadata that plain
-  ``to_pandas()`` already carried, and ``dataframe()`` reads it back. This
-  is what keeps UUID, LONG256, IPV4, CHAR, and GEOHASH columns their own
-  type when a query result is written back out: their claim lives in Arrow
-  *field* metadata, and a pandas dtype holds an Arrow type and no field, so
-  before this those columns went back out as BINARY and plain integers, and
-  a new destination table was auto-created with the wrong types. BYTE,
-  SHORT, and INT columns still widen one step on the way back in. Editing
-  the frame is safe: a column that has been dropped, renamed, or retyped
-  simply loses its claim, and ``symbols`` / ``schema_overrides`` outrank it.
-  A column that is entirely null keeps its claim and is written as the
-  claimed type: on its own such a column names no type at all and is left
-  out of the write, and so out of the table the write auto-creates.
-  The three built-in backends — plain, ``'pyarrow'``, and
-  ``'numpy_nullable'`` — carry all five column types back out. A custom
-  ``types_mapper`` gets the same ``attrs``, but the claim is only applied
-  where the dtype the mapper picked still holds the values in a shape
-  ``dataframe()`` can attach it to: an Arrow-backed column, a NumPy
-  ``uint32`` / ``uint16`` / integer column, or an object column of Python
-  ints or ``bytes``. Map one of the five to anything else — a float or a
-  string dtype, say — and the claim goes unread and the column lands as
-  that dtype implies, with nothing said.
-- LONG256 columns survive a plain ``to_pandas()`` round trip. That backend
-  hands a LONG256 column back as an object column of Python ints — the only
-  shape wide enough to hold one without pyarrow — and ``dataframe()`` now
-  reads the ``{'kind': 'long256'}`` claim that travels with it, encoding
-  each value as 32 unsigned little-endian bytes. Every non-null value must
-  satisfy ``0 <= value < 2**256``. Without the claim an object-dtype int
-  column is still a LONG.
-- ``to_pandas(dtype_backend='numpy_nullable')`` round-trips its column
-  types too, as does any column that reaches ``dataframe()`` as object
-  dtype. That backend returns IPV4, CHAR, and GEOHASH as pandas masked
-  extension columns and UUID and LONG256 as object columns of ``bytes``,
-  and none of those shapes could carry a claim through ingestion: the five
-  went back out as plain integers and BINARY, auto-creating a destination
-  table with the wrong column types. ``dataframe()`` now applies a
-  ``df.attrs['questdb']`` claim to object-dtype integer and ``bytes``
-  columns as well as to the NumPy and Arrow ones, so a result read with
-  ``'numpy_nullable'`` and the same result read with ``'pyarrow'`` write
-  the same bytes. This also covers a nullable IPV4, CHAR, or GEOHASH
-  column read by plain ``to_pandas()``: nulls make it a masked column,
-  which becomes object dtype before planning. An object column states no
-  width or range of its own, so a claimed value the type cannot hold — an
-  integer past ``2**32-1`` under ``ipv4``, a cell that is not exactly 16
-  or 32 bytes under ``uuid`` or ``long256`` — is refused rather than
-  written into a column of the claimed type.
-- A GEOHASH value wider than the precision it is written at is refused.
-  A GEOHASH column keeps only the claimed low bits, and the high bits are
-  the coarse position, so a wider value used to reach the database as a
-  valid geohash for somewhere else entirely, with nothing said. This is
-  the one type whose range is narrower than the integer carrying it;
-  IPV4 and CHAR fill their storage width exactly.
-  The check covers every route the type can be claimed by --
-  ``schema_overrides``, a ``df.attrs['questdb']`` claim, and
-  ``questdb.geohash_bits`` Arrow field metadata, whether or not it is
-  paired with ``questdb.column_type=geohash`` -- and every
-  input shape, so pandas, polars, ``pa.Table``, ``pa.RecordBatch`` and a
-  one-shot ``RecordBatchReader`` are all held to it. Values are checked
-  batch by batch on their way out, so nothing that does not fit reaches
-  the wire, and the row named is the caller's own rather than its
-  position inside a batch they never chose.
-  A ``df.attrs['questdb']`` geohash claim is also held to the width of
-  the column carrying it -- at most 8 bits on an ``int8`` column, 16 on
-  ``int16``, 32 on ``int32`` and 60 on ``int64``. A claim past that is
-  one the column cannot express, so it is dropped like any other claim
-  that no longer fits, and both planners now answer a given frame the
-  same way: retyping a claimed column narrower used to be silently
-  dropped on the Arrow path and refused mid-flush on the NumPy one.
-- An object that only claims to be a ``decimal.Decimal`` is now refused
-  instead of being read as one. DECIMAL cells are encoded by reading the
-  object's raw memory with CPython's ``Decimal`` struct layout, and the
-  check in front of that was ``isinstance``, which asks the object for its
-  ``__class__`` and believes the answer. An object setting
-  ``__class__ = Decimal`` therefore sent the encoder walking whatever its
-  ``mpd.data`` slot happened to hold: a short one crashed the interpreter
-  with no traceback, and a longer one read unrelated heap memory into the
-  mantissa, once surfacing a heap address as ``Decimal exponent
-  4416345488 exceeds the maximum supported value of 76``. The check now
-  reads the object's real type, which nothing can forge, and raises
-  ``TypeError`` naming it. A genuine ``Decimal`` subclass is still
-  accepted: it lays its own fields after the base struct, leaving the
-  ones the encoder reads where it expects them.
-- An ``int`` too wide for a 64-bit LONG column now says so on a QWP sender.
-  ``row()`` raises ``OverflowError`` naming
-  :class:`Long256 <questdb.Long256>`, the wrapper that sends a 256-bit
-  value, and ``dataframe()`` raises
-  :class:`QuestDBError <questdb.QuestDBError>` naming the
-  ``df.attrs['questdb']`` claim that makes the column a LONG256. Both used
-  to surface CPython's bare "int too large to convert", which named neither.
-- The ``df.attrs['questdb']`` claim is now read through one shared entry
-  point on both ingest paths, so the two readers cannot drift apart. The
-  ``version`` key the egress stamps is checked rather than only carried: a
-  frame claiming a version this client does not know loses its claim
-  instead of having it applied under the old vocabulary. Malformed
-  metadata is skipped on both paths, as the documented contract always
-  said — previously a ``kind`` that was not hashable, such as a list left
-  by a JSON round trip, raised ``TypeError`` from the Arrow path, and
-  ``attrs['questdb']`` that was not a dict raised ``AttributeError`` from
-  the NumPy one.
-- Four measured speed-ups on paths this release touched. The DataFrame
-  IPV4 builder looked ``IPv4Address`` and ``IPv4Interface`` up through the
-  ``ipaddress`` module on every cell; both are now bound once at import and
-  an exact-type fast path settles the common cell, taking the builder from
-  about 65 ns a row to under 2. ``Buffer.row``'s QWP-only cell types moved
-  out of the inlined dispatch function into a separate one, and within it
-  the four wrapper classes now come before the ``uuid.UUID`` and IPV4
-  tests, which they cannot be: a ``Geohash`` cell is about 33% cheaper, an
-  ``IPv4Address`` cell about 15%, and an ordinary ``int`` cell slightly
-  cheaper too, since the common path no longer has that code laid out
-  around it. Reading the round-trip metadata off an Arrow schema and
-  applying it to a pandas frame were both quadratic in the column count,
-  re-reading ``schema.names`` and ``frame.dtypes`` once per column; at 1024
-  columns the read pass drops from about 85 ms to 0.7 ms, and
-  ``iter_pandas`` paid it per batch.
-- A streaming read now builds ``df.attrs['questdb']`` once for the whole
-  result rather than once per batch. One schema covers every batch of a
-  result, and the claim declines to be copied and cannot be edited, so
-  every batch can carry the same one. Building it walked the schema and
-  froze one entry per column: at 1024 columns that is 1.2 ms a batch on
-  the pyarrow-backed ``iter_pandas`` — 0.8 ms reading the Arrow fields
-  and 0.4 ms freezing — and about 0.5 ms a batch on the native numpy
-  one, so reading 10 million rows in 10,000-row batches spent about 1.2
-  seconds on nothing else. Both variants build it once now.
-- ``df.attrs['questdb']`` is now a mapping that declines to be copied and
-  refuses to be edited in place. pandas deep-copies the whole of ``attrs``
-  every time it propagates it — ``NDFrame.__finalize__`` does
-  ``self.attrs = deepcopy(other.attrs)`` — and that runs once per column
-  while a frame is sliced or exported, so a per-column claim made those
-  passes quadratic in the column count. ``pyarrow.table(df)`` on a
-  1024-column frame took 730 ms, of which 710 ms across 1025 deep copies
-  was the claim; it now takes 26 ms, against 23 ms for the same frame
-  carrying no claim at all. Most of those copies are pandas' own — its
-  Arrow export reads the frame a column at a time — so the claim has to be
-  cheap to copy wherever the frame goes, not only inside this client.
-  Declining to copy is sound only because the claim cannot be edited: it
-  records what each column held when it was read, so no two copies of a
-  frame have anything to disagree about. It is still a ``dict`` — it
-  indexes, iterates, compares, pickles and serializes to JSON exactly as
-  before, and a hand-written plain ``dict`` is read on the way in just the
-  same. To change what a frame claims, build a new mapping —
-  ``{**df.attrs['questdb']}`` unpacks the claim into an ordinary editable
-  ``dict`` — and assign it to ``df.attrs['questdb']``, or use
-  ``schema_overrides`` / ``symbols``, which outrank it.
-- DECIMAL values are now refused on interpreters where writing them would
-  be undefined behaviour, rather than punned. The encoder reinterprets a
-  ``decimal.Decimal``'s memory with the struct layout CPython's ``_decimal``
-  accelerator gives it, without checking that is what it is looking at. It
-  now requires both CPython and that accelerator; ``row()`` and
-  ``dataframe()`` alike raise ``ValueError`` naming the interpreter and
-  suggesting a float or a string instead. This affects the PyPy wheels
-  this package publishes: DECIMAL columns were never safe there and now
-  say so. Testing only ``decimal.Decimal is _decimal.Decimal`` was not
-  enough — it says the ``decimal`` module is backed by something *named*
-  ``_decimal``, which is true on interpreters that ship their own under
-  that name and a different shape, so on its own it admitted exactly the
-  case it was meant to exclude.
-- Both ingestion styles now reject ``ipaddress.IPv4Interface`` cells instead
-  of silently discarding their network prefix, and say why. Every message
-  about one used to read as a contradiction, because ``IPv4Interface``
-  subclasses ``IPv4Address``: ``row()`` gave the generic unsupported-type
-  error, whose list of accepted types names ``ipaddress.IPv4Address``;
-  ``dataframe()`` said ``Unsupported object column containing an object of
-  type ipaddress.IPv4Interface`` for one in the column's first cell, and
-  ``expected ipaddress.IPv4Address, got ipaddress.IPv4Interface`` for one
-  further down. None of the three mentioned the prefix, which is the
-  reason. All three now give it, along with the remedy their shape calls
-  for: ``row()`` names ``value.ip``, and ``dataframe()`` names the whole
-  column, as ``df['col'] = df['col'].map(lambda value: value.ip)``.
-- An object column of ``numpy.bytes_`` now lands as BINARY. Previously the
-  DataFrame path tested for an exact ``bytes``, so a NumPy ``S``-dtype
-  scalar column was rejected as an unsupported object column.
-- ``RowColumnValue`` and ``TransactionColumnValue`` exist at runtime.
-  They were declared only in ``_client.pyi``, so annotating with them
-  type-checked and then raised ``ImportError``.
-- The four value wrappers' stub docstrings carry their ``NULL``-sentinel
-  and range notes again. ``py.typed`` ships, so an IDE shows the stub, and
-  the sentinels are exactly the detail whose absence causes silent data
-  loss. The ``Geohash`` docstring also said a precision mismatch "fails
-  when the buffer is flushed"; it is rejected by ``row()`` itself, with the
-  buffer rewound to what it held before that row.
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- **UUID raw bytes are now RFC 4122 byte order** (big-endian, the same bytes
+  as ``uuid.UUID.bytes``) everywhere they cross the API. This affects Arrow
+  and binary DataFrame columns you write, and the bytes you read back from a
+  UUID column. If your code byte-swapped to match QuestDB's old wire layout,
+  remove that swapping. Passing ``uuid.UUID`` objects is unaffected, in
+  ``row()``, in object-dtype columns, and as query binds — so are the UUIDs
+  ``to_pandas()`` gives you.
+
+- **A 16- or 32-byte Arrow column is no longer assumed to be a UUID or a
+  LONG256.** Width alone no longer decides the type; such a column is now
+  opaque bytes and lands as BINARY. To get the old behaviour back, say what
+  the column is: build it with ``pa.uuid()``, attach
+  ``questdb.column_type`` field metadata, or pass
+  ``schema_overrides={'col': 'uuid'}`` (or ``'long256'``).
+
+  ``pa.uuid()`` needs pyarrow 18 or newer, and the column must carry the
+  extension *type* rather than the metadata key — a pandas ``ArrowDtype``
+  holds a type and no field, so the key does not survive. ``uuid.UUID``
+  cells and ``schema_overrides`` work on every pyarrow version.
+
+- **If you write UUIDs as raw bytes, change the byte order too.** Two of the
+  changes above affect such a column, and only one of them produces an
+  error. Your 16-byte column now lands as BINARY, and the usual fix for that
+  is ``schema_overrides={'col': 'uuid'}``. It gets the UUID column back and
+  leaves the byte order still wrong. Any 16 bytes are a valid UUID, so
+  nothing fails at any point — the values are simply stored reversed.
+
+  Change how you produce the bytes at the same time::
+
+      value.int.to_bytes(16, 'little')   # before: QuestDB's old wire layout
+      value.bytes                        # now: RFC 4122 big-endian
+
+  Keeping the old form stores
+  ``123e4567-e89b-12d3-a456-426614174000`` as
+  ``00401714-6642-56a4-d312-9be867453e12``.
+
+- **The two DataFrame planners now treat an unlabelled 16- or 32-byte column
+  differently.** A fully Arrow-backed frame takes the Arrow path,
+  where the column lands as BINARY, because ``schema_overrides`` is available
+  to say otherwise. A frame with any non-Arrow column takes the NumPy
+  planner, which has no such argument; rather than guess, it refuses both
+  widths. To send them as BINARY there, pass an object-dtype column of
+  ``bytes``.
+
+- **A ``df.attrs['questdb']`` claim must now include ``'version': 1``.** The
+  version is checked rather than just carried, so that a future claim
+  vocabulary is not applied under today's rules. Frames from
+  ``to_pandas()`` always have it. A hand-written mapping without it, or with
+  a different version, is ignored entirely. The full shape is documented on
+  ``QuestDB.dataframe()``::
+
+      df.attrs['questdb'] = {'version': 1,
+                             'columns': {'src_ip': {'kind': 'ipv4'}}}
+
+- **``to_pandas()`` returns a GEOHASH column as a signed integer**, sized by
+  the column's precision: ``int8`` up to 7 bits, ``int16`` to 15, ``int32``
+  to 31, ``int64`` to 60. This matches what ``to_arrow()`` and
+  ``to_pandas(dtype_backend='pyarrow')`` already give you, and signed is the
+  only form that can carry a claim back in — so a GEOHASH column now
+  survives a read-modify-write round trip on every backend, including after
+  ``df.convert_dtypes(dtype_backend='pyarrow')``. Code that reads the dtype
+  of a GEOHASH column will see a signed type where it saw an unsigned one.
+
+- **DECIMAL now requires CPython.** Writing a DECIMAL reinterprets the
+  memory of a ``decimal.Decimal`` using the layout CPython's ``_decimal``
+  module gives it, which is undefined behaviour anywhere else. ``row()`` and
+  ``dataframe()`` now raise ``ValueError`` naming the interpreter instead.
+  This affects the PyPy wheels this package publishes: DECIMAL was never
+  safe there, and now says so rather than writing corrupt values.
+
+- **QWP-only column values raise ``QuestDBError`` on ILP senders**, where
+  they previously raised ``TypeError``. See the new ``row()`` types below.
+
+- If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
+  ``in_flight_window``, remove it. These options are no longer supported and now
+  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ConfigError`` during startup.
+
+New
+~~~
+
+- **``row()`` on QWP senders now writes UUID, IPV4, BINARY, CHAR, DATE,
+  LONG256, and GEOHASH columns.** Pass ``uuid.UUID``,
+  ``ipaddress.IPv4Address``, ``bytes``, ``bytearray`` or ``memoryview``
+  directly. For the rest use the new :class:`Char <questdb.Char>`,
+  :class:`DateMillis <questdb.DateMillis>`,
+  :class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`
+  wrappers. These types need QuestDB 10 or newer and a QWP sender
+  (``ws::`` or ``wss::``).
+
+- **``schema_overrides`` accepts ``'uuid'`` and ``'long256'``.** Both work on
+  fixed-size and variable-length binary columns — which is how polars frames
+  get there, since polars has no fixed-size binary dtype. Every non-null
+  value must be exactly 16 or 32 bytes.
+
+- **DataFrame BINARY columns accept ``bytearray`` and ``memoryview`` cells**
+  as well as ``bytes``. An object column of ``numpy.bytes_`` now works too.
+
+- **Query results keep their column types when you write them back.**
+  ``to_pandas(dtype_backend=...)`` and ``iter_pandas(dtype_backend=...)`` now
+  attach ``df.attrs['questdb']``, which plain ``to_pandas()`` already
+  carried, and ``dataframe()`` reads it. Without it, UUID, LONG256, IPV4,
+  CHAR and GEOHASH columns went back out as BINARY and plain integers, and a
+  new destination table was created with the wrong types.
+
+  All three built-in backends round-trip these five types, in whatever shape
+  they hand them back — Arrow-backed columns, NumPy columns, and the object
+  columns of Python ints or ``bytes`` that plain ``to_pandas()`` and
+  ``'numpy_nullable'`` produce. LONG256 in particular now survives a plain
+  ``to_pandas()``: that backend returns it as Python ints, and values must
+  satisfy ``0 <= value < 2**256``.
+
+  Editing the frame is safe. A column you dropped, renamed or retyped simply
+  loses its claim, and ``symbols`` / ``schema_overrides`` outrank it. BYTE
+  and SHORT columns still come back as INT, and INT as LONG. A custom
+  ``types_mapper`` gets the same metadata, but the claim only applies if the
+  dtype it picked can still hold the values — map one of the five to a float
+  or a string and the column lands as that dtype implies.
+
+- **An all-null column claimed as UUID, LONG256, IPV4, CHAR or GEOHASH keeps
+  its claim** and is written as the claimed type. On its own such a column
+  names no type, so it would be left out of the write and out of the table
+  the write creates. Claims of other kinds do not rescue an all-null column;
+  it is still dropped from the write.
+
+- **``df.attrs['questdb']`` is now cheap to copy and refuses the ordinary
+  mutating ``dict`` operations.** pandas deep-copies the whole of ``attrs``
+  every time it propagates a frame, once per column while slicing or
+  exporting, which made those passes quadratic.
+  ``pyarrow.table(df)`` on a 1024-column frame took
+  730 ms, of which 710 ms was copying the claim; it now takes 26 ms, against
+  23 ms with no claim at all.
+
+  It is still a ``dict`` — it indexes, iterates, compares, pickles and
+  serializes to JSON as before, and a hand-written ``dict`` is read the same
+  way. To change what a frame claims, build a new mapping
+  (``{**df.attrs['questdb']}`` unpacks it into an editable ``dict``) and
+  assign that, or use ``schema_overrides`` / ``symbols``.
+
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
   ``PooledReader``, keep that reader on its original thread until processing
   finishes.
+
 - WebSocket connections keep a dictionary of ``SYMBOL`` values to avoid sending
   repeated text in full. Repeated values do not grow it, but a long-lived
   connection fills it after 2,000,000 distinct values or 256 MiB of symbol
@@ -283,16 +164,123 @@ Changelog
   standalone senders should call ``close_drain()`` and reconnect. Before
   retrying, check ``err.in_doubt``; when it is true, some rows may already be
   stored.
+
+Fixed
+~~~~~
+
+- **A GEOHASH value too wide for its precision is now refused.** A GEOHASH
+  column keeps only the low bits it was given, so a wider value used to
+  reach the database as a valid geohash for somewhere else entirely, with
+  nothing said. It is the one type whose range is narrower than the integer
+  carrying it. The check covers every way the type can be claimed and every
+  input shape — pandas, polars, ``pa.Table``, ``pa.RecordBatch`` and
+  one-shot readers — and runs batch by batch before anything reaches the
+  wire. The error names the row you passed, not its position in a batch you
+  never chose.
+
+  A ``df.attrs['questdb']`` geohash claim is also held to the width of the
+  column carrying it: at most 8 bits on ``int8``, 16 on ``int16``, 32 on
+  ``int32``, 60 on ``int64``. A wider claim is dropped like any other claim
+  that no longer fits, and both planners now answer the same frame the same
+  way.
+
+- **A claim the column's type can never carry now warns.** The write still
+  goes ahead as the column's own type implies — a frame retyped since you
+  read it must not fail on that account — but a claim guaranteed to do
+  nothing, such as an unsigned integer under ``geohash``, is a mistake
+  rather than drift, and the two were indistinguishable in silence. A claim
+  the column does carry, and one whose column has gone, stay quiet.
+
+- **An object pretending to be a ``decimal.Decimal`` is refused.** DECIMAL
+  cells are encoded by reading the object's raw memory, and the check in
+  front of that was ``isinstance``, which asks the object for its
+  ``__class__`` and believes it. An object setting ``__class__ = Decimal``
+  sent the encoder walking unrelated memory: a short one crashed the
+  interpreter with no traceback, a longer one read heap contents into the
+  mantissa, once surfacing a heap address in an error message. The check now
+  reads the object's real type, which cannot be forged. Genuine ``Decimal``
+  subclasses still work.
+
+- **An ``int`` too wide for a LONG column now says so.** On a QWP sender
+  ``row()`` raises ``OverflowError`` pointing at
+  :class:`Long256 <questdb.Long256>`, and ``dataframe()`` raises
+  ``QuestDBError`` pointing at the claim that makes the column a LONG256.
+  Both used to surface CPython's bare "int too large to convert".
+
+- **``ipaddress.IPv4Interface`` cells are rejected** rather than silently
+  written with their network prefix discarded. The old messages read as
+  contradictions, because ``IPv4Interface`` subclasses ``IPv4Address`` and
+  they listed ``IPv4Address`` as accepted. The new ones name the prefix as
+  the reason and give the fix: ``value.ip`` for ``row()``, and
+  ``df['col'] = df['col'].map(lambda value: value.ip)`` for ``dataframe()``.
+
+- **polars ``Object`` columns are rejected** with a clear error. They export
+  as 8-byte handles to in-process memory, which would have been stored as
+  meaningless BINARY blobs.
+
+- **``QuestDB.dataframe()`` explains ``table_name_col`` properly.** It writes
+  one table per call and has never accepted that argument, but a column it
+  could not type by itself raised first and suggested
+  ``schema_overrides`` — which the same call then refused. It now checks
+  ``table_name_col`` up front and tells you to split the frame and make one
+  call per table. To vary the table name per row, use ``Sender.row()``.
+
+- **Malformed round-trip metadata is skipped on both ingest paths**, as the
+  contract always said. A ``kind`` that was not hashable (a list left by a
+  JSON round trip, say) raised ``TypeError`` from the Arrow path, and an
+  ``attrs['questdb']`` that was not a dict raised ``AttributeError`` from
+  the NumPy one. Both paths now read the claim through one shared entry
+  point, so they cannot drift apart.
+
+- **DATE columns are written differently by the two ingestion styles**, which
+  is now documented. ``row()`` takes the new ``DateMillis`` wrapper.
+  ``dataframe()`` takes the column's Arrow type — ``pa.timestamp('ms')``,
+  ``pa.date32()`` or ``pa.date64()`` on a fully Arrow-backed frame — so
+  there is no DATE cell type and no ``'date'`` kind for
+  ``schema_overrides``. The NumPy planner has no DATE route: it widens
+  ``datetime64[ms]`` to TIMESTAMP and rejects ``datetime64[ms, tz]``. Both
+  styles need a QWP sender. Reading back, a DATE column arrives as
+  ``pa.timestamp('ms', 'UTC')``, so ``to_arrow()`` and
+  ``dtype_backend='pyarrow'`` feed it back as DATE, while plain
+  ``to_pandas()`` gives ``datetime64[ms, UTC]``, which ``dataframe()``
+  rejects.
+
 - If a DataFrame load fails, batches waiting in memory are now discarded. Most
   loads commit once at the end, but very large Arrow loads may commit an earlier
   checkpoint. If a later batch fails, that prefix from the same DataFrame call
   remains, so retrying the whole DataFrame can duplicate rows.
+
 - When ``sf_dir`` enables disk-backed delivery, shutdown now obeys its configured
   timeout and recovery is safer after a crash or an incomplete final write.
-- If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
-  ``in_flight_window``, remove it. These options are no longer supported and now
-  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.ConfigError`` during startup.
+
+Faster
+~~~~~~
+
+- **Reading round-trip metadata is no longer quadratic in the column count.**
+  Reading it off an Arrow schema and applying it to a pandas frame both
+  re-read ``schema.names`` and ``frame.dtypes`` once per column. At 1024
+  columns the read pass drops from about 85 ms to 0.7 ms, and
+  ``iter_pandas`` was paying it per batch.
+
+- **A streaming read builds ``df.attrs['questdb']`` once per result**, not
+  once per batch. One schema covers every batch, and the claim is now shared
+  rather than copied. At 1024 columns that was 1.2 ms per batch on
+  ``iter_pandas``, so a 10-million-row read in 10,000-row batches spent
+  about 1.2 seconds on nothing else.
+
+- **The DataFrame IPV4 builder is about 3x faster per cell**, from roughly
+  95 ns to about 30. Its type test looked ``IPv4Address`` and
+  ``IPv4Interface`` up through the ``ipaddress`` module on every cell,
+  costing about 65 ns; both are now bound once at import, and an exact type
+  test settles the common cell in under 2 ns. What remains per cell is the
+  ``int()`` conversion, which is a Python-level call and dominates what is
+  left.
+
+- **``Buffer.row()`` cell dispatch is cheaper.** The QWP-only types moved out
+  of the inlined dispatch function, and the wrapper classes are now tested
+  before ``uuid.UUID`` and IPV4. A ``Geohash`` cell is about 33% cheaper and
+  an ``IPv4Address`` cell about 15%, and the common ``int`` / ``float`` /
+  ``str`` path no longer has that code laid out around it.
 
 5.0.0 (2026-07-27)
 ------------------
