@@ -3538,6 +3538,61 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         buffer.row('t', columns={'ok': 1}, at=qi.ServerTimestamp)
         self.assertGreater(len(buffer), 0)
 
+    def test_flush_from_inside_a_row_keeps_the_rows_already_buffered(self):
+        """A flush attempted while a row is half-written cannot succeed
+        -- the native buffer refuses it -- and the failure path clears
+        the internal buffer, which would take every finished row in it
+        along with the part-written one. The flush is refused up front
+        instead, and the buffered rows survive."""
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'lazy_connect=true;auto_flush=off;') as sender:
+                refused = []
+
+                class HostileUuid(uuid.UUID):
+                    @property
+                    def int(self):
+                        for method in ('flush', 'flush_and_get_fsn',
+                                       'flush_and_keep_and_get_fsn'):
+                            try:
+                                getattr(sender, method)()
+                            except qi.QuestDBError as exc:
+                                refused.append((method, exc))
+                            else:
+                                refused.append((method, None))
+                        return self.UUID_INT
+
+                    @int.setter
+                    def int(self, value):
+                        pass
+
+                HostileUuid.UUID_INT = self.UUID_VALUE.int
+
+                sender.row(
+                    'good', columns={'ok': 1}, at=qi.ServerTimestamp)
+                buffered = len(sender)
+                self.assertGreater(buffered, 0)
+
+                sender.row(
+                    'hostile',
+                    columns={'value': HostileUuid(str(self.UUID_VALUE))},
+                    at=qi.ServerTimestamp)
+
+                self.assertEqual(len(refused), 3)
+                for method, exc in refused:
+                    self.assertIsNotNone(
+                        exc, f'{method}() was allowed mid-row')
+                    self.assertEqual(
+                        exc.code, qi.QuestDBErrorCode.InvalidApiCall)
+                    self.assertIn(
+                        "can't be called while a row is being written",
+                        str(exc))
+                # The row that ran the hostile conversion completed, and
+                # the row buffered before it is still there.
+                self.assertGreater(len(sender), buffered)
+                sender.flush()
+
     def test_lease_cannot_be_closed_or_flushed_from_inside_a_row(self):
         """A pooled lease holds the only reference to its buffer, so
         returning it to the pool from inside a UUID or IPV4 conversion

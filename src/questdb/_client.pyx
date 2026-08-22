@@ -1394,6 +1394,26 @@ cdef class Buffer:
         cdef line_sender_buffer_view view = line_sender_buffer_peek(self._impl)
         return PyBytes_FromStringAndSize(<const char *> view.buf, <Py_ssize_t> view.len)
 
+    cdef inline void_int _check_not_in_row(self, str method) except -1:
+        """
+        Refuse a call that arrives while `row()` is part-way through
+        assembling a row into this buffer.
+
+        A column value whose conversion runs Python code re-enters on
+        the same thread, so nothing else stands between it and the
+        buffer. The native buffer refuses a half-written row anyway;
+        what it cannot do is stop the caller's own error handling from
+        acting on the refusal.
+        """
+        if self._row_depth != 0:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{method}() can't be called while a row is being "
+                "written. `row()` is part-way through assembling a row "
+                "and something it called has come back into this "
+                "buffer, most likely a column value whose conversion "
+                "runs Python code.")
+
     cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
         if not line_sender_buffer_set_marker(self._impl, &err):
@@ -10140,6 +10160,12 @@ cdef class Sender:
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl
+        # Refused before the flush is attempted, and before the GIL is
+        # released: a flush of a half-written row cannot succeed, and
+        # the failure path clears the internal buffer, which would take
+        # every finished row already in it with the part-written one.
+        (buffer if buffer is not None else self._buffer)._check_not_in_row(
+            'flush')
         if line_sender_buffer_size(c_buf) == 0 and not _is_qwp_ws_protocol(self._c_protocol):
             return
 
@@ -10233,6 +10259,8 @@ cdef class Sender:
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl
+        (buffer if buffer is not None else self._buffer)._check_not_in_row(
+            'flush_and_get_fsn')
 
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_get_fsn(sender, c_buf, &fsn, &err)
@@ -10270,6 +10298,8 @@ cdef class Sender:
             c_buf = buffer._impl
         else:
             c_buf = self._buffer._impl
+        (buffer if buffer is not None else self._buffer)._check_not_in_row(
+            'flush_and_keep_and_get_fsn')
 
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_keep_and_get_fsn(
