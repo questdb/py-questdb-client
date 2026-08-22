@@ -4886,6 +4886,53 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_commit_that_cannot_flush_leaves_the_transaction_open(self):
+        """`commit()` marked the transaction complete before the flush
+        that carries it, so a refused flush closed the transaction with
+        its rows still buffered -- and the next ordinary flush sent them
+        outside the transaction the caller asked for. The transaction
+        stays open instead, and the rows stay with it."""
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+                refused = []
+
+                class HostileTz(datetime.tzinfo):
+                    def utcoffset(self, dt):
+                        try:
+                            sender.transaction('t').commit()
+                        except qi.QuestDBError as exc:
+                            refused.append(exc)
+                        else:
+                            refused.append(None)
+                        return datetime.timedelta(0)
+
+                    def tzname(self, dt):
+                        return 'HOSTILE'
+
+                    def dst(self, dt):
+                        return datetime.timedelta(0)
+
+                with sender.transaction('t') as txn:
+                    txn.row(columns={'ok': 1}, at=qi.ServerTimestamp)
+                    buffered = len(sender)
+                    self.assertGreater(buffered, 0)
+                    # The commit re-entered from here is refused, and
+                    # must not close the transaction behind our back.
+                    txn.row(
+                        columns={'ts': datetime.datetime(
+                            2025, 1, 1, tzinfo=HostileTz())},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(refused), 1)
+                    self.assertIsNotNone(
+                        refused[0], 'commit() was allowed mid-row')
+                    # Still inside the transaction, rows intact.
+                    self.assertGreaterEqual(len(sender), buffered)
+                    # The transaction was not closed behind our back:
+                    # it still commits, and that commit drains it.
+                    txn.commit()
+                    self.assertEqual(len(sender), 0)
+
     def test_geohash_claim_too_wide_for_a_numpy_column_is_said_out_loud(self):
         """A geohash claim wider than the NumPy column carrying it is
         one the column can never hold, not drift, so it is said out

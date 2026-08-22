@@ -1223,10 +1223,21 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t commit')
+        # `_in_txn` has to come down first, because an explicit flush
+        # inside a transaction is refused. Nothing else moves until the
+        # flush has actually happened: a commit that could not flush has
+        # committed nothing, and marking it complete here left the
+        # transaction closed with its rows still in the buffer, for the
+        # next ordinary flush to send outside the transaction the caller
+        # asked for.
         self._sender._in_txn = False
+        try:
+            if len(self._sender._buffer):
+                self._sender.flush(transactional=True)
+        except:
+            self._sender._in_txn = True
+            raise
         self._complete = True
-        if len(self._sender._buffer):
-            self._sender.flush(transactional=True)
 
     def rollback(self):
         """
