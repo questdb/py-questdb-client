@@ -5103,13 +5103,17 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             'g': pyarrow.array(values, pyarrow.int32()),
             'ts': pyarrow.array(
                 list(range(rows)), pyarrow.timestamp('us'))})
-        with self.assertRaisesRegex(
-                qi.QuestDBError,
-                rf"Bad column 'g' at row {bad_at}: .*already stored"):
+        with self.assertRaises(qi.QuestDBError) as late:
             self._dataframe_wire_payload(
                 table, table_name='geo_late', at='ts',
                 schema_overrides={'g': ('geohash', 20)},
                 max_rows_per_batch=1)
+        self.assertRegex(
+            str(late.exception),
+            rf"Bad column 'g' at row {bad_at}: .*already stored")
+        # `in_doubt` is what a caller branches on to decide whether
+        # replaying is safe, so it has to agree with the message.
+        self.assertTrue(late.exception.in_doubt)
 
         # A refusal before any checkpoint says nothing of the sort --
         # nothing was stored, and the whole frame is safe to retry.
@@ -5125,6 +5129,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 schema_overrides={'g': ('geohash', 20)},
                 max_rows_per_batch=1)
         self.assertNotIn('already stored', str(cm.exception))
+        self.assertFalse(cm.exception.in_doubt)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_commit_is_refused_from_inside_a_dataframe(self):

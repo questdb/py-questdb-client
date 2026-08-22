@@ -5645,8 +5645,9 @@ cdef void_int _dataframe_claim_all_null_source(
     it, and what the Arrow path emits for the same frame.
 
     A claim the column cannot carry -- a geohash precision outside
-    1..=60 -- leaves the column skipped, the same silence a claim that
-    no longer fits meets everywhere else.
+    1..=60 -- leaves the column skipped, and the tail of
+    `_dataframe_apply_roundtrip_overrides` says so, as it does for any
+    claim no source took.
     """
     if kind == 'uuid':
         col.setup.source = col_source_t.col_source_bytes_pyobj
@@ -5683,10 +5684,12 @@ cdef _warn_roundtrip_claim_dropped(object name, str kind, object shape):
     warnings.warn(
         f'questdb: column {name!r} carries a '
         f"df.attrs['questdb'] claim of kind {kind!r}, which a column of "
-        f'type {shape} cannot carry. The claim is ignored and the column '
-        f'is written as its own type implies. Cast the column to a type '
-        f'the kind fits, state the type outright with schema_overrides, '
-        f'or drop the claim to silence this.',
+        f'type {shape} cannot carry. The claim is ignored, and the '
+        f'column goes out as its own type decides -- which for some '
+        f'shapes means it is left out of the write, or refused by it. '
+        f'Cast the column to a type the kind fits, state the type '
+        f'outright with schema_overrides, or drop the claim to silence '
+        f'this.',
         UserWarning,
         stacklevel=1)
 
@@ -11036,6 +11039,7 @@ cdef class PooledSender:
         cdef QuestDB handle
         with self._lock:
             self._check_open('dataframe')
+            self._check_not_in_row('dataframe')
             handle = self._handle
         handle.dataframe(
             df,

@@ -339,7 +339,10 @@ cdef object _roundtrip_columns_meta(object frame):
     qmeta = attrs.get('questdb')
     if not isinstance(qmeta, dict):
         return None
-    if qmeta.get('version') != _ROUNDTRIP_META_VERSION:
+    # `_is_int_not_bool`, not `!=`: `True == 1`, so a claim carrying
+    # `'version': True` would otherwise be read as a version 1 claim.
+    version = qmeta.get('version')
+    if not _is_int_not_bool(version) or version != _ROUNDTRIP_META_VERSION:
         return None
     cols_meta = qmeta.get('columns')
     if not isinstance(cols_meta, dict):
