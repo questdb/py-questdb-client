@@ -1226,19 +1226,29 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t commit')
+        if self._sender._buffer is None:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "commit() can't be called: Sender is closed.")
         # `_in_txn` has to come down first, because an explicit flush
-        # inside a transaction is refused. Nothing else moves until the
-        # flush has actually happened: a commit that could not flush has
-        # committed nothing, and marking it complete here left the
-        # transaction closed with its rows still in the buffer, for the
-        # next ordinary flush to send outside the transaction the caller
-        # asked for.
+        # inside a transaction is refused.
         self._sender._in_txn = False
         try:
             if len(self._sender._buffer):
                 self._sender.flush(transactional=True)
         except:
-            self._sender._in_txn = True
+            # A flush that reached the wire clears the buffer whether it
+            # succeeded or not, so there is nothing left to commit and
+            # the transaction is over -- saying otherwise would strand
+            # the sender inside it and make the next `close(flush=True)`
+            # raise over the caller's own error. A flush refused before
+            # it got that far left the rows where they were, and the
+            # transaction is still the caller's to finish or roll back.
+            if (self._sender._buffer is not None
+                    and len(self._sender._buffer)):
+                self._sender._in_txn = True
+            else:
+                self._complete = True
             raise
         self._complete = True
 

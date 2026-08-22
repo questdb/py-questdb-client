@@ -4887,6 +4887,54 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_commit_whose_flush_fails_at_the_wire_ends_the_transaction(self):
+        """A flush that reached the wire clears the buffer whether it
+        succeeded or not, so there is nothing left to commit. Keeping
+        the transaction open there stranded the sender inside it: the
+        next `close(flush=True)` raised over the caller's own error, and
+        a retried commit found an empty buffer and reported success."""
+        conf = ('http::addr=127.0.0.1:1;retry_timeout=0;'
+                'auto_flush=off;protocol_version=2;')
+
+        # The sender survives, and `__exit__` does not raise over the
+        # commit failure the caller already handled.
+        with qi.Sender.from_conf(conf) as sender:
+            with self.assertRaises(qi.QuestDBError):
+                with sender.transaction('t') as txn:
+                    txn.row(columns={'ok': 1}, at=qi.ServerTimestamp)
+
+        # A retried commit says the transaction is over rather than
+        # reporting a success that sent nothing.
+        sender = qi.Sender.from_conf(conf)
+        sender.establish()
+        txn = sender.transaction('t')
+        txn.row(columns={'ok': 1}, at=qi.ServerTimestamp)
+        with self.assertRaises(qi.QuestDBError):
+            txn.commit()
+        self.assertEqual(len(sender), 0)
+        with self.assertRaisesRegex(
+                qi.QuestDBError, 'Transaction already completed'):
+            txn.commit()
+        # And the sender is usable: it is no longer inside a
+        # transaction, so a plain row and a new transaction both work.
+        sender.row('t', columns={'a': 1}, at=qi.ServerTimestamp)
+        sender.transaction('t2')
+        sender.close(flush=False)
+
+    def test_commit_on_a_closed_sender_says_so(self):
+        """`len(self._sender._buffer)` raised `TypeError: object of type
+        'NoneType' has no len()`, where `row()` and `dataframe()` both
+        name the closed sender."""
+        conf = ('http::addr=127.0.0.1:1;retry_timeout=0;'
+                'auto_flush=off;protocol_version=2;')
+        sender = qi.Sender.from_conf(conf)
+        sender.establish()
+        txn = sender.transaction('t')
+        sender.close(flush=False)
+        with self.assertRaisesRegex(
+                qi.QuestDBError, "commit\\(\\) can't be called: Sender is closed"):
+            txn.commit()
+
     def test_a_commit_that_cannot_flush_leaves_the_transaction_open(self):
         """`commit()` marked the transaction complete before the flush
         that carries it, so a refused flush closed the transaction with
