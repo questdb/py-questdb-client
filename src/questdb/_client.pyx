@@ -10213,7 +10213,7 @@ cdef class Sender:
         cdef direct_conn_source_t src
         cdef qdb_pystr_buf* ws_b = NULL
         cdef dataframe_plan_t ws_plan
-        cdef Buffer ws_owner = None
+        cdef line_sender_opts* ws_opts = NULL
         # The QWP/WebSocket branch below goes straight to its own
         # connection and never reaches `_dataframe`, where the same
         # check stands for every other route. Without it here, a frame
@@ -10227,25 +10227,21 @@ cdef class Sender:
                     QuestDBErrorCode.InvalidApiCall,
                     "dataframe() can't be called: Sender is closed.")
             src.db = NULL
-            src.opts = self._qwp_ws_opts
+            # The call owns its options for its whole length. The plan
+            # build below runs caller Python -- reading `attrs`,
+            # sniffing object cells, pulling an Arrow stream -- and any
+            # of that can call `close()`, which frees the sender's own
+            # options struct while `_direct_conn_open` has still to
+            # read it. Owning a clone is what makes that harmless,
+            # rather than a guard that has to name every route a close
+            # can arrive through, and it leaves the row buffer's own
+            # bookkeeping to mean only what it says.
+            ws_opts = line_sender_opts_clone(self._qwp_ws_opts)
+            if ws_opts == NULL:
+                raise MemoryError()
+            src.opts = ws_opts
             ws_b = qdb_pystr_buf_new()
             ws_plan = dataframe_plan_blank()
-            ws_owner = self._buffer
-            # Counted as a row in progress for as long as the run
-            # lasts. `src.opts` is the sender's own options struct, and
-            # the plan build below runs caller Python -- reading
-            # `attrs`, sniffing object cells, pulling an Arrow stream --
-            # any of which can call `close()`, which frees that struct
-            # while `_direct_conn_open` is still to read it. The
-            # row-serializing route gets this from `_dataframe`; this
-            # one has to say it itself.
-            # Held as a local for both ends of the count: reading
-            # `self._buffer` twice would leave the increment on one
-            # buffer and the decrement on another, or on none, and a
-            # count left standing refuses every later clear, flush and
-            # close on that buffer for good.
-            if ws_owner is not None:
-                ws_owner._row_depth += 1
             try:
                 _direct_dataframe_run(
                     &src,
@@ -10261,9 +10257,9 @@ cdef class Sender:
                     schema_overrides)
                 return self
             finally:
-                if ws_owner is not None:
-                    ws_owner._row_depth -= 1
                 qdb_pystr_buf_free(ws_b)
+                if ws_opts != NULL:
+                    line_sender_opts_free(ws_opts)
         if schema_overrides is not None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
