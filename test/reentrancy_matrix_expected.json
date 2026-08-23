@@ -1,0 +1,4682 @@
+{
+ "Buffer.dataframe | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.clear": {
+  "result": "refused",
+  "reason": "clear() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.close": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.close_drain": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once is only supported when qwp_ws_progress is manual.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | Sender.transaction": {
+  "result": "refused",
+  "reason": "Transactions are only supported for ILP/HTTP.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.clear": {
+  "result": "refused",
+  "reason": "clear() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Buffer.row": {
+  "result": "refused",
+  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.close": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.close_drain": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once is only supported when qwp_ws_progress is manual.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | Sender.transaction": {
+  "result": "refused",
+  "reason": "Transactions are only supported for ILP/HTTP.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this sender lease. It would return the sender to the pool while that call is still using it. C",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.close": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this sender lease. It would return the sender to the pool while that call is still using it. C",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | PooledSender.wait": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this QuestDB handle. It would wait for that call to finish, which cannot happen while the call",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this QuestDB handle. It would wait for that call to finish, which cannot happen while the call",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.error_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.execute": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.query": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.reader": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.reap_idle": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.sender": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written. `row()` is part-way through assembling a row and something it called has come back int",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.close": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written. `row()` is part-way through assembling a row and something it called has come back int",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written. `row()` is part-way through assembling a row and something it called has come back",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.flush": {
+  "result": "refused",
+  "reason": "flush() can't be called while a row is being written. `row()` is part-way through assembling a row and something it called has come back int",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.flush_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_get_fsn() can't be called while a row is being written. `row()` is part-way through assembling a row and something it called has c",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_keep_and_get_fsn() can't be called while a row is being written. `row()` is part-way through assembling a row and something it cal",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.row": {
+  "result": "refused",
+  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | PooledSender.wait": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this QuestDB handle. It would wait for that call to finish, which cannot happen while the call",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this QuestDB handle. It would wait for that call to finish, which cannot happen while the call",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.error_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.execute": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.query": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.reader": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.reap_idle": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.sender": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.close": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | PooledSender.wait": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this QuestDB handle. It would wait for that call to finish, which cannot happen while the call",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this QuestDB handle. It would wait for that call to finish, which cannot happen while the call",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.error_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.execute": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.query": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.reader": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.reap_idle": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.sender": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.clear": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.acked_fsn": {
+  "result": "refused",
+  "reason": "acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.await_acked_fsn": {
+  "result": "refused",
+  "reason": "await_acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.close": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.close_drain": {
+  "result": "refused",
+  "reason": "close_drain() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.error_events_dropped": {
+  "result": "refused",
+  "reason": "error_events_dropped() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.flush": {
+  "result": "refused",
+  "reason": "flush() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.flush_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_get_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.flush_and_keep_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_keep_and_get_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.poll_error": {
+  "result": "refused",
+  "reason": "poll_error() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.published_fsn": {
+  "result": "refused",
+  "reason": "published_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | Sender.transaction": {
+  "result": "refused",
+  "reason": "transaction() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it c",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.clear": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.close": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.close_drain": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once is only supported when qwp_ws_progress is manual.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | Sender.transaction": {
+  "result": "refused",
+  "reason": "Transactions are only supported for ILP/HTTP.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.clear": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.close": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.close_drain": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once is only supported when qwp_ws_progress is manual.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | Sender.transaction": {
+  "result": "refused",
+  "reason": "Transactions are only supported for ILP/HTTP.",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.clear": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.acked_fsn": {
+  "result": "refused",
+  "reason": "acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.await_acked_fsn": {
+  "result": "refused",
+  "reason": "await_acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.close": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.close_drain": {
+  "result": "refused",
+  "reason": "close_drain() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.error_events_dropped": {
+  "result": "refused",
+  "reason": "error_events_dropped() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.flush": {
+  "result": "refused",
+  "reason": "flush() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.flush_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_get_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.flush_and_keep_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_keep_and_get_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.poll_error": {
+  "result": "refused",
+  "reason": "poll_error() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.published_fsn": {
+  "result": "refused",
+  "reason": "published_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.row": {
+  "result": "refused",
+  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | Sender.transaction": {
+  "result": "refused",
+  "reason": "transaction() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it c",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.clear": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.close": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.close_drain": {
+  "result": "refused",
+  "reason": "close_drain() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it c",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once is only supported when qwp_ws_progress is manual.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.flush": {
+  "result": "refused",
+  "reason": "flush() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.flush_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_get_fsn() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and somethin",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.flush_and_keep_and_get_fsn": {
+  "result": "refused",
+  "reason": "flush_and_keep_and_get_fsn() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.row": {
+  "result": "refused",
+  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | Sender.transaction": {
+  "result": "refused",
+  "reason": "transaction() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it c",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.clear": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.acked_fsn": {
+  "result": "refused",
+  "reason": "acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.await_acked_fsn": {
+  "result": "refused",
+  "reason": "await_acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.close": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.close_drain": {
+  "result": "refused",
+  "reason": "close_drain() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.error_events_dropped": {
+  "result": "refused",
+  "reason": "error_events_dropped() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.flush": {
+  "result": "refused",
+  "reason": "Cannot flush explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.flush_and_get_fsn": {
+  "result": "refused",
+  "reason": "Cannot flush explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.flush_and_keep_and_get_fsn": {
+  "result": "refused",
+  "reason": "Cannot flush explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.poll_error": {
+  "result": "refused",
+  "reason": "poll_error() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.published_fsn": {
+  "result": "refused",
+  "reason": "published_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.row": {
+  "result": "refused",
+  "reason": "Cannot append rows explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | Sender.transaction": {
+  "result": "refused",
+  "reason": "transaction() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it c",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | SenderTransaction.__enter__": {
+  "result": "refused",
+  "reason": "Already inside a transaction, can't start another.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | SenderTransaction.__exit__": {
+  "result": "refused",
+  "reason": "commit() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | SenderTransaction.commit": {
+  "result": "refused",
+  "reason": "commit() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | SenderTransaction.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | SenderTransaction.rollback": {
+  "result": "refused",
+  "reason": "clear() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | SenderTransaction.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.clear": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Buffer.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.acked_fsn": {
+  "result": "refused",
+  "reason": "acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.await_acked_fsn": {
+  "result": "refused",
+  "reason": "await_acked_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.close": {
+  "result": "refused",
+  "reason": "close() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.close_drain": {
+  "result": "refused",
+  "reason": "close_drain() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.error_events_dropped": {
+  "result": "refused",
+  "reason": "error_events_dropped() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.flush": {
+  "result": "refused",
+  "reason": "Cannot flush explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.flush_and_get_fsn": {
+  "result": "refused",
+  "reason": "Cannot flush explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.flush_and_keep_and_get_fsn": {
+  "result": "refused",
+  "reason": "Cannot flush explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.poll_error": {
+  "result": "refused",
+  "reason": "poll_error() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.published_fsn": {
+  "result": "refused",
+  "reason": "published_fsn() is only supported for QWP/WebSocket senders.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.row": {
+  "result": "refused",
+  "reason": "Cannot append rows explicitly inside a transaction",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | Sender.transaction": {
+  "result": "refused",
+  "reason": "transaction() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it c",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | SenderTransaction.__enter__": {
+  "result": "refused",
+  "reason": "Already inside a transaction, can't start another.",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | SenderTransaction.__exit__": {
+  "result": "refused",
+  "reason": "commit() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | SenderTransaction.commit": {
+  "result": "refused",
+  "reason": "commit() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | SenderTransaction.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | SenderTransaction.rollback": {
+  "result": "refused",
+  "reason": "clear() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | SenderTransaction.row": {
+  "result": "refused",
+  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "outer_outcome": "completed"
+ }
+}
