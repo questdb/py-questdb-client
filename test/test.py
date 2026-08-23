@@ -5302,6 +5302,178 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             borrowed[0].close()
             db.close()
 
+    def test_a_lease_cannot_be_released_from_inside_its_own_dataframe(self):
+        """`dataframe()` on a lease runs the caller's Python for the whole
+        plan build. Returning the lease to the pool from there left the
+        rest of the call working against a closed lease, so every later
+        use in the enclosing block raised `Sender is closed`."""
+        if pd is None:
+            self.skipTest('pandas not installed')
+        outcome = []
+
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=0;sender_pool_max=2;'
+                    'query_pool_min=0;pool_reap=manual;') as db:
+                lease = db.sender()
+                other = db.sender()
+
+                class HostileFrame(pd.DataFrame):
+                    fired = False
+
+                    @property
+                    def attrs(self):
+                        if not HostileFrame.fired:
+                            HostileFrame.fired = True
+                            for name, target in (('own', lease),
+                                                 ('other', other)):
+                                try:
+                                    target.close()
+                                except qi.QuestDBError as exc:
+                                    outcome.append((name, exc))
+                                else:
+                                    outcome.append((name, None))
+                        return {}
+
+                    @attrs.setter
+                    def attrs(self, value):
+                        pass
+
+                lease.dataframe(
+                    HostileFrame({
+                        'v': [1],
+                        'ts': pd.to_datetime([0], unit='s')}),
+                    table_name='t', at='ts')
+
+                results = dict(outcome)
+                self.assertIsNotNone(
+                    results['own'],
+                    'the lease was released from inside its own call')
+                self.assertEqual(
+                    results['own'].code,
+                    qi.QuestDBErrorCode.InvalidApiCall)
+                self.assertIn(
+                    "close() can't be called from inside a call on this "
+                    'sender lease',
+                    str(results['own']))
+                # A lease that is not the one running the call has
+                # nothing to do with it and must still close.
+                self.assertIsNone(
+                    results['other'],
+                    'an unrelated lease was refused a legitimate close')
+
+                # The lease survived the refusal and still works.
+                lease.row('after', columns={'v': 1}, at=qi.ServerTimestamp)
+                lease.close()
+
+    def test_closing_a_sender_mid_row_covers_the_buffer_it_flushes(self):
+        """`close(flush=True)` flushes the sender's internal buffer, so
+        that is the buffer it holds to "no row part-way through". A
+        buffer of the caller's own is neither flushed nor checked: the
+        sender is never told which buffers exist. Its bytes survive; what
+        it loses is the sender that could have sent them."""
+        internal = []
+        external = []
+        own_buffer = None
+
+        class HostileTz(datetime.tzinfo):
+            """`at` is written last, so its conversion runs with the row
+            still part-way through."""
+
+            def __init__(self, log):
+                self.log = log
+
+            def utcoffset(self, dt):
+                if not self.log:
+                    try:
+                        sender.close()
+                    except qi.QuestDBError as exc:
+                        self.log.append(exc)
+                    else:
+                        self.log.append(None)
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        with Server() as server_sock:
+            sender = qi.Sender.from_conf(
+                f'tcp::addr=localhost:{server_sock.port};')
+            sender.establish()
+            server_sock.accept()
+            sender.row(
+                'internal', columns={'a': 1},
+                at=datetime.datetime(2020, 1, 1, tzinfo=HostileTz(internal)))
+            self.assertEqual(len(internal), 1)
+            self.assertIsNotNone(
+                internal[0], 'close() was allowed mid-row on the buffer '
+                'it flushes')
+            self.assertIn(
+                "can't be called while a row is being written",
+                str(internal[0]))
+            sender.close(flush=False)
+
+        with Server() as server_sock:
+            sender = qi.Sender.from_conf(
+                f'tcp::addr=localhost:{server_sock.port};')
+            sender.establish()
+            server_sock.accept()
+            own_buffer = sender.new_buffer()
+            own_buffer.row(
+                'external', columns={'a': 1},
+                at=datetime.datetime(2020, 1, 1, tzinfo=HostileTz(external)))
+            self.assertEqual(len(external), 1)
+            self.assertIsNone(
+                external[0],
+                'a buffer the sender was never handed is not its to '
+                'refuse on behalf of')
+            # The decision, pinned: no loss. The bytes are all there,
+            # and only the sender is gone.
+            self.assertIn(b'external a=1i', bytes(own_buffer))
+
+    def test_reading_a_sender_mid_row_is_allowed_and_may_end_mid_line(self):
+        """`bytes()` and `len()` are debug surfaces: they act on nothing,
+        so they are answered mid-row rather than refused. The answer is
+        the buffer as it stands, with the last line unterminated."""
+        snapshots = []
+
+        class HostileTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                if not snapshots:
+                    snapshots.append((bytes(sender), len(sender)))
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        with Server() as server_sock:
+            sender = qi.Sender.from_conf(
+                f'tcp::addr=localhost:{server_sock.port};')
+            sender.establish()
+            server_sock.accept()
+            sender.row('outer', columns={'a': 1}, at=qi.TimestampNanos(1))
+            sender.row(
+                'inner', columns={'b': 2},
+                at=datetime.datetime(2020, 1, 1, tzinfo=HostileTz()))
+            self.assertEqual(len(snapshots), 1)
+            mid_row_bytes, mid_row_len = snapshots[0]
+            self.assertEqual(mid_row_bytes, b'outer a=1i 1\ninner b=2i')
+            self.assertEqual(mid_row_len, len(mid_row_bytes))
+            self.assertFalse(
+                mid_row_bytes.endswith(b'\n'),
+                'the row was still being written, so its line is not '
+                'terminated yet')
+            # And the finished row does terminate.
+            self.assertTrue(bytes(sender).endswith(b'\n'))
+            sender.close(flush=False)
+
     def test_closing_a_handle_from_inside_a_lease_call_is_refused(self):
         """A lease is counted in the handle's total alone -- it is handed
         out by `sender()` and may be returned from another thread -- so

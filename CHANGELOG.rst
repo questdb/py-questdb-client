@@ -208,6 +208,29 @@ Fixed
   again now gets ``Transaction already completed`` where it previously made
   a second attempt.
 
+- **A pooled lease cannot be returned to the pool from inside its own
+  ``dataframe()``.** The plan build runs your Python — reading ``attrs``,
+  sniffing object cells, pulling ``__arrow_c_stream__`` — and closing the
+  lease from there left the rest of that call working against a lease that
+  was already back in the pool, so every later use in the enclosing block
+  raised ``Sender is closed``. Closing a *different* lease from there is
+  unaffected: it has nothing to do with the call that is running.
+
+- **``close()`` says which buffer it holds to "no row part-way through".**
+  It is the sender's internal buffer, because that is the buffer
+  ``close(flush=True)`` flushes. A buffer of your own from ``new_buffer()``
+  is neither flushed nor checked there — the sender is never told which
+  buffers exist. Nothing is lost if you close mid-row on one of those: every
+  byte stays in your buffer. What you lose is the sender that could have
+  sent it, so finish the row and flush before closing. This is now written
+  down on ``close()`` rather than left to be discovered.
+
+- **``bytes(sender)`` and ``len(sender)`` are answered mid-row, not
+  refused**, and the answer may end mid-line. They read and act on nothing,
+  so a snapshot taken from inside a column conversion is the honest state of
+  the buffer at that moment; every call that would *change* the buffer is
+  still refused there.
+
 - **``QuestDB.close()`` from inside a pooled lease's own call is refused
   instead of hanging.** ``close()`` waits for outstanding leases to come
   back, and a lease's ``row()`` runs your Python for every column value

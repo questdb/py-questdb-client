@@ -1411,13 +1411,22 @@ cdef class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(buffer))``.
+        Equivalent (but cheaper) to ``len(bytes(buffer))``, and read
+        mid-row on the same terms -- see :func:`Buffer.__bytes__`.
         """
         self._check_impl()
         return line_sender_buffer_size(self._impl)
 
     def __bytes__(self) -> bytes:
-        """Return the constructed buffer as bytes. Use for debugging."""
+        """Return the constructed buffer as bytes. Use for debugging.
+
+        Read from inside a part-written row -- from a column value whose
+        conversion runs Python -- this returns the buffer as it stands,
+        so the last line has no terminator yet. That is deliberate: a
+        read changes nothing, and a snapshot of a buffer mid-row is an
+        honest answer to what the buffer holds at that moment. Every
+        call that would *act* on the buffer is refused there instead.
+        """
         return self._to_bytes()
 
     cdef inline object _to_bytes(self):
@@ -10126,6 +10135,11 @@ cdef class Sender:
         is deferred to flush. Use :func:`Sender.__len__` instead for a
         size estimate.
 
+        Read from inside a part-written row this returns the buffer as
+        it stands, with the last line unterminated; see
+        :func:`Buffer.__bytes__` for why that is allowed where every
+        call that acts on the buffer is refused.
+
         Also see :func:`Sender.__len__`.
         """
         if self._buffer is None:
@@ -10787,13 +10801,24 @@ cdef class Sender:
         :param bool flush: If ``True``, flush the internal buffer before closing.
             For QWP/WebSocket, this also drains already-published frames before
             closing.
+
+        Refused while a row is part-way through the sender's **internal**
+        buffer, which is the buffer this call flushes. A buffer of your
+        own from :func:`Sender.new_buffer` is neither flushed nor checked
+        here: the sender is never told which buffers exist, so it cannot
+        refuse on their behalf. Such a buffer keeps every byte written
+        into it, but a sender closed out from under it can no longer send
+        it — finish the row and flush it before closing.
         """
         self._check_not_in_own_callback('close')
-        # Refused outright while a row is part-way through, not merely
-        # by way of the flush below: `_close()` runs from the `finally`
-        # whatever the flush does, so a refusal there would still close
-        # the sender and take the already-buffered rows with it. With
-        # `flush=False` there is no flush to refuse at all.
+        # The internal buffer is the one this call flushes, so it is the
+        # one held to "no row part-way through" -- the same rule
+        # `flush(buffer)` applies to whichever buffer it was handed.
+        # Refused outright rather than by way of the flush below:
+        # `_close()` runs from the `finally` whatever the flush does, so
+        # a refusal there would still close the sender and take the
+        # already-buffered rows with it. With `flush=False` there is no
+        # flush to refuse at all.
         if self._buffer is not None:
             self._buffer._check_not_in_row('close')
         try:
