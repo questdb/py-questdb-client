@@ -1,0 +1,48 @@
+name: Enumerated grids
+
+# The two grids that ended the PR #140 review cycle. Deliberately not a
+# pull-request gate: they spawn a subprocess per re-entrancy cell and take
+# minutes, and a gate that slow gets skipped rather than read. They run
+# nightly, and on demand from the Actions tab when a change touches the
+# guard, claim, or dataframe-planner areas.
+on:
+  schedule:
+    # 03:20 UTC, off the hour so it does not queue behind everyone else's
+    # midnight cron.
+    - cron: '20 3 * * *'
+  workflow_dispatch:
+    inputs:
+      guard_malloc:
+        description: >-
+          Re-run every 'clean' re-entrancy cell under Guard Malloc.
+          Much slower; finds a freed read that ordinary allocation hides.
+        type: boolean
+        default: false
+
+jobs:
+  grids:
+    name: re-entrancy + claim grids
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          set -o errexit
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r dev_requirements.txt
+      - name: Build
+        run: python3 proj.py build
+      - name: Re-entrancy grid
+        run: python3 proj.py grid reentrancy
+      - name: Claim grid
+        run: python3 proj.py grid claim
+      - name: Re-entrancy grid under Guard Malloc
+        if: inputs.guard_malloc
+        run: python3 proj.py grid reentrancy --guard
