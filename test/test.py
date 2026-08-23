@@ -4668,6 +4668,117 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self._raw_geohash_stream([7, 8, 1000], batch_offset=1),
                 table_name='raw_batch_offset', at='ts')
 
+    def _geohash_metadata_blob(self, pairs, bits=b'5'):
+        """Field metadata carrying the claim behind `pairs` filler pairs,
+        so a walk bounded at 4096 pairs runs out before reaching it."""
+        blob = {}
+        for i in range(pairs):
+            blob[f'filler.{i}'.encode()] = b'x'
+        blob[b'questdb.column_type'] = b'geohash'
+        blob[b'questdb.geohash_bits'] = bits
+        return blob
+
+    def _geohash_claim_verdict(self, metadata, in_range=7, out_of_range=1000):
+        """Who sees the claim on a column carrying `metadata`.
+
+        Answered by sending twice. A value in range says whether the
+        column reaches the database as a GEOHASH at all, and a value
+        the precision cannot hold says which layer turned it away: this
+        client's own scan runs before a connection is opened and names
+        the row, and the encoder's bound runs at the truncation and
+        names the value. Returns ``(wire type, refused-by)``.
+        """
+        def stream(values):
+            stamp = struct.pack('<q', 1735689600000000)
+            return _RawArrowStream(
+                [dict(format=b'i', name=b'gh',
+                      data=struct.pack('<%di' % len(values), *values),
+                      metadata=metadata),
+                 dict(format=b'tsu:UTC', name=b'ts',
+                      data=stamp * len(values))],
+                len(values), 0)
+
+        types = dict(_first_qwp_table_column_types(
+            self._dataframe_wire_payload(
+                stream([in_range]), table_name='gh_agree', at='ts')))
+        try:
+            self._dataframe_wire_payload(
+                stream([out_of_range]), table_name='gh_agree', at='ts')
+        except qi.QuestDBError as exc:
+            text = str(exc)
+            if 'values must be in the range' in text:
+                refused_by = 'client scan'
+            elif 'cannot carry' in text:
+                refused_by = 'encoder'
+            else:
+                refused_by = f'other: {text[:80]}'
+        else:
+            refused_by = None
+        return types['gh'], refused_by
+
+    def test_the_two_geohash_claim_parsers_agree_on_every_spelling(self):
+        """The client's claim detection is a hand-written mirror of the
+        importer's, in a different language, and this repo bumps the
+        submodule routinely. While two parsers exist, something has to
+        hold them to the same answer.
+
+        Each spelling is measured rather than reasoned about: a value in
+        range says whether the column lands as a GEOHASH, and a value
+        the precision cannot hold says which side turned it away. The
+        client's scan runs first, so 'client scan' means both parsers
+        read the claim; 'encoder' means only the importer did.
+        """
+        claim = {b'questdb.column_type': b'geohash'}
+        cases = (
+            # (name, metadata, expected wire type, expected refuser)
+            ('plain', {**claim, b'questdb.geohash_bits': b'5'},
+             0x0E, 'client scan'),
+            ('leading zeros', {**claim, b'questdb.geohash_bits': b'005'},
+             0x0E, 'client scan'),
+            ('leading plus', {**claim, b'questdb.geohash_bits': b'+5'},
+             0x0E, 'client scan'),
+            # `questdb.geohash_bits` alone makes the column a GEOHASH:
+            # that is the key the importer keys off, and the client
+            # mirrors the order.
+            ('bits alone', {b'questdb.geohash_bits': b'5'},
+             0x0E, 'client scan'),
+            # Behind a blob longer than the client's bounded walk. The
+            # importer walks it unbounded and honours the claim; the
+            # client cannot read it and leaves the values to the
+            # encoder, which is where the bound now lives.
+            ('behind a 4096-pair blob', self._geohash_metadata_blob(4096),
+             0x0E, 'encoder'),
+        )
+        for name, metadata, wire_type, refused_by in cases:
+            with self.subTest(spelling=name):
+                got_type, got_refuser = self._geohash_claim_verdict(metadata)
+                self.assertEqual(
+                    got_type, wire_type,
+                    f'{name}: the importer landed the column as '
+                    f'0x{got_type:02X}, not 0x{wire_type:02X}')
+                self.assertEqual(
+                    got_refuser, refused_by,
+                    f'{name}: an out-of-range value was turned away by '
+                    f'{got_refuser}, not {refused_by}. The two claim '
+                    f'parsers have drifted, or the encoder bound has '
+                    f'gone.')
+
+    def test_a_claim_this_side_cannot_read_is_left_to_the_encoder(self):
+        """A metadata blob longer than the client's bounded walk used to
+        stop the send outright, because nothing downstream would have
+        caught an out-of-range value. The encoder holds every GEOHASH
+        value to its precision now, so a column this scan cannot read is
+        passed on: refusing it turned away a column that may be entirely
+        in range, over the length of the caller's metadata rather than
+        anything about their values."""
+        metadata = self._geohash_metadata_blob(4096)
+        wire_type, refused_by = self._geohash_claim_verdict(metadata)
+        self.assertEqual(wire_type, 0x0E)
+        self.assertEqual(
+            refused_by, 'encoder',
+            'nothing bounded the value, so the truncated geohash '
+            'reached the database as a location somewhere else')
+
     def test_geohash_claim_this_side_cannot_check_stops_the_send(self):
         # The encoder writes the low bytes of whatever it is handed and
         # reports nothing, so a claimed column that goes out unread
