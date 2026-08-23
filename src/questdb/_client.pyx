@@ -8195,6 +8195,26 @@ cdef class QuestDB:
         finally:
             self._state_cond.release()
 
+    cdef void _enter_scoped_call(self) except *:
+        """Count a call that borrows nothing but runs on this handle.
+
+        A lease's own methods are scoped in exactly the sense
+        `_begin_db_use` means: the call begins and ends inside one frame
+        on one thread. Counting them here is what lets `close()` tell a
+        caller waiting on other threads from one waiting on the very
+        frame that would release the lease it is waiting for.
+
+        `_active_uses` is deliberately untouched: the lease already
+        holds one for its whole lifetime, and it may be released from a
+        different thread than the one that borrowed it.
+        """
+        self._use_depth.value = (
+            getattr(self._use_depth, 'value', 0) + 1)
+
+    cdef void _exit_scoped_call(self) except *:
+        self._use_depth.value = (
+            getattr(self._use_depth, 'value', 0) - 1)
+
     cdef void _end_db_use(self, bint scoped=True) except *:
         self._state_cond.acquire()
         try:
@@ -10829,6 +10849,7 @@ cdef class PooledSender:
     cdef Buffer _buffer
     cdef object _lock
     cdef int64_t _batch_started_ms
+    cdef int64_t _call_depth
 
     def __cinit__(self):
         self._qwp = NULL
@@ -10837,6 +10858,7 @@ cdef class PooledSender:
         self._buffer = None
         self._lock = threading.RLock()
         self._batch_started_ms = 0
+        self._call_depth = 0
 
     cdef void _attach(
             self,
@@ -10875,6 +10897,56 @@ cdef class PooledSender:
                 "and something it called has come back into this sender, "
                 "most likely a column value whose conversion runs Python "
                 "code.")
+
+    cdef QuestDB _enter_call_locked(self):
+        """Count one of this lease's own calls, on the lease and on the
+        handle it was borrowed from. Called with `self._lock` held.
+
+        Every public method of this class counts, whether or not it looks
+        like it runs the caller's Python: the list of methods that do has
+        been wrong once per review round, and a counter that is raised
+        everywhere cannot be short one entry. The returned handle is the
+        one to pass back to `_exit_call_locked`, because the lease drops
+        its own reference when it is released.
+
+        The two counts answer different questions. The handle's is
+        per-thread and shared by every lease and call on that handle, so
+        `QuestDB.close()` can see that the frame it would wait for is its
+        own caller. The lease's own is per-lease, so `close()` can refuse
+        to return the sender to the pool from inside a call still using
+        it without refusing to close some unrelated lease.
+        """
+        cdef QuestDB handle = self._handle
+        self._call_depth += 1
+        if handle is not None:
+            handle._enter_scoped_call()
+        return handle
+
+    cdef void _exit_call_locked(self, QuestDB handle) except *:
+        self._call_depth -= 1
+        if handle is not None:
+            handle._exit_scoped_call()
+
+    cdef void_int _check_not_mid_call(self, str method) except -1:
+        """
+        Refuse a call that would end this lease while one of its own
+        calls is still running.
+
+        `dataframe()` runs the caller's Python for the whole plan build --
+        reading `attrs`, sniffing object cells, pulling
+        `__arrow_c_stream__` -- and `row()` runs it for every column
+        value whose conversion is not pure C. That code can come back
+        here. Returning the sender to the pool from inside it leaves the
+        rest of the call working against a lease that is already closed,
+        so every later use in the enclosing block raises.
+        """
+        if self._call_depth != 0:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{method}() can't be called from inside a call on this "
+                'sender lease. It would return the sender to the pool '
+                'while that call is still using it. Close the lease '
+                'after the call returns.')
 
     cdef bint _should_auto_flush_locked(self) except -1:
         cdef auto_flush_mode_t* mode = &self._handle._auto_flush_mode
@@ -11018,6 +11090,7 @@ cdef class PooledSender:
         cdef bint starts_batch
         cdef bint auto_flush
         cdef Buffer buf
+        cdef QuestDB handle
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -11025,39 +11098,43 @@ cdef class PooledSender:
                 "ServerTimestamp")
         with self._lock:
             self._check_open('row')
-            # The lease holds the only reference to the buffer, and a
-            # column value whose conversion runs Python code can reach
-            # back in here. A strong local reference keeps the buffer
-            # alive for the whole row, including its cleanup.
-            buf = self._buffer
-            starts_batch = (
-                line_sender_buffer_row_count(buf._impl) == 0)
-            buf._row(
-                False, table_name, symbols, columns, at, True)
-            if starts_batch:
-                self._batch_started_ms = line_sender_now_micros() // 1000
+            handle = self._enter_call_locked()
             try:
-                auto_flush = self._should_auto_flush_locked()
-            except:
-                buf._clear_marker()
-                raise
-            if not auto_flush:
-                buf._clear_marker()
-                return self
-            try:
-                self._flush_locked(False)
-            except QuestDBError as exc:
-                if (starts_batch and
-                        exc.code == QuestDBErrorCode.BatchTooLarge):
-                    buf._rewind_to_marker()
-                    self._batch_started_ms = 0
-                else:
+                # The lease holds the only reference to the buffer, and a
+                # column value whose conversion runs Python code can reach
+                # back in here. A strong local reference keeps the buffer
+                # alive for the whole row, including its cleanup.
+                buf = self._buffer
+                starts_batch = (
+                    line_sender_buffer_row_count(buf._impl) == 0)
+                buf._row(
+                    False, table_name, symbols, columns, at, True)
+                if starts_batch:
+                    self._batch_started_ms = line_sender_now_micros() // 1000
+                try:
+                    auto_flush = self._should_auto_flush_locked()
+                except:
                     buf._clear_marker()
-                raise
-            except:
+                    raise
+                if not auto_flush:
+                    buf._clear_marker()
+                    return self
+                try:
+                    self._flush_locked(False)
+                except QuestDBError as exc:
+                    if (starts_batch and
+                            exc.code == QuestDBErrorCode.BatchTooLarge):
+                        buf._rewind_to_marker()
+                        self._batch_started_ms = 0
+                    else:
+                        buf._clear_marker()
+                    raise
+                except:
+                    buf._clear_marker()
+                    raise
                 buf._clear_marker()
-                raise
-            buf._clear_marker()
+            finally:
+                self._exit_call_locked(handle)
         return self
 
     def dataframe(
@@ -11089,15 +11166,25 @@ cdef class PooledSender:
         with self._lock:
             self._check_open('dataframe')
             self._check_not_in_row('dataframe')
-            handle = self._handle
-        handle.dataframe(
-            df,
-            table_name=table_name,
-            table_name_col=table_name_col,
-            symbols=symbols,
-            at=at,
-            max_rows_per_batch=max_rows_per_batch,
-            schema_overrides=schema_overrides)
+            handle = self._enter_call_locked()
+        # The lock is released for the run: the frame is loaded over the
+        # handle's own connection, not this lease's, and holding the lock
+        # across a bulk load would block every other thread sharing the
+        # lease for its whole duration. The call count stays raised, so a
+        # `close()` arriving from the caller's Python mid-plan is refused
+        # rather than pulling the lease out from under the run.
+        try:
+            handle.dataframe(
+                df,
+                table_name=table_name,
+                table_name_col=table_name_col,
+                symbols=symbols,
+                at=at,
+                max_rows_per_batch=max_rows_per_batch,
+                schema_overrides=schema_overrides)
+        finally:
+            with self._lock:
+                self._exit_call_locked(handle)
         return self
 
     def __len__(self):
@@ -11118,8 +11205,13 @@ cdef class PooledSender:
         (default: the ``questdb`` logger) instead; retriable ones are
         replayed by the store-and-forward queue.
         """
+        cdef QuestDB handle
         with self._lock:
-            self._flush_locked(wait)
+            handle = self._enter_call_locked()
+            try:
+                self._flush_locked(wait)
+            finally:
+                self._exit_call_locked(handle)
         return self
 
     def wait(self, timeout_millis=0):
@@ -11137,9 +11229,14 @@ cdef class PooledSender:
             raise TypeError('"timeout_millis" must be a non-negative int.')
         if timeout_millis < 0:
             raise ValueError('timeout_millis must be non-negative.')
+        cdef QuestDB handle
         with self._lock:
             self._check_open('wait')
-            self._wait_locked(<uint64_t>timeout_millis)
+            handle = self._enter_call_locked()
+            try:
+                self._wait_locked(<uint64_t>timeout_millis)
+            finally:
+                self._exit_call_locked(handle)
         return self
 
     def flush_and_get_fsn(self):
@@ -11160,17 +11257,22 @@ cdef class PooledSender:
         cdef PyThreadState* gs = NULL
         cdef line_sender_qwpws_fsn fsn
         cdef bint ok = False
+        cdef QuestDB handle
         with self._lock:
             self._check_open('flush_and_get_fsn')
             self._check_not_in_row('flush_and_get_fsn')
-            _ensure_doesnt_have_gil(&gs)
-            ok = qwp_sender_flush_buffer_and_get_fsn(
-                self._qwp, self._buffer._impl, &fsn, &err)
-            _ensure_has_gil(&gs)
-            if not ok:
-                raise c_err_to_py(err)
-            qdb_pystr_buf_clear(self._buffer._b)
-            self._batch_started_ms = 0
+            handle = self._enter_call_locked()
+            try:
+                _ensure_doesnt_have_gil(&gs)
+                ok = qwp_sender_flush_buffer_and_get_fsn(
+                    self._qwp, self._buffer._impl, &fsn, &err)
+                _ensure_has_gil(&gs)
+                if not ok:
+                    raise c_err_to_py(err)
+                qdb_pystr_buf_clear(self._buffer._b)
+                self._batch_started_ms = 0
+            finally:
+                self._exit_call_locked(handle)
         return fsn.value if fsn.has_value else None
 
     def flush_and_keep_and_get_fsn(self):
@@ -11182,17 +11284,23 @@ cdef class PooledSender:
         cdef PyThreadState* gs = NULL
         cdef line_sender_qwpws_fsn fsn
         cdef bint ok = False
+        cdef QuestDB handle
         with self._lock:
             self._check_open('flush_and_keep_and_get_fsn')
             self._check_not_in_row('flush_and_keep_and_get_fsn')
-            _ensure_doesnt_have_gil(&gs)
-            ok = qwp_sender_flush_buffer_and_keep_and_get_fsn(
-                self._qwp, self._buffer._impl, &fsn, &err)
-            _ensure_has_gil(&gs)
-            if not ok:
-                raise c_err_to_py(err)
-            if fsn.has_value:
-                self._batch_started_ms = line_sender_now_micros() // 1000
+            handle = self._enter_call_locked()
+            try:
+                _ensure_doesnt_have_gil(&gs)
+                ok = qwp_sender_flush_buffer_and_keep_and_get_fsn(
+                    self._qwp, self._buffer._impl, &fsn, &err)
+                _ensure_has_gil(&gs)
+                if not ok:
+                    raise c_err_to_py(err)
+                if fsn.has_value:
+                    self._batch_started_ms = (
+                        line_sender_now_micros() // 1000)
+            finally:
+                self._exit_call_locked(handle)
         return fsn.value if fsn.has_value else None
 
     def poll_error(self):
@@ -11278,6 +11386,7 @@ cdef class PooledSender:
         cdef uint64_t c_timeout_millis
         cdef line_sender_qwpws_fsn acked
         cdef bint ok = False
+        cdef QuestDB handle
         if not isinstance(fsn, int) or isinstance(fsn, bool):
             raise TypeError('"fsn" must be a non-negative int.')
         if fsn < 0:
@@ -11290,30 +11399,36 @@ cdef class PooledSender:
         c_timeout_millis = timeout_millis
         with self._lock:
             self._check_open('await_acked_fsn')
-            if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
-                raise c_err_to_py(err)
-            if acked.has_value and acked.value >= c_fsn:
-                return True
-            # The barrier drains every frame published so far (a superset
-            # of ``fsn``); a no-progress expiry surfaces as FailoverRetry.
-            _ensure_doesnt_have_gil(&gs)
-            ok = qwp_sender_wait(
-                self._qwp,
-                qwpws_ack_level.qwpws_ack_level_ok,
-                c_timeout_millis,
-                &err)
-            _ensure_has_gil(&gs)
-            if not ok:
-                if line_sender_error_get_code(err) != \
-                        line_sender_error_failover_retry:
+            handle = self._enter_call_locked()
+            try:
+                if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
                     raise c_err_to_py(err)
-                line_sender_error_free(err)
-                err = NULL
-            # Re-read the watermark: the wait either drained ``fsn`` or
-            # expired with no progress; the current ack level is the answer.
-            if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
-                raise c_err_to_py(err)
-            return bool(acked.has_value and acked.value >= c_fsn)
+                if acked.has_value and acked.value >= c_fsn:
+                    return True
+                # The barrier drains every frame published so far (a
+                # superset of ``fsn``); a no-progress expiry surfaces as
+                # FailoverRetry.
+                _ensure_doesnt_have_gil(&gs)
+                ok = qwp_sender_wait(
+                    self._qwp,
+                    qwpws_ack_level.qwpws_ack_level_ok,
+                    c_timeout_millis,
+                    &err)
+                _ensure_has_gil(&gs)
+                if not ok:
+                    if line_sender_error_get_code(err) != \
+                            line_sender_error_failover_retry:
+                        raise c_err_to_py(err)
+                    line_sender_error_free(err)
+                    err = NULL
+                # Re-read the watermark: the wait either drained ``fsn``
+                # or expired with no progress; the current ack level is
+                # the answer.
+                if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
+                    raise c_err_to_py(err)
+                return bool(acked.has_value and acked.value >= c_fsn)
+            finally:
+                self._exit_call_locked(handle)
 
     def close(self, flush: bool=True, wait: bool=False):
         """
@@ -11326,13 +11441,22 @@ cdef class PooledSender:
         rejection of this lease's rows is reported through the pool's
         ``error_handler`` (default: the ``questdb`` logger).
         """
+        cdef QuestDB handle
         with self._lock:
+            # A part-way-through row is the sharper diagnosis and names
+            # the buffer, so it is asked first; the broader "inside one
+            # of this lease's own calls" answers everything else.
             self._check_not_in_row('close')
+            self._check_not_mid_call('close')
+            handle = self._enter_call_locked()
             try:
-                if flush and self._qwp != NULL:
-                    self._flush_locked(wait)
+                try:
+                    if flush and self._qwp != NULL:
+                        self._flush_locked(wait)
+                finally:
+                    self._release_locked()
             finally:
-                self._release_locked()
+                self._exit_call_locked(handle)
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
         self.close(exc_type is None, False)
@@ -11378,12 +11502,14 @@ cdef class PooledReader:
     cdef _ReaderHandle _reader
     cdef _CursorHandle _last_cursor
     cdef object _lock
+    cdef int64_t _call_depth
 
     def __cinit__(self):
         self._handle = None
         self._reader = None
         self._last_cursor = None
         self._lock = threading.RLock()
+        self._call_depth = 0
 
     cdef void _attach(
             self,
@@ -11397,6 +11523,45 @@ cdef class PooledReader:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f"{method}() can't be called: the reader lease is closed.")
+
+    cdef QuestDB _enter_call_locked(self):
+        """Count one of this lease's own calls, on the lease and on the
+        handle it was borrowed from. Called with `self._lock` held.
+
+        The mirror of `PooledSender._enter_call_locked`, and for the same
+        two reasons: `QuestDB.close()` has to be able to see that the
+        frame it would wait for is its own caller, and `close()` here has
+        to be able to tell a call on *this* lease from a call somewhere
+        else on the handle.
+
+        A query runs the caller's Python while it holds the lease --
+        `_bind_query_params` reads `value.bytes` off every bind parameter
+        it is handed -- so this is the read side's re-entrancy window.
+        """
+        cdef QuestDB handle = self._handle
+        self._call_depth += 1
+        if handle is not None:
+            handle._enter_scoped_call()
+        return handle
+
+    cdef void _exit_call_locked(self, QuestDB handle) except *:
+        self._call_depth -= 1
+        if handle is not None:
+            handle._exit_scoped_call()
+
+    cdef void_int _check_not_mid_call(self, str method) except -1:
+        """
+        Refuse a call that would end this lease while one of its own
+        calls is still running: the reader connection would go back to
+        the pool with the call still reading from it.
+        """
+        if self._call_depth != 0:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{method}() can't be called from inside a call on this "
+                'reader lease. It would release the connection while '
+                'that call is still using it. Close the lease after the '
+                'call returns.')
 
     cdef void _release_locked(self) except *:
         cdef _ReaderHandle reader = self._reader
@@ -11437,31 +11602,36 @@ cdef class PooledReader:
         """
         cdef _CursorHandle cursor_handle
         cdef _CursorHandle last
+        cdef QuestDB handle
         if binds is not None and not isinstance(binds, (list, tuple)):
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
         with self._lock:
             self._check_open('query')
-            last = self._last_cursor
-            if last is not None:
-                if last._is_live():
-                    raise QuestDBError(
-                        QuestDBErrorCode.InvalidApiCall,
-                        'the previous QueryResult is still open: drain '
-                        'it fully or close() it before running the next '
-                        'query on this lease.')
-                if self._reader._must_close:
-                    raise QuestDBError(
-                        QuestDBErrorCode.InvalidApiCall,
-                        "the lease's connection is terminal: the "
-                        'previous query was not drained to its clean '
-                        'end, so its transport was torn down. close() '
-                        'this lease and obtain a new one with '
-                        'QuestDB.reader().')
-            cursor_handle = _execute_query(
-                self._reader, sql, binds, reset_symbol_dict, False)
-            self._last_cursor = cursor_handle
+            handle = self._enter_call_locked()
+            try:
+                last = self._last_cursor
+                if last is not None:
+                    if last._is_live():
+                        raise QuestDBError(
+                            QuestDBErrorCode.InvalidApiCall,
+                            'the previous QueryResult is still open: '
+                            'drain it fully or close() it before '
+                            'running the next query on this lease.')
+                    if self._reader._must_close:
+                        raise QuestDBError(
+                            QuestDBErrorCode.InvalidApiCall,
+                            "the lease's connection is terminal: the "
+                            'previous query was not drained to its '
+                            'clean end, so its transport was torn '
+                            'down. close() this lease and obtain a new '
+                            'one with QuestDB.reader().')
+                cursor_handle = _execute_query(
+                    self._reader, sql, binds, reset_symbol_dict, False)
+                self._last_cursor = cursor_handle
+            finally:
+                self._exit_call_locked(handle)
         return QueryResult(cursor_handle)
 
     def execute(self, str sql, object binds=None):
@@ -11475,13 +11645,19 @@ cdef class PooledReader:
         interleaved statement does not invalidate a warm dictionary
         built with ``reset_symbol_dict=False``.
         """
+        cdef QuestDB handle
         with self._lock:
             self._check_open('execute')
-        result = self.query(sql, binds, reset_symbol_dict=False)
+            handle = self._enter_call_locked()
         try:
-            result._drain()
+            result = self.query(sql, binds, reset_symbol_dict=False)
+            try:
+                result._drain()
+            finally:
+                result.close()
         finally:
-            result.close()
+            with self._lock:
+                self._exit_call_locked(handle)
 
     def close(self):
         """
@@ -11492,8 +11668,14 @@ cdef class PooledReader:
         returned to the pool, any other is dropped and the pool refills
         on demand.
         """
+        cdef QuestDB handle
         with self._lock:
-            self._release_locked()
+            self._check_not_mid_call('close')
+            handle = self._enter_call_locked()
+            try:
+                self._release_locked()
+            finally:
+                self._exit_call_locked(handle)
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
         self.close()

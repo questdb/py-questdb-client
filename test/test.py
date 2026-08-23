@@ -5302,6 +5302,122 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             borrowed[0].close()
             db.close()
 
+    def test_closing_a_handle_from_inside_a_lease_call_is_refused(self):
+        """A lease is counted in the handle's total alone -- it is handed
+        out by `sender()` and may be returned from another thread -- so
+        the per-thread count that catches a self-waiting `close()` could
+        not see one, and a `close()` from inside a lease's own call waited
+        forever on the frame that called it.
+
+        A lease *method call* is scoped in the sense that count means: it
+        begins and ends inside one call on one thread. Counting it there
+        makes the existing refusal fire."""
+        outcome = []
+        hostile_ran = threading.Event()
+
+        class HostileAddr(ipaddress.IPv4Address):
+            """Its conversion to an int is pure Python, so it runs inside
+            `row()`, between the row starting and the row finishing."""
+
+            def __int__(self):
+                hostile_ran.set()
+                try:
+                    db.close()
+                except qi.QuestDBError as exc:
+                    outcome.append(exc)
+                else:
+                    outcome.append(None)
+                return 0x01020304
+
+        with QwpAckServer() as server:
+            db = qi.QuestDB.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=0;sender_pool_max=1;'
+                'query_pool_min=0;pool_reap=manual;')
+            lease = db.sender()
+            worker = threading.Thread(
+                target=lambda: lease.row(
+                    'hostile',
+                    columns={'ip': HostileAddr('192.0.2.1')},
+                    at=qi.ServerTimestamp),
+                daemon=True)
+            worker.start()
+            worker.join(20)
+            self.assertTrue(
+                hostile_ran.is_set(), 'the conversion never ran')
+            # A hung close() holds the lease's lock and the handle's
+            # condition, so nothing below could clean up. Report the
+            # hang and leave the daemon thread to die with the process.
+            self.assertFalse(
+                worker.is_alive(),
+                'close() hung inside a lease call instead of being '
+                'refused')
+            self.assertEqual(len(outcome), 1)
+            self.assertIsNotNone(
+                outcome[0], 'close() was allowed inside a lease call')
+            self.assertEqual(
+                outcome[0].code, qi.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn(
+                "close() can't be called from inside a call on this "
+                'QuestDB handle',
+                str(outcome[0]))
+            # The handle survives the refusal and still works.
+            lease.row('after', columns={'v': 1}, at=qi.ServerTimestamp)
+            lease.close()
+            db.close()
+
+    def test_a_lease_call_does_not_refuse_a_close_from_another_thread(self):
+        """Only the thread running the lease call is waiting on itself.
+        A `close()` on any other thread is a legitimate wait, and must
+        still wait rather than be refused."""
+        in_row = threading.Event()
+        release = threading.Event()
+        closed = []
+
+        class SlowAddr(ipaddress.IPv4Address):
+            def __int__(self):
+                in_row.set()
+                release.wait(20)
+                return 0x01020304
+
+        with QwpAckServer() as server:
+            db = qi.QuestDB.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};'
+                'sender_pool_min=0;sender_pool_max=1;'
+                'query_pool_min=0;pool_reap=manual;')
+            lease = db.sender()
+            writer = threading.Thread(
+                target=lambda: lease.row(
+                    'slow', columns={'ip': SlowAddr('192.0.2.1')},
+                    at=qi.ServerTimestamp),
+                daemon=True)
+            writer.start()
+            self.assertTrue(in_row.wait(20))
+
+            def close_from_elsewhere():
+                try:
+                    db.close()
+                except qi.QuestDBError as exc:
+                    closed.append(exc)
+                else:
+                    closed.append(None)
+
+            closer = threading.Thread(
+                target=close_from_elsewhere, daemon=True)
+            closer.start()
+            # It must still be waiting on the lease, not refused.
+            closer.join(1.0)
+            self.assertTrue(
+                closer.is_alive(),
+                'close() on another thread was refused instead of '
+                'waiting for the lease')
+            release.set()
+            writer.join(20)
+            lease.close()
+            closer.join(20)
+            self.assertFalse(closer.is_alive(), 'close() never returned')
+            self.assertEqual(closed, [None])
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_closing_a_handle_from_inside_its_own_call_is_refused(self):
         """`QuestDB.close()` waits for outstanding uses to be released.

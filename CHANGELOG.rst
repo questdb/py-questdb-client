@@ -208,6 +208,15 @@ Fixed
   again now gets ``Transaction already completed`` where it previously made
   a second attempt.
 
+- **``QuestDB.close()`` from inside a pooled lease's own call is refused
+  instead of hanging.** ``close()`` waits for outstanding leases to come
+  back, and a lease's ``row()`` runs your Python for every column value
+  whose conversion is not pure C. Closing the handle from there waited on
+  the very frame that would return the lease — a warning every five seconds
+  and no return. It now raises, and says to close the handle after the call
+  returns. A ``close()`` on any other thread still waits, as it should:
+  that one really is waiting for somebody else.
+
 - **``clear()``, ``flush()``, ``close()``, ``commit()`` and ``dataframe()``
   are all refused while a row is being written.** A column value whose
   conversion runs Python can call back into the sender that is part-way
