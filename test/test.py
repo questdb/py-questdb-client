@@ -5364,6 +5364,56 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             borrowed[0].close()
             db.close()
 
+    def test_the_native_capture_inventory_matches_the_sources(self):
+        """`src/questdb/native_captures.md` is the checked-in answer to
+        "which native pointer is live while the caller's Python runs, and
+        what keeps it valid". Five review rounds produced four
+        use-after-free or hang findings on exactly those captures, every
+        one of them a guard that did not name some door.
+
+        The table is only worth having if it tracks the code, so this
+        holds it to two things: no row may rest on a guard alone, and
+        every capture it names must still exist under that name."""
+        inventory = (PROJ_ROOT / 'src' / 'questdb' /
+                     'native_captures.md').read_text()
+        rows = [
+            line for line in inventory.splitlines()
+            if line.startswith('| ') and not line.startswith('| # ')]
+        self.assertGreaterEqual(
+            len(rows), 14, 'the capture table lost rows')
+
+        for row in rows:
+            cells = [cell.strip() for cell in row.strip('|').split('|')]
+            site, capture, kept_by, klass = cells[1], cells[2], cells[3], cells[4]
+            self.assertTrue(kept_by, f'{site}: nothing keeps {capture} valid')
+            self.assertNotIn(
+                'guard-only', klass,
+                f'{site}: {capture} rests on a guard alone. A guard may '
+                'refuse cleanly; it may not be the only thing between '
+                'the caller and a freed pointer.')
+
+        # Each capture, spelled as the sources spell it. A rename that
+        # forgets the table fails here rather than leaving the table
+        # describing code that no longer exists.
+        sources = '\n'.join(
+            (PROJ_ROOT / 'src' / 'questdb' / name).read_text()
+            for name in ('_client.pyx', 'dataframe.pxi'))
+        for token in (
+                'af.sender_slot = &self._impl',
+                'af.last_flush_ms = self._last_flush_ms',
+                'ws_opts = line_sender_opts_clone(self._qwp_ws_opts)',
+                'c_overrides[i].column = PyBytes_AsString(name_bytes)',
+                'cdef qdb_pystr_buf* b = NULL',
+                'buf = self._buffer'):
+            self.assertIn(
+                token, sources,
+                f'the capture table names {token!r}, which the sources '
+                'no longer contain')
+
+        # The one capture the table records as *not* convertible has to
+        # still be there too, with its guard.
+        self.assertIn('_check_not_in_own_callback', sources)
+
     def test_a_lease_cannot_be_released_from_inside_its_own_dataframe(self):
         """`dataframe()` on a lease runs the caller's Python for the whole
         plan build. Returning the lease to the pool from there left the
