@@ -6762,11 +6762,11 @@ cdef void_int _arrow_batch_check_geohash_ranges(
     the row named is the caller's own rather than its position inside a
     batch they never chose.
 
-    A shape this scan cannot read is passed on rather than refused: the
+    A claim this scan cannot read is passed on rather than refused: the
     encoder reads the same values and holds them to the same rule, so
-    "could not check here" no longer means "nothing will check". What
-    stays refused is a claim wider than the column can carry, which is a
-    mistake in the claim rather than a shape this scan could not read.
+    "could not check here" is not "nothing will check". What stays
+    refused is a claim wider than the column can carry, which is a
+    mistake in the claim rather than a shape this scan could not see.
     """
     cdef int64_t child_index
     cdef const ArrowSchema* field
@@ -6820,13 +6820,13 @@ cdef void_int _arrow_batch_check_geohash_ranges(
             continue
         bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
         if bits in (_GEOHASH_BITS_UNREADABLE, _GEOHASH_BITS_NONE):
-            # A column whose claim this walk cannot read is left to the
-            # encoder, which holds every GEOHASH value to its precision
-            # and names the column and row it turned away. Stopping the
-            # send here instead refused a column that may be entirely
-            # in range, over a metadata blob longer than this walk --
-            # which is a property of the caller's metadata, not of
-            # their values.
+            # A column whose claim this walk cannot read is left to
+            # the encoder, which holds every GEOHASH value to its
+            # precision and names the column and row it turns away.
+            # Stopping the send here instead would turn away a column
+            # that may be entirely in range, over a metadata blob
+            # longer than this walk -- a property of the caller's
+            # metadata rather than of their values.
             continue
         if bits > _arrow_geohash_width_max_bits(elem_size):
             # `schema_overrides` bounds the precision to 1..60 without
@@ -9131,11 +9131,11 @@ cdef class QuestDB:
             with self._state_cond:
                 # A close from inside one of this handle's own calls --
                 # `dataframe()` reading `attrs`, a cell conversion, an
-                # Arrow producer -- is waiting on the very frame that
-                # would release the use, so the wait below can never
-                # end. Refused rather than hung: the caller gets an
-                # error where it used to get a warning every five
-                # seconds and no return.
+                # Arrow producer, a lease's own `row()` -- is waiting on
+                # the very frame that would release the use, so the wait
+                # below can never end. An error is the only outcome a
+                # caller can act on: the alternative is a warning every
+                # five seconds and no return.
                 if getattr(self._use_depth, 'value', 0) != 0:
                     self._db = db
                     self._closing = False
@@ -10770,10 +10770,12 @@ cdef class Sender:
         cdef bint ok = False
 
         self._check_qwp_ws('close_drain')
-        # The one closing entry point that was not refused mid-row.
         # Draining stops the sender accepting anything further, so a
-        # row still being written cannot be finished or sent, and the
-        # complete rows buffered before it go with it.
+        # row still being written can never be finished or sent, and
+        # the complete rows buffered before it go with it -- after
+        # which `close(flush=True)` reports success having sent
+        # nothing. Refused while a row is part-way through, like every
+        # other call that ends the buffer.
         if self._buffer is not None:
             self._buffer._check_not_in_row('close_drain')
         _ensure_doesnt_have_gil(&gs)

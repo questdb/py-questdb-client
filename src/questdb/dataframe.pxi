@@ -3677,11 +3677,11 @@ cdef void_int _dataframe(
     owner._check_not_in_row('dataframe')
     # The run's string storage is its own. The plan's table and column
     # names live in it for the whole frame, and `qdb_pystr_buf_clear`
-    # drops every chunk past the first -- so sharing the buffer's arena
-    # left the plan one `clear()` away from reading freed memory, with
-    # nothing but the row-depth refusal in between. A private arena
-    # means there is no shared storage for a caller to recycle, whatever
-    # it calls from a cell's own Python.
+    # drops every chunk past the first, so a `clear()` re-entered from a
+    # cell's own Python would free storage the plan is still reading
+    # names out of. Private storage is storage no caller can reach to
+    # recycle, which is what keeps that safe without a guard having to
+    # name every route a `clear()` can arrive through.
     b = qdb_pystr_buf_new()
     if b == NULL:
         raise MemoryError()
