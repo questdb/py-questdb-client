@@ -3584,6 +3584,11 @@ cdef void_int _dataframe_columnar_check_geohash_ranges(
     for the whole frame and before a connection is opened, so the
     refusal arrives with the rest of the shape errors rather than
     mid-flush.
+
+    The encoder holds the same rule at the truncation itself, so this
+    scan is the early layer rather than the only one. What it adds is
+    the earlier, cheaper refusal: no connection opened, nothing sent,
+    and the row named is the caller's own.
     """
     cdef size_t col_index
     cdef col_t* col
@@ -6701,25 +6706,27 @@ cdef bint _arrow_schema_claims_geohash(
         const ArrowSchema* schema,
         const qwp_arrow_override* overrides,
         size_t overrides_len) noexcept nogil:
-    """Whether any column of this schema goes out as a GEOHASH, or
-    leaves the question unanswered.
+    """Whether any column of this schema goes out as a GEOHASH.
 
     Read off the schema alone, which the stream hands over once and
     keeps for every batch, so a frame that claims no GEOHASH is
-    answered without looking at a single batch. A column whose
-    metadata the walk stopped short of counts here, so the scan runs
-    and gets to name it.
+    answered without looking at a single batch.
+
+    A column whose metadata the walk stopped short of is not a GEOHASH
+    as far as this scan is concerned: it cannot read the claim, and the
+    encoder holds the values whether or not this scan looked at them.
     """
     cdef int64_t child_index
     cdef const ArrowSchema* field
+    cdef int bits
     if schema.n_children == 0 or schema.children == NULL:
         return False
     for child_index in range(schema.n_children):
         field = schema.children[child_index]
         if field == NULL:
             continue
-        if (_arrow_column_geohash_bits(field, overrides, overrides_len)
-                != _GEOHASH_BITS_NONE):
+        bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
+        if bits != _GEOHASH_BITS_NONE and bits != _GEOHASH_BITS_UNREADABLE:
             return True
     return False
 
@@ -6730,32 +6737,36 @@ cdef void_int _arrow_batch_check_geohash_ranges(
         const qwp_arrow_override* overrides,
         size_t overrides_len,
         size_t row_base) except -1:
-    """Refuse a GEOHASH value the claimed precision cannot hold.
+    """Refuse a GEOHASH value the claimed precision cannot hold, early.
 
     A GEOHASH column keeps only the claimed low bits, and the high bits
     are the coarse position, so a value that does not fit reaches the
-    database as a valid geohash for somewhere else entirely. The wire
-    encoder writes the low ``ceil(bits/8)`` bytes of whatever it is
-    handed and reports nothing, so the value has to be turned away on
-    this side.
+    database as a valid geohash for somewhere else entirely.
+
+    The bound itself lives in the encoder, where the truncation happens:
+    ``write_geohash_payload`` and its numpy twin hold every non-null
+    value to the precision and refuse the frame. This scan is the layer
+    in front of it, and it is worth having for what it can do that the
+    encoder cannot: it runs before a connection is opened, on the whole
+    frame rather than a batch, and it names the caller's own row number.
+    On a sliceable input that turns a mid-send failure with rows already
+    stored into a plain refusal with nothing sent.
 
     Every batch this path sends passes through here -- pandas, polars,
     ``pa.Table``, ``pa.RecordBatch`` and one-shot streams alike, sliced
-    or whole -- so there is one rule and one place that applies it. A
-    frame claiming no GEOHASH is answered off the schema, which is
-    fetched once and shared by every batch of a stream, and its values
-    are never touched.
+    or whole. A frame claiming no GEOHASH is answered off the schema,
+    which is fetched once and shared by every batch of a stream, and its
+    values are never touched.
 
     ``row_base`` is the number of rows of this frame already sent, so
     the row named is the caller's own rather than its position inside a
     batch they never chose.
 
-    Once a frame does claim a GEOHASH column, a shape this scan cannot
-    read stops the send rather than passing unread: nothing downstream
-    would catch what went by, so "could not check" and "checked, and it
-    was fine" have to end differently. A frame claiming no GEOHASH is
-    left alone whatever shape it is in -- the importer holds it to its
-    own rules.
+    A shape this scan cannot read is passed on rather than refused: the
+    encoder reads the same values and holds them to the same rule, so
+    "could not check here" no longer means "nothing will check". What
+    stays refused is a claim wider than the column can carry, which is a
+    mistake in the claim rather than a shape this scan could not read.
     """
     cdef int64_t child_index
     cdef const ArrowSchema* field
@@ -6772,6 +6783,11 @@ cdef void_int _arrow_batch_check_geohash_ranges(
         return 0
     if not _arrow_schema_claims_geohash(schema, overrides, overrides_len):
         return 0
+    # The shape refusals below stay. They are not "could not check" in
+    # the sense the metadata walk was: a batch that disagrees with its
+    # own schema is malformed, the importer turns the same shapes away
+    # in its own words, and saying so before a connection is opened is
+    # the better error.
     if (batch.n_children != schema.n_children
             or batch.children == NULL or schema.children == NULL):
         raise QuestDBError(
@@ -6803,19 +6819,14 @@ cdef void_int _arrow_batch_check_geohash_ranges(
             # otherwise stop the send over a claim it cannot hold.
             continue
         bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
-        if bits == _GEOHASH_BITS_UNREADABLE:
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad column {_arrow_field_name(field)!r}: whether it '
-                f'claims a GEOHASH cannot be read, because its Arrow '
-                f'metadata runs past what this scan walks (at most '
-                f'{_ARROW_MD_MAX_PAIRS} pairs and '
-                f'{_ARROW_MD_MAX_BYTES} bytes). The server reads that '
-                f'metadata with no such bound, so a claim hiding past '
-                f'it would ship unchecked. Name the type through '
-                f'`schema_overrides`, which is read before the '
-                f'metadata.')
-        if bits == _GEOHASH_BITS_NONE:
+        if bits in (_GEOHASH_BITS_UNREADABLE, _GEOHASH_BITS_NONE):
+            # A column whose claim this walk cannot read is left to the
+            # encoder, which holds every GEOHASH value to its precision
+            # and names the column and row it turned away. Stopping the
+            # send here instead refused a column that may be entirely
+            # in range, over a metadata blob longer than this walk --
+            # which is a property of the caller's metadata, not of
+            # their values.
             continue
         if bits > _arrow_geohash_width_max_bits(elem_size):
             # `schema_overrides` bounds the precision to 1..60 without

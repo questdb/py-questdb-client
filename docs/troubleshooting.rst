@@ -126,10 +126,12 @@ that disagrees is rejected, and the buffer is rewound to what it held
 before that row. A flush clears the pin, so ``row()`` knows nothing about
 the precision the server's column already has — writing a batch at the
 wrong one comes back as a server error at flush time. On the DataFrame
-path a value that does not fit the claimed precision is refused before
-anything reaches the wire: a
+path a value that does not fit the claimed precision is refused: a
 ``GEOHASH`` column keeps only the low bits, so a wider value would land as
-a valid geohash for somewhere else entirely.
+a valid geohash for somewhere else entirely. The bound is in the encoder,
+so it holds however the type was claimed; on a sliceable input the client
+also scans the whole frame first, and that refusal arrives before a
+connection is opened and names your own row number.
 
 **Fixed widths**: a ``'uuid'`` claim needs every non-null cell to be
 exactly 16 bytes and a ``'long256'`` claim exactly 32. An object column of

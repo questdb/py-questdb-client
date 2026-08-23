@@ -5996,32 +5996,48 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 schema_overrides={'gh': ('geohash', True)})
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
-    def test_geohash_metadata_too_long_to_walk_stops_the_send(self):
+    def test_geohash_metadata_too_long_to_walk_is_left_to_the_encoder(self):
         # The walk over an Arrow metadata blob is bounded; the native
-        # importer's is not. A claim sitting past either bound would go
-        # out honoured and unchecked, so a blob the walk cannot finish
-        # stops the send rather than reading as "claims nothing".
+        # importer's is not, so a claim sitting past this side's bound
+        # goes out honoured but unread here. That used to stop the send,
+        # because nothing downstream would have caught an out-of-range
+        # value. The encoder holds every GEOHASH value to its precision
+        # now, so the column is passed on: an out-of-range value is
+        # refused there, naming the column and the row, and an in-range
+        # one goes out as the GEOHASH it claims to be.
         oversized = (
             ('more pairs than the walk covers',
              {f'pad.{i}'.encode(): b'x' for i in range(5000)}),
             ('one value longer than the byte budget',
              {b'pad.big': b'x' * (2 << 20)}))
         for name, padding in oversized:
-            for claim in (True, False):
+            with self.subTest(blob=name, claim=True):
                 md = dict(padding)
-                if claim:
-                    md[b'questdb.column_type'] = b'geohash'
-                    md[b'questdb.geohash_bits'] = b'20'
-                with self.subTest(blob=name, claim=claim):
-                    with self.assertRaisesRegex(
-                            qi.QuestDBError,
-                            r"Bad column 'gh': whether it claims a "
-                            r'GEOHASH cannot be read'):
-                        self._dataframe_wire_payload(
-                            self._geohash_arrow_table([2 ** 21], md=md),
-                            table_name='geo_md_long', at='ts')
+                md[b'questdb.column_type'] = b'geohash'
+                md[b'questdb.geohash_bits'] = b'20'
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, r'GEOHASH\(20b\) cannot carry'):
+                    self._dataframe_wire_payload(
+                        self._geohash_arrow_table([2 ** 21], md=md),
+                        table_name='geo_md_long', at='ts')
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        self._geohash_arrow_table([7], md=md),
+                        table_name='geo_md_long', at='ts')['gh'],
+                    0x0E)
+            # A blob this long that claims nothing is a column with a
+            # lot of metadata, not a hidden geohash. Refusing it was the
+            # clearest over-refusal the old rule produced. It goes out
+            # as the integer it is.
+            with self.subTest(blob=name, claim=False):
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        self._geohash_arrow_table([2 ** 21], md=dict(padding)),
+                        table_name='geo_md_long', at='ts')['gh'],
+                    0x05)
         # `schema_overrides` is read before the metadata, so it names
-        # the type without the walk having to reach an answer.
+        # the type without the walk having to reach an answer -- and
+        # this side then gives the earlier, row-naming error.
         md = {f'pad.{i}'.encode(): b'x' for i in range(5000)}
         md[b'questdb.column_type'] = b'geohash'
         md[b'questdb.geohash_bits'] = b'20'

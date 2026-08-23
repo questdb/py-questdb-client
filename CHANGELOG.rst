@@ -240,12 +240,21 @@ Fixed
   returns. A ``close()`` on any other thread still waits, as it should:
   that one really is waiting for somebody else.
 
-- **``clear()``, ``flush()``, ``close()``, ``commit()`` and ``dataframe()``
-  are all refused while a row is being written.** A column value whose
-  conversion runs Python can call back into the sender that is part-way
-  through a row, and each of these would have destroyed or reordered what
-  that row was writing. ``dataframe()`` is covered on every transport,
-  including the WebSocket route that takes its own connection.
+- **Every call that would change or end the buffer is refused while a row
+  is being written**: ``clear()``, ``flush()``, ``flush_and_get_fsn()``,
+  ``flush_and_keep_and_get_fsn()``, ``close()``, ``close_drain()``,
+  ``commit()``, ``transaction()`` and ``dataframe()``, on senders and on
+  pooled leases alike. A column value whose conversion runs Python can call
+  back into the sender that is part-way through a row, and each of these
+  would have destroyed or reordered what that row was writing.
+  ``close_drain()`` is the sharpest of them: draining stops the sender
+  accepting anything further, so the row still being written can never be
+  finished and the complete rows buffered before it go with it — after
+  which ``close(flush=True)`` reported success having sent nothing. A
+  ``transaction()`` opened from there swallowed the whole frame, because a
+  ``dataframe()`` part-way through its plan build still has the clear
+  buffer a transaction requires, and the rollback that ends such a block
+  then discarded it.
 
 - **A dataframe refused part-way through says what it already stored.** The
   GEOHASH range check runs batch by batch, and a large enough frame commits
@@ -270,17 +279,22 @@ Fixed
   column keeps only the low bits it was given, so a wider value used to
   reach the database as a valid geohash for somewhere else entirely, with
   nothing said. It is the one type whose range is narrower than the integer
-  carrying it. The check covers every way the type can be claimed and every
-  input shape — pandas, polars, ``pa.Table``, ``pa.RecordBatch`` and
-  one-shot readers — and runs batch by batch before anything reaches the
-  wire. The error names the row you passed, not its position in a batch you
-  never chose.
+  carrying it.
 
-  Where the check cannot read a claimed column — a hand-rolled
-  ``__arrow_c_stream__`` producer can hand over shapes pyarrow and polars
-  never emit — the write stops with an error naming the column. Nothing
-  downstream would catch what went past, so a column that cannot be checked
-  is not sent.
+  The bound lives in the encoder, at the truncation, so it holds for every
+  claim, every input shape and every client that reaches it. In front of it
+  this client also scans the frame before opening a connection, which is
+  worth having for what the encoder cannot do: it sees the whole frame
+  rather than a batch, and it names the row *you* passed rather than its
+  position in a batch you never chose. On a sliceable input that turns a
+  mid-send failure with rows already stored into a plain refusal with
+  nothing sent.
+
+  A claimed column the pre-flight scan cannot read — a metadata blob longer
+  than its bounded walk — is passed on to the encoder rather than refused.
+  A malformed batch is still turned away here, in words that name the
+  column, because a batch that disagrees with its own schema is a mistake
+  rather than something the scan merely could not see.
 
   A ``df.attrs['questdb']`` geohash claim is also held to the width of the
   column carrying it: at most 7 bits on ``int8``, 15 on ``int16``, 31 on
