@@ -5299,6 +5299,87 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             borrowed[0].close()
             db.close()
 
+    #: Public members the re-entrancy grid cannot reach, each with the
+    #: reason. An entry here is a claim somebody made and can be argued
+    #: with; a member that is neither here nor in the grid is a member
+    #: nobody has thought about, which is how every missed door started.
+    REENTRANCY_ALLOW_LIST = {
+        'PooledReader.__enter__': (
+            'a reader lease needs a live QuestDB read endpoint to '
+            'borrow from; the offline fixtures are sender-side mocks. '
+            'Covered by system_test.py against a real server.'),
+        'PooledReader.__exit__': 'as PooledReader.__enter__',
+        'PooledReader.close': 'as PooledReader.__enter__',
+        'PooledReader.execute': 'as PooledReader.__enter__',
+        'PooledReader.query': 'as PooledReader.__enter__',
+    }
+
+    def test_every_public_member_is_classified_for_re_entrancy(self):
+        """Every guard this client has added came from someone listing
+        the routes they could think of, and every round of review found
+        the route they could not. So the list comes from reflection, and
+        a member that no grid cell exercises has to be excused in
+        writing.
+
+        A newly added method fails here until it is either driven by the
+        grid or excused with a reason -- unclassified at review time
+        rather than uncovered a few rounds later."""
+        table = json.loads(
+            (PROJ_ROOT / 'test' /
+             'reentrancy_matrix_expected.json').read_text())
+        exercised = set()
+        for key, record in table.items():
+            member = key.split(' | ', 1)[1]
+            if record['result'] in ('refused', 'clean'):
+                exercised.add(member)
+
+        surface = api_surface.qualified_members()
+        self.assertGreater(len(surface), 50, 'the reflected surface shrank')
+
+        unclassified = []
+        for name, _cls, _member, kind in surface:
+            if name in exercised:
+                continue
+            if name in self.REENTRANCY_ALLOW_LIST:
+                self.assertTrue(
+                    self.REENTRANCY_ALLOW_LIST[name],
+                    f'{name} is excused from the grid with no reason')
+                continue
+            unclassified.append(f'{name} ({kind})')
+        self.assertEqual(
+            unclassified, [],
+            'these public members are never exercised by the '
+            're-entrancy grid and are not excused. Either add an outer '
+            'scenario that can reach them in test/reentrancy_matrix.py, '
+            'or add them to REENTRANCY_ALLOW_LIST with the reason:\n  '
+            + '\n  '.join(unclassified))
+
+        # And the other direction: an excuse for a member that no longer
+        # exists is an excuse nobody will notice is stale.
+        known = {name for name, _, _, _ in surface}
+        stale = sorted(set(self.REENTRANCY_ALLOW_LIST) - known)
+        self.assertEqual(
+            stale, [],
+            f'these members are excused from the grid but no longer '
+            f'exist: {stale}')
+
+    def test_the_reentrancy_grid_records_no_hang_and_no_crash(self):
+        """The stored table is the grid's result, so it is also where a
+        regression would show. A `HANG` or a `CRASH` in it means someone
+        checked one in."""
+        table = json.loads(
+            (PROJ_ROOT / 'test' /
+             'reentrancy_matrix_expected.json').read_text())
+        bad = {key: record for key, record in table.items()
+               if record['result'] in ('HANG', 'CRASH')}
+        self.assertEqual(bad, {}, f'the checked-in grid records {bad}')
+        outcomes = {record['outer_outcome'] for record in table.values()}
+        self.assertEqual(
+            outcomes, {'completed'},
+            'every cell must have run its outer call to completion, '
+            'otherwise a `clean` re-entry may only be clean because '
+            f'nothing else happened: {sorted(outcomes)}')
+
     def test_the_native_capture_inventory_matches_the_sources(self):
         """`src/questdb/native_captures.md` is the checked-in answer to
         "which native pointer is live while the caller's Python runs, and
