@@ -1033,8 +1033,8 @@ cdef class Geohash:
 
 
 # The two value unions the `row()` family accepts, defined here as well
-# as in the stub. Annotating with them used to type-check and then
-# `ImportError` at runtime, because they existed only in `_client.pyi`.
+# as in the stub. A name carried only by `_client.pyi` type-checks and
+# then `ImportError`s at runtime, so the definition lives in both.
 # Not exported: they name a parameter type, they are not part of the
 # ingestion surface.
 TransactionColumnValue = Union[

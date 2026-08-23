@@ -2350,6 +2350,16 @@ class TestQwpWebSocketTls(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
 
+# Handing out an Arrow C stream means handing out a real PyCapsule,
+# and building one from Python goes through the interpreter's own C
+# API. `ctypes.pythonapi` is the only route to it, and CPython is the
+# only interpreter that exposes it -- PyPy's ctypes has no such
+# attribute, so every test below that hand-rolls a stream is CPython's.
+_CAN_BUILD_CAPSULE = hasattr(ctypes, 'pythonapi')
+_needs_capsule_builder = unittest.skipUnless(
+    _CAN_BUILD_CAPSULE, 'ctypes.pythonapi not available')
+
+
 class _RawArrowStream:
     """A hand-rolled ``__arrow_c_stream__`` producer, built straight
     onto the Arrow C data interface with ctypes.
@@ -3463,9 +3473,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_dataframe_from_inside_a_row_leaves_the_row_rewindable(self):
         """`dataframe()` clears the marker the outer row rewinds to, so
-        entering it from a half-written row used to strand that row in
-        the buffer when the row went on to fail. It is refused there,
-        and a failing row rewinds exactly as it does on its own."""
+        entering it from a half-written row would strand that row in the
+        buffer once the row went on to fail. It is refused there, and a
+        failing row rewinds exactly as it does on its own."""
         buffer = qi.Buffer._new_qwp()
 
         refused = []
@@ -4629,6 +4639,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 table_name='date_claim', at='ts')['d'],
             0x0A)
 
+    @_needs_capsule_builder
     def test_geohash_range_check_reads_an_uncounted_null_count(self):
         # The Arrow C data interface lets a producer leave `null_count`
         # at -1, meaning nobody has counted, and a column that never
@@ -4647,6 +4658,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self._raw_geohash_stream([7, 1000, 7], null_count=-1),
                 table_name='raw_unknown_nulls', at='ts')
 
+    @_needs_capsule_builder
     def test_geohash_range_check_follows_a_batch_level_offset(self):
         # A slice can put its start row on the batch rather than on
         # each column, and the importer reads every column from there.
@@ -4716,6 +4728,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             refused_by = None
         return types['gh'], refused_by
 
+    @_needs_capsule_builder
     def test_the_two_geohash_claim_parsers_agree_on_every_spelling(self):
         """The client's claim detection is a hand-written mirror of the
         importer's, in a different language, and this repo bumps the
@@ -4763,14 +4776,13 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     f'parsers have drifted, or the encoder bound has '
                     f'gone.')
 
+    @_needs_capsule_builder
     def test_a_claim_this_side_cannot_read_is_left_to_the_encoder(self):
-        """A metadata blob longer than the client's bounded walk used to
-        stop the send outright, because nothing downstream would have
-        caught an out-of-range value. The encoder holds every GEOHASH
-        value to its precision now, so a column this scan cannot read is
-        passed on: refusing it turned away a column that may be entirely
-        in range, over the length of the caller's metadata rather than
-        anything about their values."""
+        """A claim sitting behind a metadata blob longer than the
+        client's bounded walk is left to the encoder, which holds every
+        GEOHASH value to its precision. Refusing the column here would
+        turn away one that may be entirely in range, over the length of
+        the caller's metadata rather than anything about their values."""
         metadata = self._geohash_metadata_blob(4096)
         wire_type, refused_by = self._geohash_claim_verdict(metadata)
         self.assertEqual(wire_type, 0x0E)
@@ -4779,6 +4791,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             'nothing bounded the value, so the truncated geohash '
             'reached the database as a location somewhere else')
 
+    @_needs_capsule_builder
     def test_geohash_claim_this_side_cannot_check_stops_the_send(self):
         # The encoder writes the low bytes of whatever it is handed and
         # reports nothing, so a claimed column that goes out unread
@@ -5103,12 +5116,12 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     def test_a_ws_dataframe_survives_a_close_from_inside_itself(self):
         """The WebSocket `dataframe()` route hands connection options to
         the run and then builds the plan, which is caller Python. A
-        `close()` from there used to free those options while the run
-        still had to read them -- a use-after-free that took the
-        interpreter down. The run owns a clone for its whole length, so
-        the close is simply harmless, on an established sender and on
-        one that was never established (where there is no row buffer to
-        hang a guard on)."""
+        `close()` from there would free those options while the run
+        still has to read them -- a use-after-free that takes the
+        interpreter down -- so the run owns a clone for its whole
+        length. The close is simply harmless, on an established sender
+        and on one that was never established (where there is no row
+        buffer to hang a guard on)."""
         for established in (True, False):
             with self.subTest(established=established):
                 closed = []
@@ -5951,12 +5964,11 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_a_claim_no_column_can_carry_is_said_out_loud_on_both_planners(self):
         """A claim the column's type can never carry is a mistake
-        rather than drift, and both planners now say so. The NumPy
-        planner used to warn for one geohash case and stay silent for
-        the other four kinds, while the Arrow path warned for all five.
-        Exactly one warning either way -- an Arrow-backed column is
-        answered by `_dataframe_normalize_claimed_arrow`, and saying it
-        twice for one claim would be worse than either."""
+        rather than drift, so both planners say so, for all five kinds
+        and on either backing. Exactly one warning either way -- an
+        Arrow-backed column is answered by
+        `_dataframe_normalize_claimed_arrow`, and saying it twice for
+        one claim would be worse than either."""
         kinds = ('ipv4', 'char', 'uuid', 'long256', 'geohash')
         backings = (
             ('numpy', lambda: np.array([1.5], dtype=np.float64)),
@@ -6110,12 +6122,11 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     def test_geohash_metadata_too_long_to_walk_is_left_to_the_encoder(self):
         # The walk over an Arrow metadata blob is bounded; the native
         # importer's is not, so a claim sitting past this side's bound
-        # goes out honoured but unread here. That used to stop the send,
-        # because nothing downstream would have caught an out-of-range
-        # value. The encoder holds every GEOHASH value to its precision
-        # now, so the column is passed on: an out-of-range value is
-        # refused there, naming the column and the row, and an in-range
-        # one goes out as the GEOHASH it claims to be.
+        # goes out honoured but unread here. The encoder holds every
+        # GEOHASH value to its precision, so the column is passed on:
+        # an out-of-range value is refused there, naming the column and
+        # the row, and an in-range one goes out as the GEOHASH it
+        # claims to be.
         oversized = (
             ('more pairs than the walk covers',
              {f'pad.{i}'.encode(): b'x' for i in range(5000)}),
