@@ -1206,7 +1206,6 @@ cdef class SenderTransaction:
             self._sender._buffer,
             auto_flush_blank(),
             self._sender._buffer._impl,
-            self._sender._buffer._b,
             df,
             self._table_name,
             None, # table_name_col,
@@ -2353,7 +2352,6 @@ cdef class Buffer:
             self,
             auto_flush_blank(),
             self._impl,
-            self._b,
             df,
             table_name,
             table_name_col,
@@ -10355,7 +10353,10 @@ cdef class Sender:
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         if self._auto_flush_mode.enabled:
-            af.sender = self._impl
+            # The field, not its contents: see `auto_flush_t`. `self` is
+            # this call's receiver and outlives the run, so the address
+            # stays good even when a mid-frame `close()` empties it.
+            af.sender_slot = &self._impl
             af.mode = self._auto_flush_mode
             af.last_flush_ms = self._last_flush_ms
 
@@ -10368,7 +10369,6 @@ cdef class Sender:
             self._buffer,
             af,
             self._buffer._impl,
-            self._buffer._b,
             df,
             table_name,
             table_name_col,

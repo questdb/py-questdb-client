@@ -66,14 +66,20 @@ cdef struct auto_flush_mode_t:
 
 
 cdef struct auto_flush_t:
-    line_sender* sender
+    # The sender's own `_impl` field, not a copy of what was in it. A
+    # frame's plan build and its cells run the caller's Python, and a
+    # `close()` arriving from there frees the sender and leaves the
+    # field NULL -- which the auto-flush below already reads as "no
+    # sender, nothing to flush". A copy taken before the run would
+    # instead be a freed pointer handed to `line_sender_flush`.
+    line_sender** sender_slot
     auto_flush_mode_t mode
     int64_t* last_flush_ms
 
 
 cdef auto_flush_t auto_flush_blank() noexcept nogil:
     cdef auto_flush_t af
-    af.sender = NULL
+    af.sender_slot = NULL
     af.mode.enabled = False
     af.mode.interval = -1
     af.mode.row_count = -1
@@ -3582,12 +3588,18 @@ cdef void_int _dataframe_handle_auto_flush(
     cdef line_sender_error* marker_err = NULL
     cdef bint flush_ok
     cdef bint marker_ok
-    if (af.sender == NULL) or (not should_auto_flush(&af.mode, ls_buf, af.last_flush_ms[0])):
+    cdef line_sender* sender = NULL
+    # Read now, not when the run started: a `close()` from a cell's own
+    # Python nulls the field, and this is the point that would otherwise
+    # flush through the pointer it left behind.
+    if af.sender_slot != NULL:
+        sender = af.sender_slot[0]
+    if (sender == NULL) or (not should_auto_flush(&af.mode, ls_buf, af.last_flush_ms[0])):
         return 0
 
     # Always temporarily release GIL during a flush.
     had_gil = _ensure_doesnt_have_gil(gs)
-    flush_ok = line_sender_flush(af.sender, ls_buf, &flush_err)
+    flush_ok = line_sender_flush(sender, ls_buf, &flush_err)
     if flush_ok:
         af.last_flush_ms[0] = line_sender_now_micros() // 1000
     else:
@@ -3626,7 +3638,6 @@ cdef void_int _dataframe(
         Buffer owner,
         auto_flush_t af,
         line_sender_buffer* ls_buf,
-        qdb_pystr_buf* b,
         object df,
         object table_name,
         object table_name_col,
@@ -3643,6 +3654,7 @@ cdef void_int _dataframe(
     ones.
     """
     cdef dataframe_plan_t plan = dataframe_plan_blank()
+    cdef qdb_pystr_buf* b = NULL
     cdef line_sender_error* err = NULL
     cdef size_t row_index
     cdef size_t col_index
@@ -3663,6 +3675,16 @@ cdef void_int _dataframe(
     # protocols. `Sender.dataframe` over QWP/WebSocket takes its own
     # connection and checks there.
     owner._check_not_in_row('dataframe')
+    # The run's string storage is its own. The plan's table and column
+    # names live in it for the whole frame, and `qdb_pystr_buf_clear`
+    # drops every chunk past the first -- so sharing the buffer's arena
+    # left the plan one `clear()` away from reading freed memory, with
+    # nothing but the row-depth refusal in between. A private arena
+    # means there is no shared storage for a caller to recycle, whatever
+    # it calls from a cell's own Python.
+    b = qdb_pystr_buf_new()
+    if b == NULL:
+        raise MemoryError()
     owner._row_depth += 1
     try:
         _dataframe_plan_build(
@@ -3769,5 +3791,4 @@ cdef void_int _dataframe(
         if plan_has_content:
             line_sender_buffer_clear_marker(ls_buf)
         dataframe_plan_release(&plan)
-        if plan_has_content:
-            qdb_pystr_buf_clear(b)
+        qdb_pystr_buf_free(b)
