@@ -1251,6 +1251,11 @@ cdef class SenderTransaction:
             # raise over the caller's own error. A flush refused before
             # it got that far left the rows where they were, and the
             # transaction is still the caller's to finish or roll back.
+            #
+            # The buffer is therefore the discriminator, and it is
+            # `Sender.flush` that maintains it, not this method.
+            # `test_flush_clears_the_buffer_on_a_wire_failure` pins that
+            # behaviour by name for exactly this reason.
             if (self._sender._buffer is not None
                     and len(self._sender._buffer)):
                 self._sender._in_txn = True

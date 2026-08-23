@@ -4991,6 +4991,68 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     txn.commit()
                     self.assertEqual(len(sender), 0)
 
+    def test_flush_clears_the_buffer_on_a_wire_failure(self):
+        """`SenderTransaction.commit` depends on this by name.
+
+        Its recovery rule reads the buffer after a failed flush to tell
+        "the flush reached the wire and failed, so there is nothing left
+        to commit" from "the flush was refused before it got there, so
+        the rows are still the caller's to commit or roll back". That
+        discriminator is `Sender.flush`'s doing, not `commit()`'s, and it
+        is pinned here so a change to it breaks a test rather than a
+        transaction guarantee."""
+        # Reached the wire and failed: the internal buffer is cleared.
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False,
+                retry_timeout=datetime.timedelta(milliseconds=1)) as sender:
+            server.responses.append(
+                (0, 500, 'text/plain', b'Internal Server Error'))
+            sender.row('t', columns={'x': 1}, at=qi.ServerTimestamp)
+            self.assertGreater(len(sender), 0)
+            with self.assertRaises(qi.QuestDBError):
+                sender.flush()
+            self.assertEqual(
+                len(sender), 0,
+                'commit() reads an empty buffer as "the transaction is '
+                'over", so a flush that failed on the wire has to leave '
+                'it empty')
+
+        # Refused before the wire: the rows stay where they were.
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            with sender.transaction('t') as txn:
+                txn.row(columns={'x': 1}, at=qi.ServerTimestamp)
+                buffered = len(sender)
+                self.assertGreater(buffered, 0)
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        'Cannot flush explicitly inside a transaction'):
+                    sender.flush()
+                self.assertEqual(
+                    len(sender), buffered,
+                    'commit() reads a non-empty buffer as "still the '
+                    "caller's transaction\", so a refusal that never "
+                    'reached the wire has to leave the rows alone')
+                txn.commit()
+
+        # And the conclusion commit() draws from the first case.
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False,
+                retry_timeout=datetime.timedelta(milliseconds=1)) as sender:
+            server.responses.append(
+                (0, 500, 'text/plain', b'Internal Server Error'))
+            txn = sender.transaction('t')
+            txn.row(columns={'x': 1}, at=qi.ServerTimestamp)
+            with self.assertRaises(qi.QuestDBError):
+                txn.commit()
+            self.assertEqual(len(sender), 0)
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, 'Transaction already completed'):
+                txn.commit()
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_ws_dataframe_survives_a_close_from_inside_itself(self):
         """The WebSocket `dataframe()` route hands connection options to
