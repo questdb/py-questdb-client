@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""Claim grid: backings x claim kinds x planners, decoded off the wire.
+
+``df.attrs['questdb']`` is how a frame read out of QuestDB says what its
+columns *were*, so writing it back puts the same types in the same
+columns. Whether that works is not a question about the client's
+intentions -- it is a question about the byte on the wire, and the two
+DataFrame planners answer it separately.
+
+Two review rounds in a row produced a defect in this subsystem, and both
+times reasoning about it went wrong where measuring would not have. So
+this measures: every (backing, claim, planner) cell is driven through a
+real ``QwpAckServer``, the frame it produces is decoded, and the wire
+type and the warning count are recorded. Neither planner is asked what
+it thinks it did.
+
+Cells are stored in ``claim_matrix_expected.json`` and diffed on re-run,
+so a submodule bump or a planner change that moves one column's type
+shows up as a diff rather than as a silent re-type.
+
+Usage::
+
+    python3 test/claim_matrix.py            # run and diff
+    python3 test/claim_matrix.py --update   # rewrite the expected table
+    python3 test/claim_matrix.py --show KIND   # print one kind's rows
+"""
+
+import argparse
+import ipaddress
+import json
+import pathlib
+import sys
+import uuid
+import warnings
+
+import patch_path  # noqa: F401  (sys.path fix-up)
+
+import questdb._client as qi
+import qwp_wire
+from qwp_ws_ack_server import QwpAckServer
+
+EXPECTED_PATH = pathlib.Path(__file__).parent / 'claim_matrix_expected.json'
+
+UUID_VALUE = uuid.UUID('12345678-1234-5678-1234-567812345678')
+LONG256_BYTES = bytes(range(32))
+IPV4_VALUE = ipaddress.IPv4Address('192.0.2.1')
+
+
+# ---------------------------------------------------------------------
+# Axis 1: how the column is backed
+# ---------------------------------------------------------------------
+#
+# A backing is a (name, builder) pair. The builder returns the column's
+# values in one concrete storage, which is what decides which planner
+# the frame takes and what the claim has to work with.
+
+def backings(pd, pa, np):
+    """Every storage a claimed column plausibly arrives in.
+
+    ``to_pandas()`` hands back the first three, one per ``dtype_backend``;
+    the rest are what a caller builds by hand or gets from polars.
+    """
+    return {
+        'object/py': lambda values: pd.array(values['py'], dtype=object),
+        'arrow/native': lambda values: pd.array(
+            values['arrow'], dtype=pd.ArrowDtype(values['arrow'].type)),
+        'arrow/binary': lambda values: pd.array(
+            pa.array(values['raw'], pa.binary()),
+            dtype=pd.ArrowDtype(pa.binary())),
+        'arrow/fsb': lambda values: pd.array(
+            pa.array(values['raw'], pa.binary(values['width']))
+            if values['width'] else pa.array(values['raw'], pa.binary()),
+            dtype=pd.ArrowDtype(
+                pa.binary(values['width']) if values['width']
+                else pa.binary())),
+        'numpy/int': lambda values: np.array(
+            values['ints'], dtype=values['int_dtype']),
+        'arrow/int': lambda values: pd.array(
+            pa.array(values['ints'], values['arrow_int']),
+            dtype=pd.ArrowDtype(values['arrow_int'])),
+    }
+
+
+# ---------------------------------------------------------------------
+# Axis 2: what the claim says
+# ---------------------------------------------------------------------
+
+def claim_kinds():
+    """Every ``kind`` the claim vocabulary accepts, plus the two shapes
+    that are not a kind: no claim at all, and a kind no column can be."""
+    return [
+        None,
+        {'kind': 'uuid'},
+        {'kind': 'long256'},
+        {'kind': 'ipv4'},
+        {'kind': 'char'},
+        {'kind': 'geohash', 'precision_bits': 20},
+        {'kind': 'geohash', 'precision_bits': 60},
+        {'kind': 'binary'},
+        {'kind': 'not_a_kind'},
+    ]
+
+
+def claim_label(claim):
+    if claim is None:
+        return 'none'
+    if 'precision_bits' in claim:
+        return f"{claim['kind']}({claim['precision_bits']}b)"
+    return claim['kind']
+
+
+# ---------------------------------------------------------------------
+# Axis 3: the planner
+# ---------------------------------------------------------------------
+#
+# The Arrow capsule path takes a frame whose every column is
+# Arrow-backed; anything else falls to the NumPy planner. A frame is
+# steered onto one or the other by what its *other* column is made of,
+# so the same claimed column can be measured on both.
+
+PLANNERS = ('arrow', 'numpy')
+
+
+def value_set(pa, np, kind):
+    """One column's worth of values, in every storage the backings need."""
+    if kind == 'uuid':
+        # `pa.uuid()` (pyarrow 18+) is the route the changelog points
+        # users at, so it is what 'native' means here when it exists.
+        native = (pa.array([UUID_VALUE.bytes], pa.uuid())
+                  if hasattr(pa, 'uuid')
+                  else pa.array([UUID_VALUE.bytes], pa.binary(16)))
+        return {
+            'py': [UUID_VALUE],
+            'arrow': native,
+            'raw': [UUID_VALUE.bytes],
+            'width': 16,
+            'ints': [7],
+            'int_dtype': np.int64,
+            'arrow_int': pa.int64(),
+        }
+    if kind == 'long256':
+        return {
+            'py': [LONG256_BYTES],
+            'arrow': pa.array([LONG256_BYTES], pa.binary(32)),
+            'raw': [LONG256_BYTES],
+            'width': 32,
+            'ints': [7],
+            'int_dtype': np.int64,
+            'arrow_int': pa.int64(),
+        }
+    if kind == 'ipv4':
+        return {
+            'py': [IPV4_VALUE],
+            'arrow': pa.array([0xC0000201], pa.uint32()),
+            'raw': [b'\xc0\x00\x02\x01'],
+            'width': 4,
+            'ints': [0xC0000201],
+            'int_dtype': np.uint32,
+            'arrow_int': pa.uint32(),
+        }
+    if kind == 'char':
+        return {
+            'py': ['x'],
+            'arrow': pa.array(['x'], pa.string()),
+            'raw': [b'x'],
+            'width': 1,
+            'ints': [ord('x')],
+            'int_dtype': np.int32,
+            'arrow_int': pa.int32(),
+        }
+    if kind == 'geohash':
+        return {
+            'py': [7],
+            'arrow': pa.array([7], pa.int32()),
+            'raw': [b'\x07\x00\x00\x00'],
+            'width': 4,
+            'ints': [7],
+            'int_dtype': np.int32,
+            'arrow_int': pa.int32(),
+        }
+    raise AssertionError(kind)
+
+
+#: Which value set each claim is measured against. A claim is only
+#: interesting over a column that could plausibly carry it, so the
+#: source kind names the values and the claim names what is asked of
+#: them -- including asking for something else entirely.
+SOURCE_KINDS = ('uuid', 'long256', 'ipv4', 'char', 'geohash')
+
+
+def build_frame(pd, pa, np, source_kind, backing_name, claim, planner):
+    values = value_set(pa, np, source_kind)
+    column = backings(pd, pa, np)[backing_name](values)
+    if planner == 'arrow':
+        # Every column Arrow-backed, including the designated timestamp,
+        # so the frame reaches the capsule path.
+        stamps = pd.array(
+            pa.array([0], pa.timestamp('ns')),
+            dtype=pd.ArrowDtype(pa.timestamp('ns')))
+    else:
+        # A plain NumPy datetime column is enough to send the whole
+        # frame to the NumPy planner.
+        stamps = pd.to_datetime([0], unit='s')
+    frame = pd.DataFrame({'c': column, 'ts': stamps})
+    if claim is not None:
+        frame.attrs['questdb'] = {
+            'version': 1, 'columns': {'c': dict(claim)}}
+    return frame
+
+
+# ---------------------------------------------------------------------
+# Measurement
+# ---------------------------------------------------------------------
+
+def measure(frame):
+    """Send `frame` and report what actually went out.
+
+    Returns ``(wire type name, warning count, error)``. An error is a
+    result too: a claim the planner refuses outright is a different
+    answer from one it drops with a warning, and the two planners have
+    disagreed on exactly that before.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        try:
+            payload = send(frame)
+        except Exception as exc:
+            return None, _questdb_warnings(caught), _short(exc)
+        warned = _questdb_warnings(caught)
+    types = dict(qwp_wire.first_table_column_types(payload))
+    return qwp_wire.type_name(types['c']), warned, None
+
+
+def _questdb_warnings(caught):
+    return len([w for w in caught if 'questdb: column' in str(w.message)])
+
+
+def _short(exc):
+    return ' '.join(f'{type(exc).__name__}: {exc}'.split())[:160]
+
+
+def send(frame):
+    with QwpAckServer(record_payloads=True) as server:
+        conf = (f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+        with qi.QuestDB.from_conf(conf) as client:
+            client.dataframe(frame, table_name='claim_grid', at='ts')
+        stats = server.snapshot()
+    if stats['errors']:
+        raise AssertionError(f'mock server errors: {stats["errors"]}')
+    return next(
+        payload for payload in stats['binary_payloads']
+        if int.from_bytes(payload[6:8], 'little') > 0)
+
+
+def all_cells():
+    for source_kind in SOURCE_KINDS:
+        for backing_name in sorted(backings(None, None, None)):
+            for claim in claim_kinds():
+                for planner in PLANNERS:
+                    yield source_kind, backing_name, claim, planner
+
+
+def run_grid(pd, pa, np, only_kind=None):
+    results = {}
+    total = 0
+    for source_kind, backing_name, claim, planner in all_cells():
+        if only_kind and source_kind != only_kind:
+            continue
+        key = (f'{source_kind} | {backing_name} | '
+               f'{claim_label(claim)} | {planner}')
+        try:
+            frame = build_frame(
+                pd, pa, np, source_kind, backing_name, claim, planner)
+        except Exception as exc:
+            results[key] = {
+                'wire_type': None,
+                'warnings': 0,
+                'error': f'unbuildable: {_short(exc)}',
+            }
+            continue
+        wire_type, warned, error = measure(frame)
+        results[key] = {
+            'wire_type': wire_type,
+            'warnings': warned,
+            'error': error,
+        }
+        total += 1
+        if total % 50 == 0:
+            print(f'  {total} cells', file=sys.stderr, flush=True)
+    return dict(sorted(results.items()))
+
+
+def diff_tables(expected, actual):
+    problems = []
+    for key in sorted(set(expected) | set(actual)):
+        want, got = expected.get(key), actual.get(key)
+        if want is None:
+            problems.append(f'NEW CELL  {key}: {got}')
+        elif got is None:
+            problems.append(f'GONE      {key}: was {want}')
+        elif want != got:
+            problems.append(
+                f'CHANGED   {key}:\n'
+                f'    expected {want}\n'
+                f'    actual   {got}')
+    return problems
+
+
+def planner_disagreements(results):
+    """Cells where the two planners answer the same frame differently.
+
+    Not automatically wrong -- one documented divergence is inherited --
+    but each one is a decision somebody made, and an undocumented new
+    one is how a claim quietly changes a column's type.
+    """
+    out = []
+    for key, record in results.items():
+        if not key.endswith('| arrow'):
+            continue
+        twin = key[:-len('| arrow')] + '| numpy'
+        other = results.get(twin)
+        if other is None:
+            continue
+        if (record['wire_type'], record['error'] is None) != (
+                other['wire_type'], other['error'] is None):
+            out.append((key[:-len(' | arrow')], record, other))
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--update', action='store_true')
+    parser.add_argument('--show', metavar='SOURCE_KIND')
+    args = parser.parse_args()
+
+    try:
+        import numpy as np
+        import pandas as pd
+        import pyarrow as pa
+    except ImportError as exc:
+        print(f'the claim grid needs pandas, pyarrow and numpy: {exc}',
+              file=sys.stderr)
+        return 2
+
+    results = run_grid(pd, pa, np, only_kind=args.show)
+    print(f'{len(results)} cells', file=sys.stderr)
+
+    if args.show:
+        for key, record in results.items():
+            print(f'{key:60}  {record}')
+        return 0
+
+    disagreements = planner_disagreements(results)
+    print(f'{len(disagreements)} planner disagreement(s)', file=sys.stderr)
+    for key, arrow_record, numpy_record in disagreements:
+        print(f'   {key}: arrow={arrow_record["wire_type"] or "refused"} '
+              f'numpy={numpy_record["wire_type"] or "refused"}',
+              file=sys.stderr)
+
+    if args.update:
+        EXPECTED_PATH.write_text(json.dumps(results, indent=1) + '\n')
+        print(f'wrote {EXPECTED_PATH}', file=sys.stderr)
+        return 0
+
+    if not EXPECTED_PATH.exists():
+        print(f'{EXPECTED_PATH} does not exist; run with --update',
+              file=sys.stderr)
+        return 2
+    problems = diff_tables(json.loads(EXPECTED_PATH.read_text()), results)
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    if problems:
+        print(f'{len(problems)} cell(s) differ from the expected table',
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -38,6 +38,8 @@ from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 from qwp_ws_ack_server import QwpAckServer, TLS_CA
+import api_surface
+import qwp_wire
 
 import questdb._client as qi
 
@@ -68,80 +70,13 @@ except ImportError:
     pyarrow = None
 
 
-def _read_qwp_varint(payload, pos):
-    value = 0
-    shift = 0
-    while True:
-        if pos >= len(payload):
-            raise AssertionError('truncated QWP varint')
-        byte = payload[pos]
-        pos += 1
-        value |= (byte & 0x7f) << shift
-        if byte & 0x80 == 0:
-            return value, pos
-        shift += 7
-        if shift >= 64:
-            raise AssertionError('oversize QWP varint')
+# The QWP frame decoder lives in `qwp_wire` so the claim grid and these
+# tests read a captured frame the same way. A test that asks what the
+# client sent has to read the bytes, not the client's opinion of them.
+_read_qwp_varint = qwp_wire.read_varint
+_first_qwp_table_row_count = qwp_wire.first_table_row_count
+_first_qwp_table_column_types = qwp_wire.first_table_column_types
 
-
-def _first_qwp_table_row_count(payload):
-    """Decode the first table's row count from a captured QWP1 frame."""
-    if len(payload) < 12 or payload[:4] != b'QWP1':
-        raise AssertionError('not a QWP1 frame')
-    if int.from_bytes(payload[6:8], 'little') < 1:
-        raise AssertionError('QWP1 frame contains no table')
-
-    # Pooled row frames carry a delta-symbol-dictionary prefix before the
-    # table blocks: start id, entry count, then length-prefixed entries.
-    pos = 12
-    _delta_start, pos = _read_qwp_varint(payload, pos)
-    delta_count, pos = _read_qwp_varint(payload, pos)
-    for _ in range(delta_count):
-        entry_len, pos = _read_qwp_varint(payload, pos)
-        pos += entry_len
-        if pos > len(payload):
-            raise AssertionError('truncated QWP symbol dictionary')
-
-    table_name_len, pos = _read_qwp_varint(payload, pos)
-    pos += table_name_len
-    if pos > len(payload):
-        raise AssertionError('truncated QWP table name')
-    row_count, _ = _read_qwp_varint(payload, pos)
-    return row_count
-
-
-def _first_qwp_table_column_types(payload):
-    """Decode the first table's (column name, type tag) pairs from a
-    captured QWP1 frame. The designated timestamp column carries an empty
-    name."""
-    if len(payload) < 12 or payload[:4] != b'QWP1':
-        raise AssertionError('not a QWP1 frame')
-    if int.from_bytes(payload[6:8], 'little') < 1:
-        raise AssertionError('QWP1 frame contains no table')
-
-    pos = 12
-    _delta_start, pos = _read_qwp_varint(payload, pos)
-    delta_count, pos = _read_qwp_varint(payload, pos)
-    for _ in range(delta_count):
-        entry_len, pos = _read_qwp_varint(payload, pos)
-        pos += entry_len
-        if pos > len(payload):
-            raise AssertionError('truncated QWP symbol dictionary')
-
-    table_name_len, pos = _read_qwp_varint(payload, pos)
-    pos += table_name_len
-    _row_count, pos = _read_qwp_varint(payload, pos)
-    column_count, pos = _read_qwp_varint(payload, pos)
-    columns = []
-    for _ in range(column_count):
-        name_len, pos = _read_qwp_varint(payload, pos)
-        name = payload[pos:pos + name_len]
-        pos += name_len
-        if pos >= len(payload):
-            raise AssertionError('truncated QWP column schema')
-        columns.append((name.decode('utf-8'), payload[pos]))
-        pos += 1
-    return columns
 
 from test_client_capsule_path import (
     TestCapsulePathPyArrow,
