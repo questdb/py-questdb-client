@@ -131,6 +131,13 @@ cdef inline uint64_t bswap64(uint64_t value) noexcept:
 # through the module for each of the two classes is the whole cost.
 cdef object _IPV4_ADDRESS = ipaddress.IPv4Address
 cdef object _IPV4_INTERFACE = ipaddress.IPv4Interface
+cdef object _IPV6_ADDRESS = ipaddress.IPv6Address
+cdef object _UUID = _uuid.UUID
+
+# `int.to_bytes`, unbound so a subclass cannot narrow the result. The
+# row path uses it per UUID cell, where reaching through `int` for it
+# each time is the whole cost.
+cdef object _INT_TO_BYTES = int.to_bytes
 
 
 # Why an `IPv4Interface` is refused, worded once for the three places

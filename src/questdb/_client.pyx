@@ -1596,9 +1596,19 @@ cdef class Buffer:
         # a subclass may define `int` as a property. That code can recycle
         # the string arena an encoded column name borrows from, so the value
         # is reduced to C scalars first and the name is encoded after.
-        cdef object i = value.int
-        cdef uint64_t lo = <uint64_t>(i & 0xFFFFFFFFFFFFFFFF)
-        cdef uint64_t hi = <uint64_t>(i >> 64)
+        #
+        # `int.to_bytes` is called unbound, so a replaced `UUID.int`
+        # cannot narrow the result: it is always the 16 bytes
+        # `UUID.bytes` would give, in one C-implemented call rather than
+        # the two Python integers a mask and a shift would allocate.
+        cdef bytes be_bytes = _INT_TO_BYTES(value.int, 16, 'big')
+        cdef char* be = PyBytes_AsString(be_bytes)
+        cdef uint64_t hi_raw
+        cdef uint64_t lo_raw
+        memcpy(&hi_raw, be, 8)
+        memcpy(&lo_raw, be + 8, 8)
+        cdef uint64_t hi = bswap64(hi_raw)
+        cdef uint64_t lo = bswap64(lo_raw)
         str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_uuid(
                 self._impl, c_name, lo, hi, &err):
@@ -1802,15 +1812,15 @@ cdef class Buffer:
             self._column_long256(c_name, value)
         elif isinstance(value, Geohash):
             self._column_geohash(c_name, value)
-        elif isinstance(value, uuid.UUID):
+        elif type(value) is _UUID or isinstance(value, _UUID):
             self._column_uuid(name, value)
         elif _is_ipv4_address(value):
             self._column_ipv4(name, value)
         else:
-            if isinstance(value, ipaddress.IPv6Address):
+            if isinstance(value, _IPV6_ADDRESS):
                 raise TypeError(
                     'IPv6 is not supported; QuestDB has no IPv6 column type.')
-            if isinstance(value, ipaddress.IPv4Interface):
+            if isinstance(value, _IPV4_INTERFACE):
                 # It subclasses IPv4Address, so the list below would
                 # otherwise appear to contain the thing just rejected.
                 raise TypeError(
