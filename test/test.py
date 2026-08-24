@@ -5783,7 +5783,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         ' LONG256', 'GEOHASH(', ' IPV4', ' DATE', ' CHAR', ' BINARY',
         ' UUID', 'qi.Geohash(', 'qi.Long256(', 'qi.DateMillis(',
         'qi.Char(', "'long256'", "'geohash'", "'ipv4'", "'char'")
-    QWP_ROW_TYPE_WRITE_TOKENS = ('.dataframe(', '.row(', 'schema_overrides')
+    QWP_ROW_TYPE_WRITE_TOKENS = (
+        '.dataframe(', '.row(', 'schema_overrides', '_run_example(')
 
     #: Tests the scan reaches that name one of these types without
     #: putting one on the wire, each with the reason. An entry here is
@@ -5855,54 +5856,71 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         whether it does, so deleting the gate from a listed class would
         leave this green.
 
+        Both files that hold integration tests are read, and every class
+        in them, at any nesting. `test.py`'s live-server tests sit inside
+        an `if os.environ...` block, so a scan of top-level classes in
+        one file walks straight past them.
+
         A test the scan reaches that does not really write one of these
         types goes on `QWP_ROW_TYPE_EXEMPT` with the reason."""
-        source_path = PROJ_ROOT / 'test' / 'system_test.py'
-        text = source_path.read_text()
-        lines = text.splitlines(keepends=True)
-        tree = ast.parse(text)
-
-        gated = {cls.name for cls in tree.body
-                 if isinstance(cls, ast.ClassDef)
-                 and self._gates_on_questdb_10(cls, lines)}
-        self.assertTrue(
-            gated, 'no class in the integration suite gates on QuestDB 10')
+        sources = (
+            # Every class in the integration suite takes a live server.
+            # In `test.py` only some do, and they say so by deriving
+            # from `TestWithDatabase`.
+            ('system_test.py', None),
+            ('test.py', 'TestWithDatabase'),
+        )
 
         scanned = 0
         ungated = []
         reached = set()
-        for cls in tree.body:
-            if not isinstance(cls, ast.ClassDef):
-                continue
-            for fn in cls.body:
-                if not (isinstance(fn, ast.FunctionDef)
-                        and fn.name.startswith('test')):
-                    continue
-                scanned += 1
-                body = ''.join(lines[fn.lineno - 1:fn.end_lineno])
-                if not any(token in body
-                           for token in self.QWP_ROW_TYPE_TOKENS):
-                    continue
-                if not any(token in body
-                           for token in self.QWP_ROW_TYPE_WRITE_TOKENS):
-                    continue
-                reached.add(fn.name)
-                if cls.name in gated:
-                    continue
-                if fn.name in self.QWP_ROW_TYPE_EXEMPT:
-                    self.assertTrue(
-                        self.QWP_ROW_TYPE_EXEMPT[fn.name],
-                        f'{fn.name} is exempt with no reason')
-                    continue
-                ungated.append(f'{cls.name}.{fn.name}')
+        gated_names = set()
+        for file_name, base_name in sources:
+            text = (PROJ_ROOT / 'test' / file_name).read_text()
+            lines = text.splitlines(keepends=True)
+            classes = [
+                node for node in ast.walk(ast.parse(text))
+                if isinstance(node, ast.ClassDef)
+                and (base_name is None
+                     or any(isinstance(b, ast.Name) and b.id == base_name
+                            for b in node.bases))]
 
+            gated = {cls.name for cls in classes
+                     if self._gates_on_questdb_10(cls, lines)}
+            gated_names |= gated
+
+            for cls in classes:
+                for fn in cls.body:
+                    if not (isinstance(fn, ast.FunctionDef)
+                            and fn.name.startswith('test')):
+                        continue
+                    scanned += 1
+                    body = ''.join(lines[fn.lineno - 1:fn.end_lineno])
+                    if not any(token in body
+                               for token in self.QWP_ROW_TYPE_TOKENS):
+                        continue
+                    if not any(token in body
+                               for token in self.QWP_ROW_TYPE_WRITE_TOKENS):
+                        continue
+                    reached.add(fn.name)
+                    if cls.name in gated:
+                        continue
+                    if fn.name in self.QWP_ROW_TYPE_EXEMPT:
+                        self.assertTrue(
+                            self.QWP_ROW_TYPE_EXEMPT[fn.name],
+                            f'{fn.name} is exempt with no reason')
+                        continue
+                    ungated.append(f'{file_name}:{cls.name}.{fn.name}')
+
+        self.assertTrue(
+            gated_names, 'no class gates its tests on QuestDB 10 any more')
         self.assertGreater(scanned, 100, 'the integration suite shrank')
         self.assertEqual(
             ungated, [],
             'these integration tests can put a QWP-only column type on '
             'the wire from a class that does not require QuestDB 10, so '
             'they run against the 9.4.3 QWP beta on five legs. Move each '
-            f'into one of {sorted(gated)}, or add it to '
+            f'into one of {sorted(gated_names)}, or add it to '
             'QWP_ROW_TYPE_EXEMPT with the reason it writes no such '
             'type:\n  ' + '\n  '.join(ungated))
 
