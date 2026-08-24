@@ -5150,6 +5150,94 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 txn.commit()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_close_racing_a_refused_close_cannot_report_success(self):
+        """`QuestDB.close()` decides its refusal before it publishes
+        anything, and under the lock that publishes it.
+
+        A close from inside one of the handle's own calls is refused:
+        it is waiting on the very frame that would release the use.
+        Publishing `_db = NULL` and `_closing = True` first would leave
+        a window where a `close()` on another thread sees the handle
+        closing, waits for `_closing` to clear, and returns -- against a
+        handle the first call hands straight back, still open, its
+        config string still set and its callback references still held.
+        The same window is a deadlock read the other way round, with
+        each close waiting on the other.
+
+        Raced rather than sequenced, because a window is only visible
+        from inside it. The invariant each round: whichever thread
+        `close()` returned on, the handle really is closed.
+        """
+        for attempt in range(25):
+            with self.subTest(attempt=attempt):
+                with QwpAckServer() as server:
+                    conf = (
+                        f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=1;'
+                        'pool_reap=manual;')
+                    db = qi.QuestDB.from_conf(conf)
+                    start = threading.Barrier(2)
+                    inner = []
+                    outer = []
+
+                    class HostileFrame(pd.DataFrame):
+                        fired = False
+
+                        @property
+                        def attrs(self):
+                            if not HostileFrame.fired:
+                                HostileFrame.fired = True
+                                start.wait(timeout=20)
+                                try:
+                                    db.close()
+                                except qi.QuestDBError:
+                                    inner.append('refused')
+                                else:
+                                    inner.append('returned')
+                            return {}
+
+                        @attrs.setter
+                        def attrs(self, value):
+                            pass
+
+                    def close_on_another_thread():
+                        start.wait(timeout=20)
+                        try:
+                            db.close()
+                        except qi.QuestDBError:
+                            outer.append('refused')
+                        else:
+                            outer.append('returned')
+
+                    closer = threading.Thread(target=close_on_another_thread)
+                    closer.start()
+                    try:
+                        try:
+                            db.dataframe(
+                                HostileFrame({
+                                    'v': [1, 2],
+                                    'ts': pd.to_datetime([0, 1], unit='s')}),
+                                table_name='t', at='ts')
+                        except qi.QuestDBError:
+                            # The other thread won and closed the handle
+                            # first, which is a legitimate outcome.
+                            pass
+                        closer.join(timeout=30)
+                        self.assertFalse(
+                            closer.is_alive(),
+                            'close() on the other thread never returned')
+                        self.assertNotEqual(
+                            inner, ['returned'],
+                            'a close from inside the handle\'s own call '
+                            'reported success')
+                        if outer == ['returned']:
+                            with self.assertRaisesRegex(
+                                    qi.QuestDBError, 'is closed'):
+                                db.reap_idle()
+                    finally:
+                        db.close()
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_ws_dataframe_survives_a_close_from_inside_itself(self):
         """The WebSocket `dataframe()` route hands connection options to
         the run and then builds the plan, which is caller Python. A

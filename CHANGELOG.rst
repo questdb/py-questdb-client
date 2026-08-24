@@ -215,6 +215,13 @@ Fixed
   where the NumPy planner warns. A column that is gone or renamed is still
   the drift the claim is meant to survive quietly.
 
+- **``QuestDB.close()`` from inside one of the handle's own calls is refused
+  before anything is published.** The refusal is decided under the lock that
+  publishes ``close()``'s state, so a ``close()`` on another thread can no
+  longer see the handle closing, wait for that to clear, and return reporting
+  success against a handle that is still open -- nor can the two ends of that
+  window wait on each other.
+
 - **A transaction whose commit cannot flush is over.** ``commit()`` used to
   mark the transaction complete before the flush that carries it, so a flush
   that failed left the transaction closed with its rows still buffered, for

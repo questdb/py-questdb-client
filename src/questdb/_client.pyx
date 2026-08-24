@@ -9170,6 +9170,30 @@ cdef class QuestDB:
         cdef PyThreadState* gs = NULL
         cdef bint closed = False
         with self._state_cond:
+            # A close from inside one of this handle's own calls --
+            # `dataframe()` reading `attrs`, a cell conversion, an
+            # Arrow producer, a lease's own `row()` -- is waiting on
+            # the very frame that would release the use, so neither
+            # wait below can ever end. Not the one for outstanding
+            # leases, and not the one for a concurrent close either:
+            # that close is itself waiting for this thread's use to be
+            # released. An error is the only outcome a caller can act
+            # on; the alternative is a warning every five seconds and
+            # no return.
+            #
+            # Asked before `_db` and `_closing` are published, and
+            # under the lock that publishes them, so a close on another
+            # thread never sees a handle this call is about to hand
+            # back -- waits for `_closing` to clear and returns
+            # reporting success against a handle that is still open.
+            if getattr(self._use_depth, 'value', 0) != 0:
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    "close() can't be called from inside a call on "
+                    'this QuestDB handle. It would wait for that '
+                    'call to finish, which cannot happen while the '
+                    'call is waiting for close(). Close it after '
+                    'the call returns.')
             db = self._db
             if db == NULL:
                 # A caller dispatching for this handle must not wait here:
@@ -9189,23 +9213,6 @@ cdef class QuestDB:
             self._closing = True
         try:
             with self._state_cond:
-                # A close from inside one of this handle's own calls --
-                # `dataframe()` reading `attrs`, a cell conversion, an
-                # Arrow producer, a lease's own `row()` -- is waiting on
-                # the very frame that would release the use, so the wait
-                # below can never end. An error is the only outcome a
-                # caller can act on: the alternative is a warning every
-                # five seconds and no return.
-                if getattr(self._use_depth, 'value', 0) != 0:
-                    self._db = db
-                    self._closing = False
-                    raise QuestDBError(
-                        QuestDBErrorCode.InvalidApiCall,
-                        "close() can't be called from inside a call on "
-                        'this QuestDB handle. It would wait for that '
-                        'call to finish, which cannot happen while the '
-                        'call is waiting for close(). Close it after '
-                        'the call returns.')
                 while self._active_uses != 0:
                     if (not self._state_cond.wait(timeout=5.0)
                             and self._active_uses != 0):
