@@ -1788,6 +1788,34 @@ cdef _numpy_check_meta_pinned(
             err = NULL
 
 
+def _debug_numpy_pinned_meta(_NumpyBatchIter it):
+    """The schema a NumPy-backed iterator pinned from its first batch.
+
+    Not part of the public API. The drift check compares a later batch
+    against this, and a result whose schema really changes mid-stream
+    cannot be arranged from a test, so the pin is what a test perturbs
+    instead. Comparing a good batch against a doctored pin exercises
+    the same comparison as a doctored batch against a good pin.
+    """
+    return (it.pinned_meta, list(it.pinned_names_b))
+
+
+def _debug_numpy_force_pin(_NumpyBatchIter it, tuple pinned_meta,
+                           list pinned_names_b):
+    """Seed an iterator's pinned schema so its *first* batch is checked
+    against it rather than pinning one of its own.
+
+    Not part of the public API.
+    """
+    it.pinned_meta = pinned_meta
+    it.pinned_names_b = pinned_names_b
+    (it.col_names, it.col_kinds, it.col_scales,
+     it.col_precision, it.has_symbol) = pinned_meta
+    it.claim = _numpy_roundtrip_claim(
+        it.col_names, it.col_kinds, it.col_scales, it.col_precision)
+    it.first = False
+
+
 cdef _numpy_meta_drift():
     # `SchemaDrift` is the code the header gives a mid-stream schema
     # change, and the one `to_arrow()` and `iter_polars()` already raise

@@ -15,6 +15,7 @@ stages:
               questdbVersion: ""
               requireQwpRowTypes: ""
               buildDocs: true
+              runClaimGrid: true
             linux-pandas2:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
@@ -129,6 +130,19 @@ stages:
               jdkDirectory: "$(JAVA_HOME)"
               options: "-DskipTests -Pbuild-web-console$(CLIENT_PROFILE)"
             condition: eq(variables.vsQuestDbMaster, true)
+          # The claim grid is 630 cells against an in-process mock and
+          # runs in one process, so it is cheap enough to gate on. The
+          # re-entrancy grid is a subprocess per cell and stays nightly
+          # (`.github/workflows/grids.yml`).
+          #
+          # Gated because the meta-tests in `test.py` read the
+          # checked-in table rather than running it, so on their own
+          # they pass against a stale one: a change that alters what a
+          # claim does would otherwise reach the default branch and
+          # surface the next morning.
+          - script: python3 proj.py grid claim
+            displayName: "Claim grid"
+            condition: eq(variables.runClaimGrid, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:

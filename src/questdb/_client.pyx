@@ -1136,7 +1136,7 @@ cdef class SenderTransaction:
         self._sender._in_txn = True
         return self
 
-    def __exit__(self, exc_type, _exc_value, _traceback):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is not None:
             if not self._complete:
                 self.rollback()
@@ -9382,7 +9382,7 @@ cdef class QuestDB:
                 self._closing = False
                 self._state_cond.notify_all()
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
     def __dealloc__(self):
@@ -11060,7 +11060,7 @@ cdef class Sender:
         finally:
             self._close()
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Flush pending and disconnect at the end of a ``with`` block.
 
@@ -11722,7 +11722,7 @@ cdef class PooledSender:
             finally:
                 self._exit_call_locked(handle)
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.close(exc_type is None, False)
 
     def __dealloc__(self):
@@ -11941,7 +11941,7 @@ cdef class PooledReader:
             finally:
                 self._exit_call_locked(handle)
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
     def __dealloc__(self):

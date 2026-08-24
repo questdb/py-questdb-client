@@ -461,7 +461,7 @@ class SenderTransaction:
 
     def __init__(self, sender: Sender, table_name: str): ...
     def __enter__(self) -> SenderTransaction: ...
-    def __exit__(self, exc_type, _exc_value, _traceback) -> bool: ...
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool: ...
     def row(
         self,
         *,
@@ -1477,7 +1477,7 @@ class QuestDB:
         returns.
         """
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb): ...
+    def __exit__(self, exc_type, exc_val, exc_tb): ...
 
 
 class QueryResult:
@@ -1995,7 +1995,7 @@ class Sender:
             closing.
         """
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Flush pending and disconnect at the end of a ``with`` block.
 

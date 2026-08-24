@@ -2652,6 +2652,103 @@ class TestEgressWithDatabase(unittest.TestCase):
         finally:
             self._exec(f'DROP TABLE IF EXISTS {table_name}')
 
+    def test_a_batch_disagreeing_with_the_pinned_schema_is_refused(self):
+        """The NumPy backend decodes every batch after the first against
+        the first one's columns, and the claim it hands back names them
+        too. A batch that disagrees would be decoded with the wrong
+        dtype and described by a claim that does not match its own
+        values.
+
+        A result whose schema really changes mid-stream cannot be
+        arranged from a test, so the pin is perturbed instead: the
+        check is a comparison, and a good batch against a doctored pin
+        exercises it exactly as a doctored batch against a good pin
+        would. Each of the four things it compares gets its own case,
+        because a check that fires on the count alone would pass a test
+        that only ever moved the count -- and the byte widths agree for
+        any same-width type swap, which is what left this open.
+        """
+        rows = 256
+        table_name = 't_egress_drift_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), "
+                "'1.2.3.4'::ipv4, #u33d, x "
+                f'FROM long_sequence({rows})')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT ip, gh, lg FROM {table_name}'
+            conf = self._conf() + 'max_batch_rows=64;'
+
+            with qi.QuestDB.from_conf(conf) as client:
+                probe = client.query(sql).iter_pandas()
+                next(probe)
+                meta, names = qi._debug_numpy_pinned_meta(probe)
+            col_names, kinds, scales, precision, has_symbol = meta
+            gh_index = list(col_names).index('gh')
+
+            def dropped_column():
+                return ((col_names[:-1], kinds[:-1], scales[:-1],
+                         precision[:-1], has_symbol), names[:-1])
+
+            def renamed_column():
+                doctored = list(names)
+                doctored[0] = b'not_' + doctored[0]
+                return (meta, doctored)
+
+            def changed_kind():
+                doctored = list(kinds)
+                # Any other kind will do; the point is that it differs.
+                doctored[0] = kinds[0] + 1
+                return ((col_names, doctored, scales, precision,
+                         has_symbol), names)
+
+            def changed_geohash_precision():
+                doctored = list(precision)
+                doctored[gh_index] = (precision[gh_index] or 20) + 5
+                return ((col_names, kinds, scales, doctored,
+                         has_symbol), names)
+
+            cases = {
+                'a column dropped': dropped_column,
+                'a column renamed': renamed_column,
+                'a column retyped': changed_kind,
+                'a geohash precision changed': changed_geohash_precision,
+            }
+            for label, build in cases.items():
+                with self.subTest(drift=label):
+                    doctored_meta, doctored_names = build()
+                    with qi.QuestDB.from_conf(conf) as client:
+                        stream = client.query(sql).iter_pandas()
+                        qi._debug_numpy_force_pin(
+                            stream, tuple(doctored_meta),
+                            list(doctored_names))
+                        with self.assertRaises(qi.QuestDBError) as caught:
+                            next(stream)
+                    self.assertEqual(
+                        caught.exception.code,
+                        qi.QuestDBErrorCode.SchemaDrift,
+                        f'{label}: wrong error code')
+                    self.assertIn(
+                        'schema changed between batches',
+                        str(caught.exception))
+
+            # A pin that agrees is not refused -- otherwise the four
+            # cases above would pass against a check that always fires.
+            with qi.QuestDB.from_conf(conf) as client:
+                stream = client.query(sql).iter_pandas()
+                qi._debug_numpy_force_pin(stream, meta, list(names))
+                first = next(stream)
+            self.assertEqual(len(first.columns), len(col_names))
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
     def test_iter_pandas_shares_one_round_trip_claim(self):
         """Every batch of a streaming read carries the same claim
         object. One schema covers the whole result, so building the

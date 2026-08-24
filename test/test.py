@@ -22,6 +22,7 @@ import pickle
 from enum import Enum
 import random
 import re
+import types
 import pathlib
 import tempfile
 import warnings
@@ -9828,6 +9829,126 @@ class TestTypeStub(unittest.TestCase):
         self.assertEqual(
             missing, [],
             'declared in _client.pyi and absent from the extension')
+
+    #: Members whose runtime signature cannot be read, with the reason.
+    #: `__cinit__` has no `__text_signature__`, and a few slots are
+    #: implemented by CPython rather than by this module.
+    _SIGNATURE_UNREADABLE = {'__init__', '__cinit__', '__new__'}
+
+    def test_every_stub_signature_matches_the_extension(self):
+        """A name that exists is not the same promise as a signature
+        that matches. A stub naming a parameter the extension does not
+        take type-checks cleanly and raises `TypeError` at the call, so
+        the parameter lists are compared here too.
+
+        Only the shape is compared -- names, order, and whether a
+        default exists. Annotations are the stub's own business; it
+        exists to carry types the extension has no way to express.
+        """
+        import ast
+        import inspect
+        tree = self._stub_tree()
+        mismatches = []
+
+        def stub_params(fn):
+            args = fn.args
+            out = []
+            positional = args.posonlyargs + args.args
+            n_defaults = len(args.defaults)
+            first_default = len(positional) - n_defaults
+            for i, arg in enumerate(positional):
+                out.append((arg.arg, i >= first_default))
+            if args.vararg:
+                out.append(('*' + args.vararg.arg, False))
+            elif args.kwonlyargs:
+                out.append(('*', False))
+            for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+                out.append((arg.arg, default is not None))
+            if args.kwarg:
+                out.append(('**' + args.kwarg.arg, False))
+            return out
+
+        def runtime_params(obj):
+            try:
+                signature = inspect.signature(obj)
+            except (TypeError, ValueError):
+                return None
+            out = []
+            for name, param in signature.parameters.items():
+                if param.kind is param.VAR_POSITIONAL:
+                    out.append(('*' + name, False))
+                elif param.kind is param.VAR_KEYWORD:
+                    out.append(('**' + name, False))
+                else:
+                    if (param.kind is param.KEYWORD_ONLY
+                            and not any(p[0].startswith('*')
+                                        for p in out)):
+                        out.append(('*', False))
+                    out.append(
+                        (name, param.default is not param.empty))
+            return out
+
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            owner = getattr(qi, node.name, None)
+            if owner is None:
+                continue
+            for statement in node.body:
+                if not isinstance(statement, ast.FunctionDef):
+                    continue
+                name = statement.name
+                if name in self._SIGNATURE_UNREADABLE:
+                    continue
+                member = inspect.getattr_static(owner, name, None)
+                if member is None:
+                    continue
+                decorators = {
+                    d.id for d in statement.decorator_list
+                    if isinstance(d, ast.Name)}
+                if 'property' in decorators:
+                    # A `@property` on a cdef class is a getset
+                    # descriptor rather than a `property` object.
+                    self.assertIsInstance(
+                        member,
+                        (property, types.GetSetDescriptorType,
+                         types.MemberDescriptorType),
+                        f'{node.name}.{name} is a property in the stub '
+                        f'and a {type(member).__name__} at runtime')
+                    continue
+                target = member
+                if isinstance(member, (classmethod, staticmethod)):
+                    target = member.__func__
+                expected = stub_params(statement)
+                if isinstance(member, (classmethod, staticmethod)):
+                    # The stub spells the bound first parameter; the
+                    # runtime signature of the underlying function
+                    # keeps it too.
+                    pass
+                actual = runtime_params(target)
+                if actual is None:
+                    continue
+                if expected != actual:
+                    mismatches.append(
+                        f'{node.name}.{name}: stub {expected} != '
+                        f'runtime {actual}')
+
+        self.assertEqual(
+            mismatches, [],
+            'signatures in _client.pyi that the extension does not have')
+
+    def test_stub_and_module_export_the_same_names(self):
+        import ast
+        for node in self._stub_tree().body:
+            if (isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name)
+                            and target.id == '__all__'
+                            for target in node.targets)):
+                declared = sorted(ast.literal_eval(node.value))
+                break
+        else:
+            self.fail('_client.pyi declares no __all__')
+        self.assertEqual(declared, sorted(qi.__all__))
 
 
 class TestEveryTestClassIsReachable(unittest.TestCase):

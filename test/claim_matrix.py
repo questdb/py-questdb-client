@@ -194,15 +194,22 @@ def value_set(pa, np, kind):
             'arrow_int': pa.uint32(),
         }
     if kind == 'char':
+        # A CHAR column is one UTF-16 code unit, and egress hands it
+        # back as `pa.uint16()` -- `system_test.py` pins that. The
+        # shapes here are the ones a read-modify-write actually
+        # produces, so `py`, `arrow` and the integer pair all carry the
+        # code unit rather than the character it prints as. `text` is
+        # the one shape that does not: a string column is what a caller
+        # reaches for by hand, and it cannot carry the claim.
         return {
-            'py': ['x'],
+            'py': [ord('x')],
             'text': ['x'],
-            'arrow': pa.array(['x'], pa.string()),
-            'raw': [b'x'],
-            'width': 1,
+            'arrow': pa.array([ord('x')], pa.uint16()),
+            'raw': [b'x\x00'],
+            'width': 2,
             'ints': [ord('x')],
-            'int_dtype': np.int32,
-            'arrow_int': pa.int32(),
+            'int_dtype': np.uint16,
+            'arrow_int': pa.uint16(),
         }
     if kind == 'geohash':
         return {
