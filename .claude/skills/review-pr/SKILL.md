@@ -22,6 +22,7 @@ You are a senior QuestDB engineer performing a blocking code review. `py-questdb
   - GIL: does a `with nogil` block touch a Python object or call a CPython API function? Does a `cdef ... nogil` function need the GIL it doesn't hold?
   - Failure modes: connection dropping mid-flush, partial write, TLS handshake failure, auth rejection, server rejection — does the buffer/sender end in a usable state, and does native memory get released?
   - C-ABI callers: what happens when a C function returns `NULL`, returns an error via its out-param, or hands back a pointer the Cython side must free exactly once?
+- **A finding is a sample, not the population.** Once a bug is confirmed, ask whether it is one instance of a mechanism the codebase repeats, whether the obvious fix only moves it to the next place that mechanism runs, and whether the code violates this invariant because it is holding a conflicting one — then ask what else would have to be true for the finding to be as small as it looks. Step 3c makes this check mandatory.
 - **Check what's missing**, not just what's there. Missing tests, missing error handling, missing edge cases, missing `ingress.pyi` stub updates for public API changes, `.pxd` declarations out of sync with the C header.
 - **Verify every claim.** If the PR title says "fix", verify the bug actually existed and the fix is correct. If it says "improve performance", look for benchmarks or reason about the change against the per-row hot path. If it says "simplify", verify the new code is actually simpler and doesn't drop behavior (e.g. a dropped `free` on an error branch). Treat the PR description as an unverified hypothesis.
 - **Read the full context of changed files** when the diff alone is ambiguous. Use Read/Grep/Glob to inspect surrounding code, callers, and related tests.
@@ -36,10 +37,10 @@ The level controls how much of the review below actually runs. Lower levels keep
 
 | Level | What runs |
 |-------|-----------|
-| **0 (default)** | Steps 1, 2, 4. Skip Step 2.5. Skip Step 3 — no agent spawn; review the diff inline in the main loop, using Read/Grep on demand to resolve ambiguities. Skip Step 3b — verify each finding inline as you write it. Single-pass review covering correctness, Cython memory/refcount/GIL safety, C-ABI binding correctness, tests, and coding standards on the diff itself. |
-| **1** | Adds Step 2.5a (semantic delta only — skip 2.5b/2.5c/2.5d). In Step 3, launch only Agent 1 (correctness), Agent 2 (Cython memory & refcount safety), and Agent 7 (tests) in parallel. Skip all other agents. Skip Step 3b — verify findings inline as you draft the report. |
-| **2** | Full Step 2.5, but in 2.5b restrict the callsite inventory to public Python symbols (exported in `__all__` / `ingress.pyi`) plus every `cdef`/`cpdef` function and every C-ABI symbol declared in the `.pxd` files. In Step 3, launch Agents 1-8. Skip Agent 9 (cross-context) and Agent 10 (adversarial fresh-context). Step 3b uses a single batched verification agent for all findings instead of one per finding. |
-| **3** | Every step below as written, all 10 agents, per-finding verification. The full mission-critical pass. |
+| **0 (default)** | Steps 1, 2, 4. Skip Step 2.5. Skip Step 3 — no agent spawn; review the diff inline in the main loop, using Read/Grep on demand to resolve ambiguities. Skip Step 3b — verify each finding inline as you write it. Run Step 3c's probes inline on every confirmed finding; Probe A's grep is mandatory. Single-pass review covering correctness, Cython memory/refcount/GIL safety, C-ABI binding correctness, tests, and coding standards on the diff itself. |
+| **1** | Adds Step 2.5a (semantic delta only — skip 2.5b/2.5c/2.5d). In Step 3, launch only Agent 1 (correctness), Agent 2 (Cython memory & refcount safety), and Agent 7 (tests) in parallel. Skip all other agents. Skip Step 3b — verify findings inline as you draft the report. Run Step 3c's probes inline; Probe A's grep is mandatory. |
+| **2** | Full Step 2.5, but in 2.5b restrict the callsite inventory to public Python symbols (exported in `__all__` / `ingress.pyi`) plus every `cdef`/`cpdef` function and every C-ABI symbol declared in the `.pxd` files. In Step 3, launch Agents 1-8. Skip Agent 9 (cross-context) and Agent 10 (adversarial fresh-context). Step 3b uses a single batched verification agent for all findings instead of one per finding, and Step 3c uses a single batched broadening agent. |
+| **3** | Every step below as written, all 10 agents, per-finding verification, per-finding broadening plus the Step 3c merge pass. The full mission-critical pass. |
 
 State the chosen level in one line at the start of the review so the user knows what they're getting (e.g., "Reviewing PR #141 at level 2"). If the level was defaulted, mention that level 3 exists for full review.
 
@@ -269,6 +270,91 @@ For each finding in the draft report:
 
 Launch verification agents in parallel where findings are independent. Each verification agent should read surrounding source files, not just the diff.
 
+Every finding that survives verification goes into Step 3c before it reaches the report.
+
+## Step 3c: Broaden every confirmed finding
+
+Runs on every finding Step 3b classified **CONFIRMED in-diff**, **CONFIRMED at out-of-diff callsite**, or **CONFIRMED with nuance**. False positives skip this step.
+
+A confirmed finding is a sample, not the population. Reported as it was found, it earns a one-line fix — and the next review of this repo finds the same bug two files over, or finds that the fix moved the bug rather than removing it. Before a finding reaches the report, run the four probes below against it and write a verdict for each. The first three are the patterns that recur; the fourth is the open one that keeps the list from being treated as complete.
+
+Both verdicts of each probe are acceptable outcomes: a finding that survives all four unchanged is reported exactly as verified, with one line recording that the probes ran. What is not acceptable is asserting a probe's negative verdict without the search or the trace that supports it — the same evidence rule as 2.5b.
+
+### 3c.A Instance or class?
+
+The pattern: the review found one or two occurrences of a mechanism that the codebase repeats. Fix those two and the next round finds two more, indefinitely.
+
+1. **Name the mechanism, not the line.** "A `qdb_pystr_buf` pointer held across an arena append." "A `cdef` returning `int` with no `except` clause." "A `malloc` freed only on the success path." "A `.pxd` block drifted from the pinned header." If the mechanism can only be stated by quoting the finding's own line numbers, it has not been named yet.
+2. **Search the whole repository for that mechanism** — not for the changed symbol, and not only inside the diff. Match on the mechanism's shape:
+
+| Mechanism in the finding | Search that finds the rest of the class |
+|---|---|
+| `cdef` returning a C type with a missing/wrong `except` clause | `grep -rn 'cdef .*)' src/questdb/*.pyx src/questdb/*.pxi src/questdb/*.pxd`, then filter to non-object return types and read each `except` clause |
+| Allocation freed only on the success path | `grep -rn 'malloc\|calloc\|realloc\|free(' src/questdb/*.pyx src/questdb/*.pxi` and pair each allocation with its `free` on every path |
+| `line_sender_error*` freed at the callsite rather than by one converting helper | `grep -rn 'line_sender_error\|c_err_to_py\|line_sender_error_free' src/questdb/` |
+| `PyObject_GetBuffer` without a `finally`-guarded release | `grep -rn 'PyObject_GetBuffer\|PyBuffer_Release' src/questdb/` |
+| Refcount op unbalanced on an error path | `grep -rn 'Py_INCREF\|Py_DECREF\|Py_XDECREF' src/questdb/` |
+| `.pxd` declaration disagreeing with the C header | compare the **whole** declaration block, not the changed line: `grep -rn '<symbol>' c-questdb-client/include/questdb/ingress/*.h rpyutils/include/*.h` |
+| Arena pointer held across a `qdb_pystr_buf` append/clear | `grep -rn 'qdb_pystr_buf\|_utf8' src/questdb/*.pyx src/questdb/*.pxi` |
+| Arrow `release` callback invoked on some paths only | `grep -rn 'release\|ArrowArray\|ArrowSchema\|Capsule' src/questdb/dataframe.pxi` |
+| Python-level operation in a per-row/per-cell loop | read the whole loop body and the sibling loops in `dataframe.pxi`, not the changed line |
+
+3. **Write the verdict** with the search that backs it: `isolated — searched <command> over <files>, this is the only instance`, or `class — N instances at <file:line>, <file:line>, …`.
+4. **A class-level finding is reported once, not N times.** List every instance, and suggest a fix that makes the whole class impossible — a shared helper, a `try/finally` at the allocation site, one `except` convention applied to the whole family of `cdef`s, a single converting function that owns the error lifecycle — rather than N spot fixes.
+5. **Every additional instance goes back through Step 3b verification before it is reported.** Broadening does not get to skip verification; an unverified instance list re-introduces exactly the false positives 3b removed.
+
+### 3c.B Leaf or mechanism?
+
+The pattern: the finding names the exact place where a broken mechanism happens to surface. The obvious fix satisfies that place and leaves the mechanism free to fail at the next place it runs.
+
+1. **Write the one-line fix the author would obviously apply.** Then ask what that fix actually asserts — a bound, an ownership rule, an initialization, a state transition.
+2. **Ask where that assertion belongs.** Compare the leaf where the failure is visible against the deepest point every failing path shares: the `cdef` helper, `__cinit__`, the arena API, the one function that converts a `line_sender_error*`, the single place a row is committed to the buffer. A fix at the leaf holds only if the leaf is the sole entry to the mechanism.
+3. **Enumerate the other entries from the callsite inventory (2.5b)** — do not assume there is one. For each, state whether the precondition the leaf fix asserts already holds there.
+4. **Re-run the mechanism on the same object in your head:** the next row, the next column, the next flush, the retry after a failed flush, a second pass through `__dealloc__`. A fix that holds once and not on repetition is a leaf fix.
+5. **Verdict:** `leaf fix sufficient — the mechanism has one entry at <file:line>`, or `mechanism lives at <file:line>; a leaf fix leaves <callsites> broken, so the fix belongs there`. When the mechanism verdict applies, the report states the mechanism, the leaf that exposed it, and the other callsites that stay broken under the obvious fix.
+
+### 3c.C Conflicting invariants?
+
+The pattern: the finding is real, and so is the reason the code is written that way. Two contracts cannot both hold in the current design, so the obvious fix restores one invariant by breaking the other.
+
+1. **State the invariant the finding says is violated**, in one sentence.
+2. **Find the invariant the current code holds instead.** Working code rarely breaks a rule for nothing. Read the surrounding code and the tests that cover it, and name what the present shape is protecting. Pairs that pull against each other in this codebase — examples, not a closed list:
+   - The `Buffer` is usable after a failed flush ↔ rows already handed to the transport are not sent twice
+   - `qdb_pystr_buf` pointers stay valid until the write completes ↔ the arena is cleared per row/flush to bound memory
+   - The blocking flush runs under `nogil` ↔ an error discovered inside it has to become a Python exception
+   - `__dealloc__` frees the native handle ↔ the sender may still be registered in `active_senders` and reachable from another thread
+   - Auto-flush fires on a row/byte threshold ↔ a row reaches the wire only once complete
+   - A `cdef` is `noexcept`/`nogil` for the hot path ↔ the error it detects has to reach Python
+   - The `.pyi` stub and `CHANGELOG.rst` describe a stable public API ↔ the C-ABI binding must follow the pinned submodule's semantics
+3. **Apply the proposed fix on paper and walk the opposite invariant's paths**, naming the callsite and the test that would break.
+4. **Verdict:** `no conflict — the fix preserves <other invariant> because <reason>`, or `conflict — the fix breaks <other invariant> at <file:line>`.
+5. **A conflict finding is reported as a design issue, not a patch.** State both invariants, where each is enforced, and why the obvious fix trades one bug for another; then give the design options rather than a one-line suggested fix. **Severity goes up, not down** — a fix that silently breaks the opposing invariant is worse than the bug as reported, because the second bug arrives without a review.
+
+### 3c.D Any other way this is bigger?
+
+A, B and C are the three patterns that recur most. They are not the closed set. The generative question for everything else: **what would have to be true elsewhere in the repo for this finding to be exactly as small as it looks?** — then check whether it is true.
+
+Axes worth one pass each, with the evidence that settles them:
+
+- **Mirror path.** This repo carries symmetric implementations: ILP wire format v1 ↔ v2, HTTP ↔ TCP sender, pandas ↔ polars ↔ pyarrow ↔ Arrow-capsule entry points, one `Buffer.column_*` per dtype, explicit flush ↔ auto-flush. A bug in one arm is usually sitting in its mirror. Evidence: read the sibling implementation in full — a grep for the changed symbol will not find it, because the mirror spells everything differently.
+- **Inverse operation.** If the bug is in acquire, read release: `__cinit__` → `__dealloc__`, `PyObject_GetBuffer` → `PyBuffer_Release`, `Py_INCREF` → `Py_DECREF`, register in `active_senders` → unregister, encode → the decode in `test/mock_server.py`. Evidence: the paired function, read in full.
+- **Escalated consequence.** The finding is filed as one class of failure — check whether the same trigger reaches a worse one under a condition that is also reachable: unchecked indexing under `boundscheck=False`, the same path entered under `nogil`, the free-threaded build, a Rust panic crossing the ABI where the draft says "leak". Evidence: the build facts from 2.5e plus the path trace. Deepening severity is a form of broadening, and it changes the merge decision.
+- **Repo boundary.** Does the root cause live in the pinned `c-questdb-client` or `rpyutils` rather than here? Then the Cython change is a workaround: say so, name the upstream file, and state what happens at the next submodule bump. Evidence: the pinned header or Rust source, read.
+- **Stated contract.** If the code is wrong, check whether `ingress.pyi`, the docstring, `docs/`, and `CHANGELOG.rst` describe the wrong behavior too. A code-only fix leaves users writing against a contract that documents the bug. Evidence: the four contract surfaces, checked.
+- **History.** `git log -S'<mechanism>' -- src/questdb/` and `git log --grep`. A bug that was fixed before and came back means the real finding is that nothing guards it, and the fix is the guard, not the patch.
+
+**The open slot.** If none of these fit and the finding still reads smaller in the report than it looked in the code, name the axis yourself and apply it. A self-named axis is reportable only when it produces the same artifact the named ones do — a search that was run, a file that was read, a callsite named. "This may also affect X", with nothing behind it, is not a broadening: drop it and report the finding as verified.
+
+One pass over the axes, not a hunt for exhaustiveness. Stop at the first axis that changes the finding's scope, and if two axes point at the same larger finding, report it once.
+
+### Level gating for this step
+
+- **Levels 0 and 1:** run the probes inline in the main loop. Probe A's search is mandatory — it is one grep per finding. B and C are answered from the code already read during verification. From D, run the mirror-path and inverse-operation axes; they are the two that pay off most in this repo and both are a single file read.
+- **Level 2:** one batched broadening agent for all confirmed findings, receiving the confirmed list, the change surface map from 2.5, and this section. It runs A, B, C and the full D axis pass.
+- **Level 3:** one broadening agent per confirmed finding, in parallel, followed by a single merge pass that re-reads all broadened findings together and collapses any two that turn out to be the same mechanism.
+
+Do not broaden without evidence. A finding that comes back isolated on all four probes is a complete finding, and padding it with speculative instances costs the report its credibility.
+
 ## Review checklists
 
 Review the diff for:
@@ -355,15 +441,21 @@ Present ONLY verified findings (false positives are excluded from Critical/Moder
 Issues that must be fixed before merge. Each must include:
 - Exact file path and line numbers (including out-of-diff files)
 - Whether the finding is **in-diff** or **out-of-diff**
+- A **Scope** line from Step 3c, one of:
+  - `Scope: isolated` — plus the search that established it
+  - `Scope: class — N instances` — every instance listed as `file:line`, with a fix that removes the class
+  - `Scope: mechanism at <file:line>` — the leaf that exposed it, and the callsites a leaf fix leaves broken
+  - `Scope: invariant conflict with <invariant>` — both invariants stated, design options instead of a one-line fix
+  - `Scope: <axis> — <what it reached>` — a 3c.D outcome, naming the axis and its evidence (e.g. `Scope: mirror path — same bug in the polars arm at dataframe.pxi:812`)
 - Code path trace showing why the bug is real
 - For out-of-diff findings: the contract from 2.5c that was violated and the callsite that triggers it
 - Suggested fix
 
 ### Moderate
-Issues worth addressing but not blocking.
+Issues worth addressing but not blocking. Each carries its Step 3c `Scope` line.
 
 ### Minor
-Style nits and suggestions.
+Style nits and suggestions. Each carries its Step 3c `Scope` line.
 
 ### Downgraded (false positives)
 Findings from the initial review that were dismissed after source code verification. For each, state:
@@ -374,4 +466,5 @@ Findings from the initial review that were dismissed after source code verificat
 - One-line verdict: approve, request changes, or needs discussion
 - Highlight any regressions or tradeoffs
 - State how many draft findings were verified vs dropped as false positives (e.g., "8 findings verified, 4 false positives removed")
+- State the Step 3c outcome: how many findings broadened into a class (with the total instance count), how many were relocated to a mechanism deeper than the leaf, how many turned out to be invariant conflicts, and how many grew along a 3c.D axis (naming the axis). If every confirmed finding came back `isolated`, say so explicitly and name the searches — an all-isolated result on a non-trivial diff usually means Probe A searched for the changed symbol instead of the mechanism.
 - State the in-diff vs out-of-diff split (e.g., "5 findings in-diff, 3 findings out-of-diff"). If the diff is non-trivial and out-of-diff is zero, the cross-context pass likely underran — re-invoke Agent 9 with a wider grep before finalizing.
