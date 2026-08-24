@@ -2764,8 +2764,10 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             with self.subTest(to_bytes_returns=result):
                 self.assertEqual(qi.Long256(bad_int(5, result)).value, 5)
 
-        # Defeating the range check as well still cannot get a value of the
-        # wrong magnitude through.
+        # A subclass that lies through its comparison operators cannot
+        # get a value of the wrong magnitude through either. The value
+        # is taken as a plain `int` before the range check, so the check
+        # and the encoding read the same number.
         def lying_int(value):
             return type('LyingInt', (int,), {
                 '__lt__': lambda self, other: False,
@@ -2773,7 +2775,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 'to_bytes': lambda self, *a, **k: b'\xff' * 32})(value)
 
         for value in (-1, 2 ** 256):
-            with self.subTest(lying=value), self.assertRaises(OverflowError):
+            with self.subTest(lying=value), self.assertRaisesRegex(
+                    ValueError, r'0 <= value < 2\*\*256'):
                 qi.Long256(lying_int(value))
 
     def test_binary_memoryview_validation_and_ipv6_error(self):
@@ -5897,6 +5900,111 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_every_number_in_the_claim_vocabulary_reads_the_same_way(self):
+        """One predicate covers every number this client reads out of a
+        round-trip claim, a `schema_overrides` entry, or one of the
+        QWP-only wrapper classes: a whole number that is not a boolean.
+
+        So `numpy.int64` works wherever a plain `int` does -- which it
+        has to, because a claim rebuilt from array metadata carries one
+        and a pandas cell hands one back -- and `True` works nowhere.
+
+        The table is the point. These two rules arrived one field at a
+        time, each fixed where it was reported and nowhere else, which
+        left `numpy.int64` accepted for a claim's version and dropped
+        for the precision two functions away. A field of this
+        vocabulary that is not a row here is a field nobody has
+        checked."""
+        def numpy_frame(bits):
+            frame = pd.DataFrame({
+                'gh': np.array([0], dtype=np.int32),
+                'ts': pd.to_datetime([0], unit='s')})
+            frame.attrs['questdb'] = {
+                'version': 1,
+                'columns': {'gh': {'kind': 'geohash',
+                                   'precision_bits': bits}}}
+            return frame
+
+        def arrow_frame(bits):
+            frame = pd.DataFrame({
+                'gh': pd.array([0], dtype=pd.ArrowDtype(pyarrow.int32())),
+                'ts': pd.array(
+                    pyarrow.array([0], pyarrow.timestamp('ns')),
+                    dtype=pd.ArrowDtype(pyarrow.timestamp('ns')))})
+            frame.attrs['questdb'] = {
+                'version': 1,
+                'columns': {'gh': {'kind': 'geohash',
+                                   'precision_bits': bits}}}
+            return frame
+
+        def all_null_frame(bits):
+            frame = pd.DataFrame({
+                'gh': pd.array([None], dtype=object),
+                'ts': pd.to_datetime([0], unit='s')})
+            frame.attrs['questdb'] = {
+                'version': 1,
+                'columns': {'gh': {'kind': 'geohash',
+                                   'precision_bits': bits}}}
+            return frame
+
+        def wire_type(frame, **kwargs):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                return self._dataframe_column_types(
+                    frame, table_name='int_vocab', at='ts',
+                    **kwargs).get('gh')
+
+        def version_claim(value):
+            frame = numpy_frame(20)
+            frame.attrs['questdb'] = dict(
+                frame.attrs['questdb'], version=value)
+            return wire_type(frame)
+
+        # (name, good value, what one value produces at that site)
+        vocabulary = (
+            ("a claim's version", 1, version_claim),
+            ('precision_bits, numpy planner', 20,
+             lambda value: wire_type(numpy_frame(value))),
+            ('precision_bits, arrow planner', 20,
+             lambda value: wire_type(arrow_frame(value))),
+            ('precision_bits, all-null column', 20,
+             lambda value: wire_type(all_null_frame(value))),
+            ('schema_overrides geohash bits', 20,
+             lambda value: wire_type(
+                 arrow_frame(None),
+                 schema_overrides={'gh': ('geohash', value)})),
+            ('Long256 value', 1, lambda value: qi.Long256(value).value),
+            ('DateMillis millis', 1, lambda value: qi.DateMillis(value).value),
+            ('Geohash bits', 1, lambda value: qi.Geohash(value, 5).bits),
+            ('Geohash precision', 1,
+             lambda value: qi.Geohash(0, value).precision),
+        )
+
+        def answer(apply, value):
+            """What one site does with one value: its result, or the
+            kind of refusal it raises."""
+            try:
+                return ('returned', apply(value))
+            except (TypeError, ValueError, qi.QuestDBError) as exc:
+                return ('refused', type(exc).__name__)
+
+        for name, good, apply in vocabulary:
+            with self.subTest(site=name):
+                plain = answer(apply, good)
+                self.assertEqual(
+                    plain[0], 'returned',
+                    f'{name}: a plain int should be accepted, got {plain}')
+                for widened in (np.int64(good), np.int32(good),
+                                np.uint8(good)):
+                    self.assertEqual(
+                        answer(apply, widened), plain,
+                        f'{name}: {widened!r} should read as {good!r}')
+                self.assertNotEqual(
+                    answer(apply, True), answer(apply, 1),
+                    f'{name}: True was taken as the number 1')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_the_claim_version_takes_any_whole_number_but_not_a_bool(self):
         """`True == 1`, so the version gate has to reject it by type,
         and a claim rebuilt from array metadata carries a `numpy.int64`
@@ -6112,7 +6220,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         """`True` is an `int`, and would have been taken as a 1-bit
         precision. Every other bits check in this module rejects it."""
         with self.assertRaisesRegex(
-                ValueError, r'geohash bits must be int in 1\.\.=60'):
+                ValueError,
+                r'geohash bits must be a whole number in 1\.\.=60'):
             self._dataframe_wire_payload(
                 self._geohash_arrow_table([0], ty=pyarrow.int32()),
                 table_name='geo_bool', at='ts',

@@ -117,6 +117,7 @@ from cpython.long cimport PyLong_AsLongLongAndOverflow
 from cpython.memoryview cimport PyMemoryView_Check
 
 import datetime
+import numbers as _numbers
 import os
 import threading
 import time
@@ -916,8 +917,9 @@ cdef class DateMillis:
     cdef int64_t _value
 
     def __cinit__(self, millis):
-        if isinstance(millis, bool) or not isinstance(millis, int):
-            raise TypeError('millis must be an int.')
+        if not _is_integral_not_bool(millis):
+            raise TypeError('millis must be a whole number.')
+        millis = int(millis)
         if millis < INT64_MIN or millis > INT64_MAX:
             raise ValueError('millis must fit in a signed 64-bit integer.')
         self._value = <int64_t>millis
@@ -952,8 +954,9 @@ cdef class Long256:
     cdef bytes _bytes
 
     def __cinit__(self, value):
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError('value must be an int.')
+        if not _is_integral_not_bool(value):
+            raise TypeError('value must be a whole number.')
+        value = int(value)
         if value < 0 or value >= (1 << 256):
             raise ValueError('value must be in the range 0 <= value < 2**256.')
         # The column write reads exactly 32 bytes from the pointer. The
@@ -988,10 +991,12 @@ cdef class Geohash:
     cdef uint8_t _precision
 
     def __cinit__(self, bits, precision):
-        if isinstance(bits, bool) or not isinstance(bits, int):
-            raise TypeError('bits must be an int.')
-        if isinstance(precision, bool) or not isinstance(precision, int):
-            raise TypeError('precision must be an int.')
+        if not _is_integral_not_bool(bits):
+            raise TypeError('bits must be a whole number.')
+        if not _is_integral_not_bool(precision):
+            raise TypeError('precision must be a whole number.')
+        bits = int(bits)
+        precision = int(precision)
         if precision < 1 or precision > 60:
             raise ValueError('precision must be in the range 1..60.')
         if bits < 0 or bits >= (1 << precision):
@@ -2385,7 +2390,38 @@ cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
 
 
 cdef bint _is_int_not_bool(object value):
+    """A Python ``int`` that is not a boolean.
+
+    For the connection options, whose values come from a conf string or
+    a literal in the caller's code. The claim vocabulary reads its
+    numbers out of arrays and pandas cells too, so it uses
+    `_is_integral_not_bool` instead.
+    """
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+cdef bint _is_integral_not_bool(object value):
+    """A whole number that is not a boolean.
+
+    The one predicate for every number in the round-trip claim
+    vocabulary: the claim version, a geohash precision wherever it is
+    read, the ``schema_overrides`` geohash bits, and the arguments the
+    QWP-only wrapper classes take. Those numbers arrive from array
+    metadata and from pandas cells as often as from a literal, and
+    `numpy.int64` is what a claim rebuilt from array metadata carries,
+    so holding a field to `int` alone drops it over its type.
+
+    ``True == 1``, so a boolean would otherwise read as a version, a
+    one-bit precision, or a geohash of zero bits. Identity settles it:
+    `bool` cannot be subclassed, and `numpy.bool_` is not registered as
+    `numbers.Integral`.
+
+    A caller of this holds the value to a range next, and hands it on
+    to C. Both want a plain `int`, so each site coerces with `int()`
+    once the predicate has passed.
+    """
+    return (value is not True and value is not False
+            and isinstance(value, _numbers.Integral))
 
 
 cdef int64_t auto_flush_rows_default(line_sender_protocol protocol):
@@ -5671,7 +5707,7 @@ cdef void_int _dataframe_claim_all_null_source(
         col.setup.target = col_target_t.col_target_column_binary
     elif kind in ('ipv4', 'char', 'long256', 'geohash'):
         if kind == 'geohash' and not (
-                _is_int_not_bool(bits) and 1 <= bits <= 60):
+                _is_integral_not_bool(bits) and 1 <= int(bits) <= 60):
             return 0
         col.setup.source = col_source_t.col_source_int_pyobj
         col.setup.target = col_target_t.col_target_column_i64
@@ -5798,6 +5834,7 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
         elif kind == 'geohash':
             gh = _geohash_override_dtype(col.setup.source)
             bits = meta.get('precision_bits') or 0
+            bits = int(bits) if _is_integral_not_bool(bits) else 0
             # The precision is held to the column's own width, not just
             # to 1..=60. A claim wider than the slot carrying it is one
             # the column cannot express, so it is dropped rather than
@@ -5806,7 +5843,6 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
             # column nor the claim.
             if (gh != _GEOHASH_DTYPE_NONE
                     and gh != _GEOHASH_DTYPE_UNSIGNED
-                    and _is_int_not_bool(bits)
                     and 1 <= bits <= _geohash_dtype_max_bits(gh)):
                 col.setup.has_override = True
                 col.setup.override_dtype = <qwp_numpy_dtype>gh
@@ -7019,7 +7055,7 @@ cdef object _validate_schema_overrides(object schema_overrides):
             "one of: 'symbol', 'ipv4', 'char', 'uuid', 'long256', or "
             "('geohash', bits).")
     cdef list out = []
-    cdef object name, override, kind, value
+    cdef object name, override, kind, value, bits
     cdef int kind_int
     cdef int arg_int
     for name, override in schema_overrides.items():
@@ -7048,12 +7084,16 @@ cdef object _validate_schema_overrides(object schema_overrides):
         elif kind == 'long256':
             kind_int = <int>qwp_arrow_override_long256
         elif kind == 'geohash':
-            if not _is_int_not_bool(value) or value < 1 or value > 60:
+            # Held to the range as a Python object, so a number too
+            # wide for the C field is refused rather than overflowing
+            # on the way into it.
+            bits = int(value) if _is_integral_not_bool(value) else None
+            if bits is None or bits < 1 or bits > 60:
                 raise ValueError(
                     f'schema_overrides[{name!r}] geohash bits must '
-                    f'be int in 1..=60, got {value!r}.')
+                    f'be a whole number in 1..=60, got {value!r}.')
             kind_int = <int>qwp_arrow_override_geohash
-            arg_int = value
+            arg_int = bits
         else:
             raise ValueError(
                 f'schema_overrides[{name!r}] kind {kind!r} not '
@@ -7466,7 +7506,10 @@ cdef bint _attrs_override_fits(
     if kind == 'long256':
         return types.is_fixed_size_binary(ty) and ty.byte_width == 32
     if kind == 'geohash':
-        if not _is_int_not_bool(bits) or bits < 1 or bits > 60:
+        if not _is_integral_not_bool(bits):
+            return False
+        bits = int(bits)
+        if bits < 1 or bits > 60:
             return False
         # One bit short of each width: the slot is signed and the range
         # check reads it as signed, so a precision that fills the width

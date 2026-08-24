@@ -59,7 +59,8 @@ from enum import Enum
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from typing import (
-    Any, Callable, Dict, Iterator, List, Optional, Tuple, Union)
+    Any, Callable, Dict, Iterator, List, Optional, SupportsIndex, Tuple,
+    Union)
 from uuid import UUID
 
 import numpy as np
@@ -369,9 +370,12 @@ class DateMillis:
 
     ``INT64_MIN`` is QuestDB's ``NULL`` sentinel for DATE. It is accepted
     and reads back as ``NULL``.
+
+    ``millis`` is any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
     """
 
-    def __init__(self, millis: int): ...
+    def __init__(self, millis: SupportsIndex): ...
     @classmethod
     def from_datetime(cls, dt: datetime) -> DateMillis: ...
     @classmethod
@@ -386,9 +390,12 @@ class Long256:
     The value must satisfy ``0 <= value < 2**256``. The one whose four
     64-bit limbs are all ``0x8000000000000000`` is accepted but reads
     back from QuestDB as ``NULL``.
+
+    ``value`` is any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
     """
 
-    def __init__(self, value: int): ...
+    def __init__(self, value: SupportsIndex): ...
     @property
     def value(self) -> int: ...
 
@@ -402,9 +409,12 @@ class Geohash:
     itself, and the buffer is rewound to what it held before that row.
     A flush clears the pin, so a precision the server's column does not
     have is the server's to reject, at flush time.
+
+    Both are any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
     """
 
-    def __init__(self, bits: int, precision: int): ...
+    def __init__(self, bits: SupportsIndex, precision: SupportsIndex): ...
     @classmethod
     def from_string(cls, value: str) -> Geohash: ...
     @property
@@ -493,8 +503,10 @@ class SenderTransaction:
 
 
 #: What ``schema_overrides`` accepts: a kind on its own, or a kind and its
-#: argument. Only ``'geohash'`` takes one, the precision in bits.
-SchemaOverrides = Dict[str, Union[str, Tuple[str, int]]]
+#: argument. Only ``'geohash'`` takes one, the precision in bits -- any
+#: whole number that is not a ``bool``, so a ``numpy.int64`` read out of
+#: an array works as a plain ``int`` does.
+SchemaOverrides = Dict[str, Union[str, Tuple[str, SupportsIndex]]]
 
 
 class Buffer:

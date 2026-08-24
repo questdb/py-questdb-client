@@ -198,6 +198,16 @@ New
 Fixed
 ~~~~~
 
+- **NumPy and pandas integers now work everywhere a Python ``int`` does in the
+  round-trip vocabulary.** One rule covers every number this client reads out
+  of a ``df.attrs['questdb']`` claim, a ``schema_overrides`` entry, or one of
+  the QWP-only wrapper classes: a whole number that is not a boolean. A
+  ``numpy.int64`` ``precision_bits`` -- which is what a claim rebuilt from
+  array metadata carries, and what ``df.loc[i, 'bits']`` hands you -- was
+  dropped along with the rest of the claim, and the column was created as
+  LONG where the caller asked for GEOHASH. ``Long256``, ``DateMillis`` and
+  ``Geohash`` take the same numbers now. ``True`` is still refused everywhere.
+
 - **A transaction whose commit cannot flush is over.** ``commit()`` used to
   mark the transaction complete before the flush that carries it, so a flush
   that failed left the transaction closed with its rows still buffered, for
