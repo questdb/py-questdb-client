@@ -6589,6 +6589,25 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             except (TypeError, ValueError, qi.QuestDBError) as exc:
                 return ('refused', type(exc).__name__)
 
+        # A row per call site, matched by count. The table's whole
+        # point is that it is complete, and a table nobody holds to the
+        # sources is the remembered list this predicate replaced.
+        sites = []
+        for file_name in ('_client.pyx', 'dataframe.pxi'):
+            source = PROJ_ROOT / 'src' / 'questdb' / file_name
+            for number, line in enumerate(source.read_text().splitlines(), 1):
+                calls = line.count('_is_integral_not_bool(')
+                if not calls or line.lstrip().startswith('cdef bint'):
+                    continue  # no call here, or the definition
+                sites.extend(
+                    [f'{file_name}:{number}: {line.strip()}'] * calls)
+        self.assertEqual(
+            len(sites), len(vocabulary),
+            f'the claim vocabulary reads a number at {len(sites)} places '
+            f'and this table has {len(vocabulary)} rows. Every place has '
+            f'to be a row, or nobody has checked it:\n  '
+            + '\n  '.join(sites))
+
         for name, good, apply in vocabulary:
             with self.subTest(site=name):
                 plain = answer(apply, good)
