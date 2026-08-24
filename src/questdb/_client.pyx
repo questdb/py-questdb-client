@@ -1252,16 +1252,32 @@ cdef class SenderTransaction:
             # succeeded or not, so there is nothing left to commit and
             # the transaction is over -- saying otherwise would strand
             # the sender inside it and make the next `close(flush=True)`
-            # raise over the caller's own error. A flush refused before
-            # it got that far left the rows where they were, and the
-            # transaction is still the caller's to finish or roll back.
+            # raise over the caller's own error.
+            #
+            # Rows are still in the buffer only when `Sender.flush`
+            # refused before making the native call, which is a short
+            # and closed list: a row part-way through being written, a
+            # call from inside the sender's own callback, and a sender
+            # already closed. In those three the transaction is still
+            # the caller's to finish or roll back.
             #
             # The buffer is therefore the discriminator, and it is
             # `Sender.flush` that maintains it, not this method.
             # `test_flush_clears_the_buffer_on_a_wire_failure` pins that
             # behaviour by name for exactly this reason.
-            if (self._sender._buffer is not None
-                    and len(self._sender._buffer)):
+            #
+            # Asking it cannot be allowed to raise: `len()` goes through
+            # `Buffer.__len__`, which refuses on a closed buffer, and a
+            # sender closed during the flush would put that error over
+            # the caller's own. A closed buffer holds no rows, which is
+            # the same answer an empty one gives.
+            rows_left = False
+            try:
+                rows_left = (self._sender._buffer is not None
+                             and len(self._sender._buffer) > 0)
+            except QuestDBError:
+                rows_left = False
+            if rows_left:
                 self._sender._in_txn = True
             else:
                 self._complete = True
