@@ -3435,6 +3435,68 @@ class TestEgressQwpRowTypes(unittest.TestCase):
         # `_require_qwp_row_types` asks for QWP/WebSocket first.
         self._require_qwp_row_types()
 
+    def _run_example(self, file_name, table_name):
+        """Run one of the `examples/` scripts against this fixture.
+
+        Loaded and called rather than copied, so the test fails when the
+        example does. An example that only lives in the docs is an
+        example that stops working quietly.
+        """
+        spec = importlib.util.spec_from_file_location(
+            f'questdb_example_{file_name}',
+            PROJ_ROOT / 'examples' / f'{file_name}.py')
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.example(
+            host=self.qdb_plain.host,
+            port=self.qdb_plain.http_server_port,
+            table_name=table_name)
+
+    def test_qwp_column_types_example(self):
+        """`examples/qwp_column_types.py` writes all seven QWP-only
+        types through `row()` and lands them as those types."""
+        table_name = 'ex_row_types_' + uuid.uuid4().hex[:8]
+        try:
+            self._run_example('qwp_column_types', table_name)
+            self.qdb_plain.retry_check_table(table_name, min_rows=1)
+            self.assertEqual(self._column_type(table_name, 'device_id'), 'UUID')
+            self.assertEqual(self._column_type(table_name, 'address'), 'IPv4')
+            self.assertEqual(self._column_type(table_name, 'payload'), 'BINARY')
+            self.assertEqual(self._column_type(table_name, 'grade'), 'CHAR')
+            self.assertEqual(self._column_type(table_name, 'last_seen'), 'DATE')
+            self.assertEqual(self._column_type(table_name, 'checksum'), 'LONG256')
+            self.assertEqual(
+                self._column_type(table_name, 'location'), 'GEOHASH(5c)')
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
+    def test_qwp_column_types_dataframe_example(self):
+        """`examples/qwp_column_types_dataframe.py` writes the same
+        types from a frame and then writes a read-back of that frame
+        out again, which is the round trip the claim exists for. Both
+        writes land, so the table holds four rows."""
+        if pd is None:
+            self.skipTest('pandas not installed')
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        table_name = 'ex_row_types_df_' + uuid.uuid4().hex[:8]
+        try:
+            self._run_example('qwp_column_types_dataframe', table_name)
+            self.qdb_plain.retry_check_table(table_name, min_rows=4)
+            self.assertEqual(self._column_type(table_name, 'device_id'), 'UUID')
+            self.assertEqual(self._column_type(table_name, 'address'), 'IPv4')
+            self.assertEqual(self._column_type(table_name, 'grade'), 'CHAR')
+            self.assertEqual(self._column_type(table_name, 'last_seen'), 'DATE')
+            self.assertEqual(self._column_type(table_name, 'checksum'), 'LONG256')
+            self.assertEqual(
+                self._column_type(table_name, 'location'), 'GEOHASH(5c)')
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_types_mapper_keeps_the_claim_and_the_dtype_decides(self):
         """A custom ``types_mapper`` gets the same

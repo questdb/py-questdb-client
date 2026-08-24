@@ -138,19 +138,49 @@ elif pd is None:
 
 
 class TestManifest(unittest.TestCase):
-    def test_valid_yaml(self):
+    def _manifest(self):
         try:
             import yaml
         except ImportError:
             self.skipTest('Python version does not support yaml')
         repo_root = pathlib.Path(__file__).parent.parent
         with open(repo_root / 'examples.manifest.yaml', 'r') as f:
-            manifest = yaml.safe_load(f)
+            return repo_root, yaml.safe_load(f)
+
+    def test_valid_yaml(self):
+        repo_root, manifest = self._manifest()
         for entry in manifest:
             self.assertTrue(
                 (repo_root / entry['path']).is_file(),
                 f"manifest entry {entry['name']!r} points at a missing "
                 f"file: {entry['path']}")
+
+    def test_every_example_is_published_somewhere(self):
+        """An example nobody references is an example nobody runs.
+
+        The manifest carries the set the QuestDB docs site embeds and
+        `docs/examples.rst` carries the rest, so every file in
+        `examples/` has to turn up in one of them. Checked from the
+        files rather than from the manifest: reading the manifest and
+        asking whether each entry exists can only find an entry that
+        went stale, never a file that was never listed.
+        """
+        repo_root, manifest = self._manifest()
+        listed = {entry['path'] for entry in manifest}
+        rst = (repo_root / 'docs' / 'examples.rst').read_text()
+
+        orphans = []
+        for path in sorted((repo_root / 'examples').glob('*.py')):
+            rel = f'examples/{path.name}'
+            if rel in listed or f'../{rel}' in rst:
+                continue
+            orphans.append(rel)
+        self.assertEqual(
+            orphans, [],
+            'these examples are in neither examples.manifest.yaml nor '
+            'docs/examples.rst, so nothing points a reader at them and '
+            'nothing notices when they stop working:\n  '
+            + '\n  '.join(orphans))
 
 
 class TestQwpWebSocketApi(unittest.TestCase):
