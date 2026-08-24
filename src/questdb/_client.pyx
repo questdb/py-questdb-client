@@ -6903,6 +6903,23 @@ cdef void_int _arrow_batch_check_geohash_ranges(
             f'Bad dataframe: a GEOHASH column cannot be checked because '
             f'the batch carries {batch.n_children} columns against the '
             f'schema\'s {schema.n_children}.')
+    # An Arrow length is a row count and cannot be negative. It is cast
+    # to `size_t` for the scan below and added to `row_base` after, so a
+    # negative one would wrap to about 2**64 and walk the value buffer
+    # far outside it.
+    if batch.length < 0:
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad dataframe: a GEOHASH column cannot be checked because '
+            f'the batch reports {batch.length} rows.')
+    # A struct-level offset shifts every child: the importer slices each
+    # column by it before reading, so the scan starts there too and the
+    # rows it reads are the rows that go out.
+    if batch.offset < 0:
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad dataframe: a GEOHASH column cannot be checked because '
+            f'the batch starts at row {batch.offset}.')
     for child_index in range(schema.n_children):
         field = schema.children[child_index]
         col = batch.children[child_index]
@@ -7513,6 +7530,31 @@ cdef object _merge_capsule_overrides(
 # one kind restored by reshaping the column rather than by an override,
 # in `_dataframe_normalize_claimed_date`: no Arrow override names it,
 # and the Arrow type it needs is the whole claim.
+#: How long `QuestDB.close()` waits for outstanding leases before it
+#: gives up and raises. Generous, because a lease held by another thread
+#: may be part-way through a large load and that wait is the correct
+#: one; finite, because a lease held by the calling thread, or by one
+#: that has since finished, is never coming back and an unbounded wait
+#: there is a hang with no way out.
+cdef double _CLOSE_LEASE_WAIT_LIMIT_S = 60.0
+
+
+def _debug_close_lease_wait_limit_s():
+    """The bound `QuestDB.close()` puts on waiting for leases.
+
+    Not part of the public API. Exposed so a test can reach the give-up
+    path in a second rather than a minute; the bound is deliberately
+    longer than any wait worth testing.
+    """
+    return _CLOSE_LEASE_WAIT_LIMIT_S
+
+
+def _debug_set_close_lease_wait_limit_s(double seconds):
+    """Set the bound above. Not part of the public API."""
+    global _CLOSE_LEASE_WAIT_LIMIT_S
+    _CLOSE_LEASE_WAIT_LIMIT_S = seconds
+
+
 cdef dict _ATTRS_OVERRIDE_KINDS = {
     'ipv4': <int>qwp_arrow_override_ipv4,
     'char': <int>qwp_arrow_override_char,
@@ -9289,6 +9331,7 @@ cdef class QuestDB:
             self._closing = True
         try:
             with self._state_cond:
+                deadline = time.monotonic() + _CLOSE_LEASE_WAIT_LIMIT_S
                 while self._active_uses != 0:
                     if (not self._state_cond.wait(timeout=5.0)
                             and self._active_uses != 0):
@@ -9297,6 +9340,30 @@ cdef class QuestDB:
                             f'{self._active_uses} outstanding lease(s) to be '
                             'released.',
                             UserWarning)
+                        # A lease comes back from whichever thread holds
+                        # it, so this wait ends only if some other frame
+                        # runs. A caller holding the last lease itself
+                        # is waiting on its own frame and never will --
+                        # and so is one whose borrowing thread has since
+                        # gone. Neither is distinguishable from a slow
+                        # load here, so the wait is bounded rather than
+                        # diagnosed: an error a caller can act on beats
+                        # a warning every five seconds and no return.
+                        #
+                        # `_db` and `_closing` are restored by the
+                        # `finally` below, so the handle a refused close
+                        # leaves behind is the open one it started with.
+                        if time.monotonic() >= deadline:
+                            raise QuestDBError(
+                                QuestDBErrorCode.InvalidApiCall,
+                                'close() gave up after '
+                                f'{_CLOSE_LEASE_WAIT_LIMIT_S:.0f}s waiting '
+                                f'for {self._active_uses} outstanding '
+                                'lease(s). Close every sender() and '
+                                'reader() lease before closing the handle. '
+                                'A lease still held by this thread, or by '
+                                'a thread that has finished, can never be '
+                                'returned and the handle is left open.')
             _ensure_doesnt_have_gil(&gs)
             # `questdb_db_close` drains both the writer and reader free
             # lists in one shot (see `db.rs::DbInner::Drop`).
@@ -10494,9 +10561,11 @@ cdef class Sender:
         if schema_overrides is not None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'schema_overrides is only supported over QWP/WebSocket; '
-                'the row-serializing protocols ignore it. Drop the '
-                'argument or connect over ws:: / wss::.')
+                'schema_overrides is applied when a frame is written a '
+                'column at a time, which is Sender.dataframe() over '
+                'ws:: / wss:: and QuestDB.dataframe(). This sender '
+                'writes a row at a time. Drop the argument, or connect '
+                'over ws:: / wss::.')
         if self._in_txn:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,

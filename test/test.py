@@ -2244,9 +2244,13 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_dataframe_schema_overrides_rejects_non_websocket_protocol(self):
         sender = qi.Sender(qi.Protocol.Tcp, '127.0.0.1', 9009)
         try:
+            # The refusal names the two writes that do apply overrides,
+            # rather than the protocol family: `udp::` is QWP too and is
+            # refused here, so "over QWP" would read as a contradiction.
             with self.assertRaisesRegex(
                     qi.QuestDBError,
-                    'schema_overrides is only supported over QWP/WebSocket'):
+                    'schema_overrides is applied when a frame is written '
+                    'a column at a time'):
                 sender.dataframe(
                     object(),
                     table_name='t',
@@ -6272,6 +6276,179 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 f'hostile_{kind}(hook)', grid,
                 f'hostile_{kind} is defined but no outer scenario calls it, '
                 'so no grid cell exercises that branch.')
+
+    def test_a_row_serializing_dataframe_says_which_claims_it_drops(self):
+        """`df.attrs['questdb']` is read by the columnar writers. A frame
+        serialized a row at a time never reaches them, and the kinds the
+        claim names all ride on integers or blobs, so the column lands as
+        a LONG or a BINARY and a table created by the write gets that
+        type. Nothing about the values says otherwise, so the warning is
+        the only signal."""
+        if pd is None:
+            self.skipTest('pandas not installed')
+        df = pd.DataFrame({
+            'ip': np.array([0xC0A8012A], np.uint32),
+            'c': np.array([65], np.uint16),
+            'g': np.array([1], np.int8),
+            'ts': pd.to_datetime(['2020-01-01'])})
+        df.attrs['questdb'] = {'version': 1, 'columns': {
+            'ip': {'kind': 'ipv4'},
+            'c': {'kind': 'char'},
+            'g': {'kind': 'geohash', 'precision_bits': 7}}}
+
+        with Server() as server:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                with qi.Sender.from_conf(
+                        f'tcp::addr=localhost:{server.port};') as sender:
+                    sender.dataframe(df, table_name='t', at='ts')
+        messages = [str(w.message) for w in caught
+                    if w.category is UserWarning]
+        dropped = [m for m in messages if m.startswith('questdb: column')]
+        self.assertEqual(
+            len(dropped), 3,
+            f'expected one warning per claimed column, got: {messages}')
+        for kind in ("'ipv4'", "'char'", "'geohash'"):
+            self.assertTrue(
+                any(kind in m for m in dropped),
+                f'no warning named kind {kind}: {dropped}')
+
+    def test_a_frame_without_a_claim_warns_about_nothing(self):
+        """The warning above is about a claim this route cannot apply.
+        A frame carrying none has nothing to say, and a write that warns
+        on every frame trains the reader to filter it."""
+        if pd is None:
+            self.skipTest('pandas not installed')
+        df = pd.DataFrame({
+            'v': [1], 'ts': pd.to_datetime(['2020-01-01'])})
+        with Server() as server:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                with qi.Sender.from_conf(
+                        f'tcp::addr=localhost:{server.port};') as sender:
+                    sender.dataframe(df, table_name='t', at='ts')
+        self.assertEqual(
+            [str(w.message) for w in caught
+             if str(w.message).startswith('questdb: column')], [])
+
+    def test_a_batch_reporting_a_negative_row_count_is_refused(self):
+        """`ArrowArray.length` arrives from the caller's own producer and
+        is cast to `size_t` for the GEOHASH scan, so a negative one wraps
+        to about 2**64 and the scan walks the value buffer far past its
+        end -- under `nogil`, reading whatever follows it on the heap,
+        until a value happens to fail the range check or an unmapped
+        page ends the process.
+
+        Forged here rather than found: `__arrow_c_array__` is re-imported
+        through pyarrow, which normalises the struct, so only a
+        hand-built `__arrow_c_stream__` reaches the check with the batch
+        the producer actually wrote."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+
+        class ArrowArrayStream(ctypes.Structure):
+            pass
+
+        get_schema_t = ctypes.CFUNCTYPE(
+            ctypes.c_int, ctypes.POINTER(ArrowArrayStream), ctypes.c_void_p)
+        get_next_t = ctypes.CFUNCTYPE(
+            ctypes.c_int, ctypes.POINTER(ArrowArrayStream), ctypes.c_void_p)
+        get_err_t = ctypes.CFUNCTYPE(
+            ctypes.c_char_p, ctypes.POINTER(ArrowArrayStream))
+        release_t = ctypes.CFUNCTYPE(None, ctypes.POINTER(ArrowArrayStream))
+        ArrowArrayStream._fields_ = [
+            ('get_schema', get_schema_t), ('get_next', get_next_t),
+            ('get_last_error', get_err_t), ('release', release_t),
+            ('private_data', ctypes.c_void_p)]
+
+        capsule_ptr = ctypes.pythonapi.PyCapsule_GetPointer
+        capsule_ptr.restype = ctypes.c_void_p
+        capsule_ptr.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        capsule_new = ctypes.pythonapi.PyCapsule_New
+        capsule_new.restype = ctypes.py_object
+        capsule_new.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+
+        table = pa.table({
+            'g': pa.array([1, 2], pa.int8()),
+            'ts': pa.array([0, 1_000_000_000], pa.timestamp('ns'))})
+        inner_capsule = table.__arrow_c_stream__()
+        inner = ctypes.cast(
+            capsule_ptr(inner_capsule, b'arrow_array_stream'),
+            ctypes.POINTER(ArrowArrayStream))
+        forged = ArrowArrayStream()
+
+        def _schema(_self, out_ptr):
+            return inner.contents.get_schema(inner, out_ptr)
+
+        def _next(_self, out_ptr):
+            rc = inner.contents.get_next(inner, out_ptr)
+            if rc == 0 and out_ptr:
+                # `length` is the first field of `ArrowArray`.
+                length = ctypes.c_int64.from_address(out_ptr)
+                if length.value > 0:
+                    length.value = -1
+            return rc
+
+        def _last_error(_self):
+            return inner.contents.get_last_error(inner)
+
+        def _release(_self):
+            pass  # `inner_capsule`'s own destructor releases the real stream
+
+        callbacks = (get_schema_t(_schema), get_next_t(_next),
+                     get_err_t(_last_error), release_t(_release))
+        (forged.get_schema, forged.get_next,
+         forged.get_last_error, forged.release) = callbacks
+
+        class Producer:
+            def __arrow_c_stream__(self, requested_schema=None):
+                return capsule_new(
+                    ctypes.addressof(forged), b'arrow_array_stream', None)
+
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};') as sender:
+                with self.assertRaises(qi.QuestDBError) as caught:
+                    sender.dataframe(
+                        Producer(), table_name='t', at='ts',
+                        schema_overrides={'g': ('geohash', 5)})
+        self.assertIn('-1 rows', str(caught.exception))
+        # Keep the trampolines alive until the send is over.
+        self.assertIsNotNone(callbacks)
+        self.assertIsNotNone(inner_capsule)
+
+    def test_close_gives_up_on_a_lease_that_can_never_come_back(self):
+        """`close()` waits for outstanding leases, and a lease comes back
+        from whichever thread holds it. A caller holding the last lease
+        itself waits on its own frame, so the wait cannot end. The bound
+        turns that into an error the caller can act on, and the handle it
+        leaves behind is the open one it started with."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.5)
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(conf)
+                    lease = db.sender()
+                    lease.row('t', columns={'v': 1},
+                              at=qi.TimestampNanos(1))
+                    with self.assertRaises(qi.QuestDBError) as caught:
+                        db.close()
+                    self.assertIn('outstanding lease', str(caught.exception))
+                    # Open, not half-closed: the handle still leases.
+                    spare = db.sender()
+                    spare.close()
+                    lease.close()
+                    db.close()
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
 
     def test_no_column_helper_takes_a_pre_encoded_name(self):
         """A `line_sender_column_name` borrows the string arena, which
