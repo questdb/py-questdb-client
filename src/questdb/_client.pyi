@@ -373,6 +373,12 @@ class DateMillis:
 
     ``millis`` is any whole number that is not a ``bool``, so a
     ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
+
+    ``SupportsIndex`` is as near as an annotation gets. ``bool`` is a
+    subtype of ``int``, so no type can exclude it, and an object with
+    ``__index__`` that is not a ``numbers.Integral`` satisfies the
+    annotation without satisfying the constructor. Both are refused at
+    run time and neither is a type error.
     """
 
     def __init__(self, millis: SupportsIndex): ...
@@ -392,7 +398,9 @@ class Long256:
     back from QuestDB as ``NULL``.
 
     ``value`` is any whole number that is not a ``bool``, so a
-    ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does. As
+    for :class:`DateMillis`, the annotation cannot say so; the refusal
+    is at run time.
     """
 
     def __init__(self, value: SupportsIndex): ...
@@ -411,7 +419,9 @@ class Geohash:
     have is the server's to reject, at flush time.
 
     Both are any whole number that is not a ``bool``, so a
-    ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does. As
+    for :class:`DateMillis`, the annotation cannot say so; the refusal
+    is at run time.
     """
 
     def __init__(self, bits: SupportsIndex, precision: SupportsIndex): ...
