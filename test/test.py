@@ -5286,6 +5286,113 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     finally:
                         db.close()
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_refused_close_never_publishes_that_the_handle_is_closing(self):
+        """A `close()` from inside one of the handle's own calls is
+        refused, and the refusal is decided before anything is
+        published. No other thread ever sees the handle as closed on
+        account of it.
+
+        The test above races two closes and checks the outcome of each.
+        That holds the guarantee but it samples the window once per
+        round, and the window is a few instructions wide: with the
+        refusal moved back below the publish, that test still passes.
+        Widen the window by 50ms and it fails every round, so the
+        assertion is right and the sampling is what is missing.
+
+        So this samples instead of racing. One thread calls the refused
+        `close()` many times over, each one a window if the refusal is
+        decided too late; another asks the handle to do something
+        ordinary as fast as it can, and every "QuestDB is closed" it
+        gets back is the handle answering for a close that was refused.
+
+        The switch interval comes down for the duration. Both threads
+        hold the GIL through their whole turn at the lock otherwise, so
+        the refusing thread releases the state lock and takes it again
+        without the sampler ever being scheduled between the two, and
+        the window goes unvisited however many times it opens.
+        """
+        switch_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-5)
+        try:
+            self._sample_a_refused_close()
+        finally:
+            sys.setswitchinterval(switch_interval)
+
+    def _sample_a_refused_close(self):
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'sender_pool_min=0;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as db:
+                start = threading.Barrier(2)
+                stop = threading.Event()
+                looked_closed = []
+                refusals = []
+
+                def sample():
+                    # `reap_idle()` reads the published handle under the
+                    # lock that publishes it, and refuses a closed one,
+                    # so it reports the window without changing it.
+                    start.wait(timeout=20)
+                    while not stop.is_set():
+                        try:
+                            db.reap_idle()
+                        except qi.QuestDBError as exc:
+                            looked_closed.append(str(exc))
+                            return
+
+                sampler = threading.Thread(target=sample)
+                sampler.start()
+
+                class HostileFrame(pd.DataFrame):
+                    fired = False
+
+                    @property
+                    def attrs(self):
+                        if not HostileFrame.fired:
+                            HostileFrame.fired = True
+                            start.wait(timeout=20)
+                            for _ in range(2000):
+                                try:
+                                    db.close()
+                                except qi.QuestDBError:
+                                    refusals.append('refused')
+                                else:
+                                    refusals.append('returned')
+                                    break
+                        return {}
+
+                    @attrs.setter
+                    def attrs(self, value):
+                        pass
+
+                try:
+                    db.dataframe(
+                        HostileFrame({
+                            'v': [1, 2],
+                            'ts': pd.to_datetime([0, 1], unit='s')}),
+                        table_name='t', at='ts')
+                except qi.QuestDBError:
+                    pass
+                finally:
+                    stop.set()
+                    sampler.join(timeout=30)
+
+                self.assertFalse(
+                    sampler.is_alive(), 'the sampler never returned')
+                self.assertTrue(refusals, 'the close was never attempted')
+                self.assertNotIn(
+                    'returned', refusals,
+                    "a close from inside the handle's own call reported "
+                    'success')
+                self.assertEqual(
+                    looked_closed, [],
+                    'another thread saw the handle as closed while a '
+                    'close on it was being refused: '
+                    + '; '.join(looked_closed[:1]))
+                # And the handle is still open, as the refusals said.
+                db.reap_idle()
+
     def test_a_dropped_lease_returns_its_sender_to_the_pool(self):
         """`PooledSender.__dealloc__` returns the borrowed sender, and
         nothing on that path can raise.
