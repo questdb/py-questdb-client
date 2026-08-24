@@ -3778,13 +3778,22 @@ cdef void_int _dataframe(
             else:
                 raise
         except BaseException:
-            # An interrupt between two cells is not a data error, so it
-            # goes on as itself rather than being wrapped. The
-            # part-written row still has to go: the `finally` below
-            # clears the marker, which is the only way back to a clean
-            # buffer, and `_row_depth` returns to zero behind it, so
-            # every guard downstream reads the buffer as idle.
-            # `Buffer._row` catches everything for the same reason.
+            # Whatever ends the run, the part-written row goes with it:
+            # the buffer rewinds here, the `finally` below clears the
+            # marker, and `_row_depth` returns to zero behind it, so
+            # every guard downstream reads the buffer as idle. Anything
+            # that is not an `Exception` -- an interrupt, an exit --
+            # then goes on as itself rather than wrapped as a data
+            # error. `Buffer._row` holds the same property with a bare
+            # `except:`.
+            #
+            # This is the property held, not a case answered. The row
+            # loop below runs no caller Python -- which is why an object
+            # column of `uuid.UUID` is refused on this path -- and its
+            # auto-flush is a native call, so a signal has no bytecode
+            # boundary to land on between two cells. `Buffer._row` is
+            # where a cell conversion does run the caller's code, and
+            # where one can.
             if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
                 raise c_err_to_py(err)
             raise
