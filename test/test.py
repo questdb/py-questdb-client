@@ -15,6 +15,7 @@ import time
 import threading
 import uuid
 import copy
+import inspect
 import json
 import pickle
 from enum import Enum
@@ -5439,7 +5440,56 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         'PooledReader.close': 'as PooledReader.__enter__',
         'PooledReader.execute': 'as PooledReader.__enter__',
         'PooledReader.query': 'as PooledReader.__enter__',
+        'QueryResult.__arrow_c_stream__': (
+            'a query result comes from a read endpoint, which the '
+            'offline sender-side mocks do not serve. The route that '
+            'matters is a `types_mapper` running the caller\'s code '
+            'per batch while the cursor streams, and '
+            '`TestEgressWithDatabase.'
+            'test_reentering_the_client_from_a_types_mapper` drives it '
+            'in system_test.py against a real server.'),
+        'QueryResult.__enter__': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.__exit__': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.cancel': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.close': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.iter_arrow': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.iter_pandas': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.iter_polars': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.to_arrow': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.to_pandas': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.to_polars': 'as QueryResult.__arrow_c_stream__',
     }
+
+    def test_every_public_class_is_guarded_or_excused_in_writing(self):
+        """`GUARDED_CLASSES` decides which classes the re-entrancy grid
+        walks at all, and it used to be six names somebody typed under a
+        docstring saying that lists somebody typed here have been wrong
+        every time. It is read out of the module now, so a class added
+        later arrives guarded and its methods arrive unclassified in the
+        test below, which names them.
+
+        What that leaves to check is the other side of the rule: an
+        excuse has to name a class the module still defines, and it has
+        to say something."""
+        for name, reason in api_surface.NOT_GUARDED.items():
+            self.assertTrue(
+                inspect.isclass(getattr(qi, name, None)),
+                f'{name} is excused from the guarded classes, but the '
+                f'client no longer has a class by that name')
+            self.assertTrue(
+                reason,
+                f'{name} is excused from the guarded classes with no '
+                f'reason')
+
+        # Every class that holds a native handle while it runs the
+        # caller's Python. Losing one from the module's public surface
+        # would shrink the grid rather than fail anything, so it is
+        # spelled out here.
+        guarded = {cls.__name__ for cls in api_surface.GUARDED_CLASSES}
+        self.assertEqual(
+            set(),
+            {'QuestDB', 'Sender', 'PooledSender', 'PooledReader',
+             'SenderTransaction', 'Buffer', 'QueryResult'} - guarded)
 
     def test_every_public_member_is_classified_for_re_entrancy(self):
         """Every guard this client has added came from someone listing

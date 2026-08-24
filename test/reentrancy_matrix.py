@@ -92,12 +92,26 @@ class Ctx:
         self.txn = None
         self.lease = None
         self.reader_lease = None
-        self.reader_unreachable = None
+        self.query_result = None
+        #: Why a target could not be built, by class name. A row that
+        #: needs something the offline fixtures do not serve says so,
+        #: rather than going blank.
+        self.unreachable = {}
         self.closeables = []
 
     def target_for(self, cls_name):
+        """The object a re-entered call is made on, or None.
+
+        Read with `.get`, so a guarded class with no slot here answers
+        `unreachable` naming the class. A `KeyError` instead would be
+        raised from inside the outer call, where the harness reads it
+        as the outer call dying -- turning "nobody wrote a fixture for
+        this class yet" into a whole column of crashes.
+        """
         if cls_name == 'PooledReader' and self.reader_lease is None:
             self._try_reader_lease()
+        if cls_name == 'QueryResult' and self.query_result is None:
+            self._try_query_result()
         return {
             'QuestDB': self.db,
             'Sender': self.sender,
@@ -105,20 +119,36 @@ class Ctx:
             'SenderTransaction': self.txn,
             'PooledSender': self.lease,
             'PooledReader': self.reader_lease,
-        }[cls_name]
+            'QueryResult': self.query_result,
+        }.get(cls_name)
 
     def _try_reader_lease(self):
         """A reader lease needs a real handshake with a read endpoint,
         which no offline fixture serves. Borrowing one anyway records
         why the row is unreachable instead of leaving it blank."""
         if self.db is None:
-            self.reader_unreachable = 'no QuestDB in this scenario'
+            self.unreachable['PooledReader'] = 'no QuestDB in this scenario'
             return
         try:
             self.reader_lease = self.db.reader()
         except Exception as exc:
-            self.reader_unreachable = (
+            self.unreachable['PooledReader'] = (
                 f'a reader lease needs a live read endpoint, and the '
+                f'offline fixture is a sender-side mock: '
+                f'{type(exc).__name__}')
+
+    def _try_query_result(self):
+        """A `QueryResult` is what a query hands back, so it needs the
+        same live read endpoint a reader lease does. Asking for one
+        records why the row is unreachable."""
+        if self.db is None:
+            self.unreachable['QueryResult'] = 'no QuestDB in this scenario'
+            return
+        try:
+            self.query_result = self.db.query('SELECT 1')
+        except Exception as exc:
+            self.unreachable['QueryResult'] = (
+                f'a query result needs a live read endpoint, and the '
                 f'offline fixture is a sender-side mock: '
                 f'{type(exc).__name__}')
 
@@ -474,9 +504,8 @@ def run_cell(outer_name, member):
         if target is None:
             record['result'] = 'unreachable'
             record['reason'] = (
-                ctx.reader_unreachable if cls_name == 'PooledReader'
-                and ctx.reader_unreachable
-                else f'no {cls_name} in this scenario')
+                ctx.unreachable.get(cls_name)
+                or f'no {cls_name} in this scenario')
             return
         try:
             args, kwargs = reentry_args(member, ctx, deps)
@@ -531,7 +560,8 @@ def _short(exc):
 
 
 def _teardown(ctx, stack):
-    for obj in (ctx.reader_lease, ctx.lease, ctx.sender, ctx.db):
+    for obj in (ctx.query_result, ctx.reader_lease, ctx.lease,
+                ctx.sender, ctx.db):
         if obj is None:
             continue
         try:

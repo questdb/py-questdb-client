@@ -2521,6 +2521,77 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_reentering_the_client_from_a_types_mapper(self):
+        """A ``types_mapper`` runs the caller's code once per column per
+        batch while the reader is still streaming, so it is a way back
+        into this client that nothing else reaches.
+
+        `QueryResult` sits on the re-entrancy grid's allow-list because
+        the offline fixtures serve no read endpoint, and this is where
+        that excuse is redeemed. It holds what the grid holds: the
+        re-entered call answers -- cleanly or by refusing -- the outer
+        read still delivers every row, and the handle works afterwards.
+        A hang or a dead interpreter is what this is watching for.
+        """
+        rows = 300
+        table_name = 't_mapper_reentry_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), x "
+                f'FROM long_sequence({rows})')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT ts, lg FROM {table_name} ORDER BY ts'
+            # Small batches, so the mapper runs while there is still
+            # more of the result to come.
+            conf = self._conf() + 'max_batch_rows=64;'
+
+            def a_second_query(client):
+                return len(client.query('SELECT 1').to_pandas())
+
+            def reap(client):
+                return client.reap_idle()
+
+            for label, reenter in (('query', a_second_query),
+                                   ('reap_idle', reap)):
+                with self.subTest(reentered=label):
+                    seen = []
+
+                    with qi.QuestDB.from_conf(conf) as client:
+                        def mapper(arrow_type):
+                            if not seen:
+                                try:
+                                    reenter(client)
+                                except qi.QuestDBError as exc:
+                                    seen.append(('refused', str(exc)))
+                                else:
+                                    seen.append(('clean', ''))
+                            return None
+
+                        total = 0
+                        batches = 0
+                        for batch in client.query(sql).iter_pandas(
+                                types_mapper=mapper):
+                            total += len(batch)
+                            batches += 1
+
+                        # The handle still works once the read is done.
+                        self.assertEqual(
+                            len(client.query('SELECT 1').to_pandas()), 1)
+
+                    self.assertGreater(batches, 1, 'the read was not streamed')
+                    self.assertEqual(total, rows)
+                    self.assertEqual(len(seen), 1, 'the mapper never ran')
+                    self.assertIn(seen[0][0], ('refused', 'clean'), seen)
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
     def test_iter_pandas_shares_one_round_trip_claim(self):
         """Every batch of a streaming read carries the same claim
         object. One schema covers the whole result, so building the
