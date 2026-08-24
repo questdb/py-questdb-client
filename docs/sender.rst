@@ -269,8 +269,9 @@ performance:
 UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH Columns
 -----------------------------------------------------------
 
-Starting with QuestDB server version 10.0.0, a QWP sender (``udp::``,
-``ws::`` or ``wss::``) can write these seven column types. They are auto-created like
+Starting with QuestDB server version 10.0.0 -- the first production QWP
+implementation -- a QWP sender (``udp::``, ``ws::`` or ``wss::``) can
+write these seven column types. They are auto-created like
 any other column, except that a ``GEOHASH`` column's precision is fixed
 when the column is created, so a table holding one is usually created up
 front.

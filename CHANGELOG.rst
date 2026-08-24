@@ -141,8 +141,9 @@ New
   directly. For the rest use the new :class:`Char <questdb.Char>`,
   :class:`DateMillis <questdb.DateMillis>`,
   :class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`
-  wrappers. These types need QuestDB 10 or newer and a QWP sender
-  (``udp::``, ``ws::`` or ``wss::``).
+  wrappers. These types need a QWP sender (``udp::``, ``ws::`` or
+  ``wss::``) and QuestDB 10 or newer, the first production QWP
+  implementation.
 
 - **``schema_overrides`` accepts ``'uuid'`` and ``'long256'``.** Both work on
   fixed-size and variable-length binary columns — which is how polars frames

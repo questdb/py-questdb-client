@@ -2014,7 +2014,8 @@ cdef class Buffer:
 
         The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``
         and are rejected by ILP buffers used by ``tcp``, ``tcps``, ``http``,
-        and ``https``. They require QuestDB 10 or newer.
+        and ``https``. They require QuestDB 10 or newer, the first
+        production QWP implementation.
 
         QuestDB reserves these values as ``NULL`` sentinels, but the client
         deliberately accepts them: IPV4 ``0.0.0.0``, DATE ``INT64_MIN``, UUID

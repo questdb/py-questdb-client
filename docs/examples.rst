@@ -155,8 +155,9 @@ again on the strength of ``df.attrs['questdb']`` alone:
 
 .. note::
 
-    These types need QuestDB server 10.0.0 or later and a QWP sender
-    (``udp::``, ``ws::`` or ``wss::``). The legacy ILP transports have no
+    These types need QuestDB server 10.0.0 or later -- the first
+    production QWP implementation -- and a QWP sender (``udp::``,
+    ``ws::`` or ``wss::``). The legacy ILP transports have no
     such column types: over them a ``uuid.UUID`` or an
     ``ipaddress.IPv4Address`` is rejected, and so are the four wrappers.
     The DataFrame route is narrower still: it runs on ``ws::`` / ``wss::``

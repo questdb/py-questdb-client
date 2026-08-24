@@ -109,8 +109,8 @@ For more details on decimal types, see the
 UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH Column Errors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These seven column types need QuestDB server 10.0.0 or later and a QWP
-sender. If a value of one of them is rejected, check the following:
+These seven column types need a QWP sender and QuestDB server 10.0.0 or
+later, the first production QWP implementation. If a value of one of them is rejected, check the following:
 
 **Sender protocol**: they are QWP-only. Configure ``udp::``, ``ws::`` or
 ``wss::``; the legacy ILP transports (``http``, ``https``, ``tcp``,

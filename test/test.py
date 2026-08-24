@@ -14,6 +14,7 @@ import timeit
 import time
 import threading
 import uuid
+import ast
 import copy
 import inspect
 import json
@@ -48,9 +49,11 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from system_test import (
         TestWithDatabase,
         TestEgressWithDatabase,
+        TestEgressQwpRowTypes,
         TestEgressPool,
         TestEgressLeaks,
         TestColumnIngressNarrowTypes,
+        TestColumnIngressQwpRowTypes,
         TestColumnIngressFailover,
         TestEgressFailover,
         TestEgressFailoverRoleNegotiation)
@@ -5557,6 +5560,124 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             'otherwise a `clean` re-entry may only be clean because '
             f'nothing else happened: {sorted(outcomes)}')
 
+    #: Integration test classes whose `setUp` asks for
+    #: `FIRST_QWP_ROW_TYPES_RELEASE` -- QuestDB 10, the first production
+    #: QWP. Membership is the gate, so every test in one of these is
+    #: covered without anyone remembering to mark it.
+    QWP_ROW_TYPE_CLASSES = frozenset({
+        'TestEgressQwpRowTypes',
+        'TestColumnIngressQwpRowTypes',
+        'TestQwpOnlyRowTypesIntegration',
+    })
+
+    #: What a test says in its own source when it builds one of the
+    #: QWP-only column types, and what it says when it sends something.
+    #: A test that does both is a test that can put one of these types
+    #: on the wire.
+    QWP_ROW_TYPE_TOKENS = (
+        ' LONG256', 'GEOHASH(', ' IPV4', ' DATE', ' CHAR', ' BINARY',
+        ' UUID', 'qi.Geohash(', 'qi.Long256(', 'qi.DateMillis(',
+        'qi.Char(', "'long256'", "'geohash'", "'ipv4'", "'char'")
+    QWP_ROW_TYPE_WRITE_TOKENS = ('.dataframe(', '.row(', 'schema_overrides')
+
+    #: Tests the scan reaches that name one of these types without
+    #: putting one on the wire, each with the reason. An entry here is
+    #: a claim somebody made and can be argued with.
+    QWP_ROW_TYPE_EXEMPT = {
+        'test_uuid_claim_on_wrong_width_is_rejected':
+            'the claim is refused client-side; no frame is sent.',
+        'test_fsb32_rejected_by_row_ilp':
+            'the NumPy planner refuses the column client-side; no '
+            'frame is sent.',
+        'test_uuid_string_into_uuid_column_via_server_coercion':
+            'the wire type is VARCHAR. UUID is only the type of the '
+            'destination column, which QuestDB has had for years.',
+        'test_invalid_uuid_string_is_rejected_by_server':
+            'as test_uuid_string_into_uuid_column_via_server_coercion.',
+        'test_ipv4_string_coercion_is_unsupported':
+            'the wire type is VARCHAR; IPV4 is the column it is '
+            'refused by.',
+        'test_invalid_ipv4_string_is_rejected_by_server':
+            'as test_ipv4_string_coercion_is_unsupported.',
+        'test_pa_uint32_round_trip_as_long':
+            'the wire type is LONG. IPV4 appears in the docstring '
+            'saying which rule this column does not take.',
+        'test_pa_uint32_is_routed_to_long_not_ipv4':
+            'as test_pa_uint32_round_trip_as_long.',
+    }
+
+    def test_every_integration_test_that_writes_a_qwp_only_type_is_gated(self):
+        """A test that puts UUID, IPV4, BINARY, CHAR, DATE, LONG256 or
+        GEOHASH on the wire needs QuestDB 10, and five of the
+        integration legs run the 9.4.3 QWP beta.
+
+        The gate is class membership, so what this holds is the other
+        half: a test that writes one of these types from a class with
+        no gate. Reading the tests rather than remembering them is the
+        point -- a per-test call to `_require_qwp_row_types()` is a call
+        someone has to think to write, and six review rounds found tests
+        where nobody had.
+
+        The beta accepts these types, so an ungated test passes on those
+        legs rather than going red. That is the harder failure to see:
+        the coverage looks the same either way, and what is actually
+        being exercised is an implementation this client does not
+        support.
+
+        A test the scan reaches that does not really write one of these
+        types goes on `QWP_ROW_TYPE_EXEMPT` with the reason."""
+        source_path = PROJ_ROOT / 'test' / 'system_test.py'
+        text = source_path.read_text()
+        lines = text.splitlines(keepends=True)
+        tree = ast.parse(text)
+
+        scanned = 0
+        ungated = []
+        reached = set()
+        for cls in tree.body:
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            for fn in cls.body:
+                if not (isinstance(fn, ast.FunctionDef)
+                        and fn.name.startswith('test')):
+                    continue
+                scanned += 1
+                body = ''.join(lines[fn.lineno - 1:fn.end_lineno])
+                if not any(token in body
+                           for token in self.QWP_ROW_TYPE_TOKENS):
+                    continue
+                if not any(token in body
+                           for token in self.QWP_ROW_TYPE_WRITE_TOKENS):
+                    continue
+                reached.add(fn.name)
+                if cls.name in self.QWP_ROW_TYPE_CLASSES:
+                    continue
+                if fn.name in self.QWP_ROW_TYPE_EXEMPT:
+                    self.assertTrue(
+                        self.QWP_ROW_TYPE_EXEMPT[fn.name],
+                        f'{fn.name} is exempt with no reason')
+                    continue
+                ungated.append(f'{cls.name}.{fn.name}')
+
+        self.assertGreater(scanned, 100, 'the integration suite shrank')
+        self.assertEqual(
+            ungated, [],
+            'these integration tests can put a QWP-only column type on '
+            'the wire from a class that does not require QuestDB 10, so '
+            'they run against the 9.4.3 QWP beta on five legs. Move each '
+            'into one of '
+            f'{sorted(self.QWP_ROW_TYPE_CLASSES)}, or add it to '
+            'QWP_ROW_TYPE_EXEMPT with the reason it writes no such '
+            'type:\n  ' + '\n  '.join(ungated))
+
+        # And the other direction: an exemption for a test the scan no
+        # longer reaches is an exemption nobody will notice is stale.
+        stale = sorted(set(self.QWP_ROW_TYPE_EXEMPT) - reached)
+        self.assertEqual(
+            stale, [],
+            f'these tests are exempt from the QuestDB 10 gate but the '
+            f'scan no longer reaches them: {stale}')
+
     def test_the_native_capture_inventory_matches_the_sources(self):
         """`src/questdb/native_captures.md` is the checked-in answer to
         "which native pointer is live while the caller's Python runs, and
@@ -7070,8 +7191,16 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     class TestQwpOnlyRowTypesIntegration(TestWithDatabase):
-        def test_round_trip_sentinels_precisions_and_mixed_precision_error(self):
+        """The QWP-only row types against a live server.
+
+        The whole class needs QuestDB 10, so `setUp` asks for it once
+        rather than each test asking for itself.
+        """
+
+        def setUp(self):
             self._require_qwp_row_types()
+
+        def test_round_trip_sentinels_precisions_and_mixed_precision_error(self):
             table_name = 'qwp_row_types_' + uuid.uuid4().hex[:8]
             mixed_table = 'qwp_mixed_gh_' + uuid.uuid4().hex[:8]
             normal_uuid = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')

@@ -36,11 +36,18 @@ stages:
               vsQuestDbMaster: true
               questdbVersion: ""
               requireQwpRowTypes: ""
-            # The QWP-only column types need QuestDB 10, so the legs above
-            # skip every test that covers them. This one pins a 10 release
-            # and sets requireQwpRowTypes, which turns those skips into
-            # failures -- otherwise a run covering none of it looks exactly
-            # like a run that passed.
+            # The QWP-only column types are supported from QuestDB 10,
+            # the first production QWP; the legs above run the 9.4.3
+            # beta and skip them. Every test that writes one lives in a
+            # class whose `setUp` asks for
+            # `FIRST_QWP_ROW_TYPES_RELEASE` -- `TestEgressQwpRowTypes`,
+            # `TestColumnIngressQwpRowTypes`,
+            # `TestQwpOnlyRowTypesIntegration` -- so the skip covers all
+            # of them, and a test.py meta-test fails if one turns up
+            # anywhere else. This leg pins a 10 release and sets
+            # requireQwpRowTypes, which turns those skips into failures:
+            # otherwise a run covering none of it looks exactly like a
+            # run that passed.
             linux-qdb10:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
