@@ -1936,7 +1936,13 @@ cdef class Buffer:
             raise
         finally:
             self._row_depth -= 1
-        if wrote_fields and allow_auto_flush:
+        # A row written from inside another row or frame on this buffer
+        # leaves the depth above zero, and flushing there would cut the
+        # outer call's work in half, so the auto-flush is left to the
+        # call that is still running. Attempting it instead reaches the
+        # flush guard, which refuses -- correctly, but naming `flush()`
+        # and a column conversion to a caller who wrote a row.
+        if wrote_fields and allow_auto_flush and self._row_depth == 0:
             self._may_trigger_row_complete()
 
     def row(

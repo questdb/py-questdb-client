@@ -5150,6 +5150,54 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 txn.commit()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_row_written_inside_a_frame_defers_its_auto_flush(self):
+        """A `row()` written from inside a `dataframe()` leaves the
+        buffer's depth above zero when it returns, so an auto-flush
+        there would cut the frame's own work in half. It is left to the
+        call still running.
+
+        Attempting it instead reaches `flush()`'s in-row guard, which
+        refuses -- correctly, but with a message naming `flush()` and a
+        column value's conversion, to a caller who wrote a row. The row
+        lands either way; this is about what the caller is told.
+        """
+        with Server() as server:
+            with qi.Sender.from_conf(
+                    f'tcp::addr=localhost:{server.port};'
+                    'auto_flush_rows=1;') as sender:
+                server.accept()
+
+                class HostileFrame(pd.DataFrame):
+                    fired = False
+
+                    @property
+                    def attrs(self):
+                        if not HostileFrame.fired:
+                            HostileFrame.fired = True
+                            # `_dataframe` has already counted into the
+                            # buffer's depth by the time it reads this.
+                            sender.row(
+                                'nested', columns={'v': 1},
+                                at=qi.TimestampNanos(1))
+                        return {}
+
+                    @attrs.setter
+                    def attrs(self, value):
+                        pass
+
+                frame = HostileFrame({
+                    'v': [2, 3],
+                    'ts': pd.to_datetime([0, 1], unit='s')})
+                # No error, and in particular not one about `flush()`.
+                sender.dataframe(frame, table_name='framed', at='ts')
+                sender.flush()
+
+            received = server.recv()
+        text = b'\n'.join(received).decode('utf-8')
+        self.assertIn('nested', text)
+        self.assertIn('framed', text)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_close_racing_a_refused_close_cannot_report_success(self):
         """`QuestDB.close()` decides its refusal before it publishes
         anything, and under the lock that publishes it.
