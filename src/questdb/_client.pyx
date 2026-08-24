@@ -8842,7 +8842,8 @@ cdef class QuestDB:
         past that set — which a custom ``types_mapper`` can do — keeps
         the claim in ``attrs`` and cannot use it: a claimed column that
         arrives as a float or a string dtype lands as that dtype
-        implies, with nothing said. An
+        implies, and the claim it could not use is reported as a
+        ``UserWarning``. An
         object column states no width or range of its own, so a claimed
         value the type cannot hold — an integer past ``2**32-1`` under
         ``ipv4``, a cell that is not exactly 16 or 32 bytes under
