@@ -11145,13 +11145,22 @@ cdef class PooledSender:
         self._batch_started_ms = 0
 
     cdef void _release_locked(self) except *:
+        """Hand the borrowed sender back to the pool.
+
+        Every refusal belongs to `close()`, which runs them before it
+        reaches here. This is also the `__dealloc__` path, where the
+        function is `except *` and cannot report anything: a raise here
+        would skip `questdb_db_return_sender` below, leaving the pool a
+        sender short and `QuestDB.close()` waiting on a lease that can
+        never come back. `PooledReader._release_locked` is the same
+        shape.
+        """
         cdef qwp_sender* sender = self._qwp
         cdef questdb_db* db = self._db
         cdef QuestDB handle = self._handle
         cdef PyThreadState* gs = NULL
         if sender == NULL:
             return
-        self._check_not_in_row('close')
         self._qwp = NULL
         self._db = NULL
         self._buffer = None

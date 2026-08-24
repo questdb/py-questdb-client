@@ -5237,6 +5237,50 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     finally:
                         db.close()
 
+    def test_a_dropped_lease_returns_its_sender_to_the_pool(self):
+        """`PooledSender.__dealloc__` returns the borrowed sender, and
+        nothing on that path can raise.
+
+        Every refusal a lease makes belongs to `close()`, which runs
+        them before it releases. `_release_locked` is `except *` and
+        `__dealloc__` cannot report anything, so a guard standing there
+        would skip the return to the pool and leave `QuestDB.close()`
+        waiting on a lease that can never come back -- warning every
+        five seconds, forever. `PooledReader._release_locked` is the
+        same shape.
+
+        Nothing reachable from Python drops a lease part-way through a
+        row -- the frame writing the row holds a reference to the lease
+        it is writing on -- so this holds the invariant the release
+        path now has unconditionally rather than reproducing a failure.
+        """
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'sender_pool_min=0;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as db:
+                lease = db.sender()
+                lease.row('t', columns={'v': 1},
+                          at=qi.TimestampNanos(1))
+                # Dropped without `close()`, part-way through a batch.
+                del lease
+
+                # The pool holds one sender, so a second lease can only
+                # be handed out if the first came back.
+                second = db.sender()
+                second.close()
+
+                # And the handle closes rather than waiting on a lease
+                # that was never returned.
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    db.close()
+                waited = [w for w in caught
+                          if 'outstanding lease' in str(w.message)]
+                self.assertEqual(
+                    waited, [],
+                    f'close() waited on a lease: '
+                    f'{[str(w.message) for w in waited]}')
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_ws_dataframe_survives_a_close_from_inside_itself(self):
         """The WebSocket `dataframe()` route hands connection options to

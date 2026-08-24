@@ -222,6 +222,12 @@ Fixed
   success against a handle that is still open -- nor can the two ends of that
   window wait on each other.
 
+- **Returning a pooled sender to its pool cannot raise.** Every refusal a
+  lease makes belongs to ``close()``, which runs them before it releases. The
+  release path is also the deallocation path, where a raise would skip the
+  return to the pool and leave ``QuestDB.close()`` waiting for a lease that
+  can never come back.
+
 - **A transaction whose commit cannot flush is over.** ``commit()`` used to
   mark the transaction complete before the flush that carries it, so a flush
   that failed left the transaction closed with its rows still buffered, for
