@@ -157,7 +157,7 @@ class TestManifest(unittest.TestCase):
                 f"file: {entry['path']}")
 
     def test_every_example_is_published_somewhere(self):
-        """An example nobody references is an example nobody runs.
+        """An example nobody references is an example nobody reads.
 
         The manifest carries the set the QuestDB docs site embeds and
         `docs/examples.rst` carries the rest, so every file in
@@ -165,6 +165,13 @@ class TestManifest(unittest.TestCase):
         files rather than from the manifest: reading the manifest and
         asking whether each entry exists can only find an entry that
         went stale, never a file that was never listed.
+
+        Published is not the same as run. Three of these are executed
+        against a live server -- `qwp_udp.py`, `qwp_column_types.py`
+        and `qwp_column_types_dataframe.py`, by tests in
+        `system_test.py` -- and the other eighteen would break in
+        silence. What this holds is that a reader can find each one,
+        not that each one still works.
         """
         repo_root, manifest = self._manifest()
         listed = {entry['path'] for entry in manifest}
@@ -179,8 +186,7 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(
             orphans, [],
             'these examples are in neither examples.manifest.yaml nor '
-            'docs/examples.rst, so nothing points a reader at them and '
-            'nothing notices when they stop working:\n  '
+            'docs/examples.rst, so nothing points a reader at them:\n  '
             + '\n  '.join(orphans))
 
 
