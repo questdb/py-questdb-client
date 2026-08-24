@@ -3777,6 +3777,17 @@ cdef void_int _dataframe(
                     f'): {e}  [dc={<int>col.dispatch_code}]') from e
             else:
                 raise
+        except BaseException:
+            # An interrupt between two cells is not a data error, so it
+            # goes on as itself rather than being wrapped. The
+            # part-written row still has to go: the `finally` below
+            # clears the marker, which is the only way back to a clean
+            # buffer, and `_row_depth` returns to zero behind it, so
+            # every guard downstream reads the buffer as idle.
+            # `Buffer._row` catches everything for the same reason.
+            if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
+                raise c_err_to_py(err)
+            raise
     except Exception as e:
         if not isinstance(e, QuestDBError):
             raise QuestDBError(
