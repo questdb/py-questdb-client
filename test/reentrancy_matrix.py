@@ -52,6 +52,7 @@ import pathlib
 import subprocess
 import sys
 import traceback
+import uuid
 
 import patch_path  # noqa: F401  (sys.path fix-up)
 
@@ -196,6 +197,51 @@ def hostile_ipv4(hook):
             return 0x01020304
 
     return HostileAddr('192.0.2.1')
+
+
+def hostile_dt(hook):
+    """A datetime *cell* whose conversion runs `hook`, in the middle of
+    the row rather than at its end.
+
+    `hostile_at` puts the same conversion at the row's designated
+    timestamp, which reaches `_at_dt` — a call that borrows no column
+    name. As a column value it reaches `_column_dt`, so this is the
+    fixture that covers that branch. Works on every protocol.
+    """
+
+    class HostileTz(datetime.tzinfo):
+        fired = False
+
+        def utcoffset(self, dt):
+            if not HostileTz.fired:
+                HostileTz.fired = True
+                hook()
+            return datetime.timedelta(0)
+
+        def dst(self, dt):
+            return datetime.timedelta(0)
+
+        def tzname(self, dt):
+            return 'HOSTILE'
+
+    return datetime.datetime(2020, 1, 1, tzinfo=HostileTz())
+
+
+def hostile_uuid(hook):
+    """A UUID cell whose `int` read runs `hook`, in the middle of the
+    row. `UUID` accepts subclasses and a subclass may define `int` as a
+    property. QWP protocols only."""
+
+    class HostileUuid(uuid.UUID):
+        fired = False
+
+        def __getattribute__(self, name):
+            if name == 'int' and not HostileUuid.fired:
+                HostileUuid.fired = True
+                hook()
+            return object.__getattribute__(self, name)
+
+    return HostileUuid('123e4567-e89b-12d3-a456-426614174000')
 
 
 def hostile_frame(hook, pd):
@@ -362,6 +408,26 @@ def _outer_buffer_row(ctx, stack, hook, deps):
     ctx.buffer = buffer
     buffer.row('outer', columns={'v': 1}, at=qi.ServerTimestamp)
     buffer.row('hostile', columns={'ip': hostile_ipv4(hook)},
+               at=qi.ServerTimestamp)
+
+
+@outer('Buffer.row/dt', 'a hostile datetime cell in a caller-owned buffer')
+def _outer_buffer_row_dt(ctx, stack, hook, deps):
+    sender = _qwp_sender(ctx, stack)
+    buffer = sender.new_buffer()
+    ctx.buffer = buffer
+    buffer.row('outer', columns={'v': 1}, at=qi.ServerTimestamp)
+    buffer.row('hostile', columns={'ts': hostile_dt(hook)},
+               at=qi.ServerTimestamp)
+
+
+@outer('Buffer.row/uuid', 'a hostile UUID cell in a caller-owned QWP buffer')
+def _outer_buffer_row_uuid(ctx, stack, hook, deps):
+    sender = _qwp_sender(ctx, stack)
+    buffer = sender.new_buffer()
+    ctx.buffer = buffer
+    buffer.row('outer', columns={'v': 1}, at=qi.ServerTimestamp)
+    buffer.row('hostile', columns={'u': hostile_uuid(hook)},
                at=qi.ServerTimestamp)
 
 

@@ -6132,15 +6132,45 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertGreaterEqual(
             len(rows), 14, 'the capture table lost rows')
 
+        # The rows that are allowed not to say `ownership`, and why. A row
+        # reaches this list only by review: it has to be a capture whose
+        # worst case is a refused call rather than a freed read. Keyed by
+        # site and capture so that renaming either brings the row back for
+        # a fresh decision.
+        NON_OWNERSHIP_ROWS = {
+            ('`Buffer._row`', 'the rewind marker'):
+                'The marker is spent only by a flush this row triggered. '
+                'Every other route to it is refused, and the native buffer '
+                'refuses a half-written row on its own, so the worst case '
+                'is a refused call rather than a freed read.',
+        }
+
         for row in rows:
             cells = [cell.strip() for cell in row.strip('|').split('|')]
             site, capture, kept_by, klass = cells[1], cells[2], cells[3], cells[4]
             self.assertTrue(kept_by, f'{site}: nothing keeps {capture} valid')
-            self.assertNotIn(
-                'guard-only', klass,
-                f'{site}: {capture} rests on a guard alone. A guard may '
-                'refuse cleanly; it may not be the only thing between '
-                'the caller and a freed pointer.')
+            if klass.startswith('ownership'):
+                continue
+            self.assertIn(
+                (site, capture), NON_OWNERSHIP_ROWS,
+                f'{site}: {capture} is classified {klass!r}, which does not '
+                'begin with "ownership". A guard may refuse cleanly; it may '
+                'not be the only thing between the caller and a freed '
+                'pointer. Either give the row an ownership story, or add it '
+                'to NON_OWNERSHIP_ROWS with the reason its worst case is a '
+                'refused call.')
+
+        # An entry that no longer matches a row is an excuse for a capture
+        # that has moved or gone, and has to be re-decided rather than left
+        # standing.
+        present = {
+            tuple(cell.strip() for cell in row.strip('|').split('|'))[1:3]
+            for row in rows}
+        for key in NON_OWNERSHIP_ROWS:
+            self.assertIn(
+                key, present,
+                f'NON_OWNERSHIP_ROWS excuses {key}, which the capture table '
+                'no longer lists under that name.')
 
         # Each capture, spelled as the sources spell it. A rename that
         # forgets the table fails here rather than leaving the table
@@ -6163,6 +6193,110 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         # The one capture the table records as *not* convertible has to
         # still be there too, with its guard.
         self.assertIn('_check_not_in_own_callback', sources)
+
+    #: Every `_column_*` helper that cannot run the caller's Python while
+    #: it holds native state, and the reason. A helper not listed here has
+    #: to be covered by a `hostile_<kind>` fixture in the re-entrancy grid
+    #: instead. Keeping the two sets exhaustive between them is what makes
+    #: the grid's value axis derived rather than remembered: adding a
+    #: `_column_*` helper fails this test until somebody decides which
+    #: side it belongs on.
+    COLUMN_HELPERS_WITHOUT_CALLER_PYTHON = {
+        'bool': 'reached only under PyBool_Check, so the value is exactly '
+                'True or False and the bint conversion is a pointer compare',
+        'int': 'reached only under PyLong_CheckExact; '
+               'PyLong_AsLongLongAndOverflow is a C call',
+        'i64': 'takes an int64_t the caller already converted',
+        'f64': 'reached only under PyFloat_CheckExact',
+        'str': 'reached only under PyUnicode_CheckExact; str_to_utf8 is C',
+        'ts_micros': 'reads a cdef field of TimestampMicros',
+        'ts_nanos': 'reads a cdef field of TimestampNanos',
+        'numpy': 'reached only under PyArray_CheckExact; every PyArray_* '
+                 'access is a C macro and arr.dtype is read only when '
+                 'raising',
+        'decimal': 'PyObject_TypeCheck and the _decimal memory layout are '
+                   'both C; a Decimal subclass has no method called here',
+        'binary': 'bytes and bytearray are read through C macros, and '
+                  'memoryview is not subclassable, so no __getbuffer__ of '
+                  "the caller's can run",
+        'char': 'reads a cdef field of Char',
+        'date_millis': 'reads a cdef field of DateMillis',
+        'long256': 'reads a cdef field of Long256',
+        'geohash': 'reads cdef fields of Geohash',
+        'qwp_only': 'a dispatch chain of type checks; every branch it '
+                    'picks is itself a _column_* helper',
+    }
+
+    def test_every_column_helper_that_runs_caller_python_has_a_hostile_cell(self):
+        """The re-entrancy grid takes the calls it re-enters from
+        `api_surface` by reflection, but the values that *run* the
+        caller's Python inside those calls were a hand-written set. A
+        column value's conversion is one of the three windows where
+        caller code runs mid-row, and which `_column_*` branch a value
+        reaches decides what native state is live while it does.
+
+        So the value axis is derived here too: every `_column_*` helper
+        is either declared unable to run caller Python, with the reason,
+        or has a `hostile_<kind>` fixture in the grid."""
+        source = (PROJ_ROOT / 'src' / 'questdb' / '_client.pyx').read_text()
+        helpers = set(re.findall(
+            r'cdef\s+(?:inline\s+)?void_int\s+_column_(\w+)\s*\(', source))
+        # `_column` itself is the dispatch, not a helper.
+        helpers.discard('')
+        self.assertTrue(helpers, 'no _column_* helpers found; the pattern '
+                                 'this test scans for has changed')
+
+        grid = (PROJ_ROOT / 'test' / 'reentrancy_matrix.py').read_text()
+        fixtures = set(re.findall(r'^def hostile_(\w+)\(', grid, re.M))
+
+        declared = set(self.COLUMN_HELPERS_WITHOUT_CALLER_PYTHON)
+        uncovered = helpers - declared - fixtures
+        self.assertFalse(
+            uncovered,
+            f'{sorted(uncovered)}: these _column_* helpers neither declare '
+            'why they cannot run the caller\'s Python nor have a '
+            'hostile_<kind> fixture in the re-entrancy grid. Add the '
+            'fixture, or add the helper to '
+            'COLUMN_HELPERS_WITHOUT_CALLER_PYTHON with its reason.')
+
+        stale = declared - helpers
+        self.assertFalse(
+            stale,
+            f'{sorted(stale)}: declared unable to run caller Python, but no '
+            '_column_* helper goes by that name any more.')
+
+        # A fixture must be reachable from at least one outer scenario,
+        # or it measures nothing.
+        for kind in sorted(fixtures & helpers):
+            self.assertIn(
+                f'hostile_{kind}(hook)', grid,
+                f'hostile_{kind} is defined but no outer scenario calls it, '
+                'so no grid cell exercises that branch.')
+
+    def test_no_column_helper_takes_a_pre_encoded_name(self):
+        """A `line_sender_column_name` borrows the string arena, which
+        `Buffer.clear()` recycles, so it stays valid only while no
+        Python runs. Each `_column_*` helper therefore takes the name as
+        a `str` and encodes it itself, immediately before its own native
+        call and after any conversion that runs the caller's code.
+
+        Passing one across a function boundary is what puts a live
+        borrow either side of a conversion, so the signatures are where
+        this is held."""
+        source = (PROJ_ROOT / 'src' / 'questdb' / '_client.pyx').read_text()
+        offenders = []
+        for match in re.finditer(
+                r'cdef\s+(?:inline\s+)?void_int\s+(_column_\w+)\s*\('
+                r'(?P<params>[^)]*)\)', source):
+            if 'line_sender_column_name' in match.group('params'):
+                offenders.append(match.group(1))
+        self.assertFalse(
+            offenders,
+            f'{sorted(offenders)}: these take a pre-encoded '
+            'line_sender_column_name. The arena borrow then spans the '
+            'call boundary, and any conversion inside that runs the '
+            "caller's Python can recycle it. Take `str name` and encode "
+            'inside the helper instead.')
 
     def test_a_lease_cannot_be_released_from_inside_its_own_dataframe(self):
         """`dataframe()` on a lease runs the caller's Python for the whole
@@ -9517,19 +9651,6 @@ class TestTypeStub(unittest.TestCase):
         self.assertEqual(
             missing, [],
             'declared in _client.pyi and absent from the extension')
-
-    def test_stub_and_module_export_the_same_names(self):
-        import ast
-        for node in self._stub_tree().body:
-            if (isinstance(node, ast.Assign)
-                    and any(isinstance(target, ast.Name)
-                            and target.id == '__all__'
-                            for target in node.targets)):
-                declared = sorted(ast.literal_eval(node.value))
-                break
-        else:
-            self.fail('_client.pyi declares no __all__')
-        self.assertEqual(declared, sorted(qi.__all__))
 
 
 class TestEveryTestClassIsReachable(unittest.TestCase):

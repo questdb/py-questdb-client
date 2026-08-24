@@ -1538,13 +1538,17 @@ cdef class Buffer:
             raise c_err_to_py(err)
 
     cdef inline void_int _column_bool(
-            self, line_sender_column_name c_name, bint value) except -1:
+            self, str name, bint value) except -1:
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_bool(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_decimal(
-            self, line_sender_column_name c_name, object value) except -1:
+            self, str name, object value) except -1:
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         return serialize_decimal_py_obj(self._impl, c_name, <PyObject*>value)
 
     cdef inline void_int _require_qwp_column(
@@ -1557,9 +1561,10 @@ cdef class Buffer:
                 "the ILP protocol (tcp/tcps/http/https).")
 
     cdef inline void_int _column_binary(
-            self, line_sender_column_name c_name, object value) except -1:
+            self, str name, object value) except -1:
         self._require_qwp_column('BINARY')
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
         cdef const uint8_t* data
         cdef size_t data_len
         cdef Py_buffer view
@@ -1580,6 +1585,7 @@ cdef class Buffer:
             data = <const uint8_t*>view.buf
             data_len = <size_t>view.len
         try:
+            str_to_column_name(self._cleared_b(), name, &c_name)
             if not line_sender_buffer_column_binary(
                     self._impl, c_name, data, data_len, &err):
                 raise c_err_to_py(err)
@@ -1629,41 +1635,48 @@ cdef class Buffer:
             raise c_err_to_py(err)
 
     cdef inline void_int _column_char(
-            self, line_sender_column_name c_name, Char value) except -1:
+            self, str name, Char value) except -1:
         self._require_qwp_column('CHAR')
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_char(
                 self._impl, c_name, value._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_date_millis(
-            self, line_sender_column_name c_name, DateMillis value) except -1:
+            self, str name, DateMillis value) except -1:
         self._require_qwp_column('DATE')
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_date(
                 self._impl, c_name, value._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_long256(
-            self, line_sender_column_name c_name, Long256 value) except -1:
+            self, str name, Long256 value) except -1:
         self._require_qwp_column('LONG256')
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_long256(
                 self._impl, c_name,
                 <const uint8_t*>PyBytes_AsString(value._bytes), &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_geohash(
-            self, line_sender_column_name c_name, Geohash value) except -1:
+            self, str name, Geohash value) except -1:
         self._require_qwp_column('GEOHASH')
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_geohash(
                 self._impl, c_name, value._bits, value._precision, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_int(
-            self, line_sender_column_name c_name, str name,
-            object value) except -1:
+            self, str name, object value) except -1:
         # A plain `int` goes to a LONG column, which holds 64 bits. A
         # wider value fits only in a LONG256 column, and the `Long256`
         # wrapper is what puts it there, so the error names the wrapper.
@@ -1676,50 +1689,63 @@ cdef class Buffer:
         cdef int overflow = 0
         cdef int64_t as_i64
         if not self._qwp:
-            return self._column_i64(c_name, value)
+            return self._column_i64(name, value)
         as_i64 = <int64_t>PyLong_AsLongLongAndOverflow(value, &overflow)
         if overflow != 0:
             raise OverflowError(
                 f'Bad column {name!r}: integer out of range for a LONG '
                 f'column (-2**63 .. 2**63-1). Wrap it in `Long256(...)` '
                 f'to store it in a LONG256 column.')
-        return self._column_i64(c_name, as_i64)
+        return self._column_i64(name, as_i64)
 
     cdef inline void_int _column_i64(
-            self, line_sender_column_name c_name, int64_t value) except -1:
+            self, str name, int64_t value) except -1:
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_i64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
         return 0
 
     cdef inline void_int _column_f64(
-            self, line_sender_column_name c_name, double value) except -1:
+            self, str name, double value) except -1:
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_f64(self._impl, c_name, value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_str(
-            self, line_sender_column_name c_name, str value) except -1:
+            self, str name, str value) except -1:
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
         cdef line_sender_utf8 c_value
+        # The name is encoded first because `_cleared_b()` recycles the
+        # arena; the value is appended after it, and an append leaves
+        # every pointer already handed out where it is.
+        str_to_column_name(self._cleared_b(), name, &c_name)
         str_to_utf8(self._b, <PyObject*>value, &c_value)
         if not line_sender_buffer_column_str(self._impl, c_name, c_value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_ts_micros(
-            self, line_sender_column_name c_name, TimestampMicros ts) except -1:
+            self, str name, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_ts_micros(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_ts_nanos(
-            self, line_sender_column_name c_name, TimestampNanos ts) except -1:
+            self, str name, TimestampNanos ts) except -1:
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_ts_nanos(self._impl, c_name, ts._value, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column_numpy(
-            self, line_sender_column_name c_name, cnp.ndarray arr) except -1:
+            self, str name, cnp.ndarray arr) except -1:
         if cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64:
             raise QuestDBError(
                 QuestDBErrorCode.ArrayError,
@@ -1728,6 +1754,9 @@ cdef class Buffer:
             size_t rank = cnp.PyArray_NDIM(arr)
             const double * data_ptr = <const double*> cnp.PyArray_DATA(arr)
             line_sender_error * err = NULL
+            line_sender_column_name c_name
+
+        str_to_column_name(self._cleared_b(), name, &c_name)
 
         if cnp.PyArray_FLAGS(arr) & cnp.NPY_ARRAY_C_CONTIGUOUS != 0:
             if not line_sender_buffer_column_f64_arr_c_major(
@@ -1752,45 +1781,55 @@ cdef class Buffer:
                 raise c_err_to_py(err)
 
     cdef inline void_int _column_dt(
-            self, line_sender_column_name c_name, cp_datetime dt) except -1:
+            self, str name, cp_datetime dt) except -1:
         cdef line_sender_error* err = NULL
+        cdef line_sender_column_name c_name
         # We limit ourselves to micros, since this is the maxium precision
         # exposed by the datetime library in Python.
+        #
+        # `datetime_to_micros` runs Python: subtracting two aware datetimes
+        # calls the caller's `tzinfo.utcoffset()`, and a naive one reaches
+        # `warnings.warn`. That code can recycle the string arena an encoded
+        # column name borrows from, so the value is reduced to a C scalar
+        # first and the name is encoded after.
+        cdef int64_t micros = datetime_to_micros(dt)
+        str_to_column_name(self._cleared_b(), name, &c_name)
         if not line_sender_buffer_column_ts_micros(
-                self._impl, c_name, datetime_to_micros(dt), &err):
+                self._impl, c_name, micros, &err):
             raise c_err_to_py(err)
 
     cdef inline void_int _column(self, str name, object value) except -1:
-        cdef line_sender_column_name c_name
-        # `c_name` borrows storage that `Buffer.clear()` recycles, so it stays
-        # valid only while no Python code runs. A branch whose value needs
-        # Python to convert takes `name` instead and encodes it itself, once
-        # the conversion is done.
-        str_to_column_name(self._cleared_b(), name, &c_name)
+        # An encoded column name borrows storage that `Buffer.clear()`
+        # recycles, so it stays valid only while no Python code runs. Every
+        # branch therefore takes the name as a `str` and encodes it itself,
+        # immediately before its own native call and after any conversion
+        # that runs the caller's Python. The property that keeps this true
+        # is visible in the signatures: no `_column_*` helper accepts a
+        # `line_sender_column_name`, and
+        # `test_no_column_helper_takes_a_pre_encoded_name` holds it there.
         if PyBool_Check(<PyObject*>value):
-            self._column_bool(c_name, value)
+            self._column_bool(name, value)
         elif PyLong_CheckExact(<PyObject*>value):
-            self._column_int(c_name, name, value)
+            self._column_int(name, value)
         elif PyFloat_CheckExact(<PyObject*>value):
-            self._column_f64(c_name, value)
+            self._column_f64(name, value)
         elif PyUnicode_CheckExact(<PyObject*>value):
-            self._column_str(c_name, value)
+            self._column_str(name, value)
         elif isinstance(value, TimestampMicros):
-            self._column_ts_micros(c_name, value)
+            self._column_ts_micros(name, value)
         elif isinstance(value, TimestampNanos):
-            self._column_ts_nanos(c_name, value)
+            self._column_ts_nanos(name, value)
         elif PyArray_CheckExact(<PyObject *> value):
-            self._column_numpy(c_name, value)
+            self._column_numpy(name, value)
         elif isinstance(value, cp_datetime):
-            self._column_dt(c_name, value)
+            self._column_dt(name, value)
         elif _is_decimal(value):
-            self._column_decimal(c_name, value)
+            self._column_decimal(name, value)
         else:
-            self._column_qwp_only(c_name, name, value)
+            self._column_qwp_only(name, value)
 
     cdef void_int _column_qwp_only(
-            self, line_sender_column_name c_name, str name,
-            object value) except -1:
+            self, str name, object value) except -1:
         # The QWP-only cell types and the unsupported-type error live
         # out of line, and deliberately not `inline`. `_column` is
         # inlined into the loop in `_row`, so every branch here would
@@ -1803,15 +1842,15 @@ cdef class Buffer:
         # none of them can be a UUID or an address, so nothing becomes
         # reachable only through the more expensive pair.
         if isinstance(value, (bytes, bytearray, memoryview)):
-            self._column_binary(c_name, value)
+            self._column_binary(name, value)
         elif isinstance(value, Char):
-            self._column_char(c_name, value)
+            self._column_char(name, value)
         elif isinstance(value, DateMillis):
-            self._column_date_millis(c_name, value)
+            self._column_date_millis(name, value)
         elif isinstance(value, Long256):
-            self._column_long256(c_name, value)
+            self._column_long256(name, value)
         elif isinstance(value, Geohash):
-            self._column_geohash(c_name, value)
+            self._column_geohash(name, value)
         elif type(value) is _UUID or isinstance(value, _UUID):
             self._column_uuid(name, value)
         elif _is_ipv4_address(value):
@@ -6864,14 +6903,6 @@ cdef void_int _arrow_batch_check_geohash_ranges(
             f'Bad dataframe: a GEOHASH column cannot be checked because '
             f'the batch carries {batch.n_children} columns against the '
             f'schema\'s {schema.n_children}.')
-    # A struct-level offset shifts every child: the importer slices each
-    # column by it before reading, so the scan starts there too and the
-    # rows it reads are the rows that go out.
-    if batch.offset < 0:
-        raise QuestDBError(
-            QuestDBErrorCode.BadDataFrame,
-            f'Bad dataframe: a GEOHASH column cannot be checked because '
-            f'the batch starts at row {batch.offset}.')
     for child_index in range(schema.n_children):
         field = schema.children[child_index]
         col = batch.children[child_index]

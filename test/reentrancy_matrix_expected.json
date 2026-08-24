@@ -889,6 +889,896 @@
   "reason": "no SenderTransaction in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.row/dt | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.clear": {
+  "result": "refused",
+  "reason": "clear() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Buffer.row": {
+  "result": "refused",
+  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.close": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.close_drain": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once is only supported when qwp_ws_progress is manual.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | Sender.transaction": {
+  "result": "refused",
+  "reason": "Transactions are only supported for ILP/HTTP.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.capacity": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.clear": {
+  "result": "refused",
+  "reason": "clear() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it cal",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.reserve": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Buffer.row": {
+  "result": "refused",
+  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.__enter__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.__exit__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.close": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.dataframe": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.error_events_delivered": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.execute": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.query": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.reader": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.reap_idle": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.sender": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QuestDB.server_info": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.__bytes__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.__enter__": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.auto_flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.auto_flush_bytes": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.auto_flush_interval": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.auto_flush_rows": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.close": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.close_drain": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.drive_once": {
+  "result": "refused",
+  "reason": "drive_once is only supported when qwp_ws_progress is manual.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.establish": {
+  "result": "refused",
+  "reason": "establish() can't be called after close().",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.flush": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.init_buf_size": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.max_name_len": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.new_buffer": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.protocol_version": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.row": {
+  "result": "clean",
+  "reason": "",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | Sender.transaction": {
+  "result": "refused",
+  "reason": "Transactions are only supported for ILP/HTTP.",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "outer_outcome": "completed"
+ },
  "PooledSender.dataframe | Buffer.__bytes__": {
   "result": "unreachable",
   "reason": "no Buffer in this scenario",
