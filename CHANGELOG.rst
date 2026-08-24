@@ -208,6 +208,12 @@ Fixed
   LONG where the caller asked for GEOHASH. ``Long256``, ``DateMillis`` and
   ``Geohash`` take the same numbers now. ``True`` is still refused everywhere.
 
+- **Both planners report a claim the column cannot carry.** On the Arrow
+  capsule path a column that is present but holds no Arrow type -- a pandas 3
+  string column, which reaches that path -- had its claim dropped in silence
+  where the NumPy planner warns. A column that is gone or renamed is still
+  the drift the claim is meant to survive quietly.
+
 - **A transaction whose commit cannot flush is over.** ``commit()`` used to
   mark the transaction complete before the flush that carries it, so a flush
   that failed left the transaction closed with its rows still buffered, for

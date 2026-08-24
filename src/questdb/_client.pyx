@@ -7458,25 +7458,32 @@ cdef dict _ATTRS_OVERRIDE_KINDS = {
 }
 
 
-cdef object _capsule_pandas_arrow_type(
-        object dtypes, object arrow_dtype, object name):
-    """The Arrow storage type backing column `name`, or None where the
-    column is missing or not Arrow-backed.
+cdef object _capsule_pandas_dtype(object dtypes, object name):
+    """The pandas dtype of column `name`, or None where the frame has
+    no such column.
 
     Takes the frame's `dtypes` rather than the frame: reading
     `frame.dtypes` builds a fresh Series every time, so looking it up
     per column was quadratic in the column count, on a path a streaming
     `iter_pandas` feeds per batch.
     """
-    cdef object dtype
-    cdef object ty
-    if arrow_dtype is None:
-        return None
     try:
-        dtype = dtypes[name]
+        return dtypes[name]
     except Exception:
         return None
-    if not isinstance(dtype, arrow_dtype):
+
+
+cdef object _capsule_arrow_type_of(object arrow_dtype, object dtype):
+    """The Arrow storage type inside a pandas dtype, or None where the
+    dtype holds none.
+
+    A dtype with no Arrow type inside it is a real answer, separate
+    from a column that is not in the frame: the column is there and
+    cannot carry the claim. A pandas 3 string column reaches the
+    capsule path this way, so the two have to be told apart.
+    """
+    cdef object ty
+    if arrow_dtype is None or not isinstance(dtype, arrow_dtype):
         return None
     ty = dtype.pyarrow_dtype
     if isinstance(ty, _PYARROW.lib.BaseExtensionType):
@@ -7541,6 +7548,7 @@ cdef object _capsule_roundtrip_overrides(object frame):
     """
     cdef list out = []
     cdef object cols_meta, meta, ty, bits, dtypes, arrow_dtype, types
+    cdef object dtype
     cdef str kind
     cdef int kind_int
     cdef int arg_int
@@ -7564,17 +7572,25 @@ cdef object _capsule_roundtrip_overrides(object frame):
             continue
         kind_int = <int>_ATTRS_OVERRIDE_KINDS[kind]
         bits = meta.get('precision_bits') or 0
-        ty = _capsule_pandas_arrow_type(dtypes, arrow_dtype, name)
+        dtype = _capsule_pandas_dtype(dtypes, name)
+        if dtype is None:
+            # The column is gone or renamed. That is the drift the
+            # claim is meant to survive quietly.
+            continue
+        ty = _capsule_arrow_type_of(arrow_dtype, dtype)
         if ty is None:
-            # The column is gone, renamed, or not Arrow-backed. That is
-            # the drift the claim is meant to survive quietly.
+            # The column is here in a dtype that holds no Arrow type --
+            # a pandas 3 string column, say -- so no claim of any kind
+            # fits it. The NumPy planner answers the same frame with a
+            # warning, and both planners answering alike is the point.
+            _warn_roundtrip_claim_dropped(name, kind, dtype)
             continue
         if not _attrs_override_fits(types, ty, kind, bits):
             _warn_roundtrip_claim_dropped(name, kind, ty)
             continue
         # Only GEOHASH takes an argument, and `_attrs_override_fits` has
-        # already held it to 1..=60.
-        arg_int = <int>bits if kind == 'geohash' else 0
+        # already held it to a whole number in 1..=60.
+        arg_int = int(bits) if kind == 'geohash' else 0
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 

@@ -59,25 +59,57 @@ def backings(pd, pa, np):
 
     ``to_pandas()`` hands back the first three, one per ``dtype_backend``;
     the rest are what a caller builds by hand or gets from polars.
+
+    ``str/pandas`` is the value in its text spelling: what a cast to
+    VARCHAR reads back as, and what pandas 3 turns a column of Python
+    strings into. Its dtype is ``StringDtype(storage='pyarrow')``, the
+    one dtype the client lets through to the Arrow capsule path while
+    holding no Arrow type itself -- so it is where a claim meets a
+    column that cannot carry it on that path.
+
+    Each entry pairs its builder with the storage its name promises,
+    because ``pd.DataFrame`` converts some of what it is handed and
+    `build_frame` holds every backing to its own description. A row
+    measuring something other than what it is named is a row nobody is
+    reading.
     """
+    def is_arrow(dtype):
+        return isinstance(dtype, pd.ArrowDtype)
+
     return {
-        'object/py': lambda values: pd.array(values['py'], dtype=object),
-        'arrow/native': lambda values: pd.array(
-            values['arrow'], dtype=pd.ArrowDtype(values['arrow'].type)),
-        'arrow/binary': lambda values: pd.array(
-            pa.array(values['raw'], pa.binary()),
-            dtype=pd.ArrowDtype(pa.binary())),
-        'arrow/fsb': lambda values: pd.array(
-            pa.array(values['raw'], pa.binary(values['width']))
-            if values['width'] else pa.array(values['raw'], pa.binary()),
-            dtype=pd.ArrowDtype(
-                pa.binary(values['width']) if values['width']
-                else pa.binary())),
-        'numpy/int': lambda values: np.array(
-            values['ints'], dtype=values['int_dtype']),
-        'arrow/int': lambda values: pd.array(
-            pa.array(values['ints'], values['arrow_int']),
-            dtype=pd.ArrowDtype(values['arrow_int'])),
+        'object/py': (
+            lambda values: pd.Series(values['py'], dtype=object),
+            lambda dtype: dtype == object),
+        'str/pandas': (
+            lambda values: pd.array(
+                values['text'], dtype=pd.StringDtype('pyarrow')),
+            lambda dtype: isinstance(dtype, pd.StringDtype)),
+        'arrow/native': (
+            lambda values: pd.array(
+                values['arrow'], dtype=pd.ArrowDtype(values['arrow'].type)),
+            is_arrow),
+        'arrow/binary': (
+            lambda values: pd.array(
+                pa.array(values['raw'], pa.binary()),
+                dtype=pd.ArrowDtype(pa.binary())),
+            is_arrow),
+        'arrow/fsb': (
+            lambda values: pd.array(
+                pa.array(values['raw'], pa.binary(values['width']))
+                if values['width'] else pa.array(values['raw'], pa.binary()),
+                dtype=pd.ArrowDtype(
+                    pa.binary(values['width']) if values['width']
+                    else pa.binary())),
+            is_arrow),
+        'numpy/int': (
+            lambda values: np.array(
+                values['ints'], dtype=values['int_dtype']),
+            lambda dtype: getattr(dtype, 'kind', '') in 'iu'),
+        'arrow/int': (
+            lambda values: pd.array(
+                pa.array(values['ints'], values['arrow_int']),
+                dtype=pd.ArrowDtype(values['arrow_int'])),
+            is_arrow),
     }
 
 
@@ -131,6 +163,7 @@ def value_set(pa, np, kind):
                   else pa.array([UUID_VALUE.bytes], pa.binary(16)))
         return {
             'py': [UUID_VALUE],
+            'text': [str(UUID_VALUE)],
             'arrow': native,
             'raw': [UUID_VALUE.bytes],
             'width': 16,
@@ -141,6 +174,7 @@ def value_set(pa, np, kind):
     if kind == 'long256':
         return {
             'py': [LONG256_BYTES],
+            'text': ['0x' + LONG256_BYTES[::-1].hex()],
             'arrow': pa.array([LONG256_BYTES], pa.binary(32)),
             'raw': [LONG256_BYTES],
             'width': 32,
@@ -151,6 +185,7 @@ def value_set(pa, np, kind):
     if kind == 'ipv4':
         return {
             'py': [IPV4_VALUE],
+            'text': [str(IPV4_VALUE)],
             'arrow': pa.array([0xC0000201], pa.uint32()),
             'raw': [b'\xc0\x00\x02\x01'],
             'width': 4,
@@ -161,6 +196,7 @@ def value_set(pa, np, kind):
     if kind == 'char':
         return {
             'py': ['x'],
+            'text': ['x'],
             'arrow': pa.array(['x'], pa.string()),
             'raw': [b'x'],
             'width': 1,
@@ -171,6 +207,7 @@ def value_set(pa, np, kind):
     if kind == 'geohash':
         return {
             'py': [7],
+            'text': ['7'],
             'arrow': pa.array([7], pa.int32()),
             'raw': [b'\x07\x00\x00\x00'],
             'width': 4,
@@ -190,7 +227,8 @@ SOURCE_KINDS = ('uuid', 'long256', 'ipv4', 'char', 'geohash')
 
 def build_frame(pd, pa, np, source_kind, backing_name, claim, planner):
     values = value_set(pa, np, source_kind)
-    column = backings(pd, pa, np)[backing_name](values)
+    build, holds = backings(pd, pa, np)[backing_name]
+    column = build(values)
     if planner == 'arrow':
         # Every column Arrow-backed, including the designated timestamp,
         # so the frame reaches the capsule path.
@@ -202,6 +240,10 @@ def build_frame(pd, pa, np, source_kind, backing_name, claim, planner):
         # frame to the NumPy planner.
         stamps = pd.to_datetime([0], unit='s')
     frame = pd.DataFrame({'c': column, 'ts': stamps})
+    if not holds(frame['c'].dtype):
+        raise AssertionError(
+            f'the {backing_name} backing produced a '
+            f'{frame["c"].dtype} column')
     if claim is not None:
         frame.attrs['questdb'] = {
             'version': 1, 'columns': {'c': dict(claim)}}
@@ -233,6 +275,14 @@ def measure(frame):
 
 def _questdb_warnings(caught):
     return len([w for w in caught if 'questdb: column' in str(w.message)])
+
+
+def _describe(record):
+    """One cell's answer, for the disagreement report."""
+    if record is None:
+        return 'absent'
+    return (f'{record["wire_type"] or "refused"}'
+            f'/{record["warnings"]}w')
 
 
 def _short(exc):
@@ -307,24 +357,45 @@ def diff_tables(expected, actual):
     return problems
 
 
+def _answer(record):
+    """The part of a cell that both planners have to agree on.
+
+    Every field the record holds except the text of an error: the two
+    planners phrase a refusal differently for the same reason, and
+    holding them to one wording would report a disagreement on every
+    refused cell. Whether there *was* an error counts, and so does the
+    warning count -- a claim one planner drops with a warning and the
+    other drops in silence sends the same column to the same type, and
+    is still one frame given two answers.
+    """
+    if record is None:
+        return None
+    return (record['wire_type'], record['warnings'], record['error'] is None)
+
+
 def planner_disagreements(results):
     """Cells where the two planners answer the same frame differently.
 
     Not automatically wrong -- one documented divergence is inherited --
     but each one is a decision somebody made, and an undocumented new
     one is how a claim quietly changes a column's type.
+
+    Read from both sides: a cell present under one planner and missing
+    under the other is a disagreement too, and the more surprising kind.
     """
     out = []
-    for key, record in results.items():
-        if not key.endswith('| arrow'):
-            continue
-        twin = key[:-len('| arrow')] + '| numpy'
-        other = results.get(twin)
-        if other is None:
-            continue
-        if (record['wire_type'], record['error'] is None) != (
-                other['wire_type'], other['error'] is None):
-            out.append((key[:-len(' | arrow')], record, other))
+    stems = []
+    seen = set()
+    for key in results:
+        stem = key.rsplit(' | ', 1)[0]
+        if stem not in seen:
+            seen.add(stem)
+            stems.append(stem)
+    for stem in sorted(stems):
+        arrow = results.get(f'{stem} | arrow')
+        numpy_planner = results.get(f'{stem} | numpy')
+        if _answer(arrow) != _answer(numpy_planner):
+            out.append((stem, arrow, numpy_planner))
     return out
 
 
@@ -354,8 +425,8 @@ def main():
     disagreements = planner_disagreements(results)
     print(f'{len(disagreements)} planner disagreement(s)', file=sys.stderr)
     for key, arrow_record, numpy_record in disagreements:
-        print(f'   {key}: arrow={arrow_record["wire_type"] or "refused"} '
-              f'numpy={numpy_record["wire_type"] or "refused"}',
+        print(f'   {key}: arrow={_describe(arrow_record)} '
+              f'numpy={_describe(numpy_record)}',
               file=sys.stderr)
 
     if args.update:
