@@ -5775,12 +5775,6 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     #: `FIRST_QWP_ROW_TYPES_RELEASE` -- QuestDB 10, the first production
     #: QWP. Membership is the gate, so every test in one of these is
     #: covered without anyone remembering to mark it.
-    QWP_ROW_TYPE_CLASSES = frozenset({
-        'TestEgressQwpRowTypes',
-        'TestColumnIngressQwpRowTypes',
-        'TestQwpOnlyRowTypesIntegration',
-    })
-
     #: What a test says in its own source when it builds one of the
     #: QWP-only column types, and what it says when it sends something.
     #: A test that does both is a test that can put one of these types
@@ -5817,6 +5811,26 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             'as test_pa_uint32_round_trip_as_long.',
     }
 
+    @staticmethod
+    def _gates_on_questdb_10(cls, lines):
+        """Whether every test in a class is covered by the QuestDB 10
+        gate, read from the class's own fixture methods.
+
+        Membership in the class is the gate, so the class is where the
+        question is answered: a `setUp` or `setUpClass` that calls
+        `_require_qwp_row_types()` covers every test in the class,
+        whether or not whoever wrote one thought about the server
+        version.
+        """
+        for fn in cls.body:
+            if not (isinstance(fn, ast.FunctionDef)
+                    and fn.name in ('setUp', 'setUpClass')):
+                continue
+            body = ''.join(lines[fn.lineno - 1:fn.end_lineno])
+            if '_require_qwp_row_types(' in body:
+                return True
+        return False
+
     def test_every_integration_test_that_writes_a_qwp_only_type_is_gated(self):
         """A test that puts UUID, IPV4, BINARY, CHAR, DATE, LONG256 or
         GEOHASH on the wire needs QuestDB 10, and five of the
@@ -5835,12 +5849,24 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         being exercised is an implementation this client does not
         support.
 
+        Which classes gate is read from their own `setUp` rather than
+        listed here. A list of class names is the same kind of thing as
+        a list of call sites: it says a class gates without asking
+        whether it does, so deleting the gate from a listed class would
+        leave this green.
+
         A test the scan reaches that does not really write one of these
         types goes on `QWP_ROW_TYPE_EXEMPT` with the reason."""
         source_path = PROJ_ROOT / 'test' / 'system_test.py'
         text = source_path.read_text()
         lines = text.splitlines(keepends=True)
         tree = ast.parse(text)
+
+        gated = {cls.name for cls in tree.body
+                 if isinstance(cls, ast.ClassDef)
+                 and self._gates_on_questdb_10(cls, lines)}
+        self.assertTrue(
+            gated, 'no class in the integration suite gates on QuestDB 10')
 
         scanned = 0
         ungated = []
@@ -5861,7 +5887,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                            for token in self.QWP_ROW_TYPE_WRITE_TOKENS):
                     continue
                 reached.add(fn.name)
-                if cls.name in self.QWP_ROW_TYPE_CLASSES:
+                if cls.name in gated:
                     continue
                 if fn.name in self.QWP_ROW_TYPE_EXEMPT:
                     self.assertTrue(
@@ -5876,8 +5902,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             'these integration tests can put a QWP-only column type on '
             'the wire from a class that does not require QuestDB 10, so '
             'they run against the 9.4.3 QWP beta on five legs. Move each '
-            'into one of '
-            f'{sorted(self.QWP_ROW_TYPE_CLASSES)}, or add it to '
+            f'into one of {sorted(gated)}, or add it to '
             'QWP_ROW_TYPE_EXEMPT with the reason it writes no such '
             'type:\n  ' + '\n  '.join(ungated))
 
