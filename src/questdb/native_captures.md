@@ -54,6 +54,7 @@ drop the last reference to a `Buffer`, or return a lease to its pool.
 | 12 | `PooledSender.row` | `buf = self._buffer` | Strong local reference taken before the row starts, so a mid-row `close()` that nulls the lease's field cannot free the buffer the row is writing into | ownership |
 | 13 | `Buffer._column` | `c_name` — `line_sender_column_name` borrowed from the arena | Every branch whose value needs Python to convert takes the name as a `str` and encodes it *after* the conversion, so the borrow never spans caller code | ownership by construction |
 | 14 | `Buffer._row` | the rewind marker | `_row_depth`, and the native buffer refuses a half-written row on its own | guard, no crash path — the worst case is a refused call |
+| 15 | `QueryResult.to_pandas` / `iter_pandas` with a `types_mapper`, and `__arrow_c_stream__` (`egress.pxi`) | `reader` — a `pyarrow.RecordBatchReader` over the `_CursorHandle` the read is streaming from | `_take_cursor_handle` moves the handle into the reader, so the reader owns it. `_CursorHandle._free` nulls `_cursor` inside the re-entrant lock that every `_fetch_one_batch` re-reads it under, so a `close()` or `cancel()` from inside the mapper makes the next fetch refuse rather than read freed memory | ownership (+ clean refusal) |
 
 ## What each guard is still for
 

@@ -2553,9 +2553,15 @@ class TestEgressWithDatabase(unittest.TestCase):
         `QueryResult` sits on the re-entrancy grid's allow-list because
         the offline fixtures serve no read endpoint, and this is where
         that excuse is redeemed. It holds what the grid holds: the
-        re-entered call answers -- cleanly or by refusing -- the outer
-        read still delivers every row, and the handle works afterwards.
-        A hang or a dead interpreter is what this is watching for.
+        re-entered call answers -- cleanly or by refusing -- and the
+        handle works afterwards. A hang or a dead interpreter is what
+        this is watching for.
+
+        Closing the result from inside its own read is the case row 15
+        of `native_captures.md` records. The cursor handle nulls its
+        pointer under the lock that every fetch re-reads it under, so
+        the read that follows is refused rather than reading freed
+        memory.
         """
         rows = 300
         table_name = 't_mapper_reentry_' + uuid.uuid4().hex[:8]
@@ -2576,22 +2582,31 @@ class TestEgressWithDatabase(unittest.TestCase):
             # more of the result to come.
             conf = self._conf() + 'max_batch_rows=64;'
 
-            def a_second_query(client):
-                return len(client.query('SELECT 1').to_pandas())
+            cases = (
+                ('a second query',
+                 lambda client, result: client.query('SELECT 1').to_pandas(),
+                 True),
+                ('reap_idle',
+                 lambda client, result: client.reap_idle(),
+                 True),
+                ('closing the result being read',
+                 lambda client, result: result.close(),
+                 False),
+                ('cancelling the result being read',
+                 lambda client, result: result.cancel(),
+                 False),
+            )
 
-            def reap(client):
-                return client.reap_idle()
-
-            for label, reenter in (('query', a_second_query),
-                                   ('reap_idle', reap)):
+            for label, reenter, read_completes in cases:
                 with self.subTest(reentered=label):
                     seen = []
+                    held = []
 
                     with qi.QuestDB.from_conf(conf) as client:
                         def mapper(arrow_type):
                             if not seen:
                                 try:
-                                    reenter(client)
+                                    reenter(client, held[0])
                                 except qi.QuestDBError as exc:
                                     seen.append(('refused', str(exc)))
                                 else:
@@ -2600,19 +2615,30 @@ class TestEgressWithDatabase(unittest.TestCase):
 
                         total = 0
                         batches = 0
-                        for batch in client.query(sql).iter_pandas(
-                                types_mapper=mapper):
-                            total += len(batch)
-                            batches += 1
+                        result = client.query(sql)
+                        held.append(result)
+                        try:
+                            for batch in result.iter_pandas(
+                                    types_mapper=mapper):
+                                total += len(batch)
+                                batches += 1
+                        except qi.QuestDBError:
+                            # Pulling the cursor out from under the read
+                            # ends it. Refusing is the good answer.
+                            self.assertFalse(read_completes, label)
 
-                        # The handle still works once the read is done.
+                        # The handle still works once the read is over.
                         self.assertEqual(
                             len(client.query('SELECT 1').to_pandas()), 1)
 
-                    self.assertGreater(batches, 1, 'the read was not streamed')
-                    self.assertEqual(total, rows)
                     self.assertEqual(len(seen), 1, 'the mapper never ran')
                     self.assertIn(seen[0][0], ('refused', 'clean'), seen)
+                    if read_completes:
+                        self.assertGreater(
+                            batches, 1, 'the read was not streamed')
+                        self.assertEqual(total, rows)
+                    else:
+                        self.assertLessEqual(total, rows)
         finally:
             self._exec(f'DROP TABLE IF EXISTS {table_name}')
 

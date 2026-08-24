@@ -21,6 +21,7 @@ import json
 import pickle
 from enum import Enum
 import random
+import re
 import pathlib
 import tempfile
 import warnings
@@ -5887,6 +5888,75 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             stale, [],
             f'these tests are exempt from the QuestDB 10 gate but the '
             f'scan no longer reaches them: {stale}')
+
+    #: Classes the capture inventory names that the re-entrancy grid
+    #: cannot drive, each with the reason. The grid's outer axis is a
+    #: hand-registered decorator list, so this is what stops it drifting
+    #: from the inventory the repo already keeps.
+    OUTER_AXIS_ALLOW_LIST = {
+        'QueryResult':
+            'every outer scenario needs a live endpoint the fixture can '
+            'serve, and the offline fixtures are sender-side mocks with '
+            'nothing to read from. Driven against a real server by '
+            'TestEgressWithDatabase.'
+            'test_reentering_the_client_from_a_types_mapper, which '
+            're-enters from a types_mapper and covers row 15.',
+    }
+
+    def test_every_capture_site_has_an_outer_grid_scenario(self):
+        """`native_captures.md` says it lists every entry point that
+        hands native state to a run which then executes caller Python.
+        The re-entrancy grid's outer axis asks the same question, and it
+        is twelve entries registered by hand, so the two drift.
+
+        They drifted: the inventory had no row for the read side, and
+        the grid has no read-side scenario, so a `types_mapper` running
+        the caller's code over a live cursor was in neither. This holds
+        the axis to the table - a class the table names has to be
+        drivable, or excused in writing.
+
+        Only that direction is checked. The table names shared helpers
+        like `_dataframe` where the grid names each caller, so a
+        scenario without a row of its own is normal."""
+        inventory = (PROJ_ROOT / 'src' / 'questdb' /
+                     'native_captures.md').read_text()
+        sites = [
+            line.strip('|').split('|')[1]
+            for line in inventory.splitlines()
+            if line.startswith('| ') and not line.startswith('| # ')]
+
+        import reentrancy_matrix
+        outer = reentrancy_matrix.OUTER_SCENARIOS
+        driven = {name.split('.', 1)[0] for name in outer}
+        self.assertGreaterEqual(len(outer), 12, 'the outer axis shrank')
+
+        named = set()
+        for site in sites:
+            for token in re.findall(r'`([A-Z][A-Za-z]*)\.', site):
+                named.add(token)
+
+        undriven = []
+        for cls_name in sorted(named):
+            if cls_name in driven:
+                continue
+            reason = self.OUTER_AXIS_ALLOW_LIST.get(cls_name)
+            if reason:
+                self.assertTrue(reason, f'{cls_name} excused with no reason')
+                continue
+            undriven.append(cls_name)
+        self.assertEqual(
+            undriven, [],
+            'these classes hold native state across caller Python, by '
+            "`native_captures.md`'s own account, and no outer scenario "
+            'in test/reentrancy_matrix.py starts a call on them. Add a '
+            'scenario, or add the class to OUTER_AXIS_ALLOW_LIST with '
+            f'the reason it cannot have one: {undriven}')
+
+        stale = sorted(set(self.OUTER_AXIS_ALLOW_LIST) - named)
+        self.assertEqual(
+            stale, [],
+            f'these classes are excused from the grid\'s outer axis but '
+            f'the capture inventory no longer names them: {stale}')
 
     def test_the_native_capture_inventory_matches_the_sources(self):
         """`src/questdb/native_captures.md` is the checked-in answer to
