@@ -132,6 +132,28 @@ Breaking changes
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.ConfigError`` during startup.
 
+- **A claim a string column cannot carry now warns on the Arrow path
+  too.** A ``df.attrs['questdb']`` claim naming ``uuid``, ``long256``,
+  ``ipv4``, ``char`` or ``geohash`` on a column whose dtype holds no Arrow
+  type was dropped there without a word, while the NumPy planner said so.
+  On pandas 3 that includes an ordinary string column, and those reach the
+  Arrow columnar path, so this is the common way to meet it. Both planners
+  warn now, which is what this changelog already says they do.
+
+  The warning is a ``UserWarning`` and its message starts with ``questdb:
+  column``. Under ``-W error`` — usual in a test suite — it becomes an
+  exception, so a write that used to succeed in silence can now fail.
+  Cast the column to a type the kind fits, name the type outright with
+  ``schema_overrides``, or drop the claim. To silence every dropped-claim
+  warning instead::
+
+      warnings.filterwarnings(
+          'ignore', message='questdb: column', category=UserWarning)
+
+  A claim whose column has been dropped or renamed is still ignored in
+  silence. That is ordinary schema drift, and surviving it quietly is what
+  the claim is for.
+
 New
 ~~~
 
@@ -203,23 +225,17 @@ Fixed
   round-trip vocabulary.** One rule covers every number this client reads out
   of a ``df.attrs['questdb']`` claim, a ``schema_overrides`` entry, or one of
   the QWP-only wrapper classes: a whole number that is not a boolean. A
-  ``numpy.int64`` ``precision_bits`` -- which is what a claim rebuilt from
-  array metadata carries, and what ``df.loc[i, 'bits']`` hands you -- was
+  ``numpy.int64`` ``precision_bits`` — which is what a claim rebuilt from
+  array metadata carries, and what ``df.loc[i, 'bits']`` hands you — was
   dropped along with the rest of the claim, and the column was created as
   LONG where the caller asked for GEOHASH. ``Long256``, ``DateMillis`` and
   ``Geohash`` take the same numbers now. ``True`` is still refused everywhere.
-
-- **Both planners report a claim the column cannot carry.** On the Arrow
-  capsule path a column that is present but holds no Arrow type -- a pandas 3
-  string column, which reaches that path -- had its claim dropped in silence
-  where the NumPy planner warns. A column that is gone or renamed is still
-  the drift the claim is meant to survive quietly.
 
 - **``QuestDB.close()`` from inside one of the handle's own calls is refused
   before anything is published.** The refusal is decided under the lock that
   publishes ``close()``'s state, so a ``close()`` on another thread can no
   longer see the handle closing, wait for that to clear, and return reporting
-  success against a handle that is still open -- nor can the two ends of that
+  success against a handle that is still open — nor can the two ends of that
   window wait on each other.
 
 - **Returning a pooled sender to its pool cannot raise.** Every refusal a
