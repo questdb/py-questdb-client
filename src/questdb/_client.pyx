@@ -7514,6 +7514,10 @@ cdef object _capsule_arrow_type_of(object arrow_dtype, object dtype):
     from a column that is not in the frame: the column is there and
     cannot carry the claim. A pandas 3 string column reaches the
     capsule path this way, so the two have to be told apart.
+
+    The caller has already established that `arrow_dtype` is a class,
+    so a None here would be a third answer -- "cannot tell" -- that no
+    caller is prepared to read.
     """
     cdef object ty
     if arrow_dtype is None or not isinstance(dtype, arrow_dtype):
@@ -7596,6 +7600,14 @@ cdef object _capsule_roundtrip_overrides(object frame):
     # Read once for the whole frame, not once per column.
     dtypes = frame.dtypes
     arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+    if arrow_dtype is None:
+        # No `ArrowDtype` in this pandas, so no column can be shown to
+        # hold an Arrow type and every claim would be reported as one
+        # the column cannot carry. That is "cannot tell", not "cannot
+        # carry". A frame reaches here through `__arrow_c_stream__`,
+        # which arrived in the same pandas `ArrowDtype` did, so this is
+        # the shape of the answer rather than a case that comes up.
+        return out
     types = _PYARROW.types
     for name, meta in cols_meta.items():
         if not isinstance(name, str):
