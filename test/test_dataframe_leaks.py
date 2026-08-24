@@ -539,12 +539,19 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
     object-dtype pandas and no test elsewhere passes `schema_overrides`,
     so nothing entered this path before."""
 
-    # One override is 24 bytes, which `_assert_no_leak`'s 3 MiB-a-window
-    # floor cannot see without attempts in the high hundreds of
-    # thousands. Twenty claimed columns per call raise the signal
-    # instead of the iteration count, so a leak of one array a call
-    # clears the floor in a fraction of the time.
-    COLUMNS = 20
+    # Each override is 24 bytes, so a leak of one array per call only
+    # shows up when many columns are claimed at once: at 1000 columns a
+    # leaked array is 24 KiB, so the 400 calls in one window add up to
+    # about 9.6 MB. `_assert_no_leak` reads anything under 3 MiB a
+    # window as allocator noise.
+    #
+    # The call count stays small because every call waits for a
+    # WebSocket ack, which costs about 40 ms on the Linux CI agents
+    # however small the frame is -- tens of thousands of calls would run
+    # for hours there. More columns per call give the same signal in far
+    # less time, up to 4096, the most nodes an imported Arrow schema
+    # holds.
+    COLUMNS = 1000
 
     def test_overrides_leak_nothing(self):
         from qwp_ws_ack_server import QwpAckServer
@@ -569,7 +576,7 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
                         frame, table_name='caps', at='ts',
                         schema_overrides=overrides)
 
-                _assert_no_leak(self, work, warmup=4000, measure=120000)
+                _assert_no_leak(self, work, warmup=200, measure=2400)
 
 
 if __name__ == '__main__':
