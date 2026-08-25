@@ -1470,11 +1470,22 @@ class QuestDB:
         """
         Close the client and its connection pool.
 
-        Idempotent. When called from inside one of this handle's own
+        Idempotent.
+
+        Outstanding ``sender()`` / ``reader()`` leases are waited for,
+        but the wait is bounded: after a minute ``QuestDBError`` is
+        raised with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``
+        and the handle is left open, because a lease held by the calling
+        thread or by one that has finished can never be returned. A
+        ``close()`` on another thread that was waiting for this one
+        raises the same way rather than reporting a close that did not
+        happen.
+
+        When called from inside one of this handle's own
         ``error_handler`` / ``connection_listener`` callbacks, it does
         not wait for a concurrent ``close()`` on another thread to
-        finish; the in-flight callback completes after that close
-        returns.
+        finish; it returns without knowing the outcome, and the close it
+        did not wait for may itself have given up.
         """
 
     def __exit__(self, exc_type, exc_val, exc_tb): ...

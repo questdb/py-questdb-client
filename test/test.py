@@ -6451,6 +6451,73 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
+    def test_a_close_waiting_on_one_that_gave_up_does_not_report_success(self):
+        """A `close()` that finds one already in flight waits for it by
+        watching `_closing`. Giving up clears `_closing` and restores
+        `_db` in the same breath, so a waiter reading the flag alone
+        falls out of its loop and returns -- reporting a close that
+        never happened, against a handle that is open and still lending
+        senders. `_db` is what tells a close that finished apart from
+        one that handed the handle back."""
+        original = qi._debug_close_lease_wait_limit_s()
+        # Long enough that the second close() reliably arrives while the
+        # first is still waiting, which is the path under test; the
+        # assertions below fail rather than pass vacuously if it does
+        # not.
+        qi._debug_set_close_lease_wait_limit_s(3.0)
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=3;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(conf)
+                    lease = db.sender()
+                    lease.row('t', columns={'v': 1},
+                              at=qi.TimestampNanos(1))
+                    outcome = {}
+
+                    def close_into(tag):
+                        def run():
+                            try:
+                                db.close()
+                                outcome[tag] = 'returned'
+                            except qi.QuestDBError as exc:
+                                outcome[tag] = str(exc)
+                        return run
+
+                    holder = threading.Thread(target=close_into('holder'))
+                    holder.start()
+                    time.sleep(0.3)
+                    waiter = threading.Thread(target=close_into('waiter'))
+                    waiter.start()
+                    holder.join(timeout=30)
+                    waiter.join(timeout=30)
+                    self.assertFalse(
+                        holder.is_alive() or waiter.is_alive(),
+                        'a close() never returned')
+
+                    self.assertIn(
+                        'outstanding lease', outcome['holder'],
+                        f'the first close() should give up: {outcome!r}')
+                    self.assertNotEqual(
+                        outcome['waiter'], 'returned',
+                        'the waiting close() reported success against a '
+                        'handle the give-up had just re-opened')
+                    self.assertIn(
+                        'did not close the handle', outcome['waiter'],
+                        'the second close() should have taken the '
+                        'concurrent-close wait, not become the closer '
+                        f'itself: {outcome!r}')
+                    # Open, not half-closed: the handle still lends.
+                    spare = db.sender()
+                    spare.close()
+                    lease.close()
+                    db.close()
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
     def test_no_column_helper_takes_a_pre_encoded_name(self):
         """A `line_sender_column_name` borrows the string arena, which
         `Buffer.clear()` recycles, so it stays valid only while no

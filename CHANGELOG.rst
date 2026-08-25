@@ -283,8 +283,24 @@ Fixed
   whose conversion is not pure C. Closing the handle from there waited on
   the very frame that would return the lease — a warning every five seconds
   and no return. It now raises, and says to close the handle after the call
-  returns. A ``close()`` on any other thread still waits, as it should:
-  that one really is waiting for somebody else.
+  returns.
+
+- **``QuestDB.close()`` gives up after a minute instead of waiting for
+  ever, and leaves the handle open when it does.** A ``close()`` on
+  another thread really is waiting for somebody else, so it still waits.
+  But a lease held by the calling thread, or by one that has since
+  finished, can never be returned, and neither is distinguishable from a
+  slow load. After 60 seconds ``close()`` raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall``, says how many leases are
+  outstanding, and leaves the handle open — so close every ``sender()``
+  and ``reader()`` lease before closing the handle. A second thread's
+  ``close()`` that was waiting on the one that gave up raises too, rather
+  than returning as though the handle had been closed. Called from inside
+  one of the handle's own ``error_handler`` / ``connection_listener``
+  callbacks, ``close()`` cannot wait at all — that would join the thread
+  doing the closing — so it returns without knowing the outcome, and the
+  close it did not wait for may itself have given up.
 
 - **Every call that would change or end the buffer is refused while a row
   is being written**: ``clear()``, ``flush()``, ``flush_and_get_fsn()``,

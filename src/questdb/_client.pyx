@@ -9278,11 +9278,26 @@ cdef class QuestDB:
         """
         Close the client and its connection pool.
 
-        This method is idempotent. When called from inside one of this
-        handle's own ``error_handler`` / ``connection_listener``
-        callbacks, it does not wait for a concurrent ``close()`` on
-        another thread to finish; the in-flight callback completes after
-        that close returns.
+        This method is idempotent: closing an already-closed handle
+        returns without doing anything.
+
+        Outstanding ``sender()`` / ``reader()`` leases are waited for,
+        because a lease returns from whichever thread holds it. That
+        wait is bounded: a lease held by the calling thread, or by one
+        that has since finished, can never be returned, so after a
+        minute :class:`QuestDBError <questdb.QuestDBError>` is raised
+        with ``code`` set to ``QuestDBErrorCode.InvalidApiCall`` and the
+        handle is **left open**. Close every lease first to avoid it.
+        A ``close()`` on another thread that was waiting for this one
+        raises the same way rather than reporting a close that did not
+        happen.
+
+        When called from inside one of this handle's own
+        ``error_handler`` / ``connection_listener`` callbacks, it does
+        not wait for a concurrent ``close()`` on another thread to
+        finish -- waiting there would join the very thread doing the
+        closing. It therefore returns without knowing the outcome, and
+        the close it did not wait for may itself have given up.
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
@@ -9326,44 +9341,65 @@ cdef class QuestDB:
                                 'concurrent close() on another thread to '
                                 'finish.',
                                 UserWarning)
+                    # `_closing` clearing means that close finished, not
+                    # that it closed anything: the lease wait below gives
+                    # up by restoring `_db` and clearing `_closing`
+                    # together. `_db` is what actually says which
+                    # happened, so it is read rather than inferred --
+                    # returning here on a handle that is open again would
+                    # report a close that did not take place.
+                    if self._db != NULL:
+                        raise QuestDBError(
+                            QuestDBErrorCode.InvalidApiCall,
+                            'close() did not close the handle: the close() '
+                            'on another thread that this call waited for '
+                            'gave up with lease(s) still outstanding and '
+                            'left the handle open. Close every sender() '
+                            'and reader() lease, then close the handle.')
                 return
             self._db = NULL
             self._closing = True
         try:
             with self._state_cond:
-                deadline = time.monotonic() + _CLOSE_LEASE_WAIT_LIMIT_S
+                # A lease comes back from whichever thread holds it, so
+                # this wait ends only if some other frame runs. A caller
+                # holding the last lease itself is waiting on its own
+                # frame and never will -- and so is one whose borrowing
+                # thread has since gone. Neither is distinguishable from
+                # a slow load here, so the wait is bounded rather than
+                # diagnosed: an error a caller can act on beats a warning
+                # every five seconds and no return.
+                #
+                # `_db` and `_closing` are restored by the `finally`
+                # below, so the handle a refused close leaves behind is
+                # the open one it started with, and the concurrent-close
+                # waiter above reads `_db` to tell that apart from a
+                # close that finished.
+                limit = _CLOSE_LEASE_WAIT_LIMIT_S
+                deadline = time.monotonic() + limit
                 while self._active_uses != 0:
-                    if (not self._state_cond.wait(timeout=5.0)
+                    # Polled at whichever is sooner, so the bound holds
+                    # whatever it is set to rather than only at multiples
+                    # of the warning cadence.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        raise QuestDBError(
+                            QuestDBErrorCode.InvalidApiCall,
+                            f'close() gave up after {limit:g}s waiting '
+                            f'for {self._active_uses} outstanding '
+                            'lease(s). Close every sender() and '
+                            'reader() lease before closing the handle. '
+                            'A lease still held by this thread, or by '
+                            'a thread that has finished, can never be '
+                            'returned and the handle is left open.')
+                    if (not self._state_cond.wait(
+                                timeout=min(5.0, remaining))
                             and self._active_uses != 0):
                         warnings.warn(
                             'QuestDB.close() is waiting for '
                             f'{self._active_uses} outstanding lease(s) to be '
                             'released.',
                             UserWarning)
-                        # A lease comes back from whichever thread holds
-                        # it, so this wait ends only if some other frame
-                        # runs. A caller holding the last lease itself
-                        # is waiting on its own frame and never will --
-                        # and so is one whose borrowing thread has since
-                        # gone. Neither is distinguishable from a slow
-                        # load here, so the wait is bounded rather than
-                        # diagnosed: an error a caller can act on beats
-                        # a warning every five seconds and no return.
-                        #
-                        # `_db` and `_closing` are restored by the
-                        # `finally` below, so the handle a refused close
-                        # leaves behind is the open one it started with.
-                        if time.monotonic() >= deadline:
-                            raise QuestDBError(
-                                QuestDBErrorCode.InvalidApiCall,
-                                'close() gave up after '
-                                f'{_CLOSE_LEASE_WAIT_LIMIT_S:.0f}s waiting '
-                                f'for {self._active_uses} outstanding '
-                                'lease(s). Close every sender() and '
-                                'reader() lease before closing the handle. '
-                                'A lease still held by this thread, or by '
-                                'a thread that has finished, can never be '
-                                'returned and the handle is left open.')
             _ensure_doesnt_have_gil(&gs)
             # `questdb_db_close` drains both the writer and reader free
             # lists in one shot (see `db.rs::DbInner::Drop`).
