@@ -287,7 +287,7 @@ Fixed
 
 - **``QuestDB.close()`` is one-way and its wait is bounded.** The
   first ``close()`` that proceeds — one refused outright, from inside
-  the handle's own calls, changes nothing — puts the
+  the handle's own calls or callbacks, changes nothing — puts the
   handle into a closing state it never leaves: new calls and leases
   are refused with ``QuestDB is closing``, while work already in
   flight drains — a call in progress (``dataframe()``, ``query()``,
@@ -308,10 +308,13 @@ Fixed
   teardown has run — when several race, one runs it and the others
   return once it is done.
   Called from inside one of the handle's own ``error_handler`` /
-  ``connection_listener`` callbacks, ``close()`` cannot wait for a
-  concurrent close — that would join the thread doing the closing — so
-  it may return while that close is still running; the handle only
-  moves toward closed, never back to open.
+  ``connection_listener`` callbacks, ``close()`` never waits — while
+  the callback runs, that thread delivers nothing, including whatever
+  a wait would need. It closes immediately when nothing is using the
+  handle, refuses when leases or calls are outstanding, and returns
+  without waiting when a concurrent close is already running —
+  possibly before that close finishes; the handle only moves toward
+  closed, never back to open.
 
 - **Every call that would change or end the buffer is refused while a row
   is being written**: ``clear()``, ``flush()``, ``flush_and_get_fsn()``,

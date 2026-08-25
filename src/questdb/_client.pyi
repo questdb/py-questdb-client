@@ -1472,7 +1472,7 @@ class QuestDB:
 
         Closing is one-way: once a ``close()`` proceeds -- rather
         than being refused outright, as from inside one of the
-        handle's own calls -- the handle refuses new
+        handle's own calls or callbacks -- the handle refuses new
         work, while work already in flight drains: a call in progress
         runs to completion, and an outstanding lease keeps working
         until its holder closes it. The native pool is torn down by
@@ -1493,10 +1493,13 @@ class QuestDB:
         teardown has run.
 
         When called from inside one of this handle's own
-        ``error_handler`` / ``connection_listener`` callbacks, it does
-        not wait for a concurrent ``close()`` on another thread to
-        finish -- it may return while that close is still running; the
-        handle only moves toward closed, never back to open.
+        ``error_handler`` / ``connection_listener`` callbacks, it
+        never waits: it closes immediately when nothing is using the
+        handle, refuses when leases or calls are outstanding (close
+        from another thread to wait for the drain), and returns
+        without waiting when a concurrent ``close()`` is already
+        running -- possibly before that close finishes. The handle
+        only moves toward closed, never back to open.
         """
 
     def __exit__(self, exc_type, exc_val, exc_tb): ...

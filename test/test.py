@@ -6600,6 +6600,63 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
+    def test_a_callback_close_on_a_busy_handle_refuses_without_waiting(self):
+        """`close()` from inside the handle's own `connection_listener`
+        can wait on nothing: while the callback runs, the dispatch
+        thread delivers no events, including whatever the wait would
+        need. With a lease outstanding it refuses at once -- at the
+        shipped 60s bound, so a wait would be unmistakable -- and the
+        refusal publishes nothing: the handle keeps lending, and an
+        ordinary thread still closes it."""
+        box = {}
+
+        def listener(event):
+            if 'res' in box:
+                return
+            t0 = time.monotonic()
+            try:
+                box['db'].close()
+                box['res'] = 'returned'
+            except qi.QuestDBError as exc:
+                box['res'] = str(exc)
+            box['dt'] = time.monotonic() - t0
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'lazy_connect=true;'
+                    'sender_pool_min=1;sender_pool_max=2;')
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                db = qi.QuestDB.from_conf(
+                    conf, connection_listener=listener)
+                box['db'] = db
+                lease = db.sender()
+                lease.row('t', columns={'v': 1},
+                          at=qi.TimestampNanos(1))
+                # `lazy_connect` defers the connection to this flush,
+                # whose Connected event runs the listener while the
+                # lease is still outstanding.
+                lease.flush()
+                for _ in range(200):
+                    if 'res' in box:
+                        break
+                    time.sleep(0.05)
+                self.assertIn(
+                    "from inside this handle's own",
+                    box.get('res', '<listener never ran>'))
+                self.assertIn('another thread', box['res'])
+                # A refusal, not a wait: anything near the 60s bound
+                # means the guard did not fire.
+                self.assertLess(box['dt'], 2.0)
+                # And it published nothing: the handle still lends.
+                spare = db.sender()
+                spare.close()
+                lease.close()
+                db.close()
+                with self.assertRaises(qi.QuestDBError) as closed:
+                    db.sender()
+                self.assertIn('closed', str(closed.exception))
+
     def test_no_column_helper_takes_a_pre_encoded_name(self):
         """A `line_sender_column_name` borrows the string arena, which
         `Buffer.clear()` recycles, so it stays valid only while no

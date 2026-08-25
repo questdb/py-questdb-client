@@ -73,6 +73,12 @@ error rather than standing between the caller and a segfault.
   its own caller. Without it the caller would sit out the full close
   bound waiting on its own frame, and the handle would be left closing
   under the very call that is still using it.
+- `QuestDB.close`'s dispatch-thread refusal — refuses a close that would
+  wait from inside the handle's own `error_handler` /
+  `connection_listener` callback. While the callback runs, the dispatch
+  thread delivers nothing, including whatever the wait needs, so the
+  wait can only stall event delivery until the bound. An idle handle
+  still closes from there; only the wait is refused.
 - `Sender._check_not_in_own_callback` — refuses re-entering the sender
   from its own dispatcher callback. This one **is** memory safety and is
   not convertible: the native sender is borrowed by the dispatcher for

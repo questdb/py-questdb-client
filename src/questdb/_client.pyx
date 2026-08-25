@@ -9315,7 +9315,7 @@ cdef class QuestDB:
 
         Closing is one-way. Once a ``close()`` proceeds -- rather
         than being refused outright, as from inside one of the
-        handle's own calls -- the handle refuses new
+        handle's own calls or callbacks -- the handle refuses new
         work: ``sender()``, ``reader()``, ``dataframe()``, ``query()``
         and the rest raise. Work already in flight drains: a call in
         progress runs to completion, and an outstanding lease keeps
@@ -9339,11 +9339,15 @@ cdef class QuestDB:
         the others return once it is done.
 
         When called from inside one of this handle's own
-        ``error_handler`` / ``connection_listener`` callbacks, it does
-        not wait for a concurrent ``close()`` on another thread to
-        finish -- waiting there would join the very thread doing the
-        closing. It may return while that close is still running; the
-        handle only moves toward closed, never back to open.
+        ``error_handler`` / ``connection_listener`` callbacks, it
+        never waits -- while the callback runs, that thread delivers
+        nothing, including whatever a wait would need. It closes
+        immediately when nothing is using the handle; it refuses when
+        leases or calls are outstanding (close from another thread to
+        wait for the drain); and when a concurrent ``close()`` is
+        already running it returns without waiting, possibly before
+        that close finishes -- the handle only moves toward closed,
+        never back to open.
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
@@ -9364,6 +9368,26 @@ cdef class QuestDB:
                     'call to finish, which cannot happen while the '
                     'call is waiting for close(). Close it after '
                     'the call returns.')
+            # A caller dispatching for this handle can wait on
+            # nothing: while its callback frame is out, this thread
+            # delivers no events and the native layer holds a borrow
+            # on it, so anything the drain needs from this thread can
+            # never happen. Refused before `_closing` is published,
+            # like the depth refusal above, so a refused close changes
+            # nothing for any other thread. With nothing outstanding
+            # the close proceeds: there is no wait to refuse.
+            if (self._db != NULL
+                    and self._lease_uses + self._call_uses != 0
+                    and _on_dispatch_thread_for(
+                        self._error_handler, self._connection_listener)):
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    "close() can't wait for outstanding leases or "
+                    "calls from inside this handle's own "
+                    'error_handler or connection_listener callback: '
+                    'while the callback runs, this thread delivers '
+                    'nothing, including whatever the wait needs. '
+                    'Call close() from another thread.')
             # One-way from here: `_closing` is never cleared, so every
             # refusal it causes stays true, and the use counts only
             # move down -- `_begin_db_use` takes no new work once it
