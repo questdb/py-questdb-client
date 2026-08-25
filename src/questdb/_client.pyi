@@ -1504,7 +1504,16 @@ class QuestDB:
         only moves toward closed, never back to open.
         """
 
-    def __exit__(self, exc_type, exc_val, exc_tb): ...
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Close the handle at the end of a ``with`` block.
+
+        Leaving the block on an exception still closes, but a close
+        that cannot finish is reported through the ``questdb`` logger
+        instead of raised, so it does not replace the exception being
+        reported. Leaving the block normally raises as :meth:`close`
+        does.
+        """
 
 
 class QueryResult:

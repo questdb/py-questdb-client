@@ -6595,6 +6595,47 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
+    def test_leaving_a_with_block_on_an_error_keeps_the_users_exception(self):
+        """The frames unwinding out of a `with` block are often the ones
+        holding the leases `close()` waits for, so the close can fail on
+        account of the very exception being reported. `__exit__` reports
+        that failure through the `questdb` logger and lets the original
+        through: an `except` clause around the block is written for the
+        original, not for a shutdown complaint that follows from it.
+        The close is still attempted -- the handle comes out closing."""
+        class Boom(Exception):
+            pass
+
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.5)
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                db = qi.QuestDB.from_conf(conf)
+                lease = db.sender()
+                with self.assertLogs('questdb', level='ERROR') as logged:
+                    # The lease is held by this frame, so the close on
+                    # the way out cannot finish.
+                    with self.assertRaises(Boom):
+                        with db:
+                            lease.row('t', columns={'v': 1},
+                                      at=qi.TimestampNanos(1))
+                            raise Boom("the user's error")
+                self.assertTrue(
+                    any('close()' in line for line in logged.output),
+                    'the close failure was not reported through the '
+                    f'questdb logger: {logged.output}')
+                # Attempted, not skipped: the handle is closing.
+                with self.assertRaises(qi.QuestDBError) as refused:
+                    db.sender()
+                self.assertIn('closing', str(refused.exception))
+                lease.close()
+                db.close()
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
     def test_the_close_wait_reports_its_progress_through_the_logger(self):
         """A wait long enough to notice says what it is still waiting
         for every five seconds. The notice goes to the `questdb`
@@ -6628,6 +6669,33 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         for line in logged.output),
                     'the wait reported no progress through the '
                     f'questdb logger: {logged.output}')
+                lease.close()
+                db.close()
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
+    def test_leaving_a_with_block_cleanly_still_raises_on_a_stuck_close(self):
+        """Nothing is being reported on a clean exit, so there is no
+        exception for a close failure to displace -- and a lease left
+        open there is a leak worth hearing about. `__exit__` therefore
+        raises just as `close()` does."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.5)
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                db = qi.QuestDB.from_conf(conf)
+                lease = db.sender()
+                with self.assertLogs('questdb', level='WARNING'):
+                    with self.assertRaises(qi.QuestDBError) as caught:
+                        with db:
+                            lease.row('t', columns={'v': 1},
+                                      at=qi.TimestampNanos(1))
+                self.assertIn(
+                    'outstanding sender()/reader() lease',
+                    str(caught.exception))
                 lease.close()
                 db.close()
         finally:

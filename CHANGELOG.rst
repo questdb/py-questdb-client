@@ -320,6 +320,17 @@ Fixed
   possibly before that close finishes; the handle only moves toward
   closed, never back to open.
 
+- **Leaving a ``with questdb.connect(...) as db:`` block on an
+  exception no longer replaces it with a close failure.** The frames
+  unwinding out of the block are often the ones holding the leases
+  ``close()`` waits for, so the close could fail on account of the
+  very exception being reported — and an ``except`` clause around the
+  block is written for the original, not for a shutdown complaint that
+  follows from it. ``__exit__`` still closes; when the close cannot
+  finish it reports through the ``questdb`` logger and lets the
+  original exception through. Leaving the block normally still raises,
+  because a lease left open there is a leak worth hearing about.
+
 - **Every call that would change or end the buffer is refused while a row
   is being written**: ``clear()``, ``flush()``, ``flush_and_get_fsn()``,
   ``flush_and_keep_and_get_fsn()``, ``close()``, ``close_drain()``,

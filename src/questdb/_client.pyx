@@ -9496,7 +9496,28 @@ cdef class QuestDB:
                 self._state_cond.notify_all()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        """
+        Close the handle at the end of a ``with`` block.
+
+        Leaving the block on an exception still closes, but a close
+        that cannot finish is reported through the ``questdb`` logger
+        instead of raised: the frames unwinding here are often the
+        ones holding the leases the close is waiting for, so raising
+        would replace the exception being reported with a complaint
+        that follows from it. Leaving the block normally raises as
+        :meth:`close` does -- a lease left open there is a leak worth
+        hearing about.
+        """
+        if exc_type is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except QuestDBError:
+            logging.getLogger('questdb').exception(
+                'QuestDB.close() could not finish while leaving a '
+                '`with` block that was already raising. The handle '
+                'stays closing; the original exception follows.')
 
     def __dealloc__(self):
         cdef questdb_db* db
