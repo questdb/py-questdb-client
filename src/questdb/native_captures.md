@@ -70,7 +70,9 @@ error rather than standing between the caller and a segfault.
   pool from inside one of its own calls. Without it the rest of the call
   works against a closed lease.
 - `QuestDB.close`'s per-thread depth — refuses a close that would wait on
-  its own caller. Without it the caller hangs forever.
+  its own caller. Without it the caller would sit out the full close
+  bound waiting on its own frame, and the handle would be left closing
+  under the very call that is still using it.
 - `Sender._check_not_in_own_callback` — refuses re-entering the sender
   from its own dispatcher callback. This one **is** memory safety and is
   not convertible: the native sender is borrowed by the dispatcher for

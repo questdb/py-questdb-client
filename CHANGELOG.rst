@@ -285,22 +285,33 @@ Fixed
   and no return. It now raises, and says to close the handle after the call
   returns.
 
-- **``QuestDB.close()`` gives up after a minute instead of waiting for
-  ever, and leaves the handle open when it does.** A ``close()`` on
-  another thread really is waiting for somebody else, so it still waits.
-  But a lease held by the calling thread, or by one that has since
-  finished, can never be returned, and neither is distinguishable from a
-  slow load. After 60 seconds ``close()`` raises
+- **``QuestDB.close()`` is one-way and its wait is bounded.** The
+  first ``close()`` that proceeds — one refused outright, from inside
+  the handle's own calls, changes nothing — puts the
+  handle into a closing state it never leaves: new calls and leases
+  are refused with ``QuestDB is closing``, while work already in
+  flight drains — a call in progress (``dataframe()``, ``query()``,
+  …) runs to completion, and an outstanding lease keeps working until
+  its holder closes it. The native pool is torn down by the first
+  ``close()`` that finds nothing using the handle, or when the handle
+  itself is collected.
+  ``close()`` waits for that drain, but not for ever: a lease held by
+  the calling thread, or by one that has since finished, can never be
+  returned, and neither is distinguishable from a slow load. After 60
+  seconds ``close()`` raises
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.InvalidApiCall``, says how many leases are
-  outstanding, and leaves the handle open — so close every ``sender()``
-  and ``reader()`` lease before closing the handle. A second thread's
-  ``close()`` that was waiting on the one that gave up raises too, rather
-  than returning as though the handle had been closed. Called from inside
-  one of the handle's own ``error_handler`` / ``connection_listener``
-  callbacks, ``close()`` cannot wait at all — that would join the thread
-  doing the closing — so it returns without knowing the outcome, and the
-  close it did not wait for may itself have given up.
+  ``QuestDBErrorCode.InvalidApiCall``, saying how many leases and how
+  many calls are still outstanding — so close every ``sender()`` and
+  ``reader()`` lease before closing the handle. The handle stays
+  closing: close the remaining leases and call ``close()`` again to
+  finish the teardown. No ``close()`` returns success unless the
+  teardown has run — when several race, one runs it and the others
+  return once it is done.
+  Called from inside one of the handle's own ``error_handler`` /
+  ``connection_listener`` callbacks, ``close()`` cannot wait for a
+  concurrent close — that would join the thread doing the closing — so
+  it may return while that close is still running; the handle only
+  moves toward closed, never back to open.
 
 - **Every call that would change or end the buffer is refused while a row
   is being written**: ``clear()``, ``flush()``, ``flush_and_get_fsn()``,

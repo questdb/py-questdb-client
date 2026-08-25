@@ -5412,9 +5412,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         them before it releases. `_release_locked` is `except *` and
         `__dealloc__` cannot report anything, so a guard standing there
         would skip the return to the pool and leave `QuestDB.close()`
-        waiting on a lease that can never come back -- warning every
-        five seconds, forever. `PooledReader._release_locked` is the
-        same shape.
+        waiting on a lease that can never come back, until the bound
+        turns the wait into an error and the handle is left closing.
+        `PooledReader._release_locked` is the same shape.
 
         Nothing reachable from Python drops a lease part-way through a
         row -- the frame writing the row holds a reference to the lease
@@ -6421,12 +6421,15 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertIsNotNone(callbacks)
         self.assertIsNotNone(inner_capsule)
 
-    def test_close_gives_up_on_a_lease_that_can_never_come_back(self):
+    def test_close_stops_waiting_on_a_lease_that_can_never_come_back(self):
         """`close()` waits for outstanding leases, and a lease comes back
         from whichever thread holds it. A caller holding the last lease
         itself waits on its own frame, so the wait cannot end. The bound
-        turns that into an error the caller can act on, and the handle it
-        leaves behind is the open one it started with."""
+        turns that into an error the caller can act on. Closing is
+        one-way: from the `close()` that proceeds on, the handle
+        refuses new work, the lease keeps working so its holder can
+        finish and return it, and a second `close()` completes the
+        teardown."""
         original = qi._debug_close_lease_wait_limit_s()
         qi._debug_set_close_lease_wait_limit_s(0.5)
         try:
@@ -6442,29 +6445,38 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                               at=qi.TimestampNanos(1))
                     with self.assertRaises(qi.QuestDBError) as caught:
                         db.close()
-                    self.assertIn('outstanding lease', str(caught.exception))
-                    # Open, not half-closed: the handle still leases.
-                    spare = db.sender()
-                    spare.close()
+                    self.assertIn(
+                        'outstanding sender()/reader() lease',
+                        str(caught.exception))
+                    self.assertIn('close() again', str(caught.exception))
+                    # One-way: the handle takes no new work from the
+                    # first close() on, and the refusal is permanent.
+                    with self.assertRaises(qi.QuestDBError) as refused:
+                        db.sender()
+                    self.assertIn('closing', str(refused.exception))
+                    # The lease keeps working while the handle drains,
+                    # so its holder can finish and return it.
+                    lease.row('t', columns={'v': 2},
+                              at=qi.TimestampNanos(2))
                     lease.close()
+                    # With nothing outstanding, close() finishes the
+                    # teardown.
                     db.close()
+                    with self.assertRaises(qi.QuestDBError) as closed:
+                        db.sender()
+                    self.assertIn('closed', str(closed.exception))
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
-    def test_a_close_waiting_on_one_that_gave_up_does_not_report_success(self):
-        """A `close()` that finds one already in flight waits for it by
-        watching `_closing`. Giving up clears `_closing` and restores
-        `_db` in the same breath, so a waiter reading the flag alone
-        falls out of its loop and returns -- reporting a close that
-        never happened, against a handle that is open and still lending
-        senders. `_db` is what tells a close that finished apart from
-        one that handed the handle back."""
+    def test_no_close_reports_success_while_a_lease_is_outstanding(self):
+        """Two threads close a handle whose one lease is never returned
+        while either waits. The teardown runs only when nothing is
+        using the handle, so success is not a possible outcome for
+        either thread, whatever the interleaving: both raise the
+        still-draining error. The handle stays closing, and returning
+        the lease and closing once more finishes the teardown."""
         original = qi._debug_close_lease_wait_limit_s()
-        # Long enough that the second close() reliably arrives while the
-        # first is still waiting, which is the path under test; the
-        # assertions below fail rather than pass vacuously if it does
-        # not.
-        qi._debug_set_close_lease_wait_limit_s(3.0)
+        qi._debug_set_close_lease_wait_limit_s(1.0)
         try:
             with QwpAckServer() as server:
                 conf = (f'ws::addr=127.0.0.1:{server.port};'
@@ -6487,34 +6499,104 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                                 outcome[tag] = str(exc)
                         return run
 
-                    holder = threading.Thread(target=close_into('holder'))
-                    holder.start()
+                    first = threading.Thread(target=close_into('first'))
+                    first.start()
                     time.sleep(0.3)
-                    waiter = threading.Thread(target=close_into('waiter'))
-                    waiter.start()
-                    holder.join(timeout=30)
-                    waiter.join(timeout=30)
+                    second = threading.Thread(target=close_into('second'))
+                    second.start()
+                    first.join(timeout=30)
+                    second.join(timeout=30)
                     self.assertFalse(
-                        holder.is_alive() or waiter.is_alive(),
+                        first.is_alive() or second.is_alive(),
                         'a close() never returned')
 
-                    self.assertIn(
-                        'outstanding lease', outcome['holder'],
-                        f'the first close() should give up: {outcome!r}')
-                    self.assertNotEqual(
-                        outcome['waiter'], 'returned',
-                        'the waiting close() reported success against a '
-                        'handle the give-up had just re-opened')
-                    self.assertIn(
-                        'did not close the handle', outcome['waiter'],
-                        'the second close() should have taken the '
-                        'concurrent-close wait, not become the closer '
-                        f'itself: {outcome!r}')
-                    # Open, not half-closed: the handle still lends.
-                    spare = db.sender()
-                    spare.close()
+                    # The lease is returned only after both joins, so
+                    # neither close() can have found the handle idle.
+                    for tag in ('first', 'second'):
+                        self.assertIn(
+                            'outstanding sender()/reader() lease',
+                            outcome.get(tag, '<no outcome>'),
+                            f'{tag} close() did not report the '
+                            f'outstanding lease: {outcome!r}')
+                    # Closing, not open: no new lease is handed out.
+                    with self.assertRaises(qi.QuestDBError) as refused:
+                        db.sender()
+                    self.assertIn('closing', str(refused.exception))
                     lease.close()
                     db.close()
+                    with self.assertRaises(qi.QuestDBError) as closed:
+                        db.sender()
+                    self.assertIn('closed', str(closed.exception))
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
+    def test_close_names_a_running_call_rather_than_blaming_a_lease(self):
+        """`dataframe()` counts as a call in progress, not a lease.
+        A `close()` that stops waiting while one is running says so --
+        advice to close leases would point at nothing -- and the call
+        itself runs to completion. A later `close()` then finishes the
+        teardown."""
+        if pyarrow is None:
+            self.skipTest('pyarrow not installed')
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.5)
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=3;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(conf)
+                    table = pyarrow.table(
+                        {'v': pyarrow.array([1, 2, 3], pyarrow.int64())})
+                    started = threading.Event()
+                    unblock = threading.Event()
+                    outcome = {}
+
+                    class SlowProducer:
+                        """An ordinary Arrow producer whose first batch
+                        takes a while -- a slow scan, a remote fetch."""
+                        def __arrow_c_stream__(self, requested_schema=None):
+                            started.set()
+                            unblock.wait(timeout=30)
+                            return table.__arrow_c_stream__(
+                                requested_schema)
+
+                    def load():
+                        try:
+                            db.dataframe(SlowProducer(), table_name='t',
+                                         at=qi.ServerTimestamp)
+                            outcome['load'] = 'ok'
+                        except qi.QuestDBError as exc:
+                            outcome['load'] = str(exc)
+
+                    loader = threading.Thread(target=load)
+                    loader.start()
+                    try:
+                        self.assertTrue(
+                            started.wait(timeout=30),
+                            'the dataframe() call never started')
+                        with self.assertRaises(qi.QuestDBError) as caught:
+                            db.close()
+                        self.assertIn(
+                            '1 call(s) in progress',
+                            str(caught.exception))
+                        self.assertIn(
+                            '0 outstanding sender()/reader() lease(s)',
+                            str(caught.exception))
+                    finally:
+                        unblock.set()
+                        loader.join(timeout=30)
+                    self.assertFalse(loader.is_alive(),
+                                     'dataframe() never returned')
+                    # The call that was in flight when close() was
+                    # asked runs to completion.
+                    self.assertEqual(outcome.get('load'), 'ok')
+                    db.close()
+                    with self.assertRaises(qi.QuestDBError) as closed:
+                        db.sender()
+                    self.assertIn('closed', str(closed.exception))
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 

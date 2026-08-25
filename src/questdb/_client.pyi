@@ -1470,22 +1470,33 @@ class QuestDB:
         """
         Close the client and its connection pool.
 
-        Idempotent.
+        Closing is one-way: once a ``close()`` proceeds -- rather
+        than being refused outright, as from inside one of the
+        handle's own calls -- the handle refuses new
+        work, while work already in flight drains: a call in progress
+        runs to completion, and an outstanding lease keeps working
+        until its holder closes it. The native pool is torn down by
+        the first ``close()`` that finds nothing using the handle, or
+        when the handle itself is collected.
 
-        Outstanding ``sender()`` / ``reader()`` leases are waited for,
-        but the wait is bounded: after a minute ``QuestDBError`` is
-        raised with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``
-        and the handle is left open, because a lease held by the calling
-        thread or by one that has finished can never be returned. A
-        ``close()`` on another thread that was waiting for this one
-        raises the same way rather than reporting a close that did not
-        happen.
+        The wait for the drain is bounded: after a minute
+        ``QuestDBError`` is raised with ``code`` set to
+        ``QuestDBErrorCode.InvalidApiCall``, naming how many leases and
+        calls are still outstanding. The handle stays closing -- it
+        never goes back to open -- and a later ``close()`` resumes the
+        wait and finishes the teardown. A lease held by the calling
+        thread, or by a thread that has since finished, can never be
+        returned: close every lease before closing the handle.
+
+        Idempotent: closing a closed handle returns without doing
+        anything, and no ``close()`` returns success unless the
+        teardown has run.
 
         When called from inside one of this handle's own
         ``error_handler`` / ``connection_listener`` callbacks, it does
         not wait for a concurrent ``close()`` on another thread to
-        finish; it returns without knowing the outcome, and the close it
-        did not wait for may itself have given up.
+        finish -- it may return while that close is still running; the
+        handle only moves toward closed, never back to open.
         """
 
     def __exit__(self, exc_type, exc_val, exc_tb): ...
