@@ -156,17 +156,7 @@ class TestWithDatabase(unittest.TestCase):
         """UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH columns
         need a QWP sender on QuestDB 10 or newer, whichever API
         produced them. The 9.4.3 beta accepts them; it is not a
-        configuration this client supports.
-
-        Called from `setUp`, so the classes built around it start their
-        fixtures and then skip every test on the legs that pin no
-        version. Asking earlier means asking before `start()`, where
-        the only version available is the one parsed out of the install
-        directory's name; the gate reads the one the running server
-        reports, and the two differ exactly on the leg built from the
-        repo, which is the leg with the newest server. A wrong guess
-        there drops the coverage in silence, which is worse than the
-        two fixtures."""
+        configuration this client supports."""
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_QWP_ROW_TYPES_RELEASE:
             version = '.'.join(str(part) for part in self.qdb_plain.version)
