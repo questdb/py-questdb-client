@@ -302,7 +302,11 @@ Fixed
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall``, saying how many leases and how
   many calls are still outstanding — so close every ``sender()`` and
-  ``reader()`` lease before closing the handle. The handle stays
+  ``reader()`` lease before closing the handle. While it waits, every
+  five seconds it reports what it is still waiting for through the
+  ``questdb`` logger at ``WARNING`` (these notices were
+  ``UserWarning``\ s before, which ended the wait at the first notice
+  under ``-W error`` instead of at the bound). The handle stays
   closing: close the remaining leases and call ``close()`` again to
   finish the teardown. No ``close()`` returns success unless the
   teardown has run — when several race, one runs it and the others

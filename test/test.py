@@ -5437,16 +5437,11 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 second.close()
 
                 # And the handle closes rather than waiting on a lease
-                # that was never returned.
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter('always')
+                # that was never returned. A wait says so through the
+                # `questdb` logger every five seconds, so silence there
+                # is the evidence that it did not wait.
+                with self.assertNoLogs('questdb', level='WARNING'):
                     db.close()
-                waited = [w for w in caught
-                          if 'outstanding lease' in str(w.message)]
-                self.assertEqual(
-                    waited, [],
-                    f'close() waited on a lease: '
-                    f'{[str(w.message) for w in waited]}')
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_ws_dataframe_survives_a_close_from_inside_itself(self):
@@ -6597,6 +6592,44 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     with self.assertRaises(qi.QuestDBError) as closed:
                         db.sender()
                     self.assertIn('closed', str(closed.exception))
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
+    def test_the_close_wait_reports_its_progress_through_the_logger(self):
+        """A wait long enough to notice says what it is still waiting
+        for every five seconds. The notice goes to the `questdb`
+        logger rather than through `warnings`, because a warning
+        becomes an exception under `-W error` -- which would end the
+        wait at the first notice instead of at the bound, and hand the
+        caller a `UserWarning` where the contract promises a
+        `QuestDBError`."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.5)
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                db = qi.QuestDB.from_conf(conf)
+                lease = db.sender()
+                lease.row('t', columns={'v': 1},
+                          at=qi.TimestampNanos(1))
+                with warnings.catch_warnings():
+                    warnings.simplefilter('error')
+                    with self.assertLogs('questdb',
+                                         level='WARNING') as logged:
+                        with self.assertRaises(qi.QuestDBError) as caught:
+                            db.close()
+                self.assertIn(
+                    'outstanding sender()/reader() lease',
+                    str(caught.exception))
+                self.assertTrue(
+                    any('is waiting for' in line
+                        for line in logged.output),
+                    'the wait reported no progress through the '
+                    f'questdb logger: {logged.output}')
+                lease.close()
+                db.close()
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 

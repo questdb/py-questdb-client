@@ -1479,8 +1479,10 @@ class QuestDB:
         the first ``close()`` that finds nothing using the handle, or
         when the handle itself is collected.
 
-        The wait for the drain is bounded: after a minute
-        ``QuestDBError`` is raised with ``code`` set to
+        The wait for the drain is bounded. Every five seconds it
+        reports what it is still waiting for through the ``questdb``
+        logger at ``WARNING``. After a minute ``QuestDBError`` is
+        raised with ``code`` set to
         ``QuestDBErrorCode.InvalidApiCall``, naming how many leases and
         calls are still outstanding. The handle stays closing -- it
         never goes back to open -- and a later ``close()`` resumes the

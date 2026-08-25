@@ -9323,10 +9323,12 @@ cdef class QuestDB:
         down by the first ``close()`` that finds nothing using the
         handle, or when the handle itself is collected.
 
-        The wait for that drain is bounded. After a minute this call
-        raises :class:`QuestDBError <questdb.QuestDBError>` with
-        ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, naming
-        how many leases and calls are still outstanding. The handle
+        The wait for that drain is bounded. Every five seconds it
+        reports what it is still waiting for through the ``questdb``
+        logger at ``WARNING``. After a minute this call raises
+        :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set
+        to ``QuestDBErrorCode.InvalidApiCall``, naming how many leases
+        and calls are still outstanding. The handle
         stays closing -- it never goes back to open -- and a later
         ``close()`` resumes the wait and finishes the teardown once
         the last of them is done. A lease held by the calling thread,
@@ -9426,12 +9428,19 @@ cdef class QuestDB:
                                 timeout=min(5.0, remaining))
                             and (self._lease_uses
                                  + self._call_uses) != 0):
-                        warnings.warn(
-                            'QuestDB.close() is waiting for '
-                            f'{self._lease_uses} outstanding lease(s) '
-                            f'and {self._call_uses} in-progress '
+                        # Logged rather than warned, like every other
+                        # notice this client emits from a place the
+                        # caller did not ask for one: a warning turns
+                        # into an exception under `-W error`, which
+                        # would end the wait at the first notice
+                        # instead of at the bound and hand back the
+                        # wrong exception type.
+                        logging.getLogger('questdb').warning(
+                            'QuestDB.close() is waiting for %d '
+                            'outstanding lease(s) and %d in-progress '
                             'call(s) to finish.',
-                            UserWarning)
+                            self._lease_uses,
+                            self._call_uses)
             if self._db != NULL:
                 # Nothing is using the handle. Claiming the pointer
                 # under the lock picks exactly one close() to run the
@@ -9459,11 +9468,10 @@ cdef class QuestDB:
                     while self._close_running:
                         if (not self._state_cond.wait(timeout=5.0)
                                 and self._close_running):
-                            warnings.warn(
+                            logging.getLogger('questdb').warning(
                                 'QuestDB.close() is still waiting for '
                                 'a concurrent close() on another '
-                                'thread to finish.',
-                                UserWarning)
+                                'thread to finish.')
                 return
         try:
             _ensure_doesnt_have_gil(&gs)
