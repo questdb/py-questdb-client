@@ -18,6 +18,7 @@ import ast
 import copy
 import inspect
 import json
+import logging
 import pickle
 from enum import Enum
 import random
@@ -6767,6 +6768,72 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         for line in logged.output),
                     'the wait reported no progress through the '
                     f'questdb logger: {logged.output}')
+                lease.close()
+                db.close()
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
+    def test_the_close_notice_is_emitted_without_the_handle_lock(self):
+        """The progress notice runs the caller's logging handlers, and
+        a handler is the caller's code: it may block, or reach this
+        very handle from another thread -- a handler that ingests its
+        log lines into QuestDB does both. Each notice is emitted with
+        the handle's state lock released, so while a handler runs, a
+        call on the handle from another thread is answered rather than
+        queued behind the closer. Queued, it would stand until the
+        handler finished -- and a handler waiting on the handle would
+        keep that from ever happening."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.5)
+        log = logging.getLogger('questdb')
+        outcome = {}
+
+        class TouchesTheHandle(logging.Handler):
+            def __init__(self, db):
+                super().__init__()
+                self.db = db
+
+            def emit(self, record):
+                if 'answered' in outcome:
+                    return
+                answered = threading.Event()
+
+                def probe():
+                    try:
+                        self.db.reap_idle()
+                    except qi.QuestDBError:
+                        pass
+                    answered.set()
+
+                threading.Thread(target=probe, daemon=True).start()
+                outcome['answered'] = answered.wait(5.0)
+
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                db = qi.QuestDB.from_conf(conf)
+                lease = db.sender()
+                lease.row('t', columns={'v': 1},
+                          at=qi.TimestampNanos(1))
+                handler = TouchesTheHandle(db)
+                propagate = log.propagate
+                log.addHandler(handler)
+                log.propagate = False
+                try:
+                    with self.assertRaises(qi.QuestDBError) as caught:
+                        db.close()
+                finally:
+                    log.removeHandler(handler)
+                    log.propagate = propagate
+                self.assertIn(
+                    'outstanding sender()/reader() lease',
+                    str(caught.exception))
+                self.assertTrue(
+                    outcome.get('answered'),
+                    'a call on the handle was not answered while the '
+                    f'close notice was being handled: {outcome!r}')
                 lease.close()
                 db.close()
         finally:
