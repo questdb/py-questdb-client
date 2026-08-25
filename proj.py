@@ -102,12 +102,16 @@ def test(all=False, patch_path='1', *args):
 
 @command
 def grid(which='all', *args):
-    """Run the enumerated grids: `all` (default), `reentrancy`, or `claim`.
+    """Run the enumerated grids: `all` (default), `reentrancy`,
+    `concurrency`, or `claim`.
 
-    These are the two harnesses that ended the review cycle. They are
-    slow -- minutes, one subprocess per re-entrancy cell -- so they are
+    These are the harnesses that ended the review cycle. `reentrancy`
+    covers re-entry from inside a call, `concurrency` covers what one
+    thread sees while another holds an object in a given state, and
+    `claim` covers the round-trip claim vocabulary. They are slow --
+    minutes, one subprocess per cell in the first two -- so they are
     not part of `proj.py test`; run them after any change to the guard,
-    claim, or dataframe-planner areas, and read the diff.
+    claim, threading, or dataframe-planner areas, and read the diff.
 
     Pass `--update` to rewrite an expected table once you have decided a
     changed cell is right:
@@ -117,6 +121,7 @@ def grid(which='all', *args):
     env = {'TEST_QUESTDB_PATCH_PATH': '1'}
     scripts = {
         'reentrancy': 'reentrancy_matrix.py',
+        'concurrency': 'concurrency_matrix.py',
         'claim': 'claim_matrix.py',
     }
     if which == 'all':
