@@ -5884,6 +5884,104 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             'otherwise a `clean` re-entry may only be clean because '
             f'nothing else happened: {sorted(outcomes)}')
 
+    #: The two held states in which a `close()` is still draining, and
+    #: the one in which it has finished. Named here because what the
+    #: handle owes a caller differs between them by exactly one thing:
+    #: whether a second `close()` has anything left to wait for.
+    CONCURRENCY_DRAINING = (
+        'QuestDB.close/lease-wait', 'QuestDB.close/call-wait')
+    CONCURRENCY_CLOSED = 'QuestDB.close/done'
+
+    #: The two members that are allowed to return cleanly against a
+    #: closed handle, because `close()` is documented idempotent and
+    #: `__exit__` is `close()`.
+    CONCURRENCY_IDEMPOTENT = frozenset(
+        {'QuestDB.close', 'QuestDB.__exit__'})
+
+    @staticmethod
+    def _concurrency_table():
+        return json.loads(
+            (PROJ_ROOT / 'test' /
+             'concurrency_matrix_expected.json').read_text())
+
+    def test_the_concurrency_grid_records_no_hang_and_no_crash(self):
+        """The stored table is the grid's result, so it is also where a
+        regression would show. A `HANG` or a `CRASH` in it means
+        someone checked one in.
+
+        `HANG` covers one shape the re-entrancy grid cannot express:
+        the asking thread got its answer and the thread that was
+        holding the state never came back. The grid scores that as a
+        hang rather than letting it hide behind the answer."""
+        table = self._concurrency_table()
+        bad = {key: record for key, record in table.items()
+               if record['result'] in ('HANG', 'CRASH')}
+        self.assertEqual(bad, {}, f'the checked-in grid records {bad}')
+
+    def test_the_concurrency_grid_asks_about_every_public_member(self):
+        """The grid's member axis is reflected from `api_surface`, but
+        the table is a file, so the two drift the moment someone adds a
+        method and does not re-run the grid. A member with no row is a
+        member no held state has ever been asked about."""
+        table = self._concurrency_table()
+        asked = {key.split(' | ', 1)[1] for key in table}
+        surface = {name for name, _, _, _ in api_surface.qualified_members()}
+        self.assertEqual(
+            sorted(surface - asked), [],
+            'these public members have no row in the concurrency grid; '
+            're-run `./proj.py grid concurrency --update`')
+        self.assertEqual(
+            sorted(asked - surface), [],
+            'these rows in the concurrency grid are for members that no '
+            'longer exist; re-run `./proj.py grid concurrency --update`')
+
+        import concurrency_matrix
+        held = {key.split(' | ', 1)[0] for key in table}
+        self.assertEqual(
+            held, set(concurrency_matrix.HOLDER_SCENARIOS),
+            'the held states in the table and the ones the grid can '
+            'drive have drifted; re-run '
+            '`./proj.py grid concurrency --update`')
+
+    def test_a_closing_handle_turns_away_every_call_that_starts_work(self):
+        """Closing is one-way, so every refusal it causes has to hold
+        for the life of the handle. That promise is only worth as much
+        as the set of calls it actually covers, and the way it was got
+        wrong before was a route nobody listed.
+
+        So the set comes from reflection: every public member of
+        `QuestDB` is checked against the grid's three closing states,
+        and a new one is covered the day it is added. Only `close` and
+        `__exit__` may answer cleanly, and only once the close has
+        finished -- while one is still draining, a second has something
+        left to wait for and says so."""
+        table = self._concurrency_table()
+        members = sorted(
+            name for name, _, _, _ in api_surface.qualified_members()
+            if name.startswith('QuestDB.'))
+        self.assertGreater(len(members), 10, 'the QuestDB surface shrank')
+
+        wrong = []
+        for held in self.CONCURRENCY_DRAINING + (self.CONCURRENCY_CLOSED,):
+            closed = held == self.CONCURRENCY_CLOSED
+            for member in members:
+                record = table.get(f'{held} | {member}')
+                self.assertIsNotNone(
+                    record, f'no grid row for {held} | {member}')
+                want = (
+                    'clean'
+                    if closed and member in self.CONCURRENCY_IDEMPOTENT
+                    else 'refused')
+                if record['result'] != want:
+                    wrong.append(
+                        f'{held} | {member}: wanted {want}, got '
+                        f'{record["result"]} ({record["reason"][:70]})')
+        self.assertEqual(
+            wrong, [],
+            'a handle another thread has put into closing, or closed, '
+            'answered these differently than the one-way contract '
+            'says:\n  ' + '\n  '.join(wrong))
+
     #: Integration test classes whose `setUp` asks for
     #: `FIRST_QWP_ROW_TYPES_RELEASE` -- QuestDB 10, the first production
     #: QWP. Membership is the gate, so every test in one of these is
