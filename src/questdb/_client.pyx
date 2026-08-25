@@ -9482,18 +9482,44 @@ cdef class QuestDB:
             if _on_dispatch_thread_for(
                     self._error_handler, self._connection_listener):
                 return
+            # The teardown wait gets its own bound rather than what
+            # is left of the drain's: it starts when this wait does,
+            # so hitting it means the teardown itself has taken this
+            # long, and the error below can say so truthfully.
+            deadline = time.monotonic() + limit
             while True:
                 notice = False
                 with self._state_cond:
-                    # Returning when `_close_running` clears is sound
-                    # on the flag alone: between claiming the pointer
-                    # and `closed = True` sits only a GIL release and
-                    # a void C call, neither of which can raise, so a
-                    # cleared flag means the teardown ran. The restore
-                    # branch in the `finally` below is defensive.
                     if not self._close_running:
-                        return
-                    if (not self._state_cond.wait(timeout=5.0)
+                        # `_close_running` clearing says the close()
+                        # that claimed the pointer has finished;
+                        # `self._db` says what it did. After a
+                        # teardown the pointer stays NULL for good,
+                        # so a NULL pointer here is a close that ran.
+                        # A give-up hands the pointer back for a
+                        # later close() to claim, and returning
+                        # normally then would report a close that
+                        # did not take place.
+                        if self._db == NULL:
+                            return
+                        raise QuestDBError(
+                            QuestDBErrorCode.InvalidApiCall,
+                            'close() did not close the handle: the '
+                            'concurrent close() on another thread '
+                            'that this call waited for could not '
+                            'finish the teardown. The handle stays '
+                            'closing; call close() again.')
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        raise QuestDBError(
+                            QuestDBErrorCode.InvalidApiCall,
+                            'close() stopped waiting after '
+                            f'{limit:g}s for a concurrent close() '
+                            'on another thread to finish the '
+                            'teardown. The handle stays closing; '
+                            'call close() again to resume waiting.')
+                    if (not self._state_cond.wait(
+                                timeout=min(5.0, remaining))
                             and self._close_running):
                         notice = True
                 if notice:
