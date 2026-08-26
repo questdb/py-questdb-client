@@ -5322,6 +5322,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         it is writing on -- so this holds the invariant the release
         path now has unconditionally rather than reproducing a failure.
         """
+        import gc
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                     'sender_pool_min=0;sender_pool_max=1;pool_reap=manual;')
@@ -5330,7 +5331,12 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 lease.row('t', columns={'v': 1},
                           at=qi.TimestampNanos(1))
                 # Dropped without `close()`, part-way through a batch.
+                # Only a refcounting interpreter deallocates at the
+                # `del`; elsewhere a collection is what runs the
+                # release, and a cpyext proxy can need a second pass.
                 del lease
+                gc.collect()
+                gc.collect()
 
                 # The pool holds one sender, so a second lease can only
                 # be handed out if the first came back.
