@@ -374,18 +374,29 @@ Fixed
 
   The bound lives in the encoder, at the truncation, so it holds for every
   claim, every input shape and every client that reaches it. In front of it
-  this client also scans the frame before opening a connection, which is
-  worth having for what the encoder cannot do: it sees the whole frame
-  rather than a batch, and it names the row *you* passed rather than its
-  position in a batch you never chose. On a sliceable input that turns a
-  mid-send failure with rows already stored into a plain refusal with
-  nothing sent.
+  this client also scans each batch before encoding it, which is worth
+  having for what the encoder cannot do: it names the row *you* passed
+  rather than its position in a batch you never chose. Refused on the
+  frame's first batch, no batch payload has been sent. Refused later but
+  before a checkpoint, earlier batches are on the wire and none of them is
+  committed, so the corrected frame is still safe to pass again whole.
+  Refused after a checkpoint, those rows are stored: the error says which
+  and carries ``in_doubt``. On the NumPy planner's path the same scan runs
+  before a connection is opened, the whole frame being in hand there rather
+  than arriving batch by batch.
 
   A claimed column the pre-flight scan cannot read — a metadata blob longer
   than its bounded walk — is passed on to the encoder rather than refused.
-  A malformed batch is still turned away here, in words that name the
-  column, because a batch that disagrees with its own schema is a mistake
-  rather than something the scan merely could not see.
+  A malformed batch is still turned away here, because a batch that
+  disagrees with its own schema is a mistake rather than something the scan
+  merely could not see. A fault in one column names that column; a fault in
+  the batch's own structure — a column count the schema and the batch
+  disagree on, or one past what a record batch can hold, or a null entry in
+  the column array — names the batch, there being no column to name. What
+  stays with the producer is the one thing no consumer can check: counts,
+  lengths and offsets all inside those bounds over buffers smaller than they
+  claim. The Arrow C data interface carries no byte length for a buffer, so
+  nothing on this side can tell that apart from an honest frame.
 
   A ``df.attrs['questdb']`` geohash claim is also held to the width of the
   column carrying it: at most 7 bits on ``int8``, 15 on ``int16``, 31 on

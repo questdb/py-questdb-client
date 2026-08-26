@@ -6581,6 +6581,28 @@ cdef int _ARROW_MD_STOPPED_SHORT = -1
 cdef int _GEOHASH_BITS_NONE = -1
 cdef int _GEOHASH_BITS_UNREADABLE = -2
 
+# What a record batch may declare before this side stops reading it, set
+# where the pinned importer sets the same bounds so that a shape this scan
+# accepts is never one the importer then refuses for being oversized.
+#
+# The importer bounds a schema tree at 4,096 nodes counting its root, so a
+# flat record batch reaches 4,095 columns. Nested children and dictionaries
+# draw on that same budget, which makes this a top-level ceiling rather than
+# a width the importer promises to take. The length bound is the importer's
+# own `MAX_ARROW_ARRAY_LENGTH`, which is the core's `MAX_CHUNK_ROWS`.
+#
+# Both are sanity limits and neither is proof of an allocation. A count is
+# the producer's own word for how long `children[]` is, and a length is its
+# word for how many rows a buffer holds; the Arrow C data interface carries
+# no byte length for either. Holding both to a bound keeps every walk on
+# this side inside what a real frame declares, and a producer that lies
+# inside the bound -- consistently, in schema and batch at once -- is past
+# what any consumer of this interface can see. A source-contract test in
+# `test/test.py` holds these two numbers to the submodule's own.
+cdef enum:
+    _ARROW_MAX_TOP_LEVEL_COLUMNS = 4095
+    _ARROW_MAX_ARRAY_LENGTH = 16 * 1024 * 1024
+
 
 cdef int _arrow_md_lookup(
         const char* metadata,
@@ -6823,16 +6845,16 @@ cdef bint _arrow_schema_claims_geohash(
     A column whose metadata the walk stopped short of is not a GEOHASH
     as far as this scan is concerned: it cannot read the claim, and the
     encoder holds the values whether or not this scan looked at them.
+
+    The caller runs the batch's structural checks first, so by here the
+    count is bounded and non-zero, `children` is non-NULL, and every
+    slot in it holds a schema.
     """
     cdef int64_t child_index
     cdef const ArrowSchema* field
     cdef int bits
-    if schema.n_children == 0 or schema.children == NULL:
-        return False
     for child_index in range(schema.n_children):
         field = schema.children[child_index]
-        if field == NULL:
-            continue
         bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
         if bits != _GEOHASH_BITS_NONE and bits != _GEOHASH_BITS_UNREADABLE:
             return True
@@ -6855,10 +6877,20 @@ cdef void_int _arrow_batch_check_geohash_ranges(
     ``write_geohash_payload`` and its numpy twin hold every non-null
     value to the precision and refuse the frame. This scan is the layer
     in front of it, and it is worth having for what it can do that the
-    encoder cannot: it runs before a connection is opened, on the whole
-    frame rather than a batch, and it names the caller's own row number.
-    On a sliceable input that turns a mid-send failure with rows already
-    stored into a plain refusal with nothing sent.
+    encoder cannot: it reads each batch before that batch is encoded,
+    and it names the caller's own row rather than a position inside a
+    batch they never chose.
+
+    The connection is open by the time this runs -- a pooled sender is
+    checked out before the stream is read -- so what a refusal saves is
+    the batches it never reaches rather than the connection. Refused on
+    the frame's first batch, no batch payload has been sent. Refused
+    later but before a checkpoint, the batches ahead of it are on the
+    wire and none of them is committed, so the corrected frame is still
+    safe to send whole. Refused after a checkpoint, those rows are stored:
+    the error says which and carries ``in_doubt``. The numpy planner's
+    twin of this scan does run ahead of its own connection, having the
+    whole frame in hand rather than a stream to pull batches from.
 
     Every batch this path sends passes through here -- pandas, polars,
     ``pa.Table``, ``pa.RecordBatch`` and one-shot streams alike, sliced
@@ -6875,6 +6907,17 @@ cdef void_int _arrow_batch_check_geohash_ranges(
     "could not check here" is not "nothing will check". What stays
     refused is a claim wider than the column can carry, which is a
     mistake in the claim rather than a shape this scan could not see.
+
+    A malformed struct is its own case, and it is answered before the
+    claim is read rather than passed on. Reading a claim at all means
+    indexing ``children[]``, so a batch and schema that disagree on how
+    long that array is, a count past what a record batch can hold, or a
+    slot in it that arrived null, stop the send whether or not a GEOHASH
+    turns out to be claimed and whether or not the batch carries any
+    rows. That is a shape this scan can see, not a claim it could not.
+    Row shapes are the other way round: they are read only once a
+    GEOHASH is claimed, so a malformed non-GEOHASH stream keeps the
+    importer's own words for them.
     """
     cdef int64_t child_index
     cdef const ArrowSchema* field
@@ -6887,44 +6930,75 @@ cdef void_int _arrow_batch_check_geohash_ranges(
     cdef size_t bad_row = 0
     cdef bint bad = False
     cdef int64_t start
-    if batch.length == 0:
+    # The structural refusals here are not "could not check" in the
+    # sense the metadata walk is: a batch that disagrees with its own
+    # schema is malformed, the importer turns the same shapes away in
+    # its own words, and saying so before this batch is encoded is the
+    # better error. They run ahead of everything else in this function
+    # because reading a claim means indexing `children[]` and these are
+    # what bound that index -- the zero-row return included, so that an
+    # empty batch cannot carry a malformed struct past them.
+    #
+    # A count is the producer's own word for how long `children[]` is,
+    # and the Arrow C data interface carries nothing to check it
+    # against, so the two counts are held to each other and to
+    # `_ARROW_MAX_TOP_LEVEL_COLUMNS`. Neither settles a producer that
+    # lies inside the bound in both structs at once; that shape is
+    # beyond what any consumer of this interface can see.
+    if (schema.n_children < 0
+            or schema.n_children > _ARROW_MAX_TOP_LEVEL_COLUMNS):
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad dataframe: the schema declares {schema.n_children} '
+            f'columns, which is not a column count this client reads '
+            f'(at most {_ARROW_MAX_TOP_LEVEL_COLUMNS}).')
+    if batch.n_children != schema.n_children:
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad dataframe: the batch carries {batch.n_children} '
+            f'columns against the schema\'s {schema.n_children}.')
+    if schema.n_children > 0:
+        if schema.children == NULL or batch.children == NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad dataframe: the batch declares {schema.n_children} '
+                f'columns and arrived without the array holding them.')
+        # Every slot is read once, here, so that the claim walk and the
+        # scan below can each take a child as given.
+        for child_index in range(schema.n_children):
+            if (schema.children[child_index] == NULL
+                    or batch.children[child_index] == NULL):
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
+                    f'Bad dataframe: column {child_index} of the batch '
+                    f'arrived as a null pointer.')
+    if schema.n_children == 0 or batch.length == 0:
         return 0
     if not _arrow_schema_claims_geohash(schema, overrides, overrides_len):
         return 0
-    # The shape refusals below stay. They are not "could not check" in
-    # the sense the metadata walk was: a batch that disagrees with its
-    # own schema is malformed, the importer turns the same shapes away
-    # in its own words, and saying so before a connection is opened is
-    # the better error.
-    if (batch.n_children != schema.n_children
-            or batch.children == NULL or schema.children == NULL):
+    # An Arrow length is a row count, so it is neither negative nor past
+    # the bound the importer holds one to. It is cast to `size_t` for
+    # the scan below and added to `row_base` after, so a negative one
+    # would wrap to about 2**64 and walk the value buffer far outside
+    # it.
+    if batch.length < 0 or batch.length > _ARROW_MAX_ARRAY_LENGTH:
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
             f'Bad dataframe: a GEOHASH column cannot be checked because '
-            f'the batch carries {batch.n_children} columns against the '
-            f'schema\'s {schema.n_children}.')
-    # An Arrow length is a row count and cannot be negative. It is cast
-    # to `size_t` for the scan below and added to `row_base` after, so a
-    # negative one would wrap to about 2**64 and walk the value buffer
-    # far outside it.
-    if batch.length < 0:
-        raise QuestDBError(
-            QuestDBErrorCode.BadDataFrame,
-            f'Bad dataframe: a GEOHASH column cannot be checked because '
-            f'the batch reports {batch.length} rows.')
+            f'the batch reports {batch.length} rows (at most '
+            f'{_ARROW_MAX_ARRAY_LENGTH}).')
     # A struct-level offset shifts every child: the importer slices each
     # column by it before reading, so the scan starts there too and the
     # rows it reads are the rows that go out.
-    if batch.offset < 0:
+    if batch.offset < 0 or batch.offset > _ARROW_MAX_ARRAY_LENGTH:
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
             f'Bad dataframe: a GEOHASH column cannot be checked because '
-            f'the batch starts at row {batch.offset}.')
+            f'the batch starts at row {batch.offset} (at most '
+            f'{_ARROW_MAX_ARRAY_LENGTH}).')
     for child_index in range(schema.n_children):
         field = schema.children[child_index]
         col = batch.children[child_index]
-        if field == NULL or col == NULL:
-            continue
         elem_size = _arrow_signed_int_width(field.format)
         if elem_size == 0:
             # A GEOHASH rides only on a signed Int8/16/32/64, and the
@@ -6968,11 +7042,27 @@ cdef void_int _arrow_batch_check_geohash_ranges(
                 f'GEOHASH({bits}b) values cannot be held to the '
                 f'precision because the column arrived without readable '
                 f'value buffers.')
+        # The column's own row count and start row answer to the same
+        # bound as the batch's, so every number the arithmetic below
+        # runs on is a small one.
+        if (col.length < 0 or col.length > _ARROW_MAX_ARRAY_LENGTH
+                or col.offset > _ARROW_MAX_ARRAY_LENGTH):
+            raise QuestDBError(
+                QuestDBErrorCode.BadDataFrame,
+                f'Bad column {_arrow_field_name(field)!r}: its '
+                f'GEOHASH({bits}b) values cannot be held to the '
+                f'precision because the column reports {col.length} '
+                f'rows from row {col.offset} (at most '
+                f'{_ARROW_MAX_ARRAY_LENGTH}).')
         # An Arrow length is the row count measured from the array's own
         # start, and a struct-level offset picks the row each column is
         # read from, so the batch's rows are in range when
-        # `batch.offset + batch.length` fits the column's length.
-        if batch.offset + batch.length > col.length:
+        # `batch.offset + batch.length` fits the column's length. The
+        # relation is written as a subtraction, which states it without
+        # adding two producer-supplied numbers together at all. The
+        # first term is what keeps that subtraction in range.
+        if (batch.length > col.length
+                or batch.offset > col.length - batch.length):
             raise QuestDBError(
                 QuestDBErrorCode.BadDataFrame,
                 f'Bad column {_arrow_field_name(field)!r}: its '
@@ -6980,6 +7070,12 @@ cdef void_int _arrow_batch_check_geohash_ranges(
                 f'precision because the column holds {col.length} rows '
                 f'and the batch asks for {batch.length} from row '
                 f'{batch.offset}.')
+        # The scan reads `batch.length` slots from `col.offset +
+        # batch.offset`. Both terms are inside
+        # `_ARROW_MAX_ARRAY_LENGTH`, and the check above has put
+        # `batch.offset + batch.length` inside the column's length, so
+        # the last slot read is inside the column and the sum itself is
+        # nowhere near the end of `int64_t`.
         start = col.offset + batch.offset
         data = col.buffers[1]
         # A column with no validity buffer has no nulls, whatever it

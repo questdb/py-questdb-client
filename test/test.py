@@ -28,6 +28,7 @@ import pathlib
 import tempfile
 import warnings
 import numpy as np
+import subprocess
 
 import patch_path
 
@@ -35,6 +36,8 @@ from test_tools import (
     _float_binary_bytes,
     _array_binary_bytes,
     TimestampEncodingMixin)
+import forged_arrow
+from forged_arrow import _RawArrowStream
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
@@ -2407,237 +2410,6 @@ _needs_capsule_builder = unittest.skipUnless(
     _CAN_BUILD_CAPSULE, 'ctypes.pythonapi not available')
 
 
-class _RawArrowStream:
-    """A hand-rolled ``__arrow_c_stream__`` producer, built straight
-    onto the Arrow C data interface with ctypes.
-
-    ``QuestDB.dataframe()`` accepts any object carrying that method, so
-    the shapes it has to cope with are not only the ones pyarrow and
-    polars emit. pyarrow normalises a few of them away on export -- it
-    writes a counted ``null_count`` even where the array was built
-    without one, and it puts a slice's start on each column rather than
-    on the batch -- so the shapes below are reachable only from a
-    producer written by hand, which is exactly what nanoarrow, DuckDB
-    and arro3 are.
-
-    Everything the stream hands out stays owned by this object and is
-    freed with it; the release callbacks only clear the pointer the
-    consumer is told to clear.
-    """
-
-    _ARRAY_FIELDS = [
-        ('length', ctypes.c_int64),
-        ('null_count', ctypes.c_int64),
-        ('offset', ctypes.c_int64),
-        ('n_buffers', ctypes.c_int64),
-        ('n_children', ctypes.c_int64),
-        ('buffers', ctypes.POINTER(ctypes.c_void_p)),
-        ('children', ctypes.c_void_p),
-        ('dictionary', ctypes.c_void_p),
-        ('release', ctypes.c_void_p),
-        ('private_data', ctypes.c_void_p)]
-    _SCHEMA_FIELDS = [
-        ('format', ctypes.c_char_p),
-        ('name', ctypes.c_char_p),
-        ('metadata', ctypes.c_char_p),
-        ('flags', ctypes.c_int64),
-        ('n_children', ctypes.c_int64),
-        ('children', ctypes.c_void_p),
-        ('dictionary', ctypes.c_void_p),
-        ('release', ctypes.c_void_p),
-        ('private_data', ctypes.c_void_p)]
-    _STREAM_FIELDS = [
-        ('get_schema', ctypes.c_void_p),
-        ('get_next', ctypes.c_void_p),
-        ('get_last_error', ctypes.c_void_p),
-        ('release', ctypes.c_void_p),
-        ('private_data', ctypes.c_void_p)]
-
-    class Array(ctypes.Structure):
-        pass
-
-    class Schema(ctypes.Structure):
-        pass
-
-    class Stream(ctypes.Structure):
-        pass
-
-    def __init__(self, columns, row_count, batch_offset=0):
-        """`columns` is a list of dicts, one per column, each naming its
-        Arrow `format`, its `name`, the `data` bytes of its value
-        buffer, and optionally `metadata`, `null_count`, `validity`,
-        `offset` and `length`. `row_count` and `batch_offset` are the
-        struct-level length and start."""
-        self._keep = []
-        self._released = False
-        self._schema = self._build_schema(columns)
-        self._array = self._build_array(columns, row_count, batch_offset)
-        self._stream = self._build_stream()
-
-    # -- construction --------------------------------------------------
-
-    def _buffer_array(self, blobs):
-        """A `void*[]` over the given buffers; None becomes NULL."""
-        out = (ctypes.c_void_p * len(blobs))()
-        for i, blob in enumerate(blobs):
-            if blob is None:
-                out[i] = None
-            else:
-                held = ctypes.create_string_buffer(blob, len(blob))
-                self._keep.append(held)
-                out[i] = ctypes.cast(held, ctypes.c_void_p)
-        self._keep.append(out)
-        return out
-
-    @staticmethod
-    def _packed_metadata(pairs):
-        """Arrow's packed metadata blob: a pair count, then each key and
-        each value as a little-endian length followed by its bytes."""
-        if not pairs:
-            return None
-        out = struct.pack('<i', len(pairs))
-        for key, value in pairs.items():
-            out += struct.pack('<i', len(key)) + key
-            out += struct.pack('<i', len(value)) + value
-        return out
-
-    def _release_stub(self, struct_type):
-        """A release callback that clears the caller's pointer. The
-        memory itself belongs to this object."""
-        proto = ctypes.CFUNCTYPE(None, ctypes.POINTER(struct_type))
-
-        def release(ptr):
-            ptr.contents.release = None
-
-        held = proto(release)
-        self._keep.append(held)
-        return ctypes.cast(held, ctypes.c_void_p)
-
-    def _build_schema(self, columns):
-        children = (ctypes.POINTER(self.Schema) * len(columns))()
-        for i, column in enumerate(columns):
-            child = self.Schema()
-            child.format = column['format']
-            child.name = column['name']
-            child.metadata = self._packed_metadata(column.get('metadata'))
-            child.flags = 2  # ARROW_FLAG_NULLABLE
-            child.n_children = 0
-            child.children = None
-            child.dictionary = None
-            child.release = self._release_stub(self.Schema)
-            child.private_data = None
-            self._keep.append(child)
-            children[i] = ctypes.pointer(child)
-        self._keep.append(children)
-        top = self.Schema()
-        top.format = b'+s'
-        top.name = None
-        top.metadata = None
-        top.flags = 0
-        top.n_children = len(columns)
-        top.children = ctypes.cast(children, ctypes.c_void_p)
-        top.dictionary = None
-        top.release = self._release_stub(self.Schema)
-        top.private_data = None
-        self._keep.append(top)
-        return top
-
-    def _build_array(self, columns, row_count, batch_offset):
-        children = (ctypes.POINTER(self.Array) * len(columns))()
-        for i, column in enumerate(columns):
-            child = self.Array()
-            child.length = column.get('length', row_count + batch_offset)
-            child.null_count = column.get('null_count', 0)
-            child.offset = column.get('offset', 0)
-            child.n_buffers = column.get('n_buffers', 2)
-            child.n_children = 0
-            child.buffers = self._buffer_array(
-                [column.get('validity'), column['data']])
-            child.children = None
-            child.dictionary = None
-            child.release = self._release_stub(self.Array)
-            child.private_data = None
-            self._keep.append(child)
-            children[i] = ctypes.pointer(child)
-        self._keep.append(children)
-        top = self.Array()
-        top.length = row_count
-        top.null_count = 0
-        top.offset = batch_offset
-        top.n_buffers = 1
-        top.n_children = len(columns)
-        top.buffers = self._buffer_array([None])
-        top.children = ctypes.cast(children, ctypes.c_void_p)
-        top.dictionary = None
-        top.release = self._release_stub(self.Array)
-        top.private_data = None
-        self._keep.append(top)
-        return top
-
-    def _build_stream(self):
-        stream_ptr = ctypes.POINTER(self.Stream)
-        get_schema_t = ctypes.CFUNCTYPE(
-            ctypes.c_int, stream_ptr, ctypes.POINTER(self.Schema))
-        get_next_t = ctypes.CFUNCTYPE(
-            ctypes.c_int, stream_ptr, ctypes.POINTER(self.Array))
-        last_error_t = ctypes.CFUNCTYPE(ctypes.c_char_p, stream_ptr)
-        release_t = ctypes.CFUNCTYPE(None, stream_ptr)
-        source = self
-
-        def get_schema(_stream, out):
-            ctypes.memmove(
-                out, ctypes.byref(source._schema),
-                ctypes.sizeof(source.Schema))
-            return 0
-
-        def get_next(_stream, out):
-            # One batch, then the end-of-stream marker: a released
-            # array with `length` left at zero.
-            if source._released:
-                out.contents.release = None
-                out.contents.length = 0
-                return 0
-            source._released = True
-            ctypes.memmove(
-                out, ctypes.byref(source._array),
-                ctypes.sizeof(source.Array))
-            return 0
-
-        def get_last_error(_stream):
-            return None
-
-        def release(ptr):
-            ptr.contents.release = None
-
-        callbacks = [
-            get_schema_t(get_schema), get_next_t(get_next),
-            last_error_t(get_last_error), release_t(release)]
-        self._keep.extend(callbacks)
-        stream = self.Stream()
-        (stream.get_schema, stream.get_next,
-         stream.get_last_error, stream.release) = [
-            ctypes.cast(cb, ctypes.c_void_p) for cb in callbacks]
-        stream.private_data = None
-        self._keep.append(stream)
-        return stream
-
-    # -- the interface `QuestDB.dataframe()` dispatches on --------------
-
-    def __arrow_c_stream__(self, requested_schema=None):
-        self._released = False
-        new_capsule = ctypes.pythonapi.PyCapsule_New
-        new_capsule.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
-        new_capsule.restype = ctypes.py_object
-        return new_capsule(
-            ctypes.addressof(self._stream), b'arrow_array_stream', None)
-
-
-_RawArrowStream.Array._fields_ = _RawArrowStream._ARRAY_FIELDS
-_RawArrowStream.Schema._fields_ = _RawArrowStream._SCHEMA_FIELDS
-_RawArrowStream.Stream._fields_ = _RawArrowStream._STREAM_FIELDS
-
-
 class TestQwpOnlyRowTypes(unittest.TestCase):
     UUID_VALUE = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
 
@@ -4746,9 +4518,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         Answered by sending twice. A value in range says whether the
         column reaches the database as a GEOHASH at all, and a value
         the precision cannot hold says which layer turned it away: this
-        client's own scan runs before a connection is opened and names
-        the row, and the encoder's bound runs at the truncation and
-        names the value. Returns ``(wire type, refused-by)``.
+        client's own scan runs before the batch is encoded and names the
+        row, and the encoder's bound runs at the truncation and names
+        the value. Returns ``(wire type, refused-by)``.
         """
         def stream(values):
             stamp = struct.pack('<q', 1735689600000000)
@@ -4871,6 +4643,134 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         table_name='raw_unreadable', at='ts')
                 self.assertNotIn(
                     'cannot be held to the precision', str(caught.exception))
+
+    #: Forged shapes read before the claim is looked for, so none of
+    #: them needs a GEOHASH column to be turned away.
+    _FORGED_STRUCTURAL = (
+        'schema_count_absurd',
+        'schema_count_cap_plus_one',
+        'schema_count_negative',
+        'batch_count_negative',
+        'count_disagreement',
+        'zero_column_schema_disagreement',
+        'zero_row_count_disagreement',
+        'null_schema_children',
+        'null_batch_children',
+        'null_schema_child',
+        'null_batch_child',
+        'null_batch_children_zero_rows',
+        'null_schema_child_zero_rows')
+
+    #: Forged shapes read only once a GEOHASH is claimed, which is what
+    #: leaves a malformed stream carrying none of them to the importer.
+    _FORGED_ROW_SHAPES = (
+        'batch_length_overflow',
+        'batch_length_cap_plus_one',
+        'batch_offset_cap_plus_one',
+        'batch_offset_negative',
+        'column_length_cap_plus_one',
+        'column_length_negative',
+        'column_offset_cap_plus_one',
+        'column_offset_negative',
+        'slice_past_column')
+
+    _FORGED_ARROW_TIMEOUT = 120
+
+    def _refuse_forged_arrow(self, name):
+        """Build one forged Arrow shape in a fresh interpreter, send it,
+        and require the pre-flight refusal it exists to provoke.
+
+        A child process rather than this one. Each of these shapes is a
+        count, length or offset that an unguarded pre-scan takes at the
+        producer's word and then walks off the end of an array on, which
+        ends the interpreter with no traceback and takes every remaining
+        test with it. In a child the same event is a return code, and a
+        death by signal is told apart from an ordinary failure.
+
+        The server is started here so that what it saw is read from the
+        side that outlives the child.
+        """
+        with QwpAckServer(record_payloads=True) as server:
+            env = dict(os.environ)
+            env['QUESTDB_FORGED_ARROW_CASE'] = name
+            env['QUESTDB_FORGED_ARROW_PORT'] = str(server.port)
+            child = subprocess.run(
+                [sys.executable,
+                 str(PROJ_ROOT / 'test' / 'forged_arrow.py')],
+                capture_output=True, text=True, env=env,
+                timeout=self._FORGED_ARROW_TIMEOUT)
+            stats = server.snapshot()
+        self.assertGreaterEqual(
+            child.returncode, 0,
+            f'{name}: the child died on signal {-child.returncode}, '
+            f'which is the crash this shape exists to guard '
+            f'against.\n{child.stderr}')
+        self.assertEqual(
+            child.returncode, 0, f'{name}:\n{child.stderr}')
+        self.assertIn(forged_arrow.MARKER, child.stdout, child.stderr)
+        # No batch payload reached the wire. Every shape here is
+        # refused on the frame's first batch, which is the case where
+        # that holds: refused on a later one, the batches ahead of it
+        # would already be sent. The connection count is not the
+        # measure either way -- a pooled sender is checked out, and
+        # connected, before the frame is read at all.
+        self.assertEqual(
+            stats['binary_payloads'], [],
+            f'{name}: the refusal still put a payload on the wire')
+        self.assertEqual(
+            stats['binary_frames'], 0,
+            f'{name}: the refusal still put a frame on the wire')
+        return stats
+
+    @_needs_capsule_builder
+    def test_forged_arrow_counts_and_child_pointers_are_refused(self):
+        """A column count and a `children[]` slot are the producer's own
+        words for how long an array is and what is in it, and the Arrow
+        C data interface carries nothing to check either against. Every
+        walk on this side is bounded by them, so each one is held to a
+        cap, to its opposite number in the other struct, and to being a
+        pointer at all -- before anything indexes the array, and before
+        an empty batch could return past the question.
+        """
+        for name in self._FORGED_STRUCTURAL:
+            with self.subTest(case=name):
+                self._refuse_forged_arrow(name)
+
+    @_needs_capsule_builder
+    def test_forged_arrow_row_shapes_are_refused(self):
+        """Lengths and offsets reach pointer arithmetic, so each is held
+        to the importer's own bound before any of them is added to
+        another. The bound is what keeps the arithmetic in range:
+        `batch.offset + batch.length` at `INT64_MAX` leaves `int64_t`
+        and lands as a large negative, which an unbounded slice check
+        reads as a batch comfortably inside its column.
+        """
+        for name in self._FORGED_ROW_SHAPES:
+            with self.subTest(case=name):
+                self._refuse_forged_arrow(name)
+
+    def test_every_forged_arrow_shape_is_covered(self):
+        """The shapes live in `forged_arrow` and the two tests above
+        name the ones they run, so a shape added to one and not the
+        other is a shape nobody checks."""
+        self.assertEqual(
+            sorted(self._FORGED_STRUCTURAL + self._FORGED_ROW_SHAPES),
+            sorted(forged_arrow.FORGED_CASES),
+            'a forged Arrow shape is registered that no test runs, or a '
+            'test names one that no longer exists')
+
+    @_needs_capsule_builder
+    def test_a_batch_ending_exactly_at_the_column_end_is_accepted(self):
+        """`batch.offset + batch.length == col.length` is the last slice
+        that fits. The relation is checked as a subtraction, where an
+        error of one lands on either side of that boundary, so the shape
+        one row longer -- the `slice_past_column` case -- is refused and
+        this one goes.
+        """
+        payload = self._dataframe_wire_payload(
+            forged_arrow.accepted_slice(),
+            table_name='raw_slice_end', at='ts')
+        self.assertTrue(payload)
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     @unittest.skipIf(pd is None, 'pandas not installed')
@@ -6212,6 +6112,104 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             stale, [],
             f'these classes are excused from the grid\'s outer axis but '
             f'the capture inventory no longer names them: {stale}')
+
+    #: Beside a Python cap that is deliberately tighter than the
+    #: importer's, so that "lower on purpose" is a thing the source
+    #: says rather than a thing this test infers from nearby prose.
+    ARROW_CAP_MARKER = 'ARROW_CAP_INTENTIONALLY_LOWER_THAN_NATIVE'
+
+    @staticmethod
+    def _anchored_constant(source, pattern, label):
+        """The value of one constant definition, as an integer.
+
+        The definitions are written the way each language writes them --
+        `16 * 1024 * 1024`, `4_096` -- so the text is evaluated rather
+        than matched as a literal, and only after it is confirmed to be
+        arithmetic on digits.
+        """
+        found = re.search(pattern, source, re.M)
+        assert found is not None, f'no definition of {label} found'
+        text = found.group(1).replace('_', '')
+        assert re.fullmatch(r'[0-9\s*+()]+', text), (
+            f'{label} is defined as {found.group(1)!r}, which is not the '
+            f'plain arithmetic this test knows how to read')
+        return eval(text, {'__builtins__': {}}, {})
+
+    def test_arrow_preflight_limits_do_not_exceed_the_pinned_importer(self):
+        """The Arrow pre-flight caps are this side's copy of bounds the
+        importer holds the same fields to, and this repo bumps the
+        submodule routinely.
+
+        A Python cap *above* the native one is the shape that matters: it
+        accepts a schema the importer then refuses, turning a refusal
+        this client could have made before the send into one that arrives
+        from the other side of the wire. So the two are pinned to each
+        other, and a deliberate loosening or tightening has to be written
+        down here as well as in the source.
+
+        `MAX_ARROW_ARRAY_LENGTH` is itself derived from the core's
+        `MAX_CHUNK_ROWS` rather than restated, and that derivation is
+        pinned too -- otherwise the two native constants could drift
+        apart and this test would keep comparing against the one that
+        stayed put.
+        """
+        client_src = (PROJ_ROOT / 'src' / 'questdb' / '_client.pyx').read_text()
+        ffi_src = (PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi' /
+                   'src' / 'lib.rs').read_text()
+        core_src = (PROJ_ROOT / 'c-questdb-client' / 'questdb-rs' / 'src' /
+                    'ingress' / 'column_sender' / 'mod.rs').read_text()
+
+        def python_cap(name):
+            return self._anchored_constant(
+                client_src, rf'^\s+{name} = ([^\n#]+?)\s*$', name)
+
+        def rust_cap(source, name):
+            return self._anchored_constant(
+                source, rf'^(?:pub )?const {name}: \w+ = ([^;]+);',
+                name)
+
+        columns = python_cap('_ARROW_MAX_TOP_LEVEL_COLUMNS')
+        length = python_cap('_ARROW_MAX_ARRAY_LENGTH')
+        total_nodes = rust_cap(ffi_src, 'MAX_ARROW_SCHEMA_TOTAL_NODES')
+        per_node = rust_cap(ffi_src, 'MAX_ARROW_SCHEMA_CHILDREN_PER_NODE')
+        max_chunk_rows = rust_cap(core_src, 'MAX_CHUNK_ROWS')
+
+        # The importer counts a record batch's root among the nodes it
+        # bounds, so a flat schema reaches one fewer column than the
+        # budget. Nested children and dictionaries draw on the same
+        # budget, which is why this is a ceiling rather than a width the
+        # importer promises to take.
+        self.assertLessEqual(
+            columns + 1, total_nodes,
+            f'a schema of {columns} columns is {columns + 1} nodes, past '
+            f'the importer\'s budget of {total_nodes}: this client would '
+            f'accept a frame the importer then refuses')
+        self.assertLessEqual(
+            columns, per_node,
+            f'{columns} columns is past the importer\'s per-node cap of '
+            f'{per_node}')
+        self.assertLessEqual(
+            length, max_chunk_rows,
+            f'an array of {length} rows is past the importer\'s '
+            f'{max_chunk_rows}')
+
+        self.assertIn(
+            'const MAX_ARROW_ARRAY_LENGTH: i64 = '
+            'questdb::ingress::column_sender::MAX_CHUNK_ROWS as i64;',
+            ffi_src,
+            "the importer's array-length cap is no longer written as "
+            "the core's MAX_CHUNK_ROWS, so the two native constants can "
+            'drift and this test would not see it')
+
+        if self.ARROW_CAP_MARKER in client_src:
+            return  # a lower cap, said out loud beside the constant
+        self.assertEqual(
+            (columns + 1, length), (total_nodes, max_chunk_rows),
+            f'the Python caps sit below the importer\'s: {columns} '
+            f'columns against {total_nodes - 1} and {length} rows '
+            f'against {max_chunk_rows}. That refuses frames the importer '
+            f'would take. If it is meant, put {self.ARROW_CAP_MARKER} '
+            f'beside the constant in _client.pyx with the reason.')
 
     def test_the_native_capture_inventory_matches_the_sources(self):
         """`src/questdb/native_captures.md` is the checked-in answer to
