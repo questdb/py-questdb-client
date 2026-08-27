@@ -976,6 +976,11 @@ cdef class Long256:
 cdef class Geohash:
     """A QuestDB GEOHASH value represented by bits and precision.
 
+    This scalar wrapper is strict: ``precision`` must be in ``1..=60``
+    and ``bits`` must satisfy ``0 <= bits < 2**precision``. Bulk
+    NumPy/Arrow GEOHASH columns have a different, unchecked value
+    contract; see :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`.
+
     Precision is pinned per column within one buffer's worth of rows.
     The first GEOHASH cell written to a column fixes the precision for
     the rest of that batch, and a later cell at a different precision
@@ -8282,15 +8287,22 @@ cdef class QuestDB:
         value the type cannot hold — an integer past ``2**32-1`` under
         ``ipv4``, a cell that is not exactly 16 or 32 bytes under
         ``uuid`` or ``long256`` — is refused rather than written into a
-        column of the claimed type. Bulk GEOHASH values are deliberately
-        not checked against the claimed precision. Only the low bytes
-        required by the wire width are encoded; inconsistent bits may be
-        truncated locally or reinterpreted by the server, potentially
-        producing a different location or a null. This keeps
-        ingestion memory-safe for valid NumPy/Arrow buffers but makes the
-        caller responsible for the semantic validity of each value. The
+        column of the claimed type.
+
+        Bulk GEOHASH values are raw bit patterns. The declared precision
+        must be in ``1..=60`` and fit the signed integer carrier, but no
+        per-value check verifies that the pattern has no bits set above
+        that precision. For example, ``32`` under ``GEOHASH(5b)`` is
+        accepted even though it needs six bits. If the declared precision
+        is wrong for the data, the write can succeed and store a different
+        GEOHASH location or ``NULL``. Only the low
+        ``ceil(precision / 8)`` bytes are encoded, and the exact result of
+        an inconsistent value is unspecified. This is a semantic
+        data-integrity risk, not a memory-safety risk for otherwise valid
+        NumPy/Arrow buffers. The caller must validate bulk values. The
         scalar :class:`Geohash <questdb.Geohash>` constructor remains
-        strict.
+        strict; malformed custom Arrow C Data structures remain invalid
+        input and are outside this guarantee.
 
         A column of nothing but nulls names no type of its own, and
         without a claim it is left out of the write and out of the

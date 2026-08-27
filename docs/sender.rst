@@ -351,13 +351,22 @@ where it is not:
 .. literalinclude:: ../examples/qwp_column_types_dataframe.py
    :language: python
 
-Bulk ``GEOHASH`` ingestion treats the integer column as an unchecked encoded
-value carrier. The precision and the carrier width are validated, but each
-value is not checked against the precision. Only the low bytes required by the
-wire width are encoded; inconsistent bits may be truncated locally or
-reinterpreted by the server, potentially producing a different location or a
-null. Use :class:`Geohash <questdb.Geohash>` on the row path when strict
-per-value validation is required.
+.. warning::
+
+   Bulk ``GEOHASH`` ingestion treats each integer as a raw bit pattern. It
+   validates that the declared precision is in ``1..=60`` and fits the signed
+   integer carrier, but it does **not** verify that an individual value fits
+   that precision. For example, a value of ``32`` needs six bits; declaring
+   it as ``GEOHASH(5b)`` is accepted.
+
+   If the declared precision is wrong for the encoded data, the write can
+   succeed and QuestDB can store a different GEOHASH location or ``NULL``.
+   Only the low ``ceil(precision / 8)`` bytes are encoded, and the exact result
+   of an inconsistent value is unspecified. This is a semantic data-integrity
+   risk, not a memory-safety risk for otherwise valid NumPy/Arrow buffers.
+   Validate bulk values before sending them, or use
+   :class:`Geohash <questdb.Geohash>` on the row path for strict per-value
+   validation. Malformed custom Arrow C Data structures remain invalid input.
 
 Reading a query result back and writing it out again keeps all of these
 types. A pandas dtype holds an Arrow type and no field, so the claim

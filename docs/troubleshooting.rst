@@ -117,21 +117,28 @@ later, the first production QWP implementation. If a value of one of them is rej
 ``tcps``) have no such column types and reject the values rather than
 silently widening them.
 
-**GEOHASH precision**: a column's precision is fixed when the column is
-created, and every value written to it has to be at that precision.
-:meth:`Sender.row <questdb.Sender.row>` checks that within one buffer's
-worth of rows: the first :class:`Geohash <questdb.Geohash>` cell written
-to a column pins the precision for the rest of that batch, a later cell
-that disagrees is rejected, and the buffer is rewound to what it held
-before that row. A flush clears the pin, so ``row()`` knows nothing about
-the precision the server's column already has — writing a batch at the
-wrong one comes back as a server error at flush time. On the DataFrame path,
-the precision and integer carrier width are checked but individual values are
-not. Only the low bytes required by the wire width are encoded; inconsistent
-bits may be truncated locally or reinterpreted by the server, potentially
-producing a different location or a null. Validate bulk values before sending
-when this distinction matters; use the strict :class:`Geohash
-<questdb.Geohash>` wrapper on the row path for per-value validation.
+**GEOHASH precision**: the scalar and bulk paths deliberately have different
+value contracts.
+
+* :class:`Geohash <questdb.Geohash>` is strict: it requires
+  ``1 <= precision <= 60`` and ``0 <= bits < 2**precision``.
+  :meth:`Sender.row <questdb.Sender.row>` also pins the first GEOHASH
+  precision used for a column within one buffer's worth of rows. A later cell
+  at a different precision is rejected and that row is rewound. A flush clears
+  the client-side pin; it does not prove that the precision agrees with an
+  existing server column.
+* Bulk NumPy/Arrow ingestion validates the declared precision and carrier
+  width, but treats every value as a raw bit pattern. It does not check that
+  the pattern has no bits set above the declared precision. Thus ``32`` under
+  ``GEOHASH(5b)`` is accepted even though it needs six bits. If the declared
+  precision is wrong for the data, the write can succeed and store a different
+  GEOHASH location or ``NULL``. Only the low ``ceil(precision / 8)`` bytes are
+  encoded, and the exact result of an inconsistent value is unspecified.
+
+This unchecked bulk-value rule is a semantic data-integrity risk, not a
+memory-safety risk for otherwise valid NumPy/Arrow buffers. Validate bulk
+values before sending them. Malformed custom Arrow C Data structures remain
+invalid input and are outside this guarantee.
 
 **Fixed widths**: a ``'uuid'`` claim needs every non-null cell to be
 exactly 16 bytes and a ``'long256'`` claim exactly 32. An object column of

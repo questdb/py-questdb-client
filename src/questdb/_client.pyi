@@ -412,6 +412,10 @@ class Geohash:
     """A QuestDB GEOHASH value represented by bits and precision.
 
     ``bits`` is the value and ``precision`` its width in bits, 1 to 60.
+    This scalar wrapper requires ``0 <= bits < 2**precision``. Bulk
+    NumPy/Arrow GEOHASH columns deliberately do not perform that
+    per-value check; see :meth:`QuestDB.dataframe`.
+
     Precision is pinned per column within one buffer's worth of rows: a
     later cell disagreeing with the first is rejected by ``row()``
     itself, and the buffer is rewound to what it held before that row.
@@ -515,7 +519,9 @@ class SenderTransaction:
 #: What ``schema_overrides`` accepts: a kind on its own, or a kind and its
 #: argument. Only ``'geohash'`` takes one, the precision in bits -- any
 #: whole number that is not a ``bool``, so a ``numpy.int64`` read out of
-#: an array works as a plain ``int`` does.
+#: an array works as a plain ``int`` does. The precision is validated but
+#: bulk values are not checked against it: a wrong precision can be accepted
+#: and store a different GEOHASH location or ``NULL``.
 SchemaOverrides = Dict[str, Union[str, Tuple[str, SupportsIndex]]]
 
 
@@ -1351,6 +1357,16 @@ class QuestDB:
         committed prefix from this call remains, and retrying the whole
         DataFrame can duplicate it unless the destination table uses suitable
         ``DEDUP UPSERT KEYS``.
+
+        Bulk GEOHASH columns treat each integer as a raw bit pattern. The
+        declared precision must be in ``1..=60`` and fit the signed carrier,
+        but values are not checked against it. For example, ``32`` under
+        ``GEOHASH(5b)`` is accepted. A wrong precision can therefore let the
+        write succeed while storing a different GEOHASH location or ``NULL``;
+        the exact result is unspecified. This is a semantic data-integrity
+        risk, not a memory-safety risk for otherwise valid NumPy/Arrow buffers.
+        Validate bulk values before sending them. Malformed custom Arrow C
+        Data structures remain invalid input.
 
         ``at`` names the designated timestamp column (by name or index),
         or a fixed ``TimestampNanos`` / ``datetime`` shared by every row,

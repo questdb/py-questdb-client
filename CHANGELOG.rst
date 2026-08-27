@@ -350,10 +350,14 @@ Fixed
 - **Bulk GEOHASH values retain the permissive narrowing contract.** The
   client validates the declared precision and the integer carrier width, but
   does not scan individual NumPy or Arrow values against that precision.
-  Only the low bytes required by the wire width are encoded; inconsistent
-  bits may be truncated locally or reinterpreted by the server, potentially
-  producing a different location or a null. The scalar
-  :class:`Geohash <questdb.Geohash>` wrapper remains strict.
+  A wrong precision can therefore be accepted and store a different GEOHASH
+  location or ``NULL``: for example, ``32`` is accepted under
+  ``GEOHASH(5b)`` even though it needs six bits. Only the low
+  ``ceil(precision / 8)`` bytes are encoded, and the exact result is
+  unspecified. This is a semantic data-integrity risk, not a memory-safety
+  risk for otherwise valid NumPy/Arrow buffers. The scalar
+  :class:`Geohash <questdb.Geohash>` wrapper remains strict, and malformed
+  custom Arrow C Data structures remain invalid input.
 
   Byte-aligned GEOHASH precisions now carry an explicit validity bitmap even
   when every row is present. This keeps the maximum legitimate value
