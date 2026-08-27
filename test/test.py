@@ -5590,7 +5590,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         reached = set()
         gated_names = set()
         for file_name, base_name in sources:
-            text = (PROJ_ROOT / 'test' / file_name).read_text()
+            text = (PROJ_ROOT / 'test' / file_name).read_text(
+                encoding='utf-8')
             lines = text.splitlines(keepends=True)
             classes = [
                 node for node in ast.walk(ast.parse(text))
