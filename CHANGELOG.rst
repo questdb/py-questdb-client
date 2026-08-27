@@ -221,6 +221,10 @@ New
 Fixed
 ~~~~~
 
+- Malformed sliced Arrow streams now raise
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ArrowIngest`` instead of aborting the Python process.
+
 - **NumPy and pandas integers now work everywhere a Python ``int`` does in the
   round-trip vocabulary.** One rule covers every number this client reads out
   of a ``df.attrs['questdb']`` claim, a ``schema_overrides`` entry, or one of

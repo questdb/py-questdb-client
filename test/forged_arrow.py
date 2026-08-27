@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """A hand-rolled Arrow producer and the malformed shapes built on it.
 
-The producer lives here rather than in ``test/test.py`` because the
-malformed shapes have to run somewhere the interpreter is allowed to
-die. Each shape in ``FORGED_CASES`` is a count, length or offset that a
-pre-scan taking the producer at its word reads an array past the end
-of; several of them end the process on a signal when it does. So the
-test that covers them runs this module as a child and reads the return
-code. That child needs the producer and nothing else the suite imports,
-which is why this file stops at ctypes, struct and the client.
+The producer lives here rather than in ``test/test.py`` so every malformed
+shape can run in an isolated interpreter. Each shape in ``FORGED_CASES`` is
+a count, length or offset that native Arrow validation must reject before
+arrow-rs imports the stream. The parent test reads the child return code to
+guard against regressions that abort the interpreter. That child needs the
+producer and nothing else the suite imports, which is why this file stops at
+ctypes, struct and the client.
 
 Run as a script it builds one named case, sends it at the port it is
-given, requires the pre-flight refusal, and prints ``MARKER``::
+given, requires a native ``ArrowIngest`` refusal, and prints ``MARKER``::
 
     QUESTDB_FORGED_ARROW_CASE=null_batch_child
     QUESTDB_FORGED_ARROW_PORT=9009 python3 forged_arrow.py
@@ -296,7 +295,7 @@ _RawArrowStream.Stream._fields_ = _RawArrowStream._STREAM_FIELDS
 #: parent requires it, so an early `sys.exit(0)` cannot pass for one.
 MARKER = 'FORGED-ARROW-REFUSED-OK'
 
-#: Case name -> (builder, the fragment its refusal has to carry).
+#: Case name -> builder for one malformed Arrow stream.
 FORGED_CASES = {}
 
 _STAMP = struct.pack('<q', 1735689600000000)
@@ -304,12 +303,11 @@ _GEOHASH_CLAIM = {b'questdb.column_type': b'geohash',
                   b'questdb.geohash_bits': b'5'}
 
 
-def _case(name, fragment):
-    """Register a forged shape under `name`, refused in words carrying
-    `fragment`."""
+def _case(name):
+    """Register a forged shape under `name`."""
     def register(build):
         assert name not in FORGED_CASES, name
-        FORGED_CASES[name] = (build, fragment)
+        FORGED_CASES[name] = build
         return build
     return register
 
@@ -336,7 +334,7 @@ def columns(rows, geohash=True, **column):
 # none of these shapes needs a GEOHASH column to be turned away, and two
 # of them carry no rows at all.
 
-@_case('schema_count_absurd', 'is not a column count this client reads')
+@_case('schema_count_absurd')
 def _schema_count_absurd():
     """A count both structs agree on, far past any array either of them
     allocated. Agreement is what a plain equality check cannot see
@@ -346,33 +344,33 @@ def _schema_count_absurd():
         schema_n_children=1 << 40, batch_n_children=1 << 40)
 
 
-@_case('schema_count_cap_plus_one', 'is not a column count this client reads')
+@_case('schema_count_cap_plus_one')
 def _schema_count_cap_plus_one():
     return _RawArrowStream(
         columns(1, geohash=False), 1,
         schema_n_children=4096, batch_n_children=4096)
 
 
-@_case('schema_count_negative', 'is not a column count this client reads')
+@_case('schema_count_negative')
 def _schema_count_negative():
     return _RawArrowStream(
         columns(1, geohash=False), 1,
         schema_n_children=-1, batch_n_children=-1)
 
 
-@_case('batch_count_negative', 'the batch carries -1 columns')
+@_case('batch_count_negative')
 def _batch_count_negative():
     return _RawArrowStream(
         columns(1, geohash=False), 1, batch_n_children=-1)
 
 
-@_case('count_disagreement', 'the batch carries 3 columns')
+@_case('count_disagreement')
 def _count_disagreement():
     return _RawArrowStream(
         columns(1, geohash=False), 1, batch_n_children=3)
 
 
-@_case('zero_column_schema_disagreement', "against the schema's 0")
+@_case('zero_column_schema_disagreement')
 def _zero_column_schema_disagreement():
     """A zero-column schema is a shape the scan has nothing to do with,
     and the batch's own count still has to agree with it."""
@@ -380,37 +378,37 @@ def _zero_column_schema_disagreement():
         columns(1, geohash=False), 1, schema_n_children=0)
 
 
-@_case('zero_row_count_disagreement', 'the batch carries 3 columns')
+@_case('zero_row_count_disagreement')
 def _zero_row_count_disagreement():
     return _RawArrowStream(
         columns(1, geohash=False), 0, batch_n_children=3)
 
 
-@_case('null_schema_children', 'without the array holding them')
+@_case('null_schema_children')
 def _null_schema_children():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_schema_children=True)
 
 
-@_case('null_batch_children', 'without the array holding them')
+@_case('null_batch_children')
 def _null_batch_children():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_batch_children=True)
 
 
-@_case('null_schema_child', 'column 0 of the batch arrived as a null pointer')
+@_case('null_schema_child')
 def _null_schema_child():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_schema_child=0)
 
 
-@_case('null_batch_child', 'column 1 of the batch arrived as a null pointer')
+@_case('null_batch_child')
 def _null_batch_child():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_batch_child=1)
 
 
-@_case('null_batch_children_zero_rows', 'without the array holding them')
+@_case('null_batch_children_zero_rows')
 def _null_batch_children_zero_rows():
     """A batch with no rows still has its struct read, so an empty one
     cannot carry a malformed shape past the checks."""
@@ -418,8 +416,7 @@ def _null_batch_children_zero_rows():
         columns(1, geohash=False), 0, null_batch_children=True)
 
 
-@_case('null_schema_child_zero_rows',
-       'column 0 of the batch arrived as a null pointer')
+@_case('null_schema_child_zero_rows')
 def _null_schema_child_zero_rows():
     return _RawArrowStream(
         columns(1, geohash=False), 0, null_schema_child=0)
@@ -430,7 +427,7 @@ def _null_schema_child_zero_rows():
 # Read only once a GEOHASH is claimed, so that a malformed stream
 # carrying none of them keeps the importer's own words.
 
-@_case('batch_length_overflow', 'the batch reports')
+@_case('batch_length_overflow')
 def _batch_length_overflow():
     """The review's own reproduction: `batch.offset + batch.length`
     leaves `int64_t` and lands as a large negative, which an unbounded
@@ -438,42 +435,42 @@ def _batch_length_overflow():
     return _RawArrowStream(columns(1, length=1), (1 << 63) - 1, 1)
 
 
-@_case('batch_length_cap_plus_one', 'the batch reports 16777217 rows')
+@_case('batch_length_cap_plus_one')
 def _batch_length_cap_plus_one():
     return _RawArrowStream(columns(1, length=1), 16777217, 0)
 
 
-@_case('batch_offset_cap_plus_one', 'the batch starts at row 16777217')
+@_case('batch_offset_cap_plus_one')
 def _batch_offset_cap_plus_one():
     return _RawArrowStream(columns(1, length=1), 1, 16777217)
 
 
-@_case('batch_offset_negative', 'the batch starts at row -1')
+@_case('batch_offset_negative')
 def _batch_offset_negative():
     return _RawArrowStream(columns(1, length=1), 1, -1)
 
 
-@_case('column_length_cap_plus_one', 'the column reports 16777217 rows')
+@_case('column_length_cap_plus_one')
 def _column_length_cap_plus_one():
     return _RawArrowStream(columns(1, length=16777217), 1, 0)
 
 
-@_case('column_length_negative', 'the column reports -1 rows')
+@_case('column_length_negative')
 def _column_length_negative():
     return _RawArrowStream(columns(1, length=-1), 1, 0)
 
 
-@_case('column_offset_cap_plus_one', 'from row 16777217')
+@_case('column_offset_cap_plus_one')
 def _column_offset_cap_plus_one():
     return _RawArrowStream(columns(1, length=1, offset=16777217), 1, 0)
 
 
-@_case('column_offset_negative', 'without readable value buffers')
+@_case('column_offset_negative')
 def _column_offset_negative():
     return _RawArrowStream(columns(1, length=1, offset=-1), 1, 0)
 
 
-@_case('slice_past_column', 'the column holds 2 rows and the batch asks')
+@_case('slice_past_column')
 def _slice_past_column():
     """One row past the column: `batch.offset + batch.length` comes to
     `col.length + 1`. Its twin, one row shorter, is sent for real by
@@ -489,9 +486,8 @@ def accepted_slice():
 
 
 def run_case(name, port):
-    """Build the named shape, send it, and require the pre-flight
-    refusal. Raises rather than returning anything on disagreement."""
-    build, fragment = FORGED_CASES[name]
+    """Build the named shape and require a native Arrow refusal."""
+    build = FORGED_CASES[name]
     stream = build()
     conf = (f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
             f'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
@@ -500,14 +496,10 @@ def run_case(name, port):
         try:
             client.dataframe(stream, table_name='forged', at='ts')
         except qi.QuestDBError as exc:
-            if exc.code is not qi.QuestDBErrorCode.BadDataFrame:
+            if exc.code is not qi.QuestDBErrorCode.ArrowIngest:
                 raise AssertionError(
                     f'{name}: refused as {exc.code!r}, expected '
-                    f'BadDataFrame: {exc}') from None
-            if fragment not in str(exc):
-                raise AssertionError(
-                    f'{name}: refused as {exc!s}, which does not carry '
-                    f'{fragment!r}') from None
+                    f'ArrowIngest: {exc}') from None
         else:
             raise AssertionError(f'{name}: the forged stream was accepted')
     finally:

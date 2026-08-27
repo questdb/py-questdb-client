@@ -36,7 +36,11 @@ from test_tools import (
     _float_binary_bytes,
     _array_binary_bytes,
     TimestampEncodingMixin)
-from forged_arrow import _RawArrowStream
+from forged_arrow import (
+    FORGED_CASES,
+    MARKER as FORGED_ARROW_MARKER,
+    _RawArrowStream,
+    accepted_slice)
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
@@ -2411,6 +2415,65 @@ _needs_capsule_builder = unittest.skipUnless(
 
 class TestQwpOnlyRowTypes(unittest.TestCase):
     UUID_VALUE = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+
+    @_needs_capsule_builder
+    def test_every_forged_arrow_shape_is_refused_without_reaching_the_wire(self):
+        script = pathlib.Path(__file__).with_name('forged_arrow.py')
+        for name in FORGED_CASES:
+            with self.subTest(case=name), QwpAckServer(
+                    record_payloads=True) as server:
+                env = os.environ.copy()
+                env['QUESTDB_FORGED_ARROW_CASE'] = name
+                env['QUESTDB_FORGED_ARROW_PORT'] = str(server.port)
+                try:
+                    child = subprocess.run(
+                        [sys.executable, str(script)],
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=10)
+                except subprocess.TimeoutExpired as exc:
+                    self.fail(
+                        f'{name}: forged-Arrow child timed out after '
+                        f'{exc.timeout} seconds')
+                if child.returncode < 0:
+                    self.fail(
+                        f'{name}: forged-Arrow child died from signal '
+                        f'{-child.returncode}; stderr:\n{child.stderr}')
+                if child.returncode != 0:
+                    self.fail(
+                        f'{name}: forged-Arrow child exited '
+                        f'{child.returncode}; stdout:\n{child.stdout}'
+                        f'stderr:\n{child.stderr}')
+                if FORGED_ARROW_MARKER not in child.stdout:
+                    self.fail(
+                        f'{name}: forged-Arrow child did not print the '
+                        f'success marker; stdout:\n{child.stdout}'
+                        f'stderr:\n{child.stderr}')
+                frames = server.wait_binary_frames_settled()
+                stats = server.snapshot()
+                self.assertEqual(
+                    frames, 0,
+                    f'{name}: malformed Arrow produced a binary frame')
+                self.assertEqual(
+                    stats['binary_payloads'], [],
+                    f'{name}: malformed Arrow payload reached the wire')
+                self.assertEqual(stats['binary_bytes'], 0)
+
+    @_needs_capsule_builder
+    def test_a_batch_ending_exactly_at_the_column_end_is_accepted(self):
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                client.dataframe(
+                    accepted_slice(), table_name='accepted_slice', at='ts')
+            self.assertGreaterEqual(server.wait_binary_frames_settled(), 1)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(len(stats['binary_payloads']), 1)
 
     def test_wrappers_exported(self):
         import questdb
