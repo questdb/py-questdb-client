@@ -318,8 +318,9 @@ def columns(rows, geohash=True, **column):
 
     Anything in `column` -- a forged `length` or `offset` -- is put on
     both, which keeps the timestamp column's own numbers honest against
-    the same slice. Only the integer column carries a GEOHASH claim, and
-    only a claimed column reaches the row-shape checks at all.
+    the same slice. The integer column keeps a GEOHASH claim so these
+    streams also follow the production path that originally exposed the
+    bug; native structural validation itself applies to every column.
     """
     return [
         dict(format=b'i', name=b'gh',
@@ -330,9 +331,8 @@ def columns(rows, geohash=True, **column):
 
 # -- counts and child pointers -----------------------------------------
 #
-# Read before the claim is looked for and before the zero-row return, so
-# none of these shapes needs a GEOHASH column to be turned away, and two
-# of them carry no rows at all.
+# Native validation reads these before Arrow import, independently of field
+# metadata and row count. Two of the cases therefore carry no rows at all.
 
 @_case('schema_count_absurd')
 def _schema_count_absurd():
@@ -424,8 +424,9 @@ def _null_schema_child_zero_rows():
 
 # -- row shapes --------------------------------------------------------
 #
-# Read only once a GEOHASH is claimed, so that a malformed stream
-# carrying none of them keeps the importer's own words.
+# These exercise native length and offset validation. The GEOHASH metadata
+# preserves the production route that first exposed the malformed slices;
+# it does not gate the structural checks.
 
 @_case('batch_length_overflow')
 def _batch_length_overflow():
