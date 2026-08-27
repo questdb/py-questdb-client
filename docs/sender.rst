@@ -351,6 +351,14 @@ where it is not:
 .. literalinclude:: ../examples/qwp_column_types_dataframe.py
    :language: python
 
+Bulk ``GEOHASH`` ingestion treats the integer column as an unchecked encoded
+value carrier. The precision and the carrier width are validated, but each
+value is not checked against the precision. Only the low bytes required by the
+wire width are encoded; inconsistent bits may be truncated locally or
+reinterpreted by the server, potentially producing a different location or a
+null. Use :class:`Geohash <questdb.Geohash>` on the row path when strict
+per-value validation is required.
+
 Reading a query result back and writing it out again keeps all of these
 types. A pandas dtype holds an Arrow type and no field, so the claim
 travels in ``df.attrs['questdb']``, which

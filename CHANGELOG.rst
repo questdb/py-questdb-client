@@ -347,12 +347,17 @@ Fixed
   buffer a transaction requires, and the rollback that ends such a block
   then discarded it.
 
-- **A dataframe refused part-way through says what it already stored.** The
-  GEOHASH range check runs batch by batch, and a large enough frame commits
-  a checkpoint every hundred batches, so a value refused after one has rows
-  already in the table. The error now says so and carries ``in_doubt``,
-  rather than reading like a frame that never left and inviting a retry that
-  duplicates the prefix.
+- **Bulk GEOHASH values retain the permissive narrowing contract.** The
+  client validates the declared precision and the integer carrier width, but
+  does not scan individual NumPy or Arrow values against that precision.
+  Only the low bytes required by the wire width are encoded; inconsistent
+  bits may be truncated locally or reinterpreted by the server, potentially
+  producing a different location or a null. The scalar
+  :class:`Geohash <questdb.Geohash>` wrapper remains strict.
+
+  Byte-aligned GEOHASH precisions now carry an explicit validity bitmap even
+  when every row is present. This keeps the maximum legitimate value
+  distinct from the all-ones null sentinel without adding a value scan.
 
 - **A claim the column can never carry is reported the same way by both
   DataFrame planners**, for all five kinds rather than only for GEOHASH. A
@@ -366,46 +371,6 @@ Fixed
   changed mid-stream also left the frame's ``df.attrs['questdb']``
   disagreeing with its own values.
 
-- **A GEOHASH value too wide for its precision is now refused.** A GEOHASH
-  column keeps only the low bits it was given, so a wider value used to
-  reach the database as a valid geohash for somewhere else entirely, with
-  nothing said. It is the one type whose range is narrower than the integer
-  carrying it.
-
-  The bound lives in the encoder, at the truncation, so it holds for every
-  claim, every input shape and every client that reaches it. In front of it
-  this client also scans each batch before encoding it, which is worth
-  having for what the encoder cannot do: it names the row *you* passed
-  rather than its position in a batch you never chose. Refused on the
-  frame's first batch, no batch payload has been sent. Refused later but
-  before a checkpoint, earlier batches are on the wire and none of them is
-  committed, so the corrected frame is still safe to pass again whole.
-  Refused after a checkpoint, those rows are stored: the error says which
-  and carries ``in_doubt``. On the NumPy planner's path the same scan runs
-  before a connection is opened, the whole frame being in hand there rather
-  than arriving batch by batch.
-
-  A claimed column the pre-flight scan cannot read — a metadata blob longer
-  than its bounded walk — is passed on to the encoder rather than refused.
-  A malformed batch is still turned away here, because a batch that
-  disagrees with its own schema is a mistake rather than something the scan
-  merely could not see. A fault in one column names that column; a fault in
-  the batch's own structure — a column count the schema and the batch
-  disagree on, or one past what a record batch can hold, or a null entry in
-  the column array — names the batch, there being no column to name. What
-  stays with the producer is the one thing no consumer can check: counts,
-  lengths and offsets all inside those bounds over buffers smaller than they
-  claim. The Arrow C data interface carries no byte length for a buffer, so
-  nothing on this side can tell that apart from an honest frame.
-
-  A ``df.attrs['questdb']`` geohash claim is also held to the width of the
-  column carrying it: at most 7 bits on ``int8``, 15 on ``int16``, 31 on
-  ``int32``, 60 on ``int64``. Each stops one bit short of its width because
-  a precision fills its bits and the column is signed — an 8-bit geohash
-  spans 0..255, which ``int8`` cannot express — so a claim needing that last
-  bit belongs on the next width up. A wider claim is dropped like any other
-  claim that no longer fits, and both planners now answer the same frame the
-  same way, unsigned columns included.
 
 - **A claim the column's type can never carry now warns.** The write still
   goes ahead as the column's own type implies — a frame retyped since you

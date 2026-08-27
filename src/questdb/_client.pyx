@@ -3615,170 +3615,6 @@ cdef void_int _dataframe_columnar_validate_plan(
             failures)
 
 
-cdef inline bint _geohash_slot_out_of_range(
-        const void* data,
-        size_t row,
-        size_t elem_size,
-        bint is_signed,
-        int64_t max_value) noexcept nogil:
-    cdef int64_t value
-    if is_signed:
-        if elem_size == 8:
-            value = (<const int64_t*>data)[row]
-        elif elem_size == 4:
-            value = (<const int32_t*>data)[row]
-        elif elem_size == 2:
-            value = (<const int16_t*>data)[row]
-        else:
-            value = (<const int8_t*>data)[row]
-        return value < 0 or value > max_value
-    if elem_size == 8:
-        return (<const uint64_t*>data)[row] > <uint64_t>max_value
-    if elem_size == 4:
-        value = (<const uint32_t*>data)[row]
-    elif elem_size == 2:
-        value = (<const uint16_t*>data)[row]
-    else:
-        value = (<const uint8_t*>data)[row]
-    return value > max_value
-
-
-cdef bint _dataframe_columnar_geohash_scan(
-        const void* data,
-        const uint8_t* validity,
-        size_t elem_size,
-        bint is_signed,
-        size_t row_count,
-        int64_t max_value,
-        size_t offset,
-        size_t* bad_row) noexcept nogil:
-    """The first row holding a value the claimed precision cannot hold,
-    if there is one. A null slot carries no value and is skipped.
-
-    `offset` is the Arrow array's own start row, which a sliced batch
-    carries instead of rebasing its buffers. It shifts both the value
-    slot and the validity bit, so a bitmap that does not start on a
-    byte boundary is read correctly. `bad_row` is reported relative to
-    the array, not to the buffer, so it is the row the caller named.
-    """
-    cdef size_t row
-    cdef size_t slot
-    for row in range(row_count):
-        slot = offset + row
-        if (validity != NULL
-                and not ((validity[slot >> 3] >> (slot & 7)) & 1)):
-            continue
-        if _geohash_slot_out_of_range(
-                data, slot, elem_size, is_signed, max_value):
-            bad_row[0] = row
-            return True
-    return False
-
-
-cdef void_int _dataframe_columnar_check_geohash_ranges(
-        object df,
-        dataframe_plan_t* plan) except -1:
-    """Refuse a claimed GEOHASH value that its precision cannot hold.
-
-    A GEOHASH column keeps the claimed number of low bits, and the high
-    bits are the coarse position, so a wider value reaches the database
-    as a valid geohash for somewhere else entirely — the one claimed
-    type whose range is narrower than the integer carrying it, and so
-    the one that can be silently rewritten this way. IPV4 and CHAR fit
-    their storage width exactly and need no scan.
-
-    Object columns are checked value by value as they are built. The
-    columns that reach the wire as raw buffers are checked here, once
-    for the whole frame and before a connection is opened, so the
-    refusal arrives with the rest of the shape errors rather than
-    mid-flush.
-
-    The encoder holds the same rule at the truncation itself, so this
-    scan is the early layer rather than the only one. What it adds is
-    the earlier, cheaper refusal: no connection opened, nothing sent,
-    and the row named is the caller's own.
-    """
-    cdef size_t col_index
-    cdef col_t* col
-    cdef ArrowArray* arr
-    cdef const void* data
-    cdef const uint8_t* validity
-    cdef size_t elem_size
-    cdef bint is_signed
-    cdef int64_t max_value
-    cdef size_t bad_row = 0
-    cdef bint bad = False
-    if plan.row_count == 0:
-        return 0
-    for col_index in range(plan.col_count):
-        col = &plan.cols.d[col_index]
-        if not col.setup.has_override:
-            continue
-        if col.setup.override_dtype not in (
-                qwp_numpy_dtype.qwp_numpy_geohash_i8,
-                qwp_numpy_dtype.qwp_numpy_geohash_i16,
-                qwp_numpy_dtype.qwp_numpy_geohash_i32,
-                qwp_numpy_dtype.qwp_numpy_geohash_i64):
-            continue
-        # `_dataframe_columnar_build_int_pyobj` already walks an object
-        # column value by value and checks each one as it goes.
-        if col.setup.source == col_source_t.col_source_int_pyobj:
-            continue
-        if col.setup.source in (
-                col_source_t.col_source_i8_numpy,
-                col_source_t.col_source_u8_numpy):
-            elem_size = 1
-        elif col.setup.source in (
-                col_source_t.col_source_i16_numpy,
-                col_source_t.col_source_u16_numpy):
-            elem_size = 2
-        elif col.setup.source in (
-                col_source_t.col_source_i32_numpy,
-                col_source_t.col_source_u32_numpy):
-            elem_size = 4
-        elif col.setup.source in (
-                col_source_t.col_source_i64_numpy,
-                col_source_t.col_source_u64_numpy,
-                col_source_t.col_source_i64_arrow):
-            elem_size = 8
-        else:
-            raise RuntimeError(
-                'Unsupported columnar GEOHASH source: %d.'
-                % <int>col.setup.source)
-        is_signed = col.setup.source in (
-            col_source_t.col_source_i8_numpy,
-            col_source_t.col_source_i16_numpy,
-            col_source_t.col_source_i32_numpy,
-            col_source_t.col_source_i64_numpy,
-            col_source_t.col_source_i64_arrow)
-        max_value = (<int64_t>1 << col.setup.override_geohash_bits) - 1
-        arr = &col.setup.chunks.chunks[0]
-        data = arr.buffers[1]
-        validity = NULL
-        if arr.null_count != 0:
-            validity = <const uint8_t*>arr.buffers[0]
-        with nogil:
-            bad = _dataframe_columnar_geohash_scan(
-                data,
-                validity,
-                elem_size,
-                is_signed,
-                plan.row_count,
-                max_value,
-                # `_dataframe_columnar_validate_plan` has already held
-                # every column to a zero-offset chunk.
-                0,
-                &bad_row)
-        if bad:
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad column {df.columns[col.setup.orig_index]!r} at row '
-                f'{bad_row}: '
-                f'GEOHASH({col.setup.override_geohash_bits}b) values must '
-                f'be in the range 0 .. {max_value}.')
-    return 0
-
-
 cdef object _dataframe_columnar_ndarray_col_to_arrow(object df, col_t* col):
     cdef object series = df.iloc[:, col.setup.orig_index]
     cdef object cell
@@ -4016,19 +3852,10 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
             elem_size = 2
             narrow_max = 0xFFFF
             narrow_type = 'CHAR'
-        elif col.setup.override_dtype in (
-                qwp_numpy_dtype.qwp_numpy_geohash_i8,
-                qwp_numpy_dtype.qwp_numpy_geohash_i16,
-                qwp_numpy_dtype.qwp_numpy_geohash_i32,
-                qwp_numpy_dtype.qwp_numpy_geohash_i64):
-            # The slot stays 64 bits wide; the claimed precision is what
-            # bounds the value. A value past it is truncated to the low
-            # bits on the wire, putting the row at a different point on
-            # the planet, so it is refused here with the other claims.
-            narrow_max = (
-                (<int64_t>1 << col.setup.override_geohash_bits) - 1)
-            narrow_type = (
-                f'GEOHASH({col.setup.override_geohash_bits}b)')
+        # GEOHASH deliberately keeps the int64 slot without checking
+        # values against the claimed precision. The native bulk encoder
+        # encodes the low storage bytes; inconsistent bits are therefore
+        # garbage-in/garbage-out rather than a local error.
 
     try:
         values = <uint8_t*>calloc(
@@ -5434,28 +5261,19 @@ cdef int _geohash_override_dtype(col_source_t source) noexcept:
 cdef int _geohash_dtype_max_bits(int gh) noexcept:
     """The widest precision a GEOHASH slot of this width can hold.
 
-    A precision fills its bits, so an 8-bit geohash spans 0..255 --
-    every bit of a byte, and one more than a signed byte can express.
-    The slots are signed and the range check reads them as signed, so
-    each width stops one bit short of its own size and a precision that
-    needs the last bit belongs in the next slot up. Accepting the full
-    width instead promised a range the column could not hold: no value
-    from 128 to 255 could reach an 8-bit claim on `int8`, which is the
-    only way `int8` has of spelling them.
-
-    The 64-bit slot stops at 60 because that is the widest GEOHASH
-    QuestDB has, well inside a signed 64-bit value.
+    Signed carriers preserve their raw two's-complement bits, so their
+    sign bit is available to a byte-aligned GEOHASH. The 64-bit slot
+    stops at 60 because that is the widest GEOHASH QuestDB has.
 
     `_attrs_override_fits` states the same four numbers against Arrow
-    types, and `egress.pxi`'s read-back table picks the slot a
-    precision comes back in by them.
+    types.
     """
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i8:
-        return 7
+        return 8
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i16:
-        return 15
+        return 16
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i32:
-        return 31
+        return 32
     if gh == <int>qwp_numpy_dtype.qwp_numpy_geohash_i64:
         return 60
     return -1
@@ -6357,7 +6175,7 @@ def _bench_dataframe_flush_arrow_batch(
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
                     False, 0, &c_schema, NULL, 0, &any_flushed,
-                    &deferred_since_sync, &committed_prefix, 0)
+                    &deferred_since_sync, &committed_prefix)
             if any_flushed:
                 _dataframe_columnar_sync(conn)
             completed = iterations
@@ -6548,570 +6366,6 @@ cdef void_int _reject_polars_object_columns(object frame) except -1:
     return 0
 
 
-cdef const char* _ARROW_MD_KEY_COLUMN_TYPE = "questdb.column_type"
-cdef size_t _ARROW_MD_KEY_COLUMN_TYPE_LEN = 19
-cdef const char* _ARROW_MD_KEY_GEOHASH_BITS = "questdb.geohash_bits"
-cdef size_t _ARROW_MD_KEY_GEOHASH_BITS_LEN = 20
-cdef const char* _ARROW_MD_VALUE_GEOHASH = "geohash"
-cdef const char* _ARROW_FMT_INT64 = "l"
-# `questdb.geohash_bits` is written as decimal digits.
-cdef char _ASCII_ZERO = 48
-cdef char _ASCII_NINE = 57
-cdef char _ASCII_PLUS = 43
-# The largest value `u8::from_str` yields before it overflows.
-cdef int _U8_MAX = 255
-# How far a metadata walk may go. The Arrow C data interface hands over
-# a bare pointer with no total length, so the blob's own pair count and
-# lengths are the only thing steering the walk, and a producer that
-# gets them wrong steers it off the end of the allocation. These two
-# bounds sit well above any schema a producer writes on purpose, and
-# past either one the lookup stops reading and says so.
-cdef int32_t _ARROW_MD_MAX_PAIRS = 4096
-cdef size_t _ARROW_MD_MAX_BYTES = 1 << 20
-
-# What a metadata lookup answers with. "Stopped short" is its own
-# answer because the native importer reads the same keys with no such
-# bound: a blob this walk gives up on is one the importer still acts
-# on, so "did not find it" would be a claim this side cannot make.
-cdef int _ARROW_MD_MISSING = 0
-cdef int _ARROW_MD_FOUND = 1
-cdef int _ARROW_MD_STOPPED_SHORT = -1
-
-# What `_arrow_column_geohash_bits` answers with besides a precision.
-cdef int _GEOHASH_BITS_NONE = -1
-cdef int _GEOHASH_BITS_UNREADABLE = -2
-
-# What a record batch may declare before this side stops reading it, set
-# where the pinned importer sets the same bounds so that a shape this scan
-# accepts is never one the importer then refuses for being oversized.
-#
-# The importer bounds a schema tree at 4,096 nodes counting its root, so a
-# flat record batch reaches 4,095 columns. Nested children and dictionaries
-# draw on that same budget, which makes this a top-level ceiling rather than
-# a width the importer promises to take. The length bound is the importer's
-# own `MAX_ARROW_ARRAY_LENGTH`, which is the core's `MAX_CHUNK_ROWS`.
-#
-# Both are sanity limits and neither is proof of an allocation. A count is
-# the producer's own word for how long `children[]` is, and a length is its
-# word for how many rows a buffer holds; the Arrow C data interface carries
-# no byte length for either. Holding both to a bound keeps every walk on
-# this side inside what a real frame declares, and a producer that lies
-# inside the bound -- consistently, in schema and batch at once -- is past
-# what any consumer of this interface can see. A source-contract test in
-# `test/test.py` holds these two numbers to the submodule's own.
-cdef enum:
-    _ARROW_MAX_TOP_LEVEL_COLUMNS = 4095
-    _ARROW_MAX_ARRAY_LENGTH = 16 * 1024 * 1024
-
-
-cdef int _arrow_md_lookup(
-        const char* metadata,
-        const char* key,
-        size_t key_len,
-        const char** value_out,
-        int32_t* value_len_out) noexcept nogil:
-    """One value out of an ``ArrowSchema`` metadata blob.
-
-    The blob is the Arrow C data interface's packed form: a pair count,
-    then each key and each value as a length followed by its bytes.
-    None of those lengths is aligned, so each is copied out rather than
-    read through a cast.
-
-    The walk is bounded by ``_ARROW_MD_MAX_PAIRS`` and by a running
-    byte budget, so how far it reads depends on those bounds rather
-    than on numbers the producer wrote. Reaching either bound answers
-    ``_ARROW_MD_STOPPED_SHORT``, which is what the caller turns into a
-    refusal: the key may well be there, and the importer -- which walks
-    the same blob unbounded -- would act on it.
-    """
-    cdef int32_t n_pairs = 0
-    cdef int32_t pair
-    cdef int32_t len_bytes = 0
-    cdef size_t budget = _ARROW_MD_MAX_BYTES
-    cdef const char* pos = metadata
-    # A field with no metadata blob carries no keys: that is the one
-    # "not found" this walk can state without having read anything.
-    if metadata == NULL:
-        return _ARROW_MD_MISSING
-    memcpy(&n_pairs, pos, 4)
-    pos += 4
-    if n_pairs < 0 or n_pairs > _ARROW_MD_MAX_PAIRS:
-        return _ARROW_MD_STOPPED_SHORT
-    for pair in range(n_pairs):
-        if budget < 4:
-            return _ARROW_MD_STOPPED_SHORT
-        budget -= 4
-        memcpy(&len_bytes, pos, 4)
-        pos += 4
-        if len_bytes < 0 or <size_t>len_bytes > budget:
-            return _ARROW_MD_STOPPED_SHORT
-        budget -= <size_t>len_bytes
-        if (<size_t>len_bytes == key_len
-                and strncmp(pos, key, key_len) == 0):
-            pos += len_bytes
-            if budget < 4:
-                return _ARROW_MD_STOPPED_SHORT
-            budget -= 4
-            memcpy(&len_bytes, pos, 4)
-            pos += 4
-            if len_bytes < 0 or <size_t>len_bytes > budget:
-                return _ARROW_MD_STOPPED_SHORT
-            value_out[0] = pos
-            value_len_out[0] = len_bytes
-            return _ARROW_MD_FOUND
-        pos += len_bytes
-        if budget < 4:
-            return _ARROW_MD_STOPPED_SHORT
-        budget -= 4
-        memcpy(&len_bytes, pos, 4)
-        pos += 4
-        if len_bytes < 0 or <size_t>len_bytes > budget:
-            return _ARROW_MD_STOPPED_SHORT
-        budget -= <size_t>len_bytes
-        pos += len_bytes
-    return _ARROW_MD_MISSING
-
-
-cdef int _arrow_md_geohash_bits(
-        const char* value, int32_t value_len) noexcept nogil:
-    """A ``questdb.geohash_bits`` value as an int, or -1 where it is not
-    a number in 1..=60.
-
-    The native importer reads this key with ``u8::from_str``, so every
-    spelling it accepts -- a leading ``+``, any run of leading zeros --
-    names a precision here too, and a column carrying one is held to
-    it. What is left behind a -1 is what the importer refuses with a
-    message of its own, so no value leaves unchecked either way.
-    """
-    cdef int32_t i = 0
-    cdef int out = 0
-    cdef char ch
-    cdef bint any_digit = False
-    if value_len > 0 and value[0] == _ASCII_PLUS:
-        i = 1
-    while i < value_len:
-        ch = value[i]
-        if ch < _ASCII_ZERO or ch > _ASCII_NINE:
-            return -1
-        out = out * 10 + <int>(ch - _ASCII_ZERO)
-        if out > _U8_MAX:
-            return -1
-        any_digit = True
-        i += 1
-    if not any_digit:
-        return -1
-    if out < 1 or out > 60:
-        return -1
-    return out
-
-
-cdef int _arrow_column_geohash_bits(
-        const ArrowSchema* field,
-        const qwp_arrow_override* overrides,
-        size_t overrides_len) noexcept nogil:
-    """The GEOHASH precision this column goes out at,
-    ``_GEOHASH_BITS_NONE`` where it is not a GEOHASH column, or
-    ``_GEOHASH_BITS_UNREADABLE`` where the metadata walk stopped short
-    of an answer.
-
-    An override wins over the field's own metadata, and an override
-    naming some other type takes the column out of GEOHASH altogether
-    -- the precedence ``qwp_arrow_override`` documents. An override is
-    read straight off the caller's own words, so a column carrying one
-    is answered without walking any metadata at all.
-
-    In the field's own metadata it is ``questdb.geohash_bits`` that
-    claims the type, which is the order the native importer reads them
-    in: those bits alone make the column a GEOHASH, whatever else the
-    field carries. A blob too long for the walk therefore leaves the
-    kind unknown, and ``_GEOHASH_BITS_UNREADABLE`` says so: the
-    importer walks the same blob unbounded and would honour the claim.
-
-    ``questdb.column_type`` only rules the column out, and only by
-    naming something other than a ``geohash`` spelling -- a pairing the
-    importer refuses outright, so the column never reaches the wire for
-    an unread one to have let anything through, and a walk that stops
-    short of it leaves the precision standing.
-    """
-    cdef size_t i
-    cdef const char* value = NULL
-    cdef int32_t value_len = 0
-    cdef size_t name_len
-    cdef int bits
-    cdef int found
-    if field.name != NULL:
-        name_len = strlen(field.name)
-        for i in range(overrides_len):
-            if (overrides[i].column == NULL
-                    or overrides[i].column_len != name_len
-                    or strncmp(overrides[i].column, field.name,
-                               name_len) != 0):
-                continue
-            if overrides[i].kind == <uint32_t>qwp_arrow_override_geohash:
-                bits = <int>overrides[i].arg
-                # The same 1..=60 range `_arrow_md_geohash_bits` holds
-                # a metadata claim to. Both callers of this path check
-                # it before they build the override, and checking it
-                # again here is what lets the caller shift by `bits`
-                # without knowing which of them it came from.
-                if bits < 1 or bits > 60:
-                    return _GEOHASH_BITS_NONE
-                return bits
-            return _GEOHASH_BITS_NONE
-    found = _arrow_md_lookup(
-        field.metadata, _ARROW_MD_KEY_GEOHASH_BITS,
-        _ARROW_MD_KEY_GEOHASH_BITS_LEN, &value, &value_len)
-    if found == _ARROW_MD_STOPPED_SHORT:
-        return _GEOHASH_BITS_UNREADABLE
-    if found != _ARROW_MD_FOUND:
-        return _GEOHASH_BITS_NONE
-    bits = _arrow_md_geohash_bits(value, value_len)
-    if bits < 0:
-        return _GEOHASH_BITS_NONE
-    if _arrow_md_lookup(
-            field.metadata, _ARROW_MD_KEY_COLUMN_TYPE,
-            _ARROW_MD_KEY_COLUMN_TYPE_LEN,
-            &value, &value_len) == _ARROW_MD_FOUND:
-        # The importer reads any `geohash`-prefixed spelling as the
-        # kind, so the prefix is what agrees with the bits here too.
-        if value_len < 7 or strncmp(
-                value, _ARROW_MD_VALUE_GEOHASH, 7) != 0:
-            return _GEOHASH_BITS_NONE
-    return bits
-
-
-cdef int _arrow_signed_int_width(const char* fmt) noexcept nogil:
-    """The byte width of a signed Arrow integer format, or 0 for
-    anything else. GEOHASH rides only on the signed widths, so an
-    unsigned or non-integer column is the native importer's to refuse.
-    """
-    if fmt == NULL:
-        return 0
-    # Compared with the terminator, so a one-character format matches
-    # exactly and a wider one that merely starts with it does not.
-    if strncmp(fmt, _ARROW_FMT_INT8, 2) == 0:
-        return 1
-    if strncmp(fmt, _ARROW_FMT_INT16, 2) == 0:
-        return 2
-    if strncmp(fmt, _ARROW_FMT_INT32, 2) == 0:
-        return 4
-    if strncmp(fmt, _ARROW_FMT_INT64, 2) == 0:
-        return 8
-    return 0
-
-
-cdef int _arrow_geohash_width_max_bits(int elem_size) noexcept nogil:
-    """The widest precision an Arrow integer of this byte width can
-    carry, or 0 for a width that carries none.
-
-    A precision fills its bits, so a width carries a precision its own
-    size -- an `int32` carries a 32-bit geohash, whose top values sit in
-    the column as negative numbers. The 64-bit slot stops at 60, the
-    widest GEOHASH QuestDB has.
-
-    `_geohash_dtype_max_bits` and `_attrs_override_fits` state one bit
-    less per width, because the round-trip claim they answer has to
-    survive a read back into a signed column and so cannot use the
-    sign bit.
-    """
-    if elem_size == 1:
-        return 8
-    if elem_size == 2:
-        return 16
-    if elem_size == 4:
-        return 32
-    if elem_size == 8:
-        return 60
-    return 0
-
-
-cdef str _arrow_field_name(const ArrowSchema* field):
-    """A field's name as text, for a message naming the column."""
-    if field == NULL or field.name == NULL:
-        return '?'
-    return field.name.decode('utf-8', 'replace')
-
-
-cdef bint _arrow_schema_claims_geohash(
-        const ArrowSchema* schema,
-        const qwp_arrow_override* overrides,
-        size_t overrides_len) noexcept nogil:
-    """Whether any column of this schema goes out as a GEOHASH.
-
-    Read off the schema alone, which the stream hands over once and
-    keeps for every batch, so a frame that claims no GEOHASH is
-    answered without looking at a single batch.
-
-    A column whose metadata the walk stopped short of is not a GEOHASH
-    as far as this scan is concerned: it cannot read the claim, and the
-    encoder holds the values whether or not this scan looked at them.
-
-    The caller runs the batch's structural checks first, so by here the
-    count is bounded and non-zero, `children` is non-NULL, and every
-    slot in it holds a schema.
-    """
-    cdef int64_t child_index
-    cdef const ArrowSchema* field
-    cdef int bits
-    for child_index in range(schema.n_children):
-        field = schema.children[child_index]
-        bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
-        if bits != _GEOHASH_BITS_NONE and bits != _GEOHASH_BITS_UNREADABLE:
-            return True
-    return False
-
-
-cdef void_int _arrow_batch_check_geohash_ranges(
-        const ArrowArray* batch,
-        const ArrowSchema* schema,
-        const qwp_arrow_override* overrides,
-        size_t overrides_len,
-        size_t row_base) except -1:
-    """Refuse a GEOHASH value the claimed precision cannot hold, early.
-
-    A GEOHASH column keeps only the claimed low bits, and the high bits
-    are the coarse position, so a value that does not fit reaches the
-    database as a valid geohash for somewhere else entirely.
-
-    The bound itself lives in the encoder, where the truncation happens:
-    ``write_geohash_payload`` and its numpy twin hold every non-null
-    value to the precision and refuse the frame. This scan is the layer
-    in front of it, and it is worth having for what it can do that the
-    encoder cannot: it reads each batch before that batch is encoded,
-    and it names the caller's own row rather than a position inside a
-    batch they never chose.
-
-    The connection is open by the time this runs -- a pooled sender is
-    checked out before the stream is read -- so what a refusal saves is
-    the batches it never reaches rather than the connection. Refused on
-    the frame's first batch, no batch payload has been sent. Refused
-    later but before a checkpoint, the batches ahead of it are on the
-    wire and none of them is committed, so the corrected frame is still
-    safe to send whole. Refused after a checkpoint, those rows are stored:
-    the error says which and carries ``in_doubt``. The numpy planner's
-    twin of this scan does run ahead of its own connection, having the
-    whole frame in hand rather than a stream to pull batches from.
-
-    Every batch this path sends passes through here -- pandas, polars,
-    ``pa.Table``, ``pa.RecordBatch`` and one-shot streams alike, sliced
-    or whole. A frame claiming no GEOHASH is answered off the schema,
-    which is fetched once and shared by every batch of a stream, and its
-    values are never touched.
-
-    ``row_base`` is the number of rows of this frame already sent, so
-    the row named is the caller's own rather than its position inside a
-    batch they never chose.
-
-    A claim this scan cannot read is passed on rather than refused: the
-    encoder reads the same values and holds them to the same rule, so
-    "could not check here" is not "nothing will check". What stays
-    refused is a claim wider than the column can carry, which is a
-    mistake in the claim rather than a shape this scan could not see.
-
-    A malformed struct is its own case, and it is answered before the
-    claim is read rather than passed on. Reading a claim at all means
-    indexing ``children[]``, so a batch and schema that disagree on how
-    long that array is, a count past what a record batch can hold, or a
-    slot in it that arrived null, stop the send whether or not a GEOHASH
-    turns out to be claimed and whether or not the batch carries any
-    rows. That is a shape this scan can see, not a claim it could not.
-    Row shapes are the other way round: they are read only once a
-    GEOHASH is claimed, so a malformed non-GEOHASH stream keeps the
-    importer's own words for them.
-    """
-    cdef int64_t child_index
-    cdef const ArrowSchema* field
-    cdef const ArrowArray* col
-    cdef int bits
-    cdef int elem_size
-    cdef int64_t max_value
-    cdef const void* data
-    cdef const uint8_t* validity
-    cdef size_t bad_row = 0
-    cdef bint bad = False
-    cdef int64_t start
-    # The structural refusals here are not "could not check" in the
-    # sense the metadata walk is: a batch that disagrees with its own
-    # schema is malformed, the importer turns the same shapes away in
-    # its own words, and saying so before this batch is encoded is the
-    # better error. They run ahead of everything else in this function
-    # because reading a claim means indexing `children[]` and these are
-    # what bound that index -- the zero-row return included, so that an
-    # empty batch cannot carry a malformed struct past them.
-    #
-    # A count is the producer's own word for how long `children[]` is,
-    # and the Arrow C data interface carries nothing to check it
-    # against, so the two counts are held to each other and to
-    # `_ARROW_MAX_TOP_LEVEL_COLUMNS`. Neither settles a producer that
-    # lies inside the bound in both structs at once; that shape is
-    # beyond what any consumer of this interface can see.
-    if (schema.n_children < 0
-            or schema.n_children > _ARROW_MAX_TOP_LEVEL_COLUMNS):
-        raise QuestDBError(
-            QuestDBErrorCode.BadDataFrame,
-            f'Bad dataframe: the schema declares {schema.n_children} '
-            f'columns, which is not a column count this client reads '
-            f'(at most {_ARROW_MAX_TOP_LEVEL_COLUMNS}).')
-    if batch.n_children != schema.n_children:
-        raise QuestDBError(
-            QuestDBErrorCode.BadDataFrame,
-            f'Bad dataframe: the batch carries {batch.n_children} '
-            f'columns against the schema\'s {schema.n_children}.')
-    if schema.n_children > 0:
-        if schema.children == NULL or batch.children == NULL:
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad dataframe: the batch declares {schema.n_children} '
-                f'columns and arrived without the array holding them.')
-        # Every slot is read once, here, so that the claim walk and the
-        # scan below can each take a child as given.
-        for child_index in range(schema.n_children):
-            if (schema.children[child_index] == NULL
-                    or batch.children[child_index] == NULL):
-                raise QuestDBError(
-                    QuestDBErrorCode.BadDataFrame,
-                    f'Bad dataframe: column {child_index} of the batch '
-                    f'arrived as a null pointer.')
-    if schema.n_children == 0 or batch.length == 0:
-        return 0
-    if not _arrow_schema_claims_geohash(schema, overrides, overrides_len):
-        return 0
-    # An Arrow length is a row count, so it is neither negative nor past
-    # the bound the importer holds one to. It is cast to `size_t` for
-    # the scan below and added to `row_base` after, so a negative one
-    # would wrap to about 2**64 and walk the value buffer far outside
-    # it.
-    if batch.length < 0 or batch.length > _ARROW_MAX_ARRAY_LENGTH:
-        raise QuestDBError(
-            QuestDBErrorCode.BadDataFrame,
-            f'Bad dataframe: a GEOHASH column cannot be checked because '
-            f'the batch reports {batch.length} rows (at most '
-            f'{_ARROW_MAX_ARRAY_LENGTH}).')
-    # A struct-level offset shifts every child: the importer slices each
-    # column by it before reading, so the scan starts there too and the
-    # rows it reads are the rows that go out.
-    if batch.offset < 0 or batch.offset > _ARROW_MAX_ARRAY_LENGTH:
-        raise QuestDBError(
-            QuestDBErrorCode.BadDataFrame,
-            f'Bad dataframe: a GEOHASH column cannot be checked because '
-            f'the batch starts at row {batch.offset} (at most '
-            f'{_ARROW_MAX_ARRAY_LENGTH}).')
-    for child_index in range(schema.n_children):
-        field = schema.children[child_index]
-        col = batch.children[child_index]
-        elem_size = _arrow_signed_int_width(field.format)
-        if elem_size == 0:
-            # A GEOHASH rides only on a signed Int8/16/32/64, and the
-            # importer refuses the kind on anything else, naming the
-            # type it got. Settling that from the format alone keeps a
-            # column that can never carry one out of the metadata walk
-            # below, whose bound is not a property of this column: a
-            # string column with a large blob of its own metadata would
-            # otherwise stop the send over a claim it cannot hold.
-            continue
-        bits = _arrow_column_geohash_bits(field, overrides, overrides_len)
-        if bits in (_GEOHASH_BITS_UNREADABLE, _GEOHASH_BITS_NONE):
-            # A column whose claim this walk cannot read is left to
-            # the encoder, which holds every GEOHASH value to its
-            # precision and names the column and row it turns away.
-            # Stopping the send here instead would turn away a column
-            # that may be entirely in range, over a metadata blob
-            # longer than this walk -- a property of the caller's
-            # metadata rather than of their values.
-            continue
-        if bits > _arrow_geohash_width_max_bits(elem_size):
-            # `schema_overrides` bounds the precision to 1..60 without
-            # seeing the column, so a claim wider than the column can
-            # carry arrives here. Refusing it names the width; letting
-            # it through would refuse every value with the top bit set
-            # and quote a range the column cannot express.
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad column {_arrow_field_name(field)!r}: a '
-                f'GEOHASH({bits}b) claim needs more bits than a '
-                f'{elem_size * 8}-bit column can carry (at most '
-                f'{_arrow_geohash_width_max_bits(elem_size)}).')
-        # `col.offset` is the array's own start row and is cast to
-        # `size_t` for the scan, so a negative one would wrap to about
-        # 2**64 and index the value buffer far outside it.
-        if (col.n_buffers < 2 or col.buffers == NULL
-                or col.offset < 0 or col.buffers[1] == NULL):
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad column {_arrow_field_name(field)!r}: its '
-                f'GEOHASH({bits}b) values cannot be held to the '
-                f'precision because the column arrived without readable '
-                f'value buffers.')
-        # The column's own row count and start row answer to the same
-        # bound as the batch's, so every number the arithmetic below
-        # runs on is a small one.
-        if (col.length < 0 or col.length > _ARROW_MAX_ARRAY_LENGTH
-                or col.offset > _ARROW_MAX_ARRAY_LENGTH):
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad column {_arrow_field_name(field)!r}: its '
-                f'GEOHASH({bits}b) values cannot be held to the '
-                f'precision because the column reports {col.length} '
-                f'rows from row {col.offset} (at most '
-                f'{_ARROW_MAX_ARRAY_LENGTH}).')
-        # An Arrow length is the row count measured from the array's own
-        # start, and a struct-level offset picks the row each column is
-        # read from, so the batch's rows are in range when
-        # `batch.offset + batch.length` fits the column's length. The
-        # relation is written as a subtraction, which states it without
-        # adding two producer-supplied numbers together at all. The
-        # first term is what keeps that subtraction in range.
-        if (batch.length > col.length
-                or batch.offset > col.length - batch.length):
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad column {_arrow_field_name(field)!r}: its '
-                f'GEOHASH({bits}b) values cannot be held to the '
-                f'precision because the column holds {col.length} rows '
-                f'and the batch asks for {batch.length} from row '
-                f'{batch.offset}.')
-        # The scan reads `batch.length` slots from `col.offset +
-        # batch.offset`. Both terms are inside
-        # `_ARROW_MAX_ARRAY_LENGTH`, and the check above has put
-        # `batch.offset + batch.length` inside the column's length, so
-        # the last slot read is inside the column and the sum itself is
-        # nowhere near the end of `int64_t`.
-        start = col.offset + batch.offset
-        data = col.buffers[1]
-        # A column with no validity buffer has no nulls, whatever it
-        # says its null count is -- the count is allowed to be -1,
-        # meaning nobody has counted, and a column that never had a
-        # null has no bitmap to count from. Reading the pair as "has
-        # nulls, cannot see them" left every value in an ordinary
-        # bitmap-free column unread.
-        validity = NULL
-        if col.null_count != 0 and col.buffers[0] != NULL:
-            validity = <const uint8_t*>col.buffers[0]
-        max_value = (<int64_t>1 << bits) - 1
-        # A precision that fills the column's width uses every bit,
-        # including the one that reads as a sign, so its top half sits
-        # there as negative numbers. Reading such a column as signed
-        # refused every one of those values while quoting a range the
-        # column cannot express. A narrower claim leaves the sign bit
-        # clear, so a negative there is genuinely out of range.
-        with nogil:
-            bad = _dataframe_columnar_geohash_scan(
-                data,
-                validity,
-                <size_t>elem_size,
-                bits < elem_size * 8,
-                <size_t>batch.length,
-                max_value,
-                <size_t>start,
-                &bad_row)
-        if bad:
-            raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
-                f'Bad column {_arrow_field_name(field)!r} at row '
-                f'{row_base + bad_row}: '
-                f'GEOHASH({bits}b) values must be in the range '
-                f'0 .. {max_value}.')
-    return 0
 
 
 cdef void_int _capsule_consume_stream(
@@ -7126,8 +6380,7 @@ cdef void_int _capsule_consume_stream(
         size_t c_overrides_len,
         bint* any_flushed,
         size_t* deferred_since_sync,
-        bint* committed_prefix,
-        size_t row_base) except -1:
+        bint* committed_prefix) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
     # call (this function populates it via get_schema), reused as-is on
     # subsequent calls (Arrow C Data Interface guarantees slices of the
@@ -7170,35 +6423,6 @@ cdef void_int _capsule_consume_stream(
         if batch.release == NULL:
             break
         try:
-            # Before the flush: a value the claimed GEOHASH precision
-            # cannot hold is truncated by the encoder without a word,
-            # so it has to be caught while it is still on this side.
-            try:
-                _arrow_batch_check_geohash_ranges(
-                    &batch, c_schema, c_overrides, c_overrides_len,
-                    row_base)
-            except QuestDBError as gh_exc:
-                # The scan runs batch by batch, and a large enough frame
-                # syncs a checkpoint every
-                # `_QWP_MAX_DEFERRED_ARROW_FRAMES` batches. A refusal
-                # past the first checkpoint therefore arrives with rows
-                # already stored, and retrying the whole frame after
-                # correcting it would duplicate them.
-                if committed_prefix[0]:
-                    raise QuestDBError(
-                        gh_exc.code,
-                        f'{gh_exc} Rows from earlier batches of this '
-                        f'dataframe are already stored, so retrying the '
-                        f'whole dataframe would duplicate them; resume '
-                        f'from the named row instead.',
-                        # The scan raises with `in_doubt` false, being
-                        # a local refusal -- but rows really are stored
-                        # by this point, and `in_doubt` is what a caller
-                        # branches on to decide whether replaying is
-                        # safe. Saying otherwise leaves only the message
-                        # text to carry it.
-                        in_doubt=True) from gh_exc
-                raise
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)
                 committed_prefix[0] = True
@@ -7211,7 +6435,6 @@ cdef void_int _capsule_consume_stream(
                 deferred_since_sync)
             any_flushed[0] = True
             deferred_since_sync[0] += 1
-            row_base += <size_t>batch.length
         finally:
             if batch.release != NULL:
                 batch.release(&batch)
@@ -7725,16 +6948,15 @@ cdef bint _attrs_override_fits(
         bits = int(bits)
         if bits < 1 or bits > 60:
             return False
-        # One bit short of each width: the slot is signed and the range
-        # check reads it as signed, so a precision that fills the width
-        # names values the column has no way of spelling. The same four
-        # numbers as `_geohash_dtype_max_bits`.
+        # Signed Arrow carriers preserve their raw two's-complement bits,
+        # including the sign bit. The same four limits are returned by
+        # `_geohash_dtype_max_bits`.
         if types.is_int8(ty):
-            return bits <= 7
+            return bits <= 8
         if types.is_int16(ty):
-            return bits <= 15
+            return bits <= 16
         if types.is_int32(ty):
-            return bits <= 31
+            return bits <= 32
         if types.is_int64(ty):
             return bits <= 60
         return False
@@ -8090,7 +7312,7 @@ cdef bint _dataframe_client_try_capsule_path(
                     at_scalar_set, at_scalar_nanos,
                     &c_schema, c_overrides, c_overrides_len,
                     &any_flushed, &deferred_since_sync,
-                    committed_prefix, max_rows_per_batch, False, 0)
+                    committed_prefix, max_rows_per_batch, False)
             else:
                 offset = 0
                 while offset < total_rows:
@@ -8104,8 +7326,7 @@ cdef bint _dataframe_client_try_capsule_path(
                         at_scalar_set, at_scalar_nanos,
                         &c_schema, c_overrides, c_overrides_len,
                         &any_flushed, &deferred_since_sync,
-                        committed_prefix, max_rows_per_batch, True,
-                        <size_t>offset)
+                        committed_prefix, max_rows_per_batch, True)
                     offset += chunk_rows
             if any_flushed:
                 _dataframe_columnar_sync(conn)
@@ -8169,7 +7390,6 @@ cdef void_int _dataframe_numpy_publish(
         _dataframe_apply_roundtrip_overrides(df, plan)
         _dataframe_columnar_promote_cols(df, plan)
         _dataframe_columnar_validate_plan(df, plan)
-        _dataframe_columnar_check_geohash_ranges(df, plan)
         _dataframe_columnar_prebuild_pyobj(df, plan)
         rows_per_chunk = _dataframe_columnar_rows_per_chunk(
             plan, max_rows_per_batch)
@@ -8372,15 +7592,14 @@ cdef void_int _capsule_consume_stream_with_hint(
         size_t* deferred_since_sync,
         bint* committed_prefix,
         size_t max_rows_per_batch,
-        bint can_slice,
-        size_t row_base) except -1:
+        bint can_slice) except -1:
     cdef str hint
     try:
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr,
             at_scalar_set, at_scalar_nanos, c_schema,
             c_overrides, c_overrides_len, any_flushed,
-            deferred_since_sync, committed_prefix, row_base)
+            deferred_since_sync, committed_prefix)
     except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
             if exc.code == QuestDBErrorCode.BatchTooLarge:
@@ -9063,17 +8282,15 @@ cdef class QuestDB:
         value the type cannot hold — an integer past ``2**32-1`` under
         ``ipv4``, a cell that is not exactly 16 or 32 bytes under
         ``uuid`` or ``long256`` — is refused rather than written into a
-        column of the claimed type. A GEOHASH value wider than the
-        precision it is written at is refused whichever route named the
-        type — ``schema_overrides``, a ``df.attrs['questdb']`` claim, or
-        ``questdb.column_type=geohash`` field metadata — and on every
-        input shape, pandas, polars, ``pa.Table``, ``pa.RecordBatch``
-        and a one-shot ``RecordBatchReader`` alike: a GEOHASH column
-        keeps only the claimed low bits, and the high bits are the
-        coarse position, so a wider value would reach the database as a
-        valid geohash for somewhere else entirely. The values are
-        checked batch by batch on their way out, so none that does not
-        fit reaches the wire.
+        column of the claimed type. Bulk GEOHASH values are deliberately
+        not checked against the claimed precision. Only the low bytes
+        required by the wire width are encoded; inconsistent bits may be
+        truncated locally or reinterpreted by the server, potentially
+        producing a different location or a null. This keeps
+        ingestion memory-safe for valid NumPy/Arrow buffers but makes the
+        caller responsible for the semantic validity of each value. The
+        scalar :class:`Geohash <questdb.Geohash>` constructor remains
+        strict.
 
         A column of nothing but nulls names no type of its own, and
         without a claim it is left out of the write and out of the
