@@ -1,8 +1,8 @@
 name: Enumerated grids
 
-# The two grids that ended the PR #140 review cycle. Deliberately not a
-# pull-request gate: they spawn a subprocess per re-entrancy cell and take
-# minutes, and a gate that slow gets skipped rather than read. They run
+# The three grids that ended the PR #140 review cycle. Deliberately not a
+# pull-request gate: re-entrancy and concurrency spawn a subprocess per cell
+# and take minutes, and a gate that slow gets skipped rather than read. They run
 # nightly, and on demand from the Actions tab when a change touches the
 # guard, claim, or dataframe-planner areas.
 on:
@@ -21,7 +21,7 @@ on:
 
 jobs:
   grids:
-    name: re-entrancy + claim grids
+    name: re-entrancy + concurrency + claim grids
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -41,6 +41,8 @@ jobs:
         run: python3 proj.py build
       - name: Re-entrancy grid
         run: python3 proj.py grid reentrancy
+      - name: Concurrency grid
+        run: python3 proj.py grid concurrency
       - name: Claim grid
         run: python3 proj.py grid claim
       - name: Re-entrancy grid under Guard Malloc
