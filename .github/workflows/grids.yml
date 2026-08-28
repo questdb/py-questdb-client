@@ -3,8 +3,8 @@ name: Enumerated grids
 # The three grids that ended the PR #140 review cycle. Deliberately not a
 # pull-request gate: re-entrancy and concurrency spawn a subprocess per cell
 # and take minutes, and a gate that slow gets skipped rather than read. They run
-# nightly, and on demand from the Actions tab when a change touches the
-# guard, claim, or dataframe-planner areas.
+# nightly and on demand from the Actions tab. Guard Malloc is not part of a
+# scheduled run; it runs only when a manual dispatch sets `guard_malloc`.
 on:
   schedule:
     # 03:20 UTC, off the hour so it does not queue behind everyone else's

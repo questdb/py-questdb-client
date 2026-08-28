@@ -40,8 +40,7 @@ from forged_arrow import (
     FORGED_CASES,
     FORGED_EXPECTATIONS,
     MARKER as FORGED_ARROW_MARKER,
-    _RawArrowStream,
-    accepted_slice)
+    _RawArrowStream)
 
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
@@ -93,6 +92,7 @@ _first_qwp_table_column_types = qwp_wire.first_table_column_types
 
 
 from test_client_capsule_path import (
+    TestArrowFfiProducerLayoutMatrix,
     TestCapsulePathPyArrow,
     TestCapsulePathPolars,
     TestServerTimestampAt,
@@ -2418,7 +2418,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     UUID_VALUE = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
 
     @_needs_capsule_builder
-    def test_every_forged_arrow_shape_is_refused_without_reaching_the_wire(self):
+    def test_every_forged_arrow_shape_has_its_declared_subprocess_outcome(self):
         script = pathlib.Path(__file__).with_name('forged_arrow.py')
         self.assertEqual(
             set(FORGED_CASES), set(FORGED_EXPECTATIONS),
@@ -2454,13 +2454,32 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         f'stderr:\n{child.stderr}')
                 frames = server.wait_binary_frames_settled()
                 stats = server.snapshot()
-                self.assertEqual(
-                    frames, 0,
-                    f'{name}: malformed Arrow produced a binary frame')
-                self.assertEqual(
-                    stats['binary_payloads'], [],
-                    f'{name}: malformed Arrow payload reached the wire')
-                self.assertEqual(stats['binary_bytes'], 0)
+                expected = FORGED_EXPECTATIONS[name]
+                if expected['wire']:
+                    self.assertGreaterEqual(
+                        frames, 1,
+                        f'{name}: accepted Arrow produced no binary frame')
+                    data_frames = [
+                        payload for payload in stats['binary_payloads']
+                        if (payload[:4] == b'QWP1'
+                            and int.from_bytes(payload[6:8], 'little') > 0)]
+                    self.assertGreaterEqual(len(data_frames), 1)
+                    self.assertEqual(
+                        _first_qwp_table_row_count(data_frames[0]),
+                        expected['row_count'])
+                    payload = b''.join(data_frames)
+                    for encoded in expected['wire_contains']:
+                        self.assertIn(
+                            encoded, payload,
+                            f'{name}: representative encoded values missing')
+                else:
+                    self.assertEqual(
+                        frames, 0,
+                        f'{name}: rejected Arrow produced a binary frame')
+                    self.assertEqual(
+                        stats['binary_payloads'], [],
+                        f'{name}: rejected Arrow payload reached the wire')
+                    self.assertEqual(stats['binary_bytes'], 0)
                 self.assertGreaterEqual(stats['accepted_connections'], 1)
                 self.assertEqual(stats['errors'], [])
 
@@ -2487,20 +2506,6 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['accepted_connections'], 1)
-
-    @_needs_capsule_builder
-    def test_a_batch_ending_exactly_at_the_column_end_is_accepted(self):
-        with QwpAckServer(record_payloads=True) as server:
-            conf = (
-                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
-                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
-            with qi.QuestDB.from_conf(conf) as client:
-                client.dataframe(
-                    accepted_slice(), table_name='accepted_slice', at='ts')
-            self.assertGreaterEqual(server.wait_binary_frames_settled(), 1)
-            stats = server.snapshot()
-        self.assertEqual(stats['errors'], [])
-        self.assertGreaterEqual(len(stats['binary_payloads']), 1)
 
     def test_wrappers_exported(self):
         import questdb
@@ -6106,7 +6111,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         Producer(), table_name='t', at='ts',
                         schema_overrides={'g': ('geohash', 5)})
         self.assertIn(
-            'Arrow array length -1 is negative', str(caught.exception))
+            'Arrow array root: length -1 is negative',
+            str(caught.exception))
         # Keep the trampolines alive until the send is over.
         self.assertIsNotNone(callbacks)
         self.assertIsNotNone(inner_capsule)
@@ -7157,8 +7163,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_big_metadata_on_a_non_geohash_column_does_not_stop_the_send(self):
-        """Large metadata on an unrelated column remains valid input."""
-        padding = {f'pad.{i}'.encode(): b'x' * 400 for i in range(5000)}
+        """Large metadata below the 1 MiB cap remains valid input."""
+        padding = {f'pad.{i}'.encode(): b'x' * 400 for i in range(2000)}
         stamp = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
         schema = pyarrow.schema([
             pyarrow.field('s', pyarrow.string(), metadata=padding),
@@ -7227,35 +7233,44 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_large_geohash_metadata_uses_the_native_importer(self):
         # Python no longer duplicates the importer's metadata parser or
-        # walks the values. Large metadata is handled natively and wide
-        # values are forwarded under the same unchecked contract.
-        oversized = (
-            ('more pairs than the walk covers',
-             {f'pad.{i}'.encode(): b'x' for i in range(5000)}),
-            ('one value longer than the byte budget',
-             {b'pad.big': b'x' * (2 << 20)}))
-        for name, padding in oversized:
-            with self.subTest(blob=name, claim=True):
-                md = dict(padding)
-                md[b'questdb.column_type'] = b'geohash'
-                md[b'questdb.geohash_bits'] = b'20'
-                self.assertEqual(
-                    self._dataframe_column_types(
-                        self._geohash_arrow_table([2 ** 21], md=md),
-                        table_name='geo_md_long', at='ts')['gh'],
-                    0x0E)
-            # A blob this long that claims nothing is a column with a
-            # lot of metadata, not a hidden geohash. Refusing it was the
-            # clearest over-refusal the old rule produced. It goes out
-            # as the integer it is.
-            with self.subTest(blob=name, claim=False):
-                self.assertEqual(
-                    self._dataframe_column_types(
-                        self._geohash_arrow_table([2 ** 21], md=dict(padding)),
-                        table_name='geo_md_long', at='ts')['gh'],
-                    0x05)
+        # walks the values. Large metadata below the 1 MiB safety cap is
+        # handled natively and wide values are forwarded under the same
+        # unchecked contract.
+        padding = {f'pad.{i}'.encode(): b'x' for i in range(5000)}
+        md = dict(padding)
+        md[b'questdb.column_type'] = b'geohash'
+        md[b'questdb.geohash_bits'] = b'20'
+        self.assertEqual(
+            self._dataframe_column_types(
+                self._geohash_arrow_table([2 ** 21], md=md),
+                table_name='geo_md_long', at='ts')['gh'],
+            0x0E)
+        # A large allowed blob that claims nothing remains an ordinary
+        # integer column rather than a hidden geohash.
+        self.assertEqual(
+            self._dataframe_column_types(
+                self._geohash_arrow_table([2 ** 21], md=dict(padding)),
+                table_name='geo_md_long', at='ts')['gh'],
+            0x05)
+
+        # The native bounded parser rejects an individual blob above 1 MiB,
+        # independently of whether it carries a QuestDB type claim.
+        too_large = {b'pad.big': b'x' * (2 << 20)}
+        for claim in (False, True):
+            with self.subTest(above_blob_cap=True, claim=claim):
+                oversized = dict(too_large)
+                if claim:
+                    oversized[b'questdb.column_type'] = b'geohash'
+                    oversized[b'questdb.geohash_bits'] = b'20'
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r'Arrow schema root\.children\[0\]: metadata blob '
+                        r'exceeds 1048576 bytes'):
+                    self._dataframe_wire_payload(
+                        self._geohash_arrow_table([2 ** 21], md=oversized),
+                        table_name='geo_md_too_large', at='ts')
         # `schema_overrides` still outranks field metadata.
-        md = {f'pad.{i}'.encode(): b'x' for i in range(5000)}
+        md = dict(padding)
         md[b'questdb.column_type'] = b'geohash'
         md[b'questdb.geohash_bits'] = b'20'
         self._dataframe_wire_payload(

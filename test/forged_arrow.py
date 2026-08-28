@@ -12,7 +12,8 @@ producer and nothing else the suite imports, which is why this file stops at
 ctypes, struct and the client.
 
 Run as a script it builds one named case, sends it at the port it is
-given, requires a native ``ArrowIngest`` refusal, and prints ``MARKER``::
+given, requires the registered success or native refusal, and prints
+``MARKER``::
 
     TEST_QUESTDB_PATCH_PATH=1 QUESTDB_FORGED_ARROW_CASE=null_batch_child \
         QUESTDB_FORGED_ARROW_PORT=9009 python3 forged_arrow.py
@@ -87,7 +88,9 @@ class _RawArrowStream:
     def __init__(self, columns, row_count, batch_offset=0,
                  schema_n_children=None, batch_n_children=None,
                  null_schema_children=False, null_batch_children=False,
-                 null_schema_child=None, null_batch_child=None):
+                 null_schema_child=None, null_batch_child=None,
+                 poison_schema_children=False,
+                 poison_batch_children=False):
         """`columns` is a list of dicts, one per column, each naming its
         Arrow `format`, its `name`, the `data` bytes of its value
         buffer, and optionally `metadata`, `null_count`, `validity`,
@@ -110,10 +113,11 @@ class _RawArrowStream:
         self._released = False
         self._schema = self._build_schema(
             columns, schema_n_children, null_schema_children,
-            null_schema_child)
+            null_schema_child, poison_schema_children)
         self._array = self._build_array(
             columns, row_count, batch_offset, batch_n_children,
-            null_batch_children, null_batch_child)
+            null_batch_children, null_batch_child,
+            poison_batch_children)
         self._stream = self._build_stream()
 
     # -- construction --------------------------------------------------
@@ -169,11 +173,14 @@ class _RawArrowStream:
                 child = self._build_schema_node(child_def)
                 children[i] = ctypes.pointer(child)
             self._keep.append(children)
-            node.n_children = len(child_defs)
-            node.children = ctypes.cast(children, ctypes.c_void_p)
+            node.n_children = column.get('schema_n_children', len(child_defs))
+            node.children = (
+                None if column.get('null_schema_children')
+                else ctypes.cast(children, ctypes.c_void_p))
         else:
-            node.n_children = 0
-            node.children = None
+            node.n_children = column.get('schema_n_children', 0)
+            node.children = (
+                1 if column.get('poison_schema_children') else None)
         node.dictionary = None
         node.release = self._release_stub(self.Schema)
         node.private_data = None
@@ -181,7 +188,8 @@ class _RawArrowStream:
         return node
 
     def _build_schema(self, columns, n_children=None,
-                      null_children=False, null_child=None):
+                      null_children=False, null_child=None,
+                      poison_children=False):
         children = (ctypes.POINTER(self.Schema) * len(columns))()
         for i, column in enumerate(columns):
             child = self._build_schema_node(column)
@@ -197,8 +205,9 @@ class _RawArrowStream:
         top.n_children = (
             len(columns) if n_children is None else n_children)
         top.children = (
-            None if null_children
-            else ctypes.cast(children, ctypes.c_void_p))
+            1 if poison_children else (
+                None if null_children
+                else ctypes.cast(children, ctypes.c_void_p)))
         top.dictionary = None
         top.release = self._release_stub(self.Schema)
         top.private_data = None
@@ -226,11 +235,14 @@ class _RawArrowStream:
                 child = self._build_array_node(child_def, node.length)
                 children[i] = ctypes.pointer(child)
             self._keep.append(children)
-            node.n_children = len(child_defs)
-            node.children = ctypes.cast(children, ctypes.c_void_p)
+            node.n_children = column.get('array_n_children', len(child_defs))
+            node.children = (
+                None if column.get('null_array_children')
+                else ctypes.cast(children, ctypes.c_void_p))
         else:
-            node.n_children = 0
-            node.children = None
+            node.n_children = column.get('array_n_children', 0)
+            node.children = (
+                1 if column.get('poison_array_children') else None)
         node.dictionary = None
         node.release = self._release_stub(self.Array)
         node.private_data = None
@@ -239,7 +251,7 @@ class _RawArrowStream:
 
     def _build_array(self, columns, row_count, batch_offset,
                      n_children=None, null_children=False,
-                     null_child=None):
+                     null_child=None, poison_children=False):
         children = (ctypes.POINTER(self.Array) * len(columns))()
         for i, column in enumerate(columns):
             child = self._build_array_node(column, row_count + batch_offset)
@@ -256,8 +268,9 @@ class _RawArrowStream:
             len(columns) if n_children is None else n_children)
         top.buffers = self._buffer_array([None])
         top.children = (
-            None if null_children
-            else ctypes.cast(children, ctypes.c_void_p))
+            1 if poison_children else (
+                None if null_children
+                else ctypes.cast(children, ctypes.c_void_p)))
         top.dictionary = None
         top.release = self._release_stub(self.Array)
         top.private_data = None
@@ -328,28 +341,32 @@ _RawArrowStream.Schema._fields_ = _RawArrowStream._SCHEMA_FIELDS
 _RawArrowStream.Stream._fields_ = _RawArrowStream._STREAM_FIELDS
 
 
-#: Printed by a child that saw the refusal it was sent to provoke. The
+#: Printed by a child that observed its declared success/refusal outcome. The
 #: parent requires it, so an early `sys.exit(0)` cannot pass for one.
-MARKER = 'FORGED-ARROW-REFUSED-OK'
+MARKER = 'FORGED-ARROW-OUTCOME-OK'
 
 #: Case name -> builder for one malformed Arrow stream.
 FORGED_CASES = {}
 FORGED_EXPECTATIONS = {}
 
-_STAMP = struct.pack('<q', 1735689600000000)
+_STAMP_MICROS = 1735689600000000
 _GEOHASH_CLAIM = {b'questdb.column_type': b'geohash',
                   b'questdb.geohash_bits': b'5'}
 
 
-def _case(name, *, code='ArrowIngest', message=None, at='ts'):
-    """Register a forged shape under `name`."""
+def _case(name, *, outcome='ArrowIngest', message=None, at='ts',
+          wire=False, row_count=None, wire_contains=()):
+    """Register an ABI-conforming hand-built shape and its full outcome."""
     def register(build):
         assert name not in FORGED_CASES, name
         FORGED_CASES[name] = build
         FORGED_EXPECTATIONS[name] = {
-            'code': code,
+            'outcome': outcome,
             'message': message,
             'at': at,
+            'wire': wire,
+            'row_count': row_count,
+            'wire_contains': tuple(wire_contains),
         }
         return build
     return register
@@ -367,9 +384,14 @@ def columns(rows, geohash=True, **column):
     """
     return [
         dict(format=b'i', name=b'gh',
-             data=struct.pack('<%di' % rows, *([1] * rows)),
+             data=struct.pack('<%di' % rows, *range(101, 101 + rows)),
              metadata=_GEOHASH_CLAIM if geohash else None, **column),
-        dict(format=b'tsu:UTC', name=b'ts', data=_STAMP * rows, **column)]
+        dict(
+            format=b'tsu:UTC', name=b'ts',
+            data=struct.pack(
+                '<%dq' % rows,
+                *(_STAMP_MICROS + i * 1_000_000 for i in range(rows))),
+            **column)]
 
 
 # -- counts and child pointers -----------------------------------------
@@ -383,29 +405,40 @@ def columns(rows, geohash=True, **column):
 def _root_column_count_cap_plus_one():
     return _RawArrowStream(
         columns(1, geohash=False), 1,
-        schema_n_children=4096, batch_n_children=4096)
+        schema_n_children=4096, batch_n_children=4096,
+        poison_schema_children=True, poison_batch_children=True)
 
 
-@_case('schema_count_negative')
+@_case(
+    'schema_count_negative',
+    message='Arrow schema root: n_children -1 is negative')
 def _schema_count_negative():
     return _RawArrowStream(
         columns(1, geohash=False), 1,
         schema_n_children=-1, batch_n_children=-1)
 
 
-@_case('batch_count_negative')
+@_case(
+    'batch_count_negative',
+    message='Arrow array root: n_children -1 is negative')
 def _batch_count_negative():
     return _RawArrowStream(
         columns(1, geohash=False), 1, batch_n_children=-1)
 
 
-@_case('count_disagreement')
+@_case(
+    'count_disagreement',
+    message=('Arrow array root: n_children 3 disagrees with '
+             'schema n_children 2'))
 def _count_disagreement():
     return _RawArrowStream(
         columns(1, geohash=False), 1, batch_n_children=3)
 
 
-@_case('zero_column_schema_disagreement')
+@_case(
+    'zero_column_schema_disagreement',
+    message=('Arrow array root: n_children 2 disagrees with '
+             'schema n_children 0'))
 def _zero_column_schema_disagreement():
     """A zero-column schema is a shape the scan has nothing to do with,
     and the batch's own count still has to agree with it."""
@@ -413,37 +446,54 @@ def _zero_column_schema_disagreement():
         columns(1, geohash=False), 1, schema_n_children=0)
 
 
-@_case('zero_row_count_disagreement')
+@_case(
+    'zero_row_count_disagreement',
+    message=('Arrow array root: n_children 4 disagrees with '
+             'schema n_children 2'))
 def _zero_row_count_disagreement():
     return _RawArrowStream(
-        columns(1, geohash=False), 0, batch_n_children=3)
+        columns(1, geohash=False), 0, batch_n_children=4)
 
 
-@_case('null_schema_children')
+@_case(
+    'null_schema_children',
+    message=('Arrow schema root: declares 2 children but children '
+             'pointer is NULL'))
 def _null_schema_children():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_schema_children=True)
 
 
-@_case('null_batch_children')
+@_case(
+    'null_batch_children',
+    message=('Arrow array root: length 1 declares 2 children but '
+             'children pointer is NULL'))
 def _null_batch_children():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_batch_children=True)
 
 
-@_case('null_schema_child')
+@_case(
+    'null_schema_child',
+    message='Arrow schema root.children[0]: child pointer is NULL')
 def _null_schema_child():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_schema_child=0)
 
 
-@_case('null_batch_child')
+@_case(
+    'null_batch_child',
+    message=('Arrow array root.children[1]: array or schema child '
+             'pointer is NULL'))
 def _null_batch_child():
     return _RawArrowStream(
         columns(1, geohash=False), 1, null_batch_child=1)
 
 
-@_case('null_batch_children_zero_rows')
+@_case(
+    'null_batch_children_zero_rows',
+    message=('Arrow array root: length 0 declares 2 children but '
+             'children pointer is NULL'))
 def _null_batch_children_zero_rows():
     """A batch with no rows still has its struct read, so an empty one
     cannot carry a malformed shape past the checks."""
@@ -451,10 +501,12 @@ def _null_batch_children_zero_rows():
         columns(1, geohash=False), 0, null_batch_children=True)
 
 
-@_case('null_schema_child_zero_rows')
+@_case(
+    'null_schema_child_zero_rows',
+    message='Arrow schema root.children[1]: child pointer is NULL')
 def _null_schema_child_zero_rows():
     return _RawArrowStream(
-        columns(1, geohash=False), 0, null_schema_child=0)
+        columns(1, geohash=False), 0, null_schema_child=1)
 
 
 # -- unsupported nested columns and bounded metadata -------------------
@@ -478,7 +530,7 @@ def _nested_struct_stream(root_offset):
 
 @_case(
     'nested_struct_root_offset_zero',
-    code='ArrowUnsupportedColumnKind',
+    outcome='ArrowUnsupportedColumnKind',
     message='Arrow schema root.children[0]: Struct columns are not supported',
     at='server')
 def _nested_struct_root_offset_zero():
@@ -487,7 +539,7 @@ def _nested_struct_root_offset_zero():
 
 @_case(
     'nested_struct_root_offset_one',
-    code='ArrowUnsupportedColumnKind',
+    outcome='ArrowUnsupportedColumnKind',
     message='Arrow schema root.children[0]: Struct columns are not supported',
     at='server')
 def _nested_struct_root_offset_one():
@@ -495,8 +547,135 @@ def _nested_struct_root_offset_one():
 
 
 @_case(
+    'nested_struct_narrowed_to_zero_rows',
+    outcome='ArrowUnsupportedColumnKind',
+    message='Arrow schema root.children[0]: Struct columns are not supported',
+    at='server')
+def _nested_struct_narrowed_to_zero_rows():
+    stream = _nested_struct_stream(0)
+    stream._array.length = 0
+    return stream
+
+
+@_case(
+    'three_level_nested_struct',
+    outcome='ArrowUnsupportedColumnKind',
+    message='Arrow schema root.children[0]: Struct columns are not supported',
+    at='server')
+def _three_level_nested_struct():
+    leaf = {
+        'format': b'i', 'name': b'value', 'length': 2,
+        'data': struct.pack('<ii', 11, 22)}
+    inner = {
+        'format': b'+s', 'name': b'inner', 'length': 2,
+        'buffers': [None], 'children': [leaf]}
+    outer = {
+        'format': b'+s', 'name': b'outer', 'length': 2,
+        'buffers': [None], 'children': [inner]}
+    return _RawArrowStream([outer], 1)
+
+
+@_case(
+    'fixed_size_list_short_child',
+    message=('Arrow array root.children[0]: FixedSizeList slice offset 0 '
+             '+ length 2 with size 2 ends at 4, beyond child 0 length 3'),
+    at='server')
+def _fixed_size_list_short_child():
+    values = {
+        'format': b'g', 'name': b'item', 'length': 3,
+        'data': struct.pack('<ddd', 1.0, 2.0, 3.0)}
+    fixed = {
+        'format': b'+w:2', 'name': b'values', 'length': 2, 'offset': 0,
+        'buffers': [None], 'children': [values]}
+    return _RawArrowStream([fixed], 1, 1)
+
+
+@_case(
+    'list_missing_child',
+    message=('Arrow schema root.children[0]: format requires exactly 1 '
+             'normal child(ren) but declares 0'),
+    at='server')
+def _list_missing_child():
+    return _RawArrowStream([
+        {'format': b'+l', 'name': b'values', 'length': 1,
+         'buffers': [None, struct.pack('<ii', 0, 0)]}
+    ], 1)
+
+
+@_case(
+    'fixed_layout_buffer_count_below_exact',
+    message='Arrow array root.children[0]: declares 1 buffers but Int32 requires exactly 2',
+    at='server')
+def _fixed_layout_buffer_count_below_exact():
+    return _RawArrowStream([
+        {'format': b'i', 'name': b'value', 'length': 1,
+         'buffers': [None]}
+    ], 1)
+
+
+@_case(
+    'fixed_layout_buffer_count_above_exact',
+    message='Arrow array root.children[0]: declares 3 buffers but Int32 requires exactly 2',
+    at='server')
+def _fixed_layout_buffer_count_above_exact():
+    return _RawArrowStream([
+        {'format': b'i', 'name': b'value', 'length': 1,
+         'buffers': [None, struct.pack('<i', 7), b'extra']}
+    ], 1)
+
+
+@_case(
+    'view_buffer_count_below_minimum',
+    message=('Arrow array root.children[0]: view layout requires 3..=16 '
+             'buffers but declares 2'),
+    at='server')
+def _view_buffer_count_below_minimum():
+    return _RawArrowStream([
+        {'format': b'vu', 'name': b'value', 'length': 0,
+         'buffers': [None, None]}
+    ], 0)
+
+
+@_case(
+    'view_buffer_count_above_maximum',
+    message=('Arrow array root.children[0]: view layout requires 3..=16 '
+             'buffers but declares 17'),
+    at='server')
+def _view_buffer_count_above_maximum():
+    return _RawArrowStream([
+        {'format': b'vu', 'name': b'value', 'length': 0,
+         'buffers': [None] * 17}
+    ], 0)
+
+
+@_case(
+    'view_null_variadic_lengths_slot',
+    message=('Arrow array root.children[0]: view variadic-lengths buffer '
+             '(slot 3) is NULL'),
+    at='server')
+def _view_null_variadic_lengths_slot():
+    return _RawArrowStream([
+        {'format': b'vu', 'name': b'value', 'length': 1,
+         'buffers': [None, b'\x00' * 16, b'x', None]}
+    ], 1)
+
+
+@_case(
+    'utf8_null_offset_slot',
+    message=('Arrow array root.children[0]: variable-width offset buffer '
+             '(slot 1) is NULL'),
+    at='server')
+def _utf8_null_offset_slot():
+    return _RawArrowStream([
+        {'format': b'u', 'name': b'value', 'length': 1,
+         'buffers': [None, None, b'x']}
+    ], 1)
+
+
+@_case(
     'metadata_oversized_key_length',
-    message='metadata blob exceeds 1048576 bytes',
+    message=('Arrow schema root.children[0]: metadata blob exceeds '
+             '1048576 bytes'),
     at='server')
 def _metadata_oversized_key_length():
     column = dict(
@@ -507,7 +686,8 @@ def _metadata_oversized_key_length():
 
 @_case(
     'metadata_oversized_value_length',
-    message='metadata blob exceeds 1048576 bytes',
+    message=('Arrow schema root.children[0]: metadata blob exceeds '
+             '1048576 bytes'),
     at='server')
 def _metadata_oversized_value_length():
     column = dict(
@@ -516,56 +696,110 @@ def _metadata_oversized_value_length():
     return _RawArrowStream([column], 1)
 
 
+def _metadata_stream(blob):
+    return _RawArrowStream([
+        dict(format=b'i', name=b'value', data=struct.pack('<i', 1),
+             metadata_blob=blob)
+    ], 1)
+
+
+@_case(
+    'metadata_negative_entry_count',
+    message=('Arrow schema root.children[0]: metadata entry count -1 '
+             'is negative'),
+    at='server')
+def _metadata_negative_entry_count():
+    return _metadata_stream(struct.pack('<i', -1))
+
+
+@_case(
+    'metadata_entry_count_cap_plus_one',
+    message=('Arrow schema root.children[0]: metadata declares 65537 '
+             'entries, above maximum 65536'),
+    at='server')
+def _metadata_entry_count_cap_plus_one():
+    return _metadata_stream(struct.pack('<i', 65537))
+
+
+@_case(
+    'metadata_negative_key_length',
+    message=('Arrow schema root.children[0]: metadata entry 0 key '
+             'length -2 is negative'),
+    at='server')
+def _metadata_negative_key_length():
+    return _metadata_stream(struct.pack('<ii', 1, -2))
+
+
+@_case(
+    'metadata_negative_value_length',
+    message=('Arrow schema root.children[0]: metadata entry 0 value '
+             'length -3 is negative'),
+    at='server')
+def _metadata_negative_value_length():
+    return _metadata_stream(struct.pack('<iii', 1, 0, -3))
+
+
 # -- row shapes --------------------------------------------------------
 #
 # These exercise native length and offset validation. The GEOHASH metadata
 # preserves the production route that first exposed the malformed slices;
 # it does not gate the structural checks.
 
-@_case('batch_length_overflow')
-def _batch_length_overflow():
-    """The review's own reproduction: `batch.offset + batch.length`
-    leaves `int64_t` and lands as a large negative, which an unbounded
-    slice check reads as a batch comfortably inside its column."""
-    return _RawArrowStream(columns(1, length=1), (1 << 63) - 1, 1)
-
-
-@_case('batch_length_cap_plus_one')
+@_case(
+    'batch_length_cap_plus_one',
+    message='Arrow array root: length 16777217 exceeds 16777216')
 def _batch_length_cap_plus_one():
     return _RawArrowStream(columns(1, length=1), 16777217, 0)
 
 
-@_case('batch_offset_cap_plus_one')
+@_case(
+    'batch_offset_cap_plus_one',
+    message='Arrow array root: offset 16777217 exceeds 16777216')
 def _batch_offset_cap_plus_one():
     return _RawArrowStream(columns(1, length=1), 1, 16777217)
 
 
-@_case('batch_offset_negative')
+@_case(
+    'batch_offset_negative',
+    message='Arrow array root: offset -1 is negative')
 def _batch_offset_negative():
     return _RawArrowStream(columns(1, length=1), 1, -1)
 
 
-@_case('column_length_cap_plus_one')
+@_case(
+    'column_length_cap_plus_one',
+    message=('Arrow array root.children[1]: length 16777217 exceeds '
+             '16777216'))
 def _column_length_cap_plus_one():
     return _RawArrowStream(columns(1, length=16777217), 1, 0)
 
 
-@_case('column_length_negative')
+@_case(
+    'column_length_negative',
+    message='Arrow array root.children[1]: length -1 is negative')
 def _column_length_negative():
     return _RawArrowStream(columns(1, length=-1), 1, 0)
 
 
-@_case('column_offset_cap_plus_one')
+@_case(
+    'column_offset_cap_plus_one',
+    message=('Arrow array root.children[1]: offset 16777217 exceeds '
+             '16777216'))
 def _column_offset_cap_plus_one():
     return _RawArrowStream(columns(1, length=1, offset=16777217), 1, 0)
 
 
-@_case('column_offset_negative')
+@_case(
+    'column_offset_negative',
+    message='Arrow array root.children[1]: offset -1 is negative')
 def _column_offset_negative():
     return _RawArrowStream(columns(1, length=1, offset=-1), 1, 0)
 
 
-@_case('slice_past_column')
+@_case(
+    'slice_past_column',
+    message=('Arrow array root: Struct slice offset 1 + length 2 ends '
+             'at 3, beyond child 0 length 2'))
 def _slice_past_column():
     """One row past the column: `batch.offset + batch.length` comes to
     `col.length + 1`. Its twin, one row shorter, is sent for real by
@@ -573,15 +807,22 @@ def _slice_past_column():
     return _RawArrowStream(columns(3, length=2), 2, 1)
 
 
+@_case(
+    'slice_at_column_end',
+    outcome='success',
+    at='ts',
+    wire=True,
+    row_count=2,
+    wire_contains=(struct.pack('<qq', 102, 103),))
 def accepted_slice():
     """The shape `slice_past_column` is one row longer than: a batch
     ending exactly where its columns do. Built here so the two differ in
     a single number."""
-    return _RawArrowStream(columns(3, length=3), 2, 1)
+    return _RawArrowStream(columns(3, geohash=False, length=3), 2, 1)
 
 
 def run_case(name, port):
-    """Build the named shape and require a native Arrow refusal."""
+    """Build the named shape and require its declared native outcome."""
     build = FORGED_CASES[name]
     expected = FORGED_EXPECTATIONS[name]
     stream = build()
@@ -593,18 +834,22 @@ def run_case(name, port):
             at = qi.ServerTimestamp if expected['at'] == 'server' else expected['at']
             client.dataframe(stream, table_name='forged', at=at)
         except qi.QuestDBError as exc:
-            expected_code = getattr(qi.QuestDBErrorCode, expected['code'])
+            if expected['outcome'] == 'success':
+                raise AssertionError(
+                    f'{name}: expected success, got {exc.code!r}: {exc}') from None
+            expected_code = getattr(qi.QuestDBErrorCode, expected['outcome'])
             if exc.code is not expected_code:
                 raise AssertionError(
                     f'{name}: refused as {exc.code!r}, expected '
-                    f'{expected["code"]}: {exc}') from None
+                    f'{expected["outcome"]}: {exc}') from None
             if (expected['message'] is not None
                     and expected['message'] not in str(exc)):
                 raise AssertionError(
                     f'{name}: expected diagnostic {expected["message"]!r}, '
                     f'got: {exc}') from None
         else:
-            raise AssertionError(f'{name}: the forged stream was accepted')
+            if expected['outcome'] != 'success':
+                raise AssertionError(f'{name}: the forged stream was accepted')
     finally:
         client.close()
     print(MARKER)

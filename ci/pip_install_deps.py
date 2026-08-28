@@ -11,6 +11,8 @@ arg_parser = argparse.ArgumentParser(
 )
 
 arg_parser.add_argument('--pandas-version')
+arg_parser.add_argument('--pyarrow-version')
+arg_parser.add_argument('--polars-version')
 
 
 class UnsupportedDependency(Exception):
@@ -100,8 +102,8 @@ def main(args):
         install_default_pandas_and_numpy()
 
     try_pip_install('fastparquet>=2023.10.1')
-    try_pip_install('pyarrow')
-    try_pip_install('polars')
+    try_pip_install('pyarrow', args.pyarrow_version or None)
+    try_pip_install('polars', args.polars_version or None)
     try_pip_install('psutil')
 
     on_linux_is_glibc = (

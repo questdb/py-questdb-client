@@ -1,5 +1,10 @@
 trigger: none
 
+variables:
+  pyarrowVersion: ""
+  polarsVersion: ""
+  arrowProducerPins: ""
+
 stages:
   - stage: BuildAndTest
     displayName: "Building and testing"
@@ -21,6 +26,9 @@ stages:
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
               pandasVersion: "2.3.3"
+              pyarrowVersion: "25.0.1"
+              polarsVersion: "1.44.1"
+              arrowProducerPins: "pandas=2.3.3,pyarrow=25.0.1,polars=1.44.1"
               questdbVersion: ""
               requireQwpRowTypes: ""
             linux-pandas310:
@@ -84,10 +92,17 @@ stages:
               python3 --version
               python3 -m pip install cython
             displayName: "Install cython"
-          - script: python3 ci/pip_install_deps.py
+          - script: >-
+              python3 ci/pip_install_deps.py
+              --pyarrow-version=$(pyarrowVersion)
+              --polars-version=$(polarsVersion)
             displayName: "Install pandas 3.x"
             condition: eq(variables.pandasVersion, '')
-          - script: python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
+          - script: >-
+              python3 ci/pip_install_deps.py
+              --pandas-version=$(pandasVersion)
+              --pyarrow-version=$(pyarrowVersion)
+              --polars-version=$(polarsVersion)
             displayName: "Install pandas $(pandasVersion)"
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
@@ -149,6 +164,7 @@ stages:
               JAVA_HOME: $(JAVA_HOME_25_X64)
               QDB_VERSION: $(questdbVersion)
               TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES: $(requireQwpRowTypes)
+              TEST_QUESTDB_ARROW_PRODUCER_PINS: $(arrowProducerPins)
           - script: python3 proj.py test 1
             displayName: "Test vs master"
             env:
