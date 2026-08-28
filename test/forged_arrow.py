@@ -2,18 +2,20 @@
 """A hand-rolled Arrow producer and the malformed shapes built on it.
 
 The producer lives here rather than in ``test/test.py`` so every malformed
-shape can run in an isolated interpreter. Each shape in ``FORGED_CASES`` is
-a count, length or offset that native Arrow validation must reject before
-arrow-rs imports the stream. The parent test reads the child return code to
-guard against regressions that abort the interpreter. That child needs the
+shape can run in an isolated interpreter. The cases exercise structural values
+that the guarded Python/C-ABI path can check before the known panicking
+arrow-rs operations it reaches. Producer-owned pointer arrays, strings and
+buffers still have to be valid, correctly allocated and stable for the lifetime
+required by the Arrow C Data Interface. The parent reads the child return code
+to guard against regressions that abort the interpreter. That child needs the
 producer and nothing else the suite imports, which is why this file stops at
 ctypes, struct and the client.
 
 Run as a script it builds one named case, sends it at the port it is
 given, requires a native ``ArrowIngest`` refusal, and prints ``MARKER``::
 
-    QUESTDB_FORGED_ARROW_CASE=null_batch_child
-    QUESTDB_FORGED_ARROW_PORT=9009 python3 forged_arrow.py
+    TEST_QUESTDB_PATCH_PATH=1 QUESTDB_FORGED_ARROW_CASE=null_batch_child \
+        QUESTDB_FORGED_ARROW_PORT=9009 python3 forged_arrow.py
 """
 import sys
 
@@ -344,11 +346,11 @@ def _schema_count_absurd():
         schema_n_children=1 << 40, batch_n_children=1 << 40)
 
 
-@_case('schema_count_cap_plus_one')
-def _schema_count_cap_plus_one():
+@_case('schema_per_node_count_cap_plus_one')
+def _schema_per_node_count_cap_plus_one():
     return _RawArrowStream(
         columns(1, geohash=False), 1,
-        schema_n_children=4096, batch_n_children=4096)
+        schema_n_children=65537, batch_n_children=65537)
 
 
 @_case('schema_count_negative')

@@ -221,9 +221,17 @@ New
 Fixed
 ~~~~~
 
-- Malformed sliced Arrow streams now raise
-  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.ArrowIngest`` instead of aborting the Python process.
+- On the guarded ``QuestDB.dataframe()``/C-ABI path, addressable malformed
+  Arrow streams from hand-rolled C Data Interface exporters (for example
+  nanoarrow, DuckDB, or arro3) are rejected before the known panicking
+  arrow-rs operations covered by native preflight. For example, a batch whose
+  slice extends past a column raises :class:`QuestDBError
+  <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ArrowIngest`` before import. Producer-owned pointers,
+  allocations, and strings must still satisfy the Arrow ABI; dangling
+  pointers, undersized allocations, unterminated strings, and concurrent
+  producer mutation are outside this guarantee. Ordinary pandas, Polars, and
+  pyarrow exports do not normally emit the hand-rolled batch-slice shape.
 
 - **NumPy and pandas integers now work everywhere a Python ``int`` does in the
   round-trip vocabulary.** One rule covers every number this client reads out
