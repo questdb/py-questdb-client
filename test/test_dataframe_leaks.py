@@ -548,8 +548,10 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
     # WebSocket ack, which costs about 40 ms on the Linux CI agents
     # however small the frame is -- tens of thousands of calls would run
     # for hours there. More columns per call give the same signal in far
-    # less time, up to 4096, the most nodes an imported Arrow schema
-    # holds.
+    # less time. An imported Arrow schema holds 4096 nodes including its
+    # root envelope, so at most 4095 are top-level columns. The `gh` and
+    # `ts` columns below consume two of those slots, leaving 4093 as the
+    # largest usable `COLUMNS` value for this fixture.
     COLUMNS = 1000
 
     def test_overrides_leak_nothing(self):
