@@ -4734,6 +4734,175 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     txn.commit()
                     self.assertEqual(len(sender), 0)
 
+    def test_a_rollback_reentered_from_a_row_is_terminal_and_discards_it(self):
+        """Rollback is a terminal request, not just a call to `clear()`.
+
+        A value conversion can call it while the buffer is holding a rewind
+        marker. Clearing at that instant is unsafe, but refusing the clear
+        used to leave both transaction flags live. If the conversion swallowed
+        that refusal, `__exit__` then committed the rows it had asked to roll
+        back. The clear is deferred until the row unwinds instead: no row from
+        the transaction can survive to a later sender flush.
+        """
+        rolled_back = []
+        with HttpServer() as server:
+            with qi.Sender(
+                    qi.Protocol.Http, '127.0.0.1', server.port,
+                    auto_flush=False) as sender:
+
+                class HostileTz(datetime.tzinfo):
+                    fired = False
+
+                    def utcoffset(self, dt):
+                        if not HostileTz.fired:
+                            HostileTz.fired = True
+                            txn.rollback()
+                            rolled_back.append(True)
+                        return datetime.timedelta(0)
+
+                    def tzname(self, dt):
+                        return 'HOSTILE'
+
+                    def dst(self, dt):
+                        return datetime.timedelta(0)
+
+                with sender.transaction('rolled_back') as txn:
+                    txn.row(columns={'before': 1}, at=qi.ServerTimestamp)
+                    txn.row(
+                        columns={'ts': datetime.datetime(
+                            2025, 1, 1, tzinfo=HostileTz())},
+                        at=qi.ServerTimestamp)
+
+                self.assertEqual(rolled_back, [True])
+                self.assertEqual(len(sender), 0)
+                sender.row(
+                    'after', columns={'kept': 1}, at=qi.ServerTimestamp)
+
+            self.assertEqual(server.requests, [b'after kept=1i\n'])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_rollback_reentered_from_a_dataframe_discards_the_frame(self):
+        """The deferred clear belongs to the shared buffer lifecycle.
+
+        A dataframe holds `_row_depth` across both its Python plan build and
+        serialization, so it must discharge the same rollback request when it
+        unwinds even if no individual `Buffer._row` frame exists.
+        """
+        rolled_back = []
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            txn = sender.transaction('rolled_back')
+
+            class HostileFrame(pd.DataFrame):
+                armed = False
+                fired = False
+
+                @property
+                def attrs(self):
+                    if HostileFrame.armed and not HostileFrame.fired:
+                        HostileFrame.fired = True
+                        txn.rollback()
+                        rolled_back.append(True)
+                    return {}
+
+                @attrs.setter
+                def attrs(self, value):
+                    pass
+
+            frame = HostileFrame({
+                'v': [1, 2],
+                'ts': pd.to_datetime([0, 1], unit='s')})
+            HostileFrame.armed = True
+            with txn:
+                txn.dataframe(frame, at='ts')
+
+            self.assertEqual(rolled_back, [True])
+            self.assertEqual(len(sender), 0)
+            self.assertEqual(server.requests, [])
+
+    def test_a_completed_transaction_cannot_be_reused(self):
+        """Completion is an absorbing state for every transaction method.
+
+        Checking it only in `commit()` and `rollback()` allowed an ended
+        transaction to append rows outside any transaction, or to be entered
+        again and strand the sender when its already-complete `__exit__` did
+        nothing.
+        """
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            rolled_back = sender.transaction('rolled_back')
+            rolled_back.rollback()
+            with sender.transaction('committed') as committed:
+                pass
+
+            for outcome, txn in (
+                    ('rollback', rolled_back), ('commit', committed)):
+                calls = (
+                    ('row', lambda: txn.row(
+                        columns={'v': 1}, at=qi.ServerTimestamp)),
+                    ('__enter__', txn.__enter__),
+                )
+                if pd is not None:
+                    frame = pd.DataFrame({
+                        'v': [1], 'ts': pd.to_datetime([0], unit='s')})
+                    calls += (('dataframe', lambda: txn.dataframe(
+                        frame, at='ts')),)
+
+                for method, call in calls:
+                    with self.subTest(outcome=outcome, method=method):
+                        with self.assertRaisesRegex(
+                                qi.QuestDBError,
+                                'Transaction already completed'):
+                            call()
+
+            self.assertEqual(len(sender), 0)
+            # In particular, a refused second `__enter__` did not mark the
+            # sender as being in a transaction.
+            with sender.transaction('next'):
+                pass
+
+    def test_rollback_cannot_interrupt_a_commit_in_progress(self):
+        """Only one terminal transition may own the transaction buffer.
+
+        `commit()` releases the GIL during HTTP I/O. A rollback on another
+        thread used to clear the buffer borrowed by that flush and overwrite
+        its transaction flags. It is refused until commit has published its
+        final state.
+        """
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            server.responses.append((500, 200, None, None))
+            txn = sender.transaction('t')
+            txn.row(columns={'v': 1}, at=qi.ServerTimestamp)
+            commit_errors = []
+
+            def commit():
+                try:
+                    txn.commit()
+                except Exception as exc:
+                    commit_errors.append(exc)
+
+            commit_thread = threading.Thread(target=commit)
+            commit_thread.start()
+            deadline = time.monotonic() + 5
+            while not server.requests and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertTrue(server.requests, 'commit never reached the server')
+
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, 'commit is already in progress'):
+                txn.rollback()
+
+            commit_thread.join(5)
+            self.assertFalse(commit_thread.is_alive())
+            self.assertEqual(commit_errors, [])
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, 'Transaction already completed'):
+                txn.rollback()
+
     def test_flush_clears_the_buffer_on_a_wire_failure(self):
         """`SenderTransaction.commit` depends on this by name.
 

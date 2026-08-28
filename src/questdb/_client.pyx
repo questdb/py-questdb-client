@@ -1115,6 +1115,7 @@ cdef class SenderTransaction:
     cdef Sender _sender
     cdef str _table_name
     cdef bint _complete
+    cdef bint _committing
 
     def __cinit__(self, Sender sender, str table_name):
         if not _is_http_protocol(sender._c_protocol):
@@ -1124,8 +1125,22 @@ cdef class SenderTransaction:
         self._sender = sender
         self._table_name = table_name
         self._complete = False
+        self._committing = False
+
+    cdef inline void_int _check_usable(self, str method) except -1:
+        """Keep completion an absorbing state for the whole object."""
+        if self._complete:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"Transaction already completed, can't call {method}().")
+        if self._committing:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"Transaction commit is already in progress, can't call "
+                f"{method}().")
 
     def __enter__(self):
+        self._check_usable('__enter__')
         if self._sender._in_txn:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -1171,6 +1186,7 @@ cdef class SenderTransaction:
         QWP-only and are not supported by ``SenderTransaction``, which is
         ILP/HTTP-only by construction.
         """
+        self._check_usable('row')
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -1202,6 +1218,7 @@ cdef class SenderTransaction:
 
         The table name is taken from the transaction.
         """
+        self._check_usable('dataframe')
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
@@ -1235,6 +1252,10 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t commit')
+        if self._committing:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "Transaction commit is already in progress, can't commit.")
         if self._sender._buffer is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -1248,46 +1269,54 @@ cdef class SenderTransaction:
         self._sender._buffer._check_not_in_row('commit')
         # `_in_txn` has to come down first, because an explicit flush
         # inside a transaction is refused.
+        self._committing = True
         self._sender._in_txn = False
         try:
-            if len(self._sender._buffer):
-                self._sender.flush(transactional=True)
-        except:
-            # A flush that reached the wire clears the buffer whether it
-            # succeeded or not, so there is nothing left to commit and
-            # the transaction is over -- saying otherwise would strand
-            # the sender inside it and make the next `close(flush=True)`
-            # raise over the caller's own error.
-            #
-            # Rows are still in the buffer only when `Sender.flush`
-            # refused before making the native call, which is a short
-            # and closed list: a row part-way through being written, a
-            # call from inside the sender's own callback, and a sender
-            # already closed. In those three the transaction is still
-            # the caller's to finish or roll back.
-            #
-            # The buffer is therefore the discriminator, and it is
-            # `Sender.flush` that maintains it, not this method.
-            # `test_flush_clears_the_buffer_on_a_wire_failure` pins that
-            # behaviour by name for exactly this reason.
-            #
-            # Asking it cannot be allowed to raise: `len()` goes through
-            # `Buffer.__len__`, which refuses on a closed buffer, and a
-            # sender closed during the flush would put that error over
-            # the caller's own. A closed buffer holds no rows, which is
-            # the same answer an empty one gives.
-            rows_left = False
             try:
-                rows_left = (self._sender._buffer is not None
-                             and len(self._sender._buffer) > 0)
-            except QuestDBError:
+                if len(self._sender._buffer):
+                    self._sender.flush(transactional=True)
+            except:
+                # A flush that reached the wire clears the buffer whether it
+                # succeeded or not, so there is nothing left to commit and
+                # the transaction is over -- saying otherwise would strand
+                # the sender inside it and make the next `close(flush=True)`
+                # raise over the caller's own error.
+                #
+                # Rows are still in the buffer only when `Sender.flush`
+                # refused before making the native call, which is a short
+                # and closed list: a row part-way through being written, a
+                # call from inside the sender's own callback, and a sender
+                # already closed. In those three the transaction is still
+                # the caller's to finish or roll back.
+                #
+                # The buffer is therefore the discriminator, and it is
+                # `Sender.flush` that maintains it, not this method.
+                # `test_flush_clears_the_buffer_on_a_wire_failure` pins that
+                # behaviour by name for exactly this reason.
+                #
+                # Asking it cannot be allowed to raise: `len()` goes through
+                # `Buffer.__len__`, which refuses on a closed buffer, and a
+                # sender closed during the flush would put that error over
+                # the caller's own. A closed buffer holds no rows, which is
+                # the same answer an empty one gives.
                 rows_left = False
-            if rows_left:
-                self._sender._in_txn = True
-            else:
-                self._complete = True
-            raise
-        self._complete = True
+                try:
+                    rows_left = (self._sender._buffer is not None
+                                 and len(self._sender._buffer) > 0)
+                except QuestDBError:
+                    rows_left = False
+                if rows_left:
+                    self._sender._in_txn = True
+                else:
+                    self._complete = True
+                raise
+            self._complete = True
+        finally:
+            # A commit releases the GIL in `flush()`. Refuse another
+            # terminal operation while that transition owns the buffer,
+            # then make the transition available again only after every
+            # success/failure state above has been published.
+            self._committing = False
 
     def rollback(self):
         """
@@ -1301,10 +1330,18 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t rollback.')
-        if self._sender._buffer is not None:
-            self._sender._buffer.clear()
+        if self._committing:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "Transaction commit is already in progress, can't rollback.")
+        # Completion is an absorbing state, even when rollback is called
+        # re-entrantly from a value conversion while the buffer cannot yet
+        # be cleared. Publishing it before cleanup keeps `__exit__` from
+        # turning a swallowed cleanup refusal into an automatic commit.
         self._sender._in_txn = False
         self._complete = True
+        if self._sender._buffer is not None:
+            self._sender._buffer._clear_or_defer()
 
 cdef class Buffer:
     """
@@ -1321,6 +1358,7 @@ cdef class Buffer:
     cdef bint _qwp
     cdef bint _marker_set
     cdef int _row_depth
+    cdef bint _clear_on_row_complete
     cdef object _row_complete_sender
 
     def __cinit__(self):
@@ -1331,6 +1369,7 @@ cdef class Buffer:
         self._qwp = False
         self._marker_set = False
         self._row_depth = 0
+        self._clear_on_row_complete = False
         self._row_complete_sender = None
 
     def __init__(
@@ -1434,8 +1473,24 @@ cdef class Buffer:
         """
         self._check_impl()
         self._check_not_in_row('clear')
+        self._clear_now()
+
+    cdef inline void _clear_now(self) noexcept:
         line_sender_buffer_clear(self._impl)
         qdb_pystr_buf_clear(self._b)
+
+    cdef inline void _clear_or_defer(self) noexcept:
+        """Clear after the outermost in-progress row has unwound."""
+        if self._row_depth == 0:
+            self._clear_now()
+        else:
+            self._clear_on_row_complete = True
+
+    cdef inline void _leave_row(self) noexcept:
+        self._row_depth -= 1
+        if self._row_depth == 0 and self._clear_on_row_complete:
+            self._clear_on_row_complete = False
+            self._clear_now()
 
     def __len__(self) -> int:
         """
@@ -1979,7 +2034,7 @@ cdef class Buffer:
             self._rewind_after_failure()
             raise
         finally:
-            self._row_depth -= 1
+            self._leave_row()
         # A row written from inside another row or frame on this buffer
         # leaves the depth above zero, and flushing there would cut the
         # outer call's work in half, so the auto-flush is left to the

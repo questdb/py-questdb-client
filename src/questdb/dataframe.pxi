@@ -3859,9 +3859,9 @@ cdef void_int _dataframe(
             raise
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
-        owner._row_depth -= 1
         plan_has_content = (plan.col_count != 0) and (plan.row_count != 0)
         if plan_has_content:
             line_sender_buffer_clear_marker(ls_buf)
         dataframe_plan_release(&plan)
         qdb_pystr_buf_free(b)
+        owner._leave_row()
