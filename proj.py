@@ -275,8 +275,7 @@ def cibuildwheel(*args):
     #     #
     #     # NB: Make sure to update `cibuildwheel` on py3.8 too before running!
     #     python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
-    _run(python, '-m',
-         'cibuildwheel',
+    _run(python, PROJ_ROOT / 'ci' / 'run_cibuildwheel.py',
          '--platform', plat,
          '--output-dir', 'dist',
          '--archs', platform.machine(),
