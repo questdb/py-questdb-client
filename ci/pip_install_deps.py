@@ -4,6 +4,7 @@ import shlex
 import textwrap
 import platform
 import argparse
+import importlib.metadata
 
 arg_parser = argparse.ArgumentParser(
     prog='pip_install_deps.py',
@@ -54,6 +55,20 @@ def try_pip_install(package, version=None):
         sys.stderr.write(f'    Ignored unsatisfiable dependency:\n{msg}\n')
 
 
+def pip_install_required(package, version):
+    try:
+        pip_install(package, version)
+    except UnsupportedDependency as e:
+        raise SystemExit(
+            f'Required dependency {package}=={version} is not installable:\n'
+            f'{e}') from None
+    installed = importlib.metadata.version(package)
+    if installed != version:
+        raise SystemExit(
+            f'Required dependency {package}=={version} was requested, but '
+            f'version {installed} is installed')
+
+
 def ensure_timezone():
     try:
         import zoneinfo
@@ -65,7 +80,7 @@ def ensure_timezone():
 
 def install_pandas2_and_numpy(pandas_version=None):
     if pandas_version is not None:
-        try_pip_install('pandas', pandas_version)
+        pip_install_required('pandas', pandas_version)
     else:
         try_pip_install('pandas>=2,<3')
     try_pip_install('numpy<2')
@@ -102,8 +117,14 @@ def main(args):
         install_default_pandas_and_numpy()
 
     try_pip_install('fastparquet>=2023.10.1')
-    try_pip_install('pyarrow', args.pyarrow_version or None)
-    try_pip_install('polars', args.polars_version or None)
+    if args.pyarrow_version:
+        pip_install_required('pyarrow', args.pyarrow_version)
+    else:
+        try_pip_install('pyarrow')
+    if args.polars_version:
+        pip_install_required('polars', args.polars_version)
+    else:
+        try_pip_install('polars')
     try_pip_install('psutil')
 
     on_linux_is_glibc = (
