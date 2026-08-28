@@ -155,21 +155,36 @@ class _RawArrowStream:
         self._keep.append(held)
         return ctypes.cast(held, ctypes.c_void_p)
 
+    def _build_schema_node(self, column):
+        node = self.Schema()
+        node.format = column['format']
+        node.name = column.get('name')
+        node.metadata = column.get(
+            'metadata_blob', self._packed_metadata(column.get('metadata')))
+        node.flags = 2  # ARROW_FLAG_NULLABLE
+        child_defs = column.get('children', [])
+        if child_defs:
+            children = (ctypes.POINTER(self.Schema) * len(child_defs))()
+            for i, child_def in enumerate(child_defs):
+                child = self._build_schema_node(child_def)
+                children[i] = ctypes.pointer(child)
+            self._keep.append(children)
+            node.n_children = len(child_defs)
+            node.children = ctypes.cast(children, ctypes.c_void_p)
+        else:
+            node.n_children = 0
+            node.children = None
+        node.dictionary = None
+        node.release = self._release_stub(self.Schema)
+        node.private_data = None
+        self._keep.append(node)
+        return node
+
     def _build_schema(self, columns, n_children=None,
                       null_children=False, null_child=None):
         children = (ctypes.POINTER(self.Schema) * len(columns))()
         for i, column in enumerate(columns):
-            child = self.Schema()
-            child.format = column['format']
-            child.name = column['name']
-            child.metadata = self._packed_metadata(column.get('metadata'))
-            child.flags = 2  # ARROW_FLAG_NULLABLE
-            child.n_children = 0
-            child.children = None
-            child.dictionary = None
-            child.release = self._release_stub(self.Schema)
-            child.private_data = None
-            self._keep.append(child)
+            child = self._build_schema_node(column)
             children[i] = ctypes.pointer(child)
         if null_child is not None:
             children[null_child] = None
@@ -190,24 +205,44 @@ class _RawArrowStream:
         self._keep.append(top)
         return top
 
+    def _build_array_node(self, column, default_length):
+        node = self.Array()
+        node.length = column.get('length', default_length)
+        node.null_count = column.get('null_count', 0)
+        node.offset = column.get('offset', 0)
+        buffer_defs = column.get('buffers')
+        if buffer_defs is None:
+            if column['format'] == b'+s':
+                buffer_defs = [column.get('validity')]
+            else:
+                buffer_defs = [column.get('validity'), column.get('data', b'')]
+        buffers = self._buffer_array(buffer_defs)
+        node.n_buffers = column.get('n_buffers', len(buffer_defs))
+        node.buffers = buffers
+        child_defs = column.get('children', [])
+        if child_defs:
+            children = (ctypes.POINTER(self.Array) * len(child_defs))()
+            for i, child_def in enumerate(child_defs):
+                child = self._build_array_node(child_def, node.length)
+                children[i] = ctypes.pointer(child)
+            self._keep.append(children)
+            node.n_children = len(child_defs)
+            node.children = ctypes.cast(children, ctypes.c_void_p)
+        else:
+            node.n_children = 0
+            node.children = None
+        node.dictionary = None
+        node.release = self._release_stub(self.Array)
+        node.private_data = None
+        self._keep.append(node)
+        return node
+
     def _build_array(self, columns, row_count, batch_offset,
                      n_children=None, null_children=False,
                      null_child=None):
         children = (ctypes.POINTER(self.Array) * len(columns))()
         for i, column in enumerate(columns):
-            child = self.Array()
-            child.length = column.get('length', row_count + batch_offset)
-            child.null_count = column.get('null_count', 0)
-            child.offset = column.get('offset', 0)
-            child.n_buffers = column.get('n_buffers', 2)
-            child.n_children = 0
-            child.buffers = self._buffer_array(
-                [column.get('validity'), column['data']])
-            child.children = None
-            child.dictionary = None
-            child.release = self._release_stub(self.Array)
-            child.private_data = None
-            self._keep.append(child)
+            child = self._build_array_node(column, row_count + batch_offset)
             children[i] = ctypes.pointer(child)
         if null_child is not None:
             children[null_child] = None
@@ -299,17 +334,23 @@ MARKER = 'FORGED-ARROW-REFUSED-OK'
 
 #: Case name -> builder for one malformed Arrow stream.
 FORGED_CASES = {}
+FORGED_EXPECTATIONS = {}
 
 _STAMP = struct.pack('<q', 1735689600000000)
 _GEOHASH_CLAIM = {b'questdb.column_type': b'geohash',
                   b'questdb.geohash_bits': b'5'}
 
 
-def _case(name):
+def _case(name, *, code='ArrowIngest', message=None, at='ts'):
     """Register a forged shape under `name`."""
     def register(build):
         assert name not in FORGED_CASES, name
         FORGED_CASES[name] = build
+        FORGED_EXPECTATIONS[name] = {
+            'code': code,
+            'message': message,
+            'at': at,
+        }
         return build
     return register
 
@@ -424,6 +465,65 @@ def _null_schema_child_zero_rows():
         columns(1, geohash=False), 0, null_schema_child=0)
 
 
+# -- unsupported nested columns and bounded metadata -------------------
+
+def _nested_struct_stream(root_offset):
+    leaf = {
+        'format': b'i',
+        'name': b'value',
+        'length': 2,
+        'data': struct.pack('<ii', 11, 22),
+    }
+    nested = {
+        'format': b'+s',
+        'name': b'nested',
+        'length': 2,
+        'buffers': [None],
+        'children': [leaf],
+    }
+    return _RawArrowStream([nested], 1, root_offset)
+
+
+@_case(
+    'nested_struct_root_offset_zero',
+    code='ArrowUnsupportedColumnKind',
+    message='Arrow schema root.children[0]: Struct columns are not supported',
+    at='server')
+def _nested_struct_root_offset_zero():
+    return _nested_struct_stream(0)
+
+
+@_case(
+    'nested_struct_root_offset_one',
+    code='ArrowUnsupportedColumnKind',
+    message='Arrow schema root.children[0]: Struct columns are not supported',
+    at='server')
+def _nested_struct_root_offset_one():
+    return _nested_struct_stream(1)
+
+
+@_case(
+    'metadata_oversized_key_length',
+    message='metadata blob exceeds 1048576 bytes',
+    at='server')
+def _metadata_oversized_key_length():
+    column = dict(
+        format=b'i', name=b'value', data=struct.pack('<i', 1),
+        metadata_blob=struct.pack('<ii', 1, 0x7fffffff))
+    return _RawArrowStream([column], 1)
+
+
+@_case(
+    'metadata_oversized_value_length',
+    message='metadata blob exceeds 1048576 bytes',
+    at='server')
+def _metadata_oversized_value_length():
+    column = dict(
+        format=b'i', name=b'value', data=struct.pack('<i', 1),
+        metadata_blob=struct.pack('<iii', 1, 0, 0x7fffffff))
+    return _RawArrowStream([column], 1)
+
+
 # -- row shapes --------------------------------------------------------
 #
 # These exercise native length and offset validation. The GEOHASH metadata
@@ -491,18 +591,26 @@ def accepted_slice():
 def run_case(name, port):
     """Build the named shape and require a native Arrow refusal."""
     build = FORGED_CASES[name]
+    expected = FORGED_EXPECTATIONS[name]
     stream = build()
     conf = (f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
             f'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
     client = qi.QuestDB.from_conf(conf)
     try:
         try:
-            client.dataframe(stream, table_name='forged', at='ts')
+            at = qi.ServerTimestamp if expected['at'] == 'server' else expected['at']
+            client.dataframe(stream, table_name='forged', at=at)
         except qi.QuestDBError as exc:
-            if exc.code is not qi.QuestDBErrorCode.ArrowIngest:
+            expected_code = getattr(qi.QuestDBErrorCode, expected['code'])
+            if exc.code is not expected_code:
                 raise AssertionError(
                     f'{name}: refused as {exc.code!r}, expected '
-                    f'ArrowIngest: {exc}') from None
+                    f'{expected["code"]}: {exc}') from None
+            if (expected['message'] is not None
+                    and expected['message'] not in str(exc)):
+                raise AssertionError(
+                    f'{name}: expected diagnostic {expected["message"]!r}, '
+                    f'got: {exc}') from None
         else:
             raise AssertionError(f'{name}: the forged stream was accepted')
     finally:

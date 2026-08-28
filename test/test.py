@@ -38,6 +38,7 @@ from test_tools import (
     TimestampEncodingMixin)
 from forged_arrow import (
     FORGED_CASES,
+    FORGED_EXPECTATIONS,
     MARKER as FORGED_ARROW_MARKER,
     _RawArrowStream,
     accepted_slice)
@@ -2419,6 +2420,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     @_needs_capsule_builder
     def test_every_forged_arrow_shape_is_refused_without_reaching_the_wire(self):
         script = pathlib.Path(__file__).with_name('forged_arrow.py')
+        self.assertEqual(
+            set(FORGED_CASES), set(FORGED_EXPECTATIONS),
+            'every forged Arrow case must declare its expected outcome')
         for name in FORGED_CASES:
             with self.subTest(case=name), QwpAckServer(
                     record_payloads=True) as server:
@@ -2437,19 +2441,16 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     self.fail(
                         f'{name}: forged-Arrow child timed out after '
                         f'{exc.timeout} seconds')
-                if child.returncode < 0:
-                    self.fail(
-                        f'{name}: forged-Arrow child died from signal '
-                        f'{-child.returncode}; stderr:\n{child.stderr}')
                 if child.returncode != 0:
                     self.fail(
-                        f'{name}: forged-Arrow child exited '
-                        f'{child.returncode}; stdout:\n{child.stdout}'
+                        f'{name}: forged-Arrow child failed\n'
+                        f'returncode: {child.returncode}\n'
+                        f'stdout:\n{child.stdout}\n'
                         f'stderr:\n{child.stderr}')
                 if FORGED_ARROW_MARKER not in child.stdout:
                     self.fail(
                         f'{name}: forged-Arrow child did not print the '
-                        f'success marker; stdout:\n{child.stdout}'
+                        f'success marker\nstdout:\n{child.stdout}\n'
                         f'stderr:\n{child.stderr}')
                 frames = server.wait_binary_frames_settled()
                 stats = server.snapshot()
@@ -2460,6 +2461,32 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     stats['binary_payloads'], [],
                     f'{name}: malformed Arrow payload reached the wire')
                 self.assertEqual(stats['binary_bytes'], 0)
+                self.assertGreaterEqual(stats['accepted_connections'], 1)
+                self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(
+        pd is None or pyarrow is None,
+        'pandas and pyarrow are required for real-export metadata coverage')
+    def test_wide_real_pandas_pyarrow_schema_passes_arrow_preflight(self):
+        column_count = 4_095
+        frame = pd.DataFrame({
+            f'c{i}': pd.Series([i], dtype='int64')
+            for i in range(column_count)
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                client.dataframe(
+                    frame,
+                    table_name='wide_arrow_schema',
+                    at=qi.ServerTimestamp,
+                    symbols=False)
+            self.assertGreaterEqual(server.wait_binary_frames_settled(), 1)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['accepted_connections'], 1)
 
     @_needs_capsule_builder
     def test_a_batch_ending_exactly_at_the_column_end_is_accepted(self):
