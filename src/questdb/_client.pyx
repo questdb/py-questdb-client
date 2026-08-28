@@ -5684,9 +5684,9 @@ cdef _log_roundtrip_claim_dropped(object name, str kind, object shape):
     mistake the caller wants to hear about. Naming the claim and the type
     that turned it away tells them apart without failing either.
     """
-    # A stale claim does not invalidate the frame. Report it on the same
-    # logger as the other non-fatal client notices so warning filters --
-    # especially `-W error` -- cannot turn it into a failed write.
+    # A stale claim does not invalidate the frame. Unlike the naive-datetime
+    # and reconnect warnings, it is not a migration/performance pattern the
+    # caller should be able to promote to an error with `-W error`.
     logging.getLogger('questdb').warning(
         'questdb: column %r carries a df.attrs[\'questdb\'] claim of '
         'kind %r, which a column of type %s cannot carry. The claim is '

@@ -142,10 +142,12 @@ Breaking changes
 
   Its message starts with ``questdb: column``. It is deliberately a log
   record rather than a ``UserWarning``: ``-W error`` must not turn a valid
-  frame into ``QuestDBErrorCode.InvalidApiCall`` or stop its write. Cast the
-  column to a type the kind fits, name the type outright with
-  ``schema_overrides``, or drop the claim. To silence these notices instead,
-  configure the standard-library logger::
+  frame into ``QuestDBErrorCode.InvalidApiCall`` or stop its write. Logging
+  has no warnings-style deduplication: every write emits one record for every
+  claim it cannot apply, so repeated writes of the same frame repeat the
+  notice. Cast the column to a type the kind fits, name the type outright
+  with ``schema_overrides``, or drop the claim. To silence these notices
+  instead, configure the standard-library logger::
 
       import logging
 
