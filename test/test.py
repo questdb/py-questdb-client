@@ -4341,15 +4341,14 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             with self.subTest(shape=label):
                 frame = self._geohash_frame(
                     [0, 1], dtype, bits=20, mixed=mixed)
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter('always')
+                with self.assertLogs('questdb', level='WARNING') as caught:
                     types = self._dataframe_column_types(
                         frame, table_name='geo_unsigned', at='ts')
                 # 0x0E is GEOHASH: the claim really was dropped.
                 self.assertNotEqual(types['gh'], 0x0E)
                 said = [
-                    str(w.message) for w in caught
-                    if "df.attrs['questdb']" in str(w.message)]
+                    record.getMessage() for record in caught.records
+                    if "df.attrs['questdb']" in record.getMessage()]
                 self.assertEqual(len(said), 1, said)
                 self.assertIn("column 'gh'", said[0])
                 self.assertIn("'geohash'", said[0])
@@ -4382,14 +4381,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
         for label, frame in cases:
             with self.subTest(case=label):
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter('always')
+                with self.assertNoLogs('questdb', level='WARNING'):
                     self._dataframe_column_types(
                         frame, table_name='geo_quiet', at='ts')
-                self.assertEqual(
-                    [str(w.message) for w in caught
-                     if "df.attrs['questdb']" in str(w.message)],
-                    [])
 
     def _geohash_arrow_table(self, values, bits=None, ty=None, md=None):
         """A GEOHASH frame as a `pa.Table`, claiming the type through
@@ -6150,7 +6144,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         serialized a row at a time never reaches them, and the kinds the
         claim names all ride on integers or blobs, so the column lands as
         a LONG or a BINARY and a table created by the write gets that
-        type. Nothing about the values says otherwise, so the warning is
+        type. Nothing about the values says otherwise, so the log notice is
         the only signal."""
         if pd is None:
             self.skipTest('pandas not installed')
@@ -6164,40 +6158,36 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             'c': {'kind': 'char'},
             'g': {'kind': 'geohash', 'precision_bits': 7}}}
 
-        with Server() as server:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
-                with qi.Sender.from_conf(
-                        f'tcp::addr=localhost:{server.port};') as sender:
-                    sender.dataframe(df, table_name='t', at='ts')
-        messages = [str(w.message) for w in caught
-                    if w.category is UserWarning]
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            with self.assertLogs('questdb', level='WARNING') as caught:
+                with Server() as server:
+                    with qi.Sender.from_conf(
+                            f'tcp::addr=localhost:{server.port};') as sender:
+                        sender.dataframe(df, table_name='t', at='ts')
+        messages = [record.getMessage() for record in caught.records]
         dropped = [m for m in messages if m.startswith('questdb: column')]
         self.assertEqual(
             len(dropped), 3,
-            f'expected one warning per claimed column, got: {messages}')
+            f'expected one log notice per claimed column, got: {messages}')
         for kind in ("'ipv4'", "'char'", "'geohash'"):
             self.assertTrue(
                 any(kind in m for m in dropped),
-                f'no warning named kind {kind}: {dropped}')
+                f'no log notice named kind {kind}: {dropped}')
 
-    def test_a_frame_without_a_claim_warns_about_nothing(self):
-        """The warning above is about a claim this route cannot apply.
-        A frame carrying none has nothing to say, and a write that warns
+    def test_a_frame_without_a_claim_logs_no_notice(self):
+        """The notice above is about a claim this route cannot apply.
+        A frame carrying none has nothing to say, and a write that logs
         on every frame trains the reader to filter it."""
         if pd is None:
             self.skipTest('pandas not installed')
         df = pd.DataFrame({
             'v': [1], 'ts': pd.to_datetime(['2020-01-01'])})
         with Server() as server:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
+            with self.assertNoLogs('questdb', level='WARNING'):
                 with qi.Sender.from_conf(
                         f'tcp::addr=localhost:{server.port};') as sender:
                     sender.dataframe(df, table_name='t', at='ts')
-        self.assertEqual(
-            [str(w.message) for w in caught
-             if str(w.message).startswith('questdb: column')], [])
 
     def test_a_batch_reporting_a_negative_row_count_is_refused(self):
         """`ArrowArray.length` arrives from the caller's own producer and
@@ -7216,7 +7206,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         """An object column of `uuid.UUID` or `ipaddress.IPv4Address`
         is written as UUID or IPV4 by its source alone, so no override
         is set for it and none is missing. That is the shape plain
-        `to_pandas()` hands back, so warning there would put a false
+        `to_pandas()` hands back, so a log notice there would put a false
         'claim ignored' on every round trip -- the one path the claim
         exists to serve."""
         cases = (
@@ -7235,17 +7225,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         df.attrs['questdb'] = {
                             'version': 1,
                             'columns': {'c': {'kind': kind}}}
-                    with warnings.catch_warnings(record=True) as caught:
-                        warnings.simplefilter('always')
+                    with self.assertNoLogs('questdb', level='WARNING'):
                         types = self._dataframe_column_types(
                             df, table_name='claim_carried', at='ts')
-                    dropped = [
-                        w for w in caught
-                        if 'questdb: column' in str(w.message)]
-                    self.assertEqual(
-                        dropped, [],
-                        f'claim is carried, should be quiet: '
-                        f'{[str(w.message) for w in dropped]}')
                     # And the claim changes nothing: the column goes out
                     # as its own type either way.
                     self.assertEqual(types['c'], wire_type)
@@ -7255,7 +7237,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     def test_a_claim_no_column_can_carry_is_said_out_loud_on_both_planners(self):
         """A claim the column's type can never carry is a mistake
         rather than drift, so both planners say so, for all five kinds
-        and on either backing. Exactly one warning either way -- an
+        and on either backing. Exactly one log notice either way -- an
         Arrow-backed column is answered by
         `_dataframe_normalize_claimed_arrow`, and saying it twice for
         one claim would be worse than either."""
@@ -7276,18 +7258,20 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         'ts': pd.to_datetime([0], unit='s')})
                     df.attrs['questdb'] = {
                         'version': 1, 'columns': {'g': meta}}
-                    with warnings.catch_warnings(record=True) as caught:
-                        warnings.simplefilter('always')
-                        self._dataframe_column_types(
-                            df, table_name='claim_impossible', at='ts')
-                    dropped = [
-                        w for w in caught
-                        if 'questdb: column' in str(w.message)]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('error')
+                        with self.assertLogs(
+                                'questdb', level='WARNING') as caught:
+                            self._dataframe_column_types(
+                                df, table_name='claim_impossible', at='ts')
+                    dropped = [record.getMessage()
+                               for record in caught.records
+                               if 'questdb: column' in record.getMessage()]
                     self.assertEqual(
                         len(dropped), 1,
-                        f'expected exactly one dropped-claim warning, got '
-                        f'{[str(w.message) for w in dropped]}')
-                    self.assertIn(kind, str(dropped[0].message))
+                        f'expected exactly one dropped-claim log notice, '
+                        f'got {dropped}')
+                    self.assertIn(kind, dropped[0])
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_geohash_claim_too_wide_for_a_numpy_column_is_said_out_loud(self):
@@ -7302,7 +7286,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                  (np.int16, 16, False), (np.int16, 17, True),
                  (np.int32, 32, False), (np.int32, 33, True),
                  (np.int64, 60, False), (np.int64, 61, True))
-        for dtype, bits, expect_warning in cases:
+        for dtype, bits, expect_notice in cases:
             with self.subTest(dtype=dtype.__name__, bits=bits):
                 df = pd.DataFrame({
                     'g': np.array([1], dtype=dtype),
@@ -7311,24 +7295,23 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     'version': 1,
                     'columns': {
                         'g': {'kind': 'geohash', 'precision_bits': bits}}}
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter('always')
+                log = logging.getLogger('questdb')
+                with mock.patch.object(log, 'handle') as handle:
                     types = self._dataframe_column_types(
                         df, table_name='geo_numpy_wide', at='ts')
-                dropped = [
-                    w for w in caught
-                    if 'geohash' in str(w.message)]
-                if expect_warning:
+                dropped = [call.args[0].getMessage()
+                           for call in handle.call_args_list
+                           if 'geohash' in call.args[0].getMessage()]
+                if expect_notice:
                     self.assertEqual(
                         len(dropped), 1,
-                        f'expected a dropped-claim warning, got '
-                        f'{[str(w.message) for w in caught]}')
-                    self.assertIn('g', str(dropped[0].message))
+                        f'expected a dropped-claim log notice, got {dropped}')
+                    self.assertIn('g', dropped[0])
                 else:
                     self.assertEqual(
                         len(dropped), 0,
                         f'claim fits, should be quiet: '
-                        f'{[str(w.message) for w in dropped]}')
+                        f'{dropped}')
                     self.assertEqual(types['g'], 0x0E)
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

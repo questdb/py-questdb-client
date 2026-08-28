@@ -5533,7 +5533,7 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
         # rather than drift, and the two look the same from here.
         if not _attrs_override_fits(
                 types, ty, kind, meta.get('precision_bits') or 0):
-            _warn_roundtrip_claim_dropped(name, kind, dtype)
+            _log_roundtrip_claim_dropped(name, kind, dtype)
             continue
         target_dtype = _claimed_arrow_col_reshape_dtype(
             types, raw_ty, ty, kind)
@@ -5668,7 +5668,7 @@ cdef void_int _dataframe_claim_all_null_source(
     return 0
 
 
-cdef _warn_roundtrip_claim_dropped(object name, str kind, object shape):
+cdef _log_roundtrip_claim_dropped(object name, str kind, object shape):
     """Say that a column's ``df.attrs['questdb']`` claim was not applied.
 
     A claim that no longer matches its column is not an error. The frame
@@ -5684,17 +5684,20 @@ cdef _warn_roundtrip_claim_dropped(object name, str kind, object shape):
     mistake the caller wants to hear about. Naming the claim and the type
     that turned it away tells them apart without failing either.
     """
-    warnings.warn(
-        f'questdb: column {name!r} carries a '
-        f"df.attrs['questdb'] claim of kind {kind!r}, which a column of "
-        f'type {shape} cannot carry. The claim is ignored, and the '
-        f'column goes out as its own type decides -- which for some '
-        f'shapes means it is left out of the write, or refused by it. '
-        f'Cast the column to a type the kind fits, state the type '
-        f'outright with schema_overrides, or drop the claim to silence '
-        f'this.',
-        UserWarning,
-        stacklevel=1)
+    # A stale claim does not invalidate the frame. Report it on the same
+    # logger as the other non-fatal client notices so warning filters --
+    # especially `-W error` -- cannot turn it into a failed write.
+    logging.getLogger('questdb').warning(
+        'questdb: column %r carries a df.attrs[\'questdb\'] claim of '
+        'kind %r, which a column of type %s cannot carry. The claim is '
+        'ignored, and the column goes out as its own type decides -- '
+        'which for some shapes means it is left out of the write, or '
+        'refused by it. Cast the column to a type the kind fits, state '
+        'the type outright with schema_overrides, or drop the claim to '
+        'silence this.',
+        name,
+        kind,
+        shape)
 
 
 cdef bint _roundtrip_claim_already_carried(
@@ -5816,7 +5819,7 @@ cdef void_int _dataframe_apply_roundtrip_overrides(
             # one claim would be worse than either.
             dtype = df.dtypes.iloc[col.setup.orig_index]
             if arrow_dtype is None or not isinstance(dtype, arrow_dtype):
-                _warn_roundtrip_claim_dropped(
+                _log_roundtrip_claim_dropped(
                     df_cols[col.setup.orig_index], kind, dtype)
     return 0
 
@@ -7079,11 +7082,11 @@ cdef object _capsule_roundtrip_overrides(object frame):
             # The column is here in a dtype that holds no Arrow type --
             # a pandas 3 string column, say -- so no claim of any kind
             # fits it. The NumPy planner answers the same frame with a
-            # warning, and both planners answering alike is the point.
-            _warn_roundtrip_claim_dropped(name, kind, dtype)
+            # log notice, and both planners answering alike is the point.
+            _log_roundtrip_claim_dropped(name, kind, dtype)
             continue
         if not _attrs_override_fits(types, ty, kind, bits):
-            _warn_roundtrip_claim_dropped(name, kind, ty)
+            _log_roundtrip_claim_dropped(name, kind, ty)
             continue
         # Only GEOHASH takes an argument, and `_attrs_override_fits` has
         # already held it to a whole number in 1..=60.
@@ -8337,12 +8340,12 @@ cdef class QuestDB:
         the claim in ``attrs`` and cannot use it: a claimed column that
         arrives as a float or a string dtype lands as that dtype
         implies, and the claim it could not use is reported as a
-        ``UserWarning``. An
-        object column states no width or range of its own, so a claimed
-        value the type cannot hold — an integer past ``2**32-1`` under
-        ``ipv4``, a cell that is not exactly 16 or 32 bytes under
-        ``uuid`` or ``long256`` — is refused rather than written into a
-        column of the claimed type.
+        warning-level record on the ``questdb`` logger. An object column
+        states no width or range of its own, so a claimed value the type
+        cannot hold — an integer past ``2**32-1`` under ``ipv4``, a cell
+        that is not exactly 16 or 32 bytes under ``uuid`` or ``long256``
+        — is refused rather than written into a column of the claimed
+        type.
 
         Bulk GEOHASH values are raw bit patterns. The declared precision
         must be in ``1..=60`` and fit the signed integer carrier, but no

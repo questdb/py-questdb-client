@@ -381,7 +381,7 @@ cdef str _roundtrip_kind(object meta):
     return kind
 
 
-cdef _warn_roundtrip_claim_route(object name, str kind):
+cdef _log_roundtrip_claim_route(object name, str kind):
     """Say that a column's claim named a type this write cannot apply.
 
     The claim is read by the columnar writers. A frame serialized a row
@@ -391,31 +391,34 @@ cdef _warn_roundtrip_claim_route(object name, str kind):
     column reaches the database as a LONG or a BINARY, the table it
     creates has that type, and without this nothing says so.
 
-    Separate from `_warn_roundtrip_claim_dropped`, which answers a
+    Separate from `_log_roundtrip_claim_dropped`, which answers a
     different question: there the column cannot carry the kind, here
     the route cannot apply it. The remedy differs with it.
     """
-    warnings.warn(
-        f'questdb: column {name!r} carries a '
-        f"df.attrs['questdb'] claim of kind {kind!r}, which this write "
-        f'cannot apply. The claim is read when a frame is written a '
-        f'column at a time; this one is being written a row at a time, '
-        f'so the column goes out as its own type decides -- a plain '
-        f'integer or blob rather than the claimed type, and a table '
-        f'created by this write gets that type. Use '
-        f'QuestDB.dataframe(), or Sender.dataframe() over a ws:: or '
-        f'wss:: configuration, to have the claim applied.',
-        UserWarning,
-        stacklevel=1)
+    # This is a diagnostic about a write that remains valid. Keep it out
+    # of `warnings.warn`: under `-W error` a Python warning would become
+    # an exception, abort the write, and be translated by `_dataframe`
+    # into an unrelated InvalidApiCall error.
+    logging.getLogger('questdb').warning(
+        'questdb: column %r carries a df.attrs[\'questdb\'] claim of '
+        'kind %r, which this write cannot apply. The claim is read when '
+        'a frame is written a column at a time; this one is being '
+        'written a row at a time, so the column goes out as its own '
+        'type decides -- a plain integer or blob rather than the '
+        'claimed type, and a table created by this write gets that '
+        'type. Use QuestDB.dataframe(), or Sender.dataframe() over a '
+        'ws:: or wss:: configuration, to have the claim applied.',
+        name,
+        kind)
 
 
-cdef void_int _dataframe_warn_claims_this_route_drops(object df) except -1:
-    """Warn for every claim the row-serializing write silently ignores.
+cdef void_int _dataframe_log_claims_this_route_drops(object df) except -1:
+    """Log every claim the row-serializing write silently ignores.
 
     Placed at `_dataframe`, which is the one entry `Buffer.dataframe`,
     `SenderTransaction.dataframe` and `Sender.dataframe` over the
     row-serializing protocols all arrive through, so a fourth caller
-    inherits the warning rather than having to remember it.
+    inherits the notice rather than having to remember it.
     """
     cdef object cols_meta = _roundtrip_columns_meta(df)
     cdef object name
@@ -426,7 +429,7 @@ cdef void_int _dataframe_warn_claims_this_route_drops(object df) except -1:
     for name, meta in cols_meta.items():
         kind = _roundtrip_kind(meta)
         if kind is not None and kind in _ATTRS_OVERRIDE_KINDS:
-            _warn_roundtrip_claim_route(name, kind)
+            _log_roundtrip_claim_route(name, kind)
     return 0
 
 
@@ -3739,7 +3742,7 @@ cdef void_int _dataframe(
         # Said before the plan is built, so a frame refused for its
         # shape still hears which of its claims this route would have
         # ignored.
-        _dataframe_warn_claims_this_route_drops(df)
+        _dataframe_log_claims_this_route_drops(df)
         _dataframe_plan_build(
             b,
             df,

@@ -11,8 +11,8 @@ Two review rounds in a row produced a defect in this subsystem, and both
 times reasoning about it went wrong where measuring would not have. So
 this measures: every (backing, claim, planner) cell is driven through a
 real ``QwpAckServer``, the frame it produces is decoded, and the wire
-type and the warning count are recorded. Neither planner is asked what
-it thinks it did.
+type and the diagnostic-notice count are recorded. Neither planner is
+asked what it thinks it did.
 
 Cells are stored in ``claim_matrix_expected.json`` and diffed on re-run,
 so a submodule bump or a planner change that moves one column's type
@@ -26,12 +26,13 @@ Usage::
 """
 
 import argparse
+import contextlib
 import ipaddress
 import json
+import logging
 import pathlib
 import sys
 import uuid
-import warnings
 
 import patch_path  # noqa: F401  (sys.path fix-up)
 
@@ -264,24 +265,44 @@ def build_frame(pd, pa, np, source_kind, backing_name, claim, planner):
 def measure(frame):
     """Send `frame` and report what actually went out.
 
-    Returns ``(wire type name, warning count, error)``. An error is a
+    Returns ``(wire type name, notice count, error)``. An error is a
     result too: a claim the planner refuses outright is a different
-    answer from one it drops with a warning, and the two planners have
+    answer from one it drops with a log notice, and the two planners have
     disagreed on exactly that before.
     """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with _questdb_log_notices() as notices:
         try:
             payload = send(frame)
         except Exception as exc:
-            return None, _questdb_warnings(caught), _short(exc)
-        warned = _questdb_warnings(caught)
+            return None, len(notices), _short(exc)
     types = dict(qwp_wire.first_table_column_types(payload))
-    return qwp_wire.type_name(types['c']), warned, None
+    return qwp_wire.type_name(types['c']), len(notices), None
 
 
-def _questdb_warnings(caught):
-    return len([w for w in caught if 'questdb: column' in str(w.message)])
+@contextlib.contextmanager
+def _questdb_log_notices():
+    """Capture claim diagnostics without letting them fill grid output."""
+    logger = logging.getLogger('questdb')
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            if (record.levelno >= logging.WARNING
+                    and record.getMessage().startswith('questdb: column')):
+                records.append(record)
+
+    handler = Capture()
+    old_level = logger.level
+    old_propagate = logger.propagate
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = old_propagate
+        logger.setLevel(old_level)
 
 
 def _describe(record):
@@ -289,7 +310,7 @@ def _describe(record):
     if record is None:
         return 'absent'
     return (f'{record["wire_type"] or "refused"}'
-            f'/{record["warnings"]}w')
+            f'/{record["notices"]}n')
 
 
 def _short(exc):
@@ -332,14 +353,14 @@ def run_grid(pd, pa, np, only_kind=None):
         except Exception as exc:
             results[key] = {
                 'wire_type': None,
-                'warnings': 0,
+                'notices': 0,
                 'error': f'unbuildable: {_short(exc)}',
             }
             continue
-        wire_type, warned, error = measure(frame)
+        wire_type, notices, error = measure(frame)
         results[key] = {
             'wire_type': wire_type,
-            'warnings': warned,
+            'notices': notices,
             'error': error,
         }
         total += 1
@@ -371,13 +392,13 @@ def _answer(record):
     planners phrase a refusal differently for the same reason, and
     holding them to one wording would report a disagreement on every
     refused cell. Whether there *was* an error counts, and so does the
-    warning count -- a claim one planner drops with a warning and the
+    notice count -- a claim one planner drops with a notice and the
     other drops in silence sends the same column to the same type, and
     is still one frame given two answers.
     """
     if record is None:
         return None
-    return (record['wire_type'], record['warnings'], record['error'] is None)
+    return (record['wire_type'], record['notices'], record['error'] is None)
 
 
 def planner_disagreements(results):

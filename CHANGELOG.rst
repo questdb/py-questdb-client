@@ -132,23 +132,24 @@ Breaking changes
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.ConfigError`` during startup.
 
-- **A claim a string column cannot carry now warns on the Arrow path
+- **A claim a string column cannot carry is now logged on the Arrow path
   too.** A ``df.attrs['questdb']`` claim naming ``uuid``, ``long256``,
   ``ipv4``, ``char`` or ``geohash`` on a column whose dtype holds no Arrow
   type was dropped there without a word, while the NumPy planner said so.
   On pandas 3 that includes an ordinary string column, and those reach the
   Arrow columnar path, so this is the common way to meet it. Both planners
-  warn now, which is what this changelog already says they do.
+  now emit a warning-level record on the ``questdb`` logger.
 
-  The warning is a ``UserWarning`` and its message starts with ``questdb:
-  column``. Under ``-W error`` — usual in a test suite — it becomes an
-  exception, so a write that used to succeed in silence can now fail.
-  Cast the column to a type the kind fits, name the type outright with
-  ``schema_overrides``, or drop the claim. To silence every dropped-claim
-  warning instead::
+  Its message starts with ``questdb: column``. It is deliberately a log
+  record rather than a ``UserWarning``: ``-W error`` must not turn a valid
+  frame into ``QuestDBErrorCode.InvalidApiCall`` or stop its write. Cast the
+  column to a type the kind fits, name the type outright with
+  ``schema_overrides``, or drop the claim. To silence these notices instead,
+  configure the standard-library logger::
 
-      warnings.filterwarnings(
-          'ignore', message='questdb: column', category=UserWarning)
+      import logging
+
+      logging.getLogger('questdb').setLevel(logging.ERROR)
 
   A claim whose column has been dropped or renamed is still ignored in
   silence. That is ordinary schema drift, and surviving it quietly is what
@@ -417,7 +418,7 @@ Fixed
   disagreeing with its own values.
 
 
-- **A claim the column's type can never carry now warns.** The write still
+- **A claim the column's type can never carry is now logged.** The write still
   goes ahead as the column's own type implies — a frame retyped since you
   read it must not fail on that account — but a claim guaranteed to do
   nothing, such as an unsigned integer under ``geohash``, is a mistake

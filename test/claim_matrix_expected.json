@@ -1,3152 +1,3152 @@
 {
  "char | arrow/binary | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/binary | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/binary | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/binary | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/binary | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/fsb | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/fsb | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/fsb | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/fsb | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/fsb | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | binary | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | binary | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | char | arrow": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | char | numpy": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | geohash(20b) | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | geohash(20b) | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | geohash(60b) | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | geohash(60b) | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | ipv4 | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | ipv4 | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | long256 | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | long256 | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | none | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | none | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | not_a_kind | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | not_a_kind | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/int | uuid | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | uuid | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | binary | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | binary | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | char | arrow": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | char | numpy": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | geohash(20b) | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | geohash(20b) | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | geohash(60b) | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | geohash(60b) | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | ipv4 | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | ipv4 | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | long256 | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | long256 | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | none | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | none | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | not_a_kind | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | not_a_kind | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | arrow/native | uuid | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | uuid | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | binary | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | binary | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | char | arrow": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | char | numpy": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | geohash(20b) | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | geohash(20b) | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | geohash(60b) | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | geohash(60b) | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | ipv4 | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | ipv4 | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | long256 | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | long256 | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | none | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | none | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | not_a_kind | arrow": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | not_a_kind | numpy": {
   "wire_type": "INT",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | numpy/int | uuid | arrow": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | uuid | numpy": {
   "wire_type": "INT",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | object/py | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | char | arrow": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | char | numpy": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | geohash(60b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | geohash(60b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | ipv4 | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | ipv4 | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | long256 | arrow": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | long256 | numpy": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | object/py | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | object/py | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | binary | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | str/pandas | binary | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | str/pandas | char | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | char | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | geohash(20b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | geohash(20b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | geohash(60b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | geohash(60b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | ipv4 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | ipv4 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | long256 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | long256 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | none | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | str/pandas | none | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "char | str/pandas | uuid | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | uuid | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/binary | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/binary | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/binary | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/binary | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/fsb | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/fsb | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/fsb | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/fsb | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/fsb | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | geohash(60b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | geohash(60b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | ipv4 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | ipv4 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | geohash(60b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | geohash(60b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | ipv4 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | ipv4 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | arrow/native | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | geohash(60b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | geohash(60b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | ipv4 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | ipv4 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | numpy/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | object/py | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | char | arrow": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | char | numpy": {
   "wire_type": "CHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | geohash(60b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | geohash(60b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | ipv4 | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | ipv4 | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | long256 | arrow": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | long256 | numpy": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | object/py | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | object/py | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | binary | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | str/pandas | binary | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | str/pandas | char | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | char | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | geohash(20b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | geohash(20b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | geohash(60b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | geohash(60b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | ipv4 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | ipv4 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | long256 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | long256 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | none | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | str/pandas | none | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "geohash | str/pandas | uuid | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | uuid | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/binary | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/binary | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/binary | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/binary | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/fsb | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/fsb | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/fsb | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/fsb | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/fsb | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | geohash(20b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | geohash(20b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | geohash(60b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | geohash(60b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | ipv4 | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | ipv4 | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | geohash(20b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | geohash(20b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | geohash(60b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | geohash(60b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | ipv4 | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | ipv4 | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | geohash(20b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | geohash(20b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | geohash(60b) | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | geohash(60b) | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | ipv4 | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | ipv4 | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | binary | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | binary | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | char | arrow": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | char | numpy": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | geohash(20b) | arrow": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | geohash(20b) | numpy": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | geohash(60b) | arrow": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | geohash(60b) | numpy": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | ipv4 | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | ipv4 | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | long256 | arrow": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | long256 | numpy": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | none | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | none | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | not_a_kind | arrow": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | not_a_kind | numpy": {
   "wire_type": "IPV4",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | object/py | uuid | arrow": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | uuid | numpy": {
   "wire_type": "IPV4",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | binary | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | str/pandas | binary | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | str/pandas | char | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | char | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | geohash(20b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | geohash(20b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | geohash(60b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | geohash(60b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | ipv4 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | ipv4 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | long256 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | long256 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | none | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | str/pandas | none | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "ipv4 | str/pandas | uuid | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | uuid | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/binary | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/binary | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/binary | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/binary | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/fsb | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/fsb | binary | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/fsb | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/fsb | char | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/fsb | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/fsb | geohash(20b) | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/fsb | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/fsb | geohash(60b) | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/fsb | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/fsb | ipv4 | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/fsb | long256 | arrow": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/fsb | long256 | numpy": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/fsb | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/fsb | none | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/fsb | not_a_kind | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/fsb | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/fsb | uuid | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | geohash(60b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | geohash(60b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | ipv4 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | ipv4 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/native | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/native | binary | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/native | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/native | char | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/native | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/native | geohash(20b) | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/native | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/native | geohash(60b) | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/native | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/native | ipv4 | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/native | long256 | arrow": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/native | long256 | numpy": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/native | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/native | none | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/native | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | arrow/native | not_a_kind | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | arrow/native | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/native | uuid | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 32-byte fixed_size_binary column claims no QuestDB type on this path. To store LONG256, either pass `schema_overrides={'c': 'lon"
  },
  "long256 | numpy/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | geohash(60b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | geohash(60b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | ipv4 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | ipv4 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | numpy/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | long256 | arrow": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | long256 | numpy": {
   "wire_type": "LONG256",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | object/py | uuid | arrow": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c' at row 0: a UUID value is exactly 16 bytes, got 32."
  },
  "long256 | object/py | uuid | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c' at row 0: a UUID value is exactly 16 bytes, got 32."
  },
  "long256 | str/pandas | binary | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | str/pandas | binary | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | str/pandas | char | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | char | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | geohash(20b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | geohash(20b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | geohash(60b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | geohash(60b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | ipv4 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | ipv4 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | long256 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | long256 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | none | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | str/pandas | none | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "long256 | str/pandas | uuid | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | uuid | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/binary | binary | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/binary | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | char | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | geohash(20b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | geohash(60b) | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | ipv4 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | long256 | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/binary | none | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/binary | uuid | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | uuid | numpy": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/fsb | binary | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/fsb | binary | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | char | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/fsb | char | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | geohash(20b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/fsb | geohash(20b) | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | geohash(60b) | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/fsb | geohash(60b) | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | ipv4 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/fsb | ipv4 | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | long256 | arrow": {
   "wire_type": "BINARY",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/fsb | long256 | numpy": {
   "wire_type": null,
-  "warnings": 1,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | none | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/fsb | none | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/fsb | not_a_kind | numpy": {
   "wire_type": null,
-  "warnings": 0,
+  "notices": 0,
   "error": "QuestDBError: Bad column 'c': a 16-byte fixed_size_binary column claims no QuestDB type on this path. To store UUIDs, either build the column as `pa.uuid()`, or"
  },
  "uuid | arrow/fsb | uuid | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/fsb | uuid | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | geohash(60b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | geohash(60b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | ipv4 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | ipv4 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | binary | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/native | binary | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/native | char | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | char | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | geohash(20b) | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | geohash(20b) | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | geohash(60b) | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | geohash(60b) | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | ipv4 | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | ipv4 | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | long256 | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | long256 | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | none | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/native | none | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/native | not_a_kind | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/native | not_a_kind | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/native | uuid | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | arrow/native | uuid | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | binary | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | binary | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | char | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | char | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | geohash(20b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | geohash(20b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | geohash(60b) | arrow": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | geohash(60b) | numpy": {
   "wire_type": "GEOHASH",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | ipv4 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | ipv4 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | long256 | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | long256 | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | none | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | none | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | numpy/int | uuid | arrow": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | uuid | numpy": {
   "wire_type": "LONG",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | binary | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | object/py | binary | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | object/py | char | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | char | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | geohash(20b) | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | geohash(20b) | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | geohash(60b) | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | geohash(60b) | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | ipv4 | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | ipv4 | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | long256 | arrow": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | long256 | numpy": {
   "wire_type": "UUID",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | none | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | object/py | none | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | object/py | not_a_kind | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | object/py | not_a_kind | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | object/py | uuid | arrow": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | object/py | uuid | numpy": {
   "wire_type": "UUID",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | str/pandas | binary | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | str/pandas | binary | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | str/pandas | char | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | char | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | geohash(20b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | geohash(20b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | geohash(60b) | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | geohash(60b) | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | ipv4 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | ipv4 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | long256 | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | long256 | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | none | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | str/pandas | none | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 0,
+  "notices": 0,
   "error": null
  },
  "uuid | str/pandas | uuid | arrow": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | uuid | numpy": {
   "wire_type": "VARCHAR",
-  "warnings": 1,
+  "notices": 1,
   "error": null
  }
 }
