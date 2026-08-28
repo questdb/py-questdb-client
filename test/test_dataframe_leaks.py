@@ -535,9 +535,8 @@ class TestClosedHandleDataframeLeak(unittest.TestCase):
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
 class TestCapsuleOverridesLeak(unittest.TestCase):
     """The Arrow capsule path allocates an override array per call and
-    imports a schema per stream. Every other frame in this module is
-    object-dtype pandas and no test elsewhere passes `schema_overrides`,
-    so nothing entered this path before."""
+    imports a schema per stream. Cover both successful override sends and
+    streams refused by the guarded FFI preflight."""
 
     # Each override is 24 bytes, so a leak of one array per call only
     # shows up when many columns are claimed at once: at 1000 columns a
@@ -577,6 +576,35 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
                         schema_overrides=overrides)
 
                 _assert_no_leak(self, work, warmup=200, measure=2400)
+
+    def test_rejected_stream_leaks_nothing(self):
+        from qwp_ws_ack_server import QwpAckServer
+        nested = pa.StructArray.from_arrays(
+            [pa.array([1], type=pa.int32())], names=['value'])
+        frame = pa.table({
+            'nested': nested,
+            'ts': pa.array([0], type=pa.timestamp('us')),
+        })
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    with self.assertRaises(qi.QuestDBError) as raised:
+                        client.dataframe(
+                            frame, table_name='caps', at='ts')
+                    self.assertEqual(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
+
+                # Rejection happens before a WebSocket send, so enough calls
+                # to expose a small per-stream leak remain inexpensive.
+                _assert_no_leak(self, work, warmup=20000, measure=900000)
+            frames = server.wait_binary_frames_settled()
+            stats = server.snapshot()
+        self.assertEqual(frames, 0)
+        self.assertEqual(stats['errors'], [])
 
 
 if __name__ == '__main__':
