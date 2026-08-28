@@ -272,6 +272,29 @@ Fixed
   again now gets ``Transaction already completed`` where it previously made
   a second attempt.
 
+- **A rollback requested while a row or dataframe is being written is still
+  terminal.** A re-entrant ``rollback()`` used to reach ``Buffer.clear()``
+  while the buffer held a row rewind marker and raise before it marked the
+  transaction complete. If the value conversion swallowed that refusal, the
+  successful ``with``-block exit committed the rows the caller had asked to
+  roll back. Rollback now records completion immediately and defers the
+  physical clear until the serializer releases its marker, so none of those
+  rows can survive into a later flush.
+
+- **A completed transaction object cannot append rows outside a transaction
+  or be entered again.** ``row()``, ``dataframe()`` and ``__enter__()`` now
+  raise ``Transaction already completed`` after either commit or rollback.
+  Previously those writing methods accepted more data after the sender had
+  already left transaction mode, leaving it in the ordinary buffer to be sent
+  without the transaction the caller had requested.
+
+- **A transaction refuses every competing call while its commit is in
+  progress.** ``commit()`` releases the GIL during HTTP I/O, so another call
+  through the same transaction could previously overwrite its state, append
+  to the buffer, or clear it while the flush still borrowed it. Such calls now
+  raise ``Transaction commit is already in progress`` until the commit has
+  published its success or failure state.
+
 - **A pooled lease cannot be returned to the pool from inside its own
   ``dataframe()``.** The plan build runs your Python — reading ``attrs``,
   sniffing object cells, pulling ``__arrow_c_stream__`` — and closing the
