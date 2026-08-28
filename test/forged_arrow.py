@@ -377,21 +377,13 @@ def columns(rows, geohash=True, **column):
 # Native validation reads these before Arrow import, independently of field
 # metadata and row count. Two of the cases therefore carry no rows at all.
 
-@_case('schema_count_absurd')
-def _schema_count_absurd():
-    """A count both structs agree on, far past any array either of them
-    allocated. Agreement is what a plain equality check cannot see
-    through, which is why the count answers to a bound of its own."""
+@_case(
+    'root_column_count_cap_plus_one',
+    message='Arrow schema root: root column count 4096 exceeds 4095')
+def _root_column_count_cap_plus_one():
     return _RawArrowStream(
         columns(1, geohash=False), 1,
-        schema_n_children=1 << 40, batch_n_children=1 << 40)
-
-
-@_case('schema_per_node_count_cap_plus_one')
-def _schema_per_node_count_cap_plus_one():
-    return _RawArrowStream(
-        columns(1, geohash=False), 1,
-        schema_n_children=65537, batch_n_children=65537)
+        schema_n_children=4096, batch_n_children=4096)
 
 
 @_case('schema_count_negative')
