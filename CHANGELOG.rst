@@ -233,6 +233,12 @@ Fixed
   producer mutation are outside this guarantee. Ordinary pandas, Polars, and
   pyarrow exports do not normally emit the hand-rolled batch-slice shape.
 
+- Python extension builds now use the committed ``questdb-rs-ffi`` Cargo
+  lockfile and require its Arrow dependency graph to remain at 59.0.0. Wheel
+  and source-distribution builds fail when that lockfile drifts instead of
+  silently compiling against a different Arrow implementation. The published
+  ``questdb-rs`` crate keeps its existing compatible Arrow version range.
+
 - **NumPy and pandas integers now work everywhere a Python ``int`` does in the
   round-trip vocabulary.** One rule covers every number this client reads out
   of a ``df.attrs['questdb']`` claim, a ``schema_overrides`` entry, or one of
