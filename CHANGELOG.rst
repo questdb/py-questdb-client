@@ -224,6 +224,13 @@ New
 Fixed
 ~~~~~
 
+- Direct QWP DataFrame ingestion no longer retries the entire source after an
+  earlier batch may have committed. Native direct-sender failures now preserve
+  that commit history in ``in_doubt``, and the Python operation also keeps a
+  sticky successful-publication guard before attempting failover replay. A
+  refused whole-DataFrame replay reports ``in_doubt=True`` for the call; a
+  consumed one-shot stream retains its fresh-reader guidance.
+
 - On the guarded ``QuestDB.dataframe()``/C-ABI path, addressable malformed
   Arrow streams from hand-rolled C Data Interface exporters (for example
   nanoarrow, DuckDB, or arro3) are rejected before the known panicking

@@ -61,6 +61,38 @@ def _table(n, str_len=0):
     return pa.table(cols)
 
 
+class _CloseBarrierTable:
+    """Replayable Arrow table that pauses at a configured slice boundary.
+
+    This makes close-after-ACK faults deterministic: the client cannot begin
+    the selected native flush until the first connection has finished, while a
+    whole-source retry would still be possible because this wrapper remains
+    sliceable.
+    """
+
+    def __init__(self, table, server, barrier_offset=1):
+        self._table = table
+        self._server = server
+        self._barrier_offset = barrier_offset
+
+    def __getattr__(self, name):
+        return getattr(self._table, name)
+
+    def __arrow_c_stream__(self, *args, **kwargs):
+        return self._table.__arrow_c_stream__(*args, **kwargs)
+
+    def slice(self, offset, length=None):
+        if offset >= self._barrier_offset:
+            deadline = time.monotonic() + 5.0
+            while (self._server.snapshot()['finished_connections'] < 1
+                   and time.monotonic() < deadline):
+                time.sleep(0.001)
+            if self._server.snapshot()['finished_connections'] < 1:
+                raise AssertionError(
+                    'mock server did not close after the first committed frame')
+        return self._table.slice(offset, length)
+
+
 @unittest.skipIf(pa is None, 'pyarrow not installed')
 class TestClientDataframeDirectFailures(unittest.TestCase):
 
@@ -99,26 +131,27 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
 
     def test_consumed_stream_failure_raises_instead_of_empty_replay(self):
         # A one-shot RecordBatchReader cannot be re-exported for the
-        # whole-frame replay: after the server drops the connection with
-        # the stream already drained, a retry would send nothing and
-        # report success. The call must raise instead — on the original
-        # connection only, with a message pointing at the fresh-reader fix.
+        # whole-frame replay. Make the server close immediately after upgrade,
+        # then wait for that close before the reader yields its first batch: the
+        # native failure is provably before publication, but the stream has
+        # still been consumed, so an automatic retry would send nothing and
+        # report success. The call must raise on the original connection with a
+        # message pointing at the fresh-reader fix.
         schema = pa.schema([
             ('ts', pa.timestamp('us', tz='UTC')),
             ('v', pa.int64()),
         ])
 
         def batches():
-            for i in range(10):
-                yield pa.record_batch(
-                    [pa.array([1_700_000_000_000_000 + i],
-                              type=schema[0].type),
-                     pa.array([i], type=pa.int64())], schema=schema)
-            # Let the server's close land before the trailing sync so the
-            # failure is the retry gate's decision, not a flush error.
-            time.sleep(0.15)
+            deadline = time.monotonic() + 5.0
+            while (server.snapshot()['finished_connections'] < 1
+                   and time.monotonic() < deadline):
+                time.sleep(0.001)
+            yield pa.record_batch(
+                [pa.array([1_700_000_000_000_000], type=schema[0].type),
+                 pa.array([1], type=pa.int64())], schema=schema)
 
-        with QwpAckServer(close_plan=[10], defer_aware_acks=True) as server:
+        with QwpAckServer(close_plan=[0]) as server:
             with qi.QuestDB.from_conf(_conf(server.port)) as client:
                 reader = pa.RecordBatchReader.from_batches(schema, batches())
                 with self.assertRaises(qi.QuestDBError) as raised:
@@ -127,7 +160,52 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertIn('cannot be replayed', str(raised.exception))
         self.assertFalse(raised.exception.in_doubt)
         self.assertEqual(stats['accepted_connections'], 1)
-        self.assertEqual(stats['binary_frames'], 10)
+        self.assertEqual(stats['binary_frames'], 0)
+
+    def test_consumed_stream_after_eager_commit_reports_both_risks(self):
+        # A one-shot stream can be both non-replayable and delivery-ambiguous
+        # at the DataFrame-call boundary. Let its first batch cross the eager
+        # commit boundary, wait for the server to ACK and close, then expose the
+        # second batch. The error must retain the fresh-reader guidance while
+        # also warning that replaying from row zero can duplicate the prefix.
+        schema = pa.schema([
+            ('ts', pa.timestamp('us', tz='UTC')),
+            ('v', pa.int64()),
+        ])
+
+        def batch(i):
+            return pa.record_batch(
+                [pa.array([1_700_000_000_000_000 + i],
+                          type=schema[0].type),
+                 pa.array([i], type=pa.int64())], schema=schema)
+
+        def batches():
+            yield batch(1)
+            deadline = time.monotonic() + 5.0
+            while (server.snapshot()['finished_connections'] < 1
+                   and time.monotonic() < deadline):
+                time.sleep(0.001)
+            if server.snapshot()['finished_connections'] < 1:
+                raise AssertionError(
+                    'mock server did not close after the eager commit')
+            yield batch(2)
+
+        with QwpAckServer(close_plan=[1]) as server:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                reader = pa.RecordBatchReader.from_batches(schema, batches())
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(reader, table_name='t_stream_prefix',
+                                     at='ts')
+            stats = server.snapshot()
+
+        self.assertIn('may have committed', str(raised.exception))
+        self.assertIn('cannot be replayed', str(raised.exception))
+        self.assertIn('fresh reader', str(raised.exception))
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.FailoverRetry)
+        self.assertTrue(raised.exception.in_doubt)
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertEqual(stats['binary_frames'], 1)
 
     def test_transient_failure_before_publication_resends_whole_frame(self):
         # Operation 1 (11 frames: 10 data + 1 commit) completes, then the
@@ -157,6 +235,32 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertEqual(stats['accepted_connections'], 2)
         self.assertEqual(stats['binary_frames'], 11 + 11)
 
+    def test_failure_after_eager_commit_raises_without_whole_frame_resend(self):
+        # Direct QWP commits the first successful data flush eagerly. Pause the
+        # sliceable source until the mock has ACKed that frame and closed the
+        # connection, then let the second flush observe the dead transport.
+        # The second frame itself was not delivered, but retrying the source
+        # from row zero would duplicate row 0.
+        with QwpAckServer(close_plan=[1], record_payloads=True) as server:
+            frame = _CloseBarrierTable(_table(2), server)
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(
+                        frame, table_name='t_eager_prefix', at='ts',
+                        max_rows_per_batch=1)
+            stats = server.snapshot()
+
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.FailoverRetry)
+        self.assertTrue(
+            raised.exception.in_doubt,
+            'native in_doubt must include an earlier eager commit')
+        self.assertEqual(
+            stats['accepted_connections'], 1,
+            'the Python driver must not reconnect and replay row zero')
+        self.assertEqual(stats['binary_frames'], 1)
+        self.assertEqual(len(stats['binary_payloads']), 1)
+
     def test_committed_prefix_failure_raises_without_resend(self):
         # 110 one-row batches: frames 1-100 are data, frame 101 is the
         # intermediate commit checkpoint (every 100 batches), frames
@@ -172,8 +276,41 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(
             raised.exception.code, qi.QuestDBErrorCode.FailoverRetry)
+        self.assertTrue(
+            raised.exception.in_doubt,
+            'the public error must cover the entire DataFrame call')
         self.assertEqual(stats['accepted_connections'], 1)
         self.assertEqual(stats['binary_frames'], 105)
+
+    def test_python_sticky_prefix_widens_native_safe_error(self):
+        # After 100 successful one-row flushes, the next slice triggers the
+        # periodic sync (frame 101), which ACKs the prefix and clears native
+        # commit_since_sync. Its data flush is deferred (frame 102). Wait for
+        # the server to close before exposing row 102: that row's native
+        # failure is provably not delivered and has in_doubt=False, but the
+        # Python call has a committed prefix and must widen its public error.
+        with QwpAckServer(close_plan=[102]) as server:
+            frame = _CloseBarrierTable(
+                _table(102), server, barrier_offset=101)
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(
+                        frame, table_name='t_sticky_prefix', at='ts',
+                        max_rows_per_batch=1)
+            stats = server.snapshot()
+
+        cause = raised.exception.__cause__
+        self.assertIsInstance(cause, qi.QuestDBError)
+        self.assertEqual(raised.exception.code, cause.code)
+        self.assertFalse(
+            cause.in_doubt,
+            'the final native operation must be safe in isolation')
+        self.assertTrue(
+            raised.exception.in_doubt,
+            'the public error must cover the earlier DataFrame prefix')
+        self.assertIn('earlier batch', str(raised.exception))
+        self.assertEqual(stats['accepted_connections'], 1)
+        self.assertEqual(stats['binary_frames'], 102)
 
     def test_capacity_exhaustion_drains_and_completes(self):
         # The 1024-byte advertised cap splits every 16-row batch into

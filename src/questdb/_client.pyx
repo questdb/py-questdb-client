@@ -245,10 +245,14 @@ class QuestDBError(Exception):
     @property
     def in_doubt(self) -> bool:
         """
-        Whether the failed operation may already have delivered its input.
+        Whether replaying the input supplied to this call may duplicate rows.
+        The failed native write may be ambiguous, or an earlier direct QWP
+        publication in the same higher-level call may already have committed.
 
-        Retrying the same input when this is true can duplicate rows unless the
-        destination table has an appropriate deduplication guarantee.
+        Retrying that input when this is true requires an appropriate
+        application- or table-level deduplication guarantee. A false value says
+        only that duplicate delivery is not known to be possible; a consumed
+        one-shot input may still be impossible to replay.
         """
         return self._in_doubt
 
@@ -5947,7 +5951,7 @@ cdef void_int _dataframe_columnar_flush(
         qwp_direct_sender* conn,
         qwp_chunk* chunk,
         bint retry_after_sync,
-        bint* committed_prefix) except -1:
+        bint* may_have_committed_prefix) except -1:
     cdef line_sender_error* err = NULL
     cdef line_sender_error_code err_code
     cdef bint ok = False
@@ -5966,6 +5970,7 @@ cdef void_int _dataframe_columnar_flush(
         _dataframe_columnar_flush_calls += 1
         _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
     if ok:
+        may_have_committed_prefix[0] = True
         return 0
 
     err_code = line_sender_error_get_code(err)
@@ -5976,7 +5981,7 @@ cdef void_int _dataframe_columnar_flush(
         line_sender_error_free(err)
         err = NULL
         _dataframe_columnar_sync(conn)
-        committed_prefix[0] = True
+        may_have_committed_prefix[0] = True
         if _dataframe_columnar_count_io_stats:
             start_ns = time.perf_counter_ns()
         _ensure_doesnt_have_gil(&gs)
@@ -5986,6 +5991,7 @@ cdef void_int _dataframe_columnar_flush(
             _dataframe_columnar_flush_calls += 1
             _dataframe_columnar_flush_ns += time.perf_counter_ns() - start_ns
         if ok:
+            may_have_committed_prefix[0] = True
             return 0
 
     raise c_err_to_py(err)
@@ -6041,7 +6047,7 @@ cdef void_int _dataframe_arrow_flush_batch(
         const qwp_arrow_override* overrides,
         size_t overrides_len,
         bint retry_after_sync,
-        bint* committed_prefix,
+        bint* may_have_committed_prefix,
         size_t* deferred_since_sync) except -1:
     cdef line_sender_error* err = NULL
     global _dataframe_columnar_flush_retry_syncs
@@ -6050,15 +6056,17 @@ cdef void_int _dataframe_arrow_flush_batch(
             conn, table, array, schema, ts_column,
             at_scalar_set, at_scalar_nanos,
             overrides, overrides_len, &err):
+        may_have_committed_prefix[0] = True
         return 0
 
     # A batch larger than the server per-batch cap is split into several
     # deferred frames, so the caller's batch counter can undercount the
     # 127-slot in-flight window; commit to drain it and retry once. The
     # failed frame itself never hit the wire (`array` was re-exported;
-    # `release` must still be set for the retry to be safe), but earlier
-    # frames of a split batch may have: the commit lands them and the
-    # retry re-sends them — at-least-once, like any failover replay.
+    # `release` must still be set for the retry to be safe). The native split
+    # path never exposes a retryable error after committing an internal prefix;
+    # this explicit sync nevertheless makes the higher-level source prefix
+    # sticky before the failed batch is retried.
     if (retry_after_sync
             and line_sender_error_get_code(err) ==
                 line_sender_error_invalid_api_call
@@ -6069,12 +6077,13 @@ cdef void_int _dataframe_arrow_flush_batch(
         line_sender_error_free(err)
         err = NULL
         _dataframe_columnar_sync(conn)
-        committed_prefix[0] = True
+        may_have_committed_prefix[0] = True
         deferred_since_sync[0] = 0
         if _arrow_flush_once(
                 conn, table, array, schema, ts_column,
                 at_scalar_set, at_scalar_nanos,
                 overrides, overrides_len, &err):
+            may_have_committed_prefix[0] = True
             return 0
 
     raise c_err_to_py(err)
@@ -6175,7 +6184,7 @@ def _bench_dataframe_flush_arrow_batch(
     cdef PyThreadState* gs = NULL
     cdef bytes conf_bytes
     cdef bint any_flushed = False
-    cdef bint committed_prefix = False
+    cdef bint may_have_committed_prefix = False
     cdef size_t deferred_since_sync = 0
     cdef line_sender_table_name c_table_name
     cdef line_sender_column_name c_ts_column
@@ -6238,7 +6247,7 @@ def _bench_dataframe_flush_arrow_batch(
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
                     False, 0, &c_schema, NULL, 0, &any_flushed,
-                    &deferred_since_sync, &committed_prefix)
+                    &deferred_since_sync, &may_have_committed_prefix)
             if any_flushed:
                 _dataframe_columnar_sync(conn)
             completed = iterations
@@ -6443,7 +6452,7 @@ cdef void_int _capsule_consume_stream(
         size_t c_overrides_len,
         bint* any_flushed,
         size_t* deferred_since_sync,
-        bint* committed_prefix) except -1:
+        bint* may_have_committed_prefix) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
     # call (this function populates it via get_schema), reused as-is on
     # subsequent calls (Arrow C Data Interface guarantees slices of the
@@ -6488,13 +6497,13 @@ cdef void_int _capsule_consume_stream(
         try:
             if deferred_since_sync[0] >= _QWP_MAX_DEFERRED_ARROW_FRAMES:
                 _dataframe_columnar_sync(conn)
-                committed_prefix[0] = True
+                may_have_committed_prefix[0] = True
                 deferred_since_sync[0] = 0
             _dataframe_arrow_flush_batch(
                 conn, c_table_name, &batch, c_schema, c_ts_column_ptr,
                 at_scalar_set, at_scalar_nanos,
                 c_overrides, c_overrides_len,
-                True, committed_prefix,
+                True, may_have_committed_prefix,
                 deferred_since_sync)
             any_flushed[0] = True
             deferred_since_sync[0] += 1
@@ -7237,7 +7246,7 @@ cdef bint _dataframe_client_try_capsule_path(
         object at,
         size_t max_rows_per_batch,
         object validated_overrides,
-        bint* committed_prefix,
+        bint* may_have_committed_prefix,
         bint* nonreplayable_consumed) except -1:
     cdef qdb_pystr_buf* b = NULL
     cdef qwp_direct_sender* conn = NULL
@@ -7375,7 +7384,7 @@ cdef bint _dataframe_client_try_capsule_path(
                     at_scalar_set, at_scalar_nanos,
                     &c_schema, c_overrides, c_overrides_len,
                     &any_flushed, &deferred_since_sync,
-                    committed_prefix, max_rows_per_batch, False)
+                    may_have_committed_prefix, max_rows_per_batch, False)
             else:
                 offset = 0
                 while offset < total_rows:
@@ -7389,7 +7398,7 @@ cdef bint _dataframe_client_try_capsule_path(
                         at_scalar_set, at_scalar_nanos,
                         &c_schema, c_overrides, c_overrides_len,
                         &any_flushed, &deferred_since_sync,
-                        committed_prefix, max_rows_per_batch, True)
+                        may_have_committed_prefix, max_rows_per_batch, True)
                     offset += chunk_rows
             if any_flushed:
                 _dataframe_columnar_sync(conn)
@@ -7423,7 +7432,7 @@ cdef void_int _dataframe_numpy_publish(
         object symbols,
         object at,
         size_t max_rows_per_batch,
-        bint* committed_prefix) except -1:
+        bint* may_have_committed_prefix) except -1:
     cdef qwp_chunk* chunk = NULL
     cdef qwp_direct_sender* conn = NULL
     cdef line_sender_error* err = NULL
@@ -7486,7 +7495,7 @@ cdef void_int _dataframe_numpy_publish(
                     conn,
                     chunk,
                     True,
-                    committed_prefix)
+                    may_have_committed_prefix)
                 flushed = True
                 row_offset += chunk_rows
 
@@ -7525,8 +7534,9 @@ cdef void_int _direct_dataframe_run(
     cdef uint64_t budget_ms = 0
     cdef double deadline = 0.0
     cdef double remaining = 0.0
-    cdef bint committed_prefix = False
+    cdef bint may_have_committed_prefix = False
     cdef bint nonreplayable_consumed = False
+    cdef bint call_in_doubt = False
     cdef object validated_overrides = _validate_schema_overrides(
         schema_overrides)
     if max_rows_per_batch <= 0:
@@ -7597,7 +7607,7 @@ cdef void_int _direct_dataframe_run(
                     at,
                     max_rows_per_batch,
                     validated_overrides,
-                    &committed_prefix,
+                    &may_have_committed_prefix,
                     &nonreplayable_consumed):
                 return 0
             if validated_overrides is not None:
@@ -7612,7 +7622,7 @@ cdef void_int _direct_dataframe_run(
             _dataframe_numpy_publish(
                 src, budget_ms, b, plan, df, table_name,
                 table_name_col, symbols, at, max_rows_per_batch,
-                &committed_prefix)
+                &may_have_committed_prefix)
             return 0
         except QuestDBError as exc:
             # FailoverRetry = transient flush/sync; SocketError = a
@@ -7621,20 +7631,50 @@ cdef void_int _direct_dataframe_run(
                     QuestDBErrorCode.FailoverRetry,
                     QuestDBErrorCode.SocketError):
                 raise
-            # The native operation may have committed a split prefix, or an
-            # explicit intermediate sync already committed one. Restarting
-            # from row 0 would duplicate it.
-            if exc.in_doubt or committed_prefix:
-                raise
-            # A drained one-shot stream has no rows left to replay: retrying
-            # would report success while writing nothing.
+            # Normalize native delivery state to the public DataFrame-call
+            # boundary. Native `in_doubt` covers the failed operation and
+            # native commits since its last successful sync; the sticky flag
+            # also covers successful publications before that boundary in this
+            # same call.
+            call_in_doubt = exc.in_doubt or may_have_committed_prefix
+
+            # Select the one-shot guidance before the delivery-risk gate so a
+            # caller sees both facts when both apply. A drained stream cannot
+            # be replayed even when duplicate delivery is not in doubt.
             if nonreplayable_consumed:
+                if call_in_doubt:
+                    raise QuestDBError(
+                        exc.code,
+                        f'{exc} A prefix of this DataFrame call may have '
+                        f'committed, and the input stream was already '
+                        f'partially consumed and cannot be replayed. Create '
+                        f'a fresh reader, then reconcile or deduplicate any '
+                        f'already committed rows before retrying.',
+                        exc.sender_error,
+                        in_doubt=True) from exc
                 raise QuestDBError(
                     exc.code,
                     f'{exc} The input stream was already partially '
                     f'consumed and cannot be replayed; retry with a '
                     f'fresh reader.',
-                    in_doubt=exc.in_doubt) from exc
+                    exc.sender_error,
+                    in_doubt=False) from exc
+
+            # Refuse a whole-source replay once any batch in this DataFrame
+            # call may have committed. If only the Python sticky guard knows
+            # about that prefix, widen the exposed error as well; otherwise a
+            # caller could read `in_doubt=False` and manually repeat the same
+            # unsafe replay.
+            if call_in_doubt:
+                if exc.in_doubt:
+                    raise
+                raise QuestDBError(
+                    exc.code,
+                    f'{exc} An earlier batch from this DataFrame call may '
+                    f'have committed; replaying the original input from row '
+                    f'zero may duplicate rows.',
+                    exc.sender_error,
+                    in_doubt=True) from exc
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 raise
@@ -7653,7 +7693,7 @@ cdef void_int _capsule_consume_stream_with_hint(
         size_t c_overrides_len,
         bint* any_flushed,
         size_t* deferred_since_sync,
-        bint* committed_prefix,
+        bint* may_have_committed_prefix,
         size_t max_rows_per_batch,
         bint can_slice) except -1:
     cdef str hint
@@ -7662,7 +7702,7 @@ cdef void_int _capsule_consume_stream_with_hint(
             conn, stream_owner, c_table_name, c_ts_column_ptr,
             at_scalar_set, at_scalar_nanos, c_schema,
             c_overrides, c_overrides_len, any_flushed,
-            deferred_since_sync, committed_prefix)
+            deferred_since_sync, may_have_committed_prefix)
     except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
             if exc.code == QuestDBErrorCode.BatchTooLarge:
@@ -7871,10 +7911,11 @@ cdef class QuestDB:
         `questdb_db_connect_with_handlers`.
         Dataframe ingestion always uses the direct (non-store-and-forward)
         QWP/WebSocket column sender, independent of ``sf_dir``. On a transient
-        connection failure the frame is re-sent from the caller's DataFrame
-        only when the failed operation is provably not delivered. A
-        delivery-unknown failure surfaces as :class:`QuestDBError` with
-        ``in_doubt`` set, because blindly re-sending could duplicate rows.
+        connection failure the original DataFrame is re-sent only when no
+        batch was successfully published and the failed operation is provably
+        not delivered. Once a prefix may have committed, the call raises
+        instead of replaying from row zero. A delivery-unknown failure surfaces
+        as :class:`QuestDBError` with ``in_doubt`` set.
         ``request_timeout`` bounds each commit's no-progress ack wait;
         ``request_timeout=0`` disables that deadline, so a stalled but
         connected server can block :meth:`dataframe` indefinitely.
@@ -8110,19 +8151,25 @@ cdef class QuestDB:
 
         Ingestion always uses the direct (non-store-and-forward) column
         sender, independent of ``sf_dir``. On success, the call returns only
-        after every DataFrame batch has been committed. Most loads queue their
-        batches and commit once at the end. Large Arrow inputs checkpoint about
-        every 100 batches to keep memory bounded. The client may checkpoint
-        earlier if the connection cannot queue another batch or if a batch must
-        be split to fit. If a later batch fails, the exception means that the
-        load did not finish, not necessarily that no rows landed. Any already
-        committed prefix from this call remains, and retrying the whole
-        DataFrame can duplicate it unless the destination table uses suitable
-        ``DEDUP UPSERT KEYS``.
+        after every DataFrame batch has been committed. The first successful
+        batch on a fresh direct connection is already a commit boundary;
+        subsequent batches are pipelined until the final commit. Large Arrow
+        inputs add a checkpoint about every 100 batches to bound the
+        uncommitted tail. The client may checkpoint earlier if deferred
+        capacity fills or a batch must be split to fit.
 
-        On a transient connection failure, the client re-sends from the
-        original DataFrame only when it knows that no rows landed. Otherwise it
-        raises instead of risking a blind retry. Server-side rejections (e.g. a
+        On a transient connection failure, the client re-sends the original,
+        replayable DataFrame only when no batch was successfully published and
+        the failed operation is not ``in_doubt``. Otherwise it raises rather
+        than replaying from row zero. If a batch from this call may have
+        committed, the raised error has ``in_doubt=True`` even when the final
+        native write alone was provably not delivered. The load did not
+        finish, but any already committed prefix remains; an application-level
+        retry of the whole DataFrame can duplicate it unless the destination
+        table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot stream
+        may instead be non-replayable with ``in_doubt=False`` when no rows
+        could have landed; that error asks for a fresh reader. Server-side
+        rejections (e.g. a
         schema mismatch) surface as a plain
         :class:`QuestDBError`; the structured ``sender_error`` diagnostic
         is attached only by the store-and-forward senders.
@@ -8401,11 +8448,13 @@ cdef class QuestDB:
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded
         by it. Each batch is one unit of client memory and server-side
-        apply. Sliceable Arrow inputs checkpoint about every 100 batches,
-        so ``max_rows_per_batch * 100`` rows approximates their periodic
-        replay window. The NumPy planner normally commits once after the
-        whole frame. Either path may checkpoint earlier when deferred
-        capacity fills. Raise ``max_rows_per_batch`` for narrow numeric
+        apply. The first successful batch on a fresh connection is a commit
+        boundary. Sliceable Arrow inputs add another checkpoint about every
+        100 batches, so ``max_rows_per_batch * 100`` rows approximates the
+        maximum periodic uncommitted tail, not a whole-source replay window.
+        The NumPy planner pipelines the remaining batches until its final
+        commit. Either path may checkpoint earlier when deferred capacity
+        fills. Raise ``max_rows_per_batch`` for narrow numeric
         rows; lower it for very wide rows or tight memory. Streaming Arrow
         input (``pa.RecordBatchReader``) is not re-batched — the producer's
         batch size governs its checkpoint window.
