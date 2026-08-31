@@ -3832,6 +3832,28 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_fixed_size_list_in_mixed_frame_lands_as_array(self):
+        values = pyarrow.array(
+            [[1.0, 2.0], None, [5.0, 6.0]],
+            type=pyarrow.list_(pyarrow.float64(), 2))
+        base = pd.DataFrame({
+            'a': pd.array(values, dtype=pd.ArrowDtype(values.type)),
+            # A NumPy column forces the manual planner that used to impose a
+            # nonexistent top-level buffers[1] on the Arrow passthrough.
+            'x': np.arange(3, dtype=np.int64),
+            'ts': pd.date_range('2025-01-01', periods=3, freq='s'),
+        })
+        for sliced in (False, True):
+            with self.subTest(sliced=sliced):
+                frame = (base.iloc[1:].reset_index(drop=True)
+                         if sliced else base)
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        frame, table_name='fixed_list', at='ts')['a'],
+                    0x11)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_dataframe_date_columns_wire_types(self):
         # A DataFrame claims DATE through the column's Arrow type, so
         # millisecond timestamps and both Arrow date types land as DATE
@@ -4223,12 +4245,15 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
-    def test_a_column_with_too_few_arrow_buffers_is_refused(self):
-        """pyarrow allocates exactly `n_buffers` pointers, so reading
-        the value buffer of a struct array (1) or a null array (0)
-        reads past the allocation, and whatever is there decides
-        whether the column is accepted. The refusal has to come from
-        the buffer count instead, the same answer every time."""
+    def test_passthrough_without_value_buffer_is_left_to_importer(self):
+        """A passthrough column need not have a top-level value buffer.
+
+        Struct and null columns are not supported, but their legitimate
+        Arrow layouts carry one and zero top-level buffers respectively.
+        The Python planner must not read ``buffers[1]`` merely to reject
+        them; the native importer owns their type-specific layout and returns
+        the same clean unsupported-type error every time.
+        """
         stamp = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
         arrays = (
             ('struct', pyarrow.array(
@@ -4240,18 +4265,18 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 'ts': pd.array(
                     [stamp],
                     dtype=pd.ArrowDtype(pyarrow.timestamp('us', 'UTC'))),
-                # One NumPy column routes the frame onto the manual
-                # planner, which is the one that reads the buffers.
+                # One NumPy column routes the frame onto the manual planner,
+                # whose passthrough branch must leave these buffers opaque.
                 'x': np.arange(1, dtype=np.int64)})
             seen = set()
             for _ in range(20):
-                with self.assertRaises(
-                        qi.UnsupportedDataFrameShapeError) as caught:
+                with self.assertRaises(qi.QuestDBError) as caught:
                     self._dataframe_column_types(
                         frame, table_name='too_few_buffers', at='ts')
                 seen.add(str(caught.exception))
             with self.subTest(array=label):
                 self.assertEqual(len(seen), 1, seen)
+                self.assertIn('not supported', next(iter(seen)))
 
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     @unittest.skipIf(pd is None, 'pandas not installed')

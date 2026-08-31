@@ -552,6 +552,49 @@ class TestPandasBase:
             self.assertEqual(result['populated_rows_total'], 2)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
+        def test_columnar_plan_delegates_mixed_arrow_list_layouts(self):
+            cases = (
+                ('list', pa.list_(pa.float64()),
+                 [[1.0], None, [3.0, 4.0]]),
+                ('large_list', pa.large_list(pa.float64()),
+                 [[1.0], None, [3.0, 4.0]]),
+                ('fixed_size_list', pa.list_(pa.float64(), 2),
+                 [[1.0, 2.0], None, [5.0, 6.0]]),
+            )
+            for name, arrow_type, values in cases:
+                arrow_values = pd.Series(
+                    pd.array(
+                        pa.array(values, type=arrow_type),
+                        dtype=pd.ArrowDtype(arrow_type)))
+                base = pd.DataFrame({
+                    'array_value': arrow_values,
+                    # Either NumPy column routes the frame through the manual
+                    # planner instead of the all-Arrow capsule path.
+                    'seq': np.arange(3, dtype=np.int64),
+                    'ts': pd.date_range(
+                        '2024-01-01', periods=3, freq='s'),
+                })
+                for sliced in (False, True):
+                    with self.subTest(layout=name, sliced=sliced):
+                        frame = (base.iloc[1:].reset_index(drop=True)
+                                 if sliced else base)
+                        exported = frame['array_value'].array.__arrow_array__()
+                        self.assertEqual(exported.num_chunks, 1)
+                        self.assertEqual(exported.chunk(0).offset,
+                                         1 if sliced else 0)
+
+                        plan = qi._debug_dataframe_columnar_plan(
+                            frame, table_name='array_layouts', at='ts')
+                        self.assertTrue(plan['supported'], plan['failures'])
+                        result = (
+                            qi._bench_dataframe_plan_and_populate_column_chunks(
+                                frame,
+                                table_name='array_layouts',
+                                at='ts'))
+                        self.assertEqual(
+                            result['populated_rows_total'], len(frame))
+                        self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_columnar_plan_accepts_arrow_wide_numeric_sources(self):
             df = pd.DataFrame({
                 'ts': pd.Series([

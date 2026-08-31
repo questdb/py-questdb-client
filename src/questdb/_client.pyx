@@ -3224,20 +3224,27 @@ cdef str conf_str_value(object value):
     return str(value).replace(';', ';;')
 
 
+cdef bint _dataframe_columnar_has_single_logical_chunk(
+        col_t* col,
+        size_t row_count) noexcept nogil:
+    if col.setup.chunks.n_chunks != 1:
+        return False
+    if col.setup.chunks.chunks == NULL:
+        return False
+    return col.setup.chunks.chunks[0].length == <int64_t>row_count
+
+
 cdef bint _dataframe_columnar_has_single_contiguous_chunk(
         col_t* col,
         size_t row_count) noexcept nogil:
     cdef ArrowArray* arr
-    if col.setup.chunks.n_chunks != 1:
-        return False
-    if col.setup.chunks.chunks == NULL:
+    if not _dataframe_columnar_has_single_logical_chunk(col, row_count):
         return False
     arr = &col.setup.chunks.chunks[0]
     # pyarrow allocates exactly `n_buffers` pointers, so `buffers[1]` is
     # past the allocation for a struct array (1) or a null array (0).
     return (
         arr.offset == 0 and
-        arr.length == <int64_t>row_count and
         arr.n_buffers >= 2 and
         arr.buffers != NULL and
         arr.buffers[1] != NULL)
@@ -3436,17 +3443,34 @@ cdef object _dataframe_columnar_plan_failures(
             continue
         if col.setup.target != col_target_t.col_target_at:
             field_count += 1
-        if not _dataframe_columnar_has_single_contiguous_chunk(
-                col, plan.row_count):
-            failures.append(_dataframe_columnar_col_failure(
-                df, col, 'v1 requires one contiguous zero-offset buffer.'))
-            continue
-        if not _dataframe_columnar_has_validity(
-                &col.setup.chunks.chunks[0]):
-            failures.append(_dataframe_columnar_col_failure(
-                df, col, 'v1 requires a zero-offset validity bitmap when '
-                'nulls are present.'))
-            continue
+        if col.setup.target == col_target_t.col_target_column_arrow:
+            # Generic Arrow passthrough is opaque to this planner. The Rust
+            # importer validates the type-specific buffer layout, validity,
+            # children and logical offset. This side only needs the one array
+            # that the per-column import handle accepts, spanning every row in
+            # the pandas frame.
+            if not _dataframe_columnar_has_single_logical_chunk(
+                    col, plan.row_count):
+                failures.append(_dataframe_columnar_col_failure(
+                    df, col,
+                    'v1 requires one Arrow chunk spanning the whole column.'))
+                continue
+        else:
+            # Direct encoders below address buffers[0]/buffers[1] themselves,
+            # so they require a zero-offset value buffer and a readable
+            # validity bitmap. Arrow passthrough deliberately does not.
+            if not _dataframe_columnar_has_single_contiguous_chunk(
+                    col, plan.row_count):
+                failures.append(_dataframe_columnar_col_failure(
+                    df, col,
+                    'v1 requires one contiguous zero-offset buffer.'))
+                continue
+            if not _dataframe_columnar_has_validity(
+                    &col.setup.chunks.chunks[0]):
+                failures.append(_dataframe_columnar_col_failure(
+                    df, col, 'v1 requires a zero-offset validity bitmap when '
+                    'nulls are present.'))
+                continue
 
         if col.setup.target == col_target_t.col_target_column_bool:
             if col.setup.source not in (
@@ -4857,14 +4881,22 @@ cdef void_int _dataframe_columnar_append_field(
     cdef size_t dict_offsets_len
     cdef size_t dict_bytes_len
     cdef qwp_validity validity
-    cdef const qwp_validity* validity_ptr = (
-        _dataframe_columnar_validity(arr, row_offset, row_count, &validity))
+    cdef const qwp_validity* validity_ptr = NULL
     cdef bint ok = False
 
     cdef qwp_numpy_dtype numpy_dtype
     cdef size_t element_size
     cdef qwp_numpy_extras extras
     cdef const qwp_numpy_extras* extras_ptr
+
+    # Generic Arrow passthrough owns its complete layout: the native importer
+    # validates and reads the parent buffers and child tree. In particular, a
+    # FixedSizeList legitimately has no buffers[1]. Dispatch it before any
+    # direct-encoder validity or value-buffer read on this side.
+    if col.setup.target == col_target_t.col_target_column_arrow:
+        _dataframe_columnar_call_arrow_append(
+            chunk, col, row_offset, row_count)
+        return 0
 
     # pyarrow allocates exactly `n_buffers` pointers, so reading the
     # value buffer of a column that has fewer reads past the
@@ -4878,6 +4910,8 @@ cdef void_int _dataframe_columnar_append_field(
             f'with {arr.n_buffers} Arrow buffers, too few to read '
             f'values from.')
     data = arr.buffers[1]
+    validity_ptr = _dataframe_columnar_validity(
+        arr, row_offset, row_count, &validity)
 
     if col.setup.target == col_target_t.col_target_column_bool:
         if col.setup.source == col_source_t.col_source_bool_pyobj:
@@ -5190,10 +5224,6 @@ cdef void_int _dataframe_columnar_append_field(
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count,
             qwp_symbol_mode_symbol)
-        return 0
-    elif col.setup.target == col_target_t.col_target_column_arrow:
-        _dataframe_columnar_call_arrow_append(
-            chunk, col, row_offset, row_count)
         return 0
     elif col.setup.target == col_target_t.col_target_column_decimal:
         _dataframe_columnar_call_arrow_append(
