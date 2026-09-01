@@ -8192,7 +8192,7 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
                             'gh1': qi.Geohash(1, 1),
                             'gh5': qi.Geohash(31, 5),
                             'gh7': qi.Geohash(85, 7),
-                            'gh8': qi.Geohash(170, 8),
+                            'gh8': qi.Geohash(255, 8),
                             'gh60': qi.Geohash((1 << 60) - 1, 60),
                         },
                         at=qi.TimestampMicros(1))
