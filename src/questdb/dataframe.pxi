@@ -1854,6 +1854,38 @@ cdef inline bint _dataframe_is_null_pyobj(PyObject* obj) noexcept:
         (obj == <PyObject*>_PANDAS_NAT) or
         _dataframe_is_float_nan(obj))
 
+
+cdef object _dataframe_row_wrapper_df_message(
+        object col_name, PyObject* obj):
+    """A working DataFrame route for a scalar wrapper learned from row()."""
+    if isinstance(<object>obj, Char):
+        return (
+            'questdb.Char is a row-ingestion wrapper, not a DataFrame cell '
+            'type. Replace each wrapper with `ord(value.value)` in a uint16 '
+            'column in a fully Arrow-backed frame and pass '
+            f'`schema_overrides={{{col_name!r}: \'char\'}}`.')
+    if isinstance(<object>obj, DateMillis):
+        return (
+            'questdb.DateMillis is a row-ingestion wrapper, not a DataFrame '
+            'cell type. Build the column as Arrow `timestamp(\'ms\')`, '
+            '`date32()`, or `date64()` values instead; DATE is identified by '
+            'its Arrow type and has no `schema_overrides` kind.')
+    if isinstance(<object>obj, Long256):
+        return (
+            'questdb.Long256 is a row-ingestion wrapper, not a DataFrame cell '
+            'type. Replace each wrapper with its unsigned value encoded as 32 '
+            'little-endian bytes in a binary column in a fully Arrow-backed '
+            f'frame and pass `schema_overrides={{{col_name!r}: \'long256\'}}`.')
+    if isinstance(<object>obj, Geohash):
+        return (
+            'questdb.Geohash is a row-ingestion wrapper, not a DataFrame cell '
+            'type. Replace each wrapper with its `.bits` value in a signed-'
+            'integer column in a fully Arrow-backed frame and pass '
+            f'`schema_overrides={{{col_name!r}: (\'geohash\', '
+            f'{(<object>obj).precision})}}`; every value in the column must '
+            'use that precision.')
+    return None
+
 # noinspection PyUnreachableCode
 cdef void_int _dataframe_series_sniff_pyobj(
         PandasCol pandas_col, col_t* col) except -1:
@@ -1873,6 +1905,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
     cdef npy_int arr_type
     cdef cnp.dtype arr_descr  # A cython defn for `PyArray_Descr*`
     cdef str arr_type_name
+    cdef object wrapper_message
 
     _dataframe_series_as_pybuf(pandas_col, col)
     obj_arr = <PyObject**>(col.setup.pybuf.buf)
@@ -1923,6 +1956,12 @@ cdef void_int _dataframe_series_sniff_pyobj(
                     f'Bad column {pandas_col.name!r}: ' +
                     _ipv4_interface_df_message(pandas_col.name))
             else:
+                wrapper_message = _dataframe_row_wrapper_df_message(
+                    pandas_col.name, obj)
+                if wrapper_message is not None:
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
+                        f'Bad column {pandas_col.name!r}: ' + wrapper_message)
                 raise QuestDBError(
                     QuestDBErrorCode.BadDataFrame,
                     f'Bad column {pandas_col.name!r}: ' +

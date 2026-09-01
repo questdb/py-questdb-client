@@ -2928,6 +2928,39 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertIn('`value.ip`', str(caught.exception))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_row_wrappers_name_their_dataframe_remedies(self):
+        cases = (
+            (qi.Char('Q'), (
+                'questdb.Char is a row-ingestion wrapper',
+                '`ord(value.value)`',
+                "`schema_overrides={'value': 'char'}`")),
+            (qi.DateMillis(1), (
+                'questdb.DateMillis is a row-ingestion wrapper',
+                "Arrow `timestamp('ms')`, `date32()`, or `date64()`",
+                'has no `schema_overrides` kind')),
+            (qi.Long256(1), (
+                'questdb.Long256 is a row-ingestion wrapper',
+                '32 little-endian bytes',
+                "`schema_overrides={'value': 'long256'}`")),
+            (qi.Geohash(7, 20), (
+                'questdb.Geohash is a row-ingestion wrapper',
+                'signed-integer column in a fully Arrow-backed frame',
+                "`schema_overrides={'value': ('geohash', 20)}`")),
+        )
+        for value, fragments in cases:
+            with self.subTest(wrapper=type(value).__name__):
+                frame = pd.DataFrame({
+                    'value': pd.Series([value], dtype=object),
+                    'ts': pd.to_datetime([0], unit='s'),
+                })
+                buffer = qi.Buffer._new_qwp()
+                with self.assertRaises(qi.QuestDBError) as caught:
+                    buffer.dataframe(frame, table_name='t', at='ts')
+                message = str(caught.exception)
+                for fragment in fragments:
+                    self.assertIn(fragment, message)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_ipv4_interface_remedy_quotes_an_awkward_column_name(self):
         # The remedy is a line of code naming the column, so the name
