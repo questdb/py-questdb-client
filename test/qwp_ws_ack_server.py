@@ -22,7 +22,7 @@ class QwpAckServer:
                  close_plan=None, max_batch_size=0,
                  defer_aware_acks=False, record_payloads=False,
                  error_status=None, error_message=b"mock rejection",
-                 tls=False):
+                 tls=False, idle_timeout_s=30):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -48,6 +48,10 @@ class QwpAckServer:
         self-signed certificate under ``test/certs`` (SAN: 127.0.0.1,
         localhost). Handshake failures are counted in
         ``tls_handshake_failures``, not ``errors``.
+
+        `idle_timeout_s`: seconds an upgraded connection may remain idle;
+        None waits indefinitely. The HTTP upgrade always retains its own
+        bounded timeout.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
@@ -57,6 +61,7 @@ class QwpAckServer:
         self.record_payloads = record_payloads
         self.error_status = error_status
         self.error_message = error_message
+        self.idle_timeout_s = idle_timeout_s
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -221,6 +226,7 @@ class QwpAckServer:
                 response += f"X-QWP-Max-Batch-Size: {self.max_batch_size}\r\n"
             response += "\r\n"
             conn.sendall(response.encode("ascii"))
+            conn.settimeout(self.idle_timeout_s)
             if close_after is not None and close_after == 0:
                 _fin_close(conn)
                 return

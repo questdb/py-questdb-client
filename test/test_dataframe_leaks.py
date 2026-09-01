@@ -587,7 +587,10 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
             'nested': nested,
             'ts': pa.array([0], type=pa.timestamp('us')),
         })
-        with QwpAckServer() as server:
+        # This intentionally sends no frames for several minutes on slower
+        # wheel builders. Keep the otherwise useful mock-server idle timeout
+        # from turning that expected silence into a harness error.
+        with QwpAckServer(idle_timeout_s=None) as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
                     'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
                     'query_pool_min=0;')
