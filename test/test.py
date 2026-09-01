@@ -8334,7 +8334,7 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
             self.assertEqual(int.from_bytes(first['l'], 'little'), 7)
             self.assertEqual(
                 [first[name] for name in ('gh1', 'gh5', 'gh7', 'gh8', 'gh60')],
-                [1, 31, 85, 170, (1 << 60) - 1])
+                [1, 31, 85, 255, (1 << 60) - 1])
             for name in ('u', 'ip', 'dt', 'l'):
                 self.assertIsNone(second[name])
             # CHAR has no physical/QWP NULL representation: '\x00' is stored
