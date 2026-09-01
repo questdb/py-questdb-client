@@ -1763,7 +1763,12 @@ cdef class Buffer:
         if not self._qwp:
             return self._column_i64(name, value)
         as_i64 = <int64_t>PyLong_AsLongLongAndOverflow(value, &overflow)
-        if overflow != 0:
+        if overflow < 0:
+            raise OverflowError(
+                f'Bad column {name!r}: integer is below the minimum for a '
+                f'LONG column (-2**63). LONG256 is unsigned and cannot '
+                f'store negative values.')
+        if overflow > 0:
             raise OverflowError(
                 f'Bad column {name!r}: integer out of range for a LONG '
                 f'column (-2**63 .. 2**63-1). Wrap it in `Long256(...)` '
@@ -3981,6 +3986,13 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
                             f'Bad column {df_col_name!r} at row {i}: '
                             f'{narrow_type} values must be in the range '
                             f'0 .. {narrow_max}.')
+                    if overflow < 0:
+                        raise QuestDBError(
+                            QuestDBErrorCode.BadDataFrame,
+                            f'Bad column {df_col_name!r} at row {i}: '
+                            f'integer is below the minimum for a LONG '
+                            f'column (-2**63). LONG256 is unsigned and '
+                            f'cannot store negative values.')
                     raise QuestDBError(
                         QuestDBErrorCode.BadDataFrame,
                         f'Bad column {df_col_name!r} at row {i}: integer '

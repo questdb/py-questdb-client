@@ -7832,7 +7832,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         buffer = qi.Buffer._new_qwp()
         buffer.row('long256_row', columns={'v': 1}, at=qi.TimestampNanos(1))
         before = len(buffer)
-        for value in (2 ** 255 + 7, 2 ** 63, -(2 ** 63) - 1):
+        for value in (2 ** 255 + 7, 2 ** 63):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(
                         OverflowError, 'Long256') as caught:
@@ -7841,6 +7841,13 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         at=qi.TimestampNanos(2))
                 self.assertIn("Bad column 'v'", str(caught.exception))
                 self.assertEqual(len(buffer), before)
+        with self.assertRaisesRegex(
+                OverflowError, 'LONG256 is unsigned') as caught:
+            buffer.row(
+                'long256_row', columns={'v': -(2 ** 63) - 1},
+                at=qi.TimestampNanos(2))
+        self.assertNotIn('Wrap it', str(caught.exception))
+        self.assertEqual(len(buffer), before)
         for value in (2 ** 63 - 1, -(2 ** 63)):
             buffer.row(
                 'long256_row', columns={'v': value},

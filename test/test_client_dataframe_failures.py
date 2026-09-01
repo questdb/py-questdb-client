@@ -438,14 +438,23 @@ class TestClientDataframeArgValidation(unittest.TestCase):
                         qi.QuestDBErrorCode.InvalidTimestamp)
 
     def test_object_int_overflow_names_column(self):
-        with self._client() as client:
-            with self.assertRaisesRegex(
-                    qi.QuestDBError, r"'big'") as raised:
-                client.dataframe(
-                    pd.DataFrame({'big': pd.Series([2 ** 63], dtype=object)}),
-                    table_name='t', at=qi.ServerTimestamp)
-        self.assertEqual(
-            raised.exception.code, qi.QuestDBErrorCode.BadDataFrame)
+        cases = (
+            (2 ** 63, "'kind': 'long256'"),
+            (-(2 ** 63) - 1, 'LONG256 is unsigned'),
+        )
+        for value, remedy in cases:
+            with self.subTest(value=value), self._client() as client:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, r"'big'") as raised:
+                    client.dataframe(
+                        pd.DataFrame({
+                            'big': pd.Series([value], dtype=object)}),
+                        table_name='t', at=qi.ServerTimestamp)
+            self.assertEqual(
+                raised.exception.code, qi.QuestDBErrorCode.BadDataFrame)
+            self.assertIn(remedy, str(raised.exception))
+            if value < 0:
+                self.assertNotIn("'kind': 'long256'", str(raised.exception))
 
     def test_object_str_lone_surrogate_names_column(self):
         with self._client() as client:
