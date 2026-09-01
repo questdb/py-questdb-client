@@ -6199,22 +6199,24 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     def test_a_row_serializing_dataframe_says_which_claims_it_drops(self):
         """`df.attrs['questdb']` is read by the columnar writers. A frame
-        serialized a row at a time never reaches them, and the kinds the
-        claim names all ride on integers or blobs, so the column lands as
-        a LONG or a BINARY and a table created by the write gets that
-        type. Nothing about the values says otherwise, so the log notice is
-        the only signal."""
+        serialized a row at a time never reaches them, so a column lands
+        as its own dtype decides -- a LONG, BINARY, or TIMESTAMP rather
+        than the claimed type -- and a table created by the write gets
+        that type. Nothing about the values says otherwise, so the log
+        notice is the only signal."""
         if pd is None:
             self.skipTest('pandas not installed')
         df = pd.DataFrame({
             'ip': np.array([0xC0A8012A], np.uint32),
             'c': np.array([65], np.uint16),
             'g': np.array([1], np.int8),
+            'd': np.array(['2020-01-01'], dtype='datetime64[ms]'),
             'ts': pd.to_datetime(['2020-01-01'])})
         df.attrs['questdb'] = {'version': 1, 'columns': {
             'ip': {'kind': 'ipv4'},
             'c': {'kind': 'char'},
-            'g': {'kind': 'geohash', 'precision_bits': 7}}}
+            'g': {'kind': 'geohash', 'precision_bits': 7},
+            'd': {'kind': 'date'}}}
 
         with warnings.catch_warnings():
             warnings.simplefilter('error')
@@ -6226,9 +6228,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         messages = [record.getMessage() for record in caught.records]
         dropped = [m for m in messages if m.startswith('questdb: column')]
         self.assertEqual(
-            len(dropped), 3,
+            len(dropped), 4,
             f'expected one log notice per claimed column, got: {messages}')
-        for kind in ("'ipv4'", "'char'", "'geohash'"):
+        for kind in ("'ipv4'", "'char'", "'geohash'", "'date'"):
             self.assertTrue(
                 any(kind in m for m in dropped),
                 f'no log notice named kind {kind}: {dropped}')

@@ -386,10 +386,10 @@ cdef _log_roundtrip_claim_route(object name, str kind):
 
     The claim is read by the columnar writers. A frame serialized a row
     at a time never reaches them, so a claim of one of the QWP-only
-    kinds does nothing here -- and the kinds it names all ride on
-    integers or blobs, which say nothing about which type they are. The
-    column reaches the database as a LONG or a BINARY, the table it
-    creates has that type, and without this nothing says so.
+    kinds does nothing here. The column reaches the database as its own
+    dtype decides -- typically a LONG, BINARY, or TIMESTAMP rather than
+    the claimed type -- and the table it creates has that type. Without
+    this nothing says so.
 
     Separate from `_log_roundtrip_claim_dropped`, which answers a
     different question: there the column cannot carry the kind, here
@@ -404,12 +404,22 @@ cdef _log_roundtrip_claim_route(object name, str kind):
         'kind %r, which this write cannot apply. The claim is read when '
         'a frame is written a column at a time; this one is being '
         'written a row at a time, so the column goes out as its own '
-        'type decides -- a plain integer or blob rather than the '
-        'claimed type, and a table created by this write gets that '
-        'type. Use QuestDB.dataframe(), or Sender.dataframe() over a '
+        'dtype decides rather than as the claimed type, and a table '
+        'created by this write gets that resulting type. Use '
+        'QuestDB.dataframe(), or Sender.dataframe() over a '
         'ws:: or wss:: configuration, to have the claim applied.',
         name,
         kind)
+
+
+cdef bint _row_route_drops_roundtrip_kind(str kind) except -1:
+    """Whether row serialization has no way to apply this claim.
+
+    DATE deliberately has no Arrow override: its Arrow type is the
+    claim. It still belongs here because the row route does not run the
+    normalization that puts that type back on a NumPy datetime column.
+    """
+    return kind == 'date' or kind in _ATTRS_OVERRIDE_KINDS
 
 
 cdef void_int _dataframe_log_claims_this_route_drops(object df) except -1:
@@ -428,7 +438,8 @@ cdef void_int _dataframe_log_claims_this_route_drops(object df) except -1:
         return 0
     for name, meta in cols_meta.items():
         kind = _roundtrip_kind(meta)
-        if kind is not None and kind in _ATTRS_OVERRIDE_KINDS:
+        if (kind is not None
+                and _row_route_drops_roundtrip_kind(kind)):
             _log_roundtrip_claim_route(name, kind)
     return 0
 
