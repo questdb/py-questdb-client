@@ -560,6 +560,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             'verification_uri': server.url + '/verify',
             'verification_uri_complete': (
                 server.url + '/verify?user_code=WXYZ-1234'),
+            'expires_in': 600,
+            'interval': 5,
             'browser_target': (
                 server.url + '/verify?user_code=WXYZ-1234'),
         }])

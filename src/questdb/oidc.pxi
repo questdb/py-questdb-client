@@ -174,6 +174,10 @@ cdef void _oidc_event_dispatch(
                 'verification_uri_complete': _oidc_text(
                     event.verification_uri_complete,
                     event.verification_uri_complete_len),
+                # The bounded values the native polling loop actually uses,
+                # matching Java's complete device challenge.
+                'expires_in': <uint64_t>event.expires_in_seconds,
+                'interval': event.interval_seconds,
                 # This is the only native-vetted actionable URL. Built-in
                 # renderers prefer it for links and QR codes.
                 'browser_target': _oidc_text(

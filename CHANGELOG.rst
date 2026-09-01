@@ -52,6 +52,8 @@ Highlights:
   an ID token.
 * OIDC device-flow polling tolerates transient transport failures until the
   device code expires, matching the Java client.
+* OIDC prompt callbacks expose the bounded device-code lifetime and polling
+  interval, matching the complete Java device challenge.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
   plaintext credentials atomically and coordinates refresh across processes.
   Custom Python token stores are not supported by the native provider.

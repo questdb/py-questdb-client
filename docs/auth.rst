@@ -193,6 +193,9 @@ Rendering and non-interactive environments
 The default renderer produces a rich, clickable Jupyter prompt or terminal
 text. Pass ``qr=True`` for a QR code, ``open_browser=False`` to suppress browser
 opening, or ``renderer=`` for a custom :class:`~questdb.auth.Renderer`.
+The custom renderer's prompt dictionary includes ``user_code``, both
+verification URLs, ``expires_in`` and ``interval`` in seconds, plus the vetted
+``browser_target``.
 
 When no interactive terminal/frontend is available, ``sign_in()`` raises
 :class:`~questdb.auth.OidcInteractionRequired` instead of waiting indefinitely.

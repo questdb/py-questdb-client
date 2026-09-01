@@ -932,6 +932,7 @@ cdef extern from "questdb/oidc.h":
         double expires_in_seconds
         const char* browser_target
         size_t browser_target_len
+        uint64_t interval_seconds
 
     ctypedef void (*questdb_oidc_event_cb)(
         void* user_data,
