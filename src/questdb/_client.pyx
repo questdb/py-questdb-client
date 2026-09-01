@@ -83,14 +83,6 @@ from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
-from cpython.pythread cimport (
-    PyThread_tss_alloc,
-    PyThread_tss_create,
-    PyThread_tss_delete,
-    PyThread_tss_free,
-    PyThread_tss_get,
-    PyThread_tss_set,
-)
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 from .line_sender cimport *
@@ -7824,7 +7816,7 @@ cdef class QuestDB:
     cdef size_t _call_uses
     cdef bint _closing
     cdef bint _close_running
-    cdef Py_tss_t* _use_depth_key
+    cdef object _use_depth
     cdef object _connection_listener
     cdef object _error_handler
     cdef size_t _cb_refs_key
@@ -7833,21 +7825,18 @@ cdef class QuestDB:
 
     def __cinit__(self):
         self._db = NULL
-        self._use_depth_key = NULL
         self._conf_str = None
         self._state_cond = threading.Condition(threading.RLock())
         self._lease_uses = 0
         self._call_uses = 0
         self._closing = False
         self._close_running = False
-        self._use_depth_key = PyThread_tss_alloc()
-        if self._use_depth_key == NULL:
-            raise MemoryError()
-        if PyThread_tss_create(self._use_depth_key) != 0:
-            PyThread_tss_free(self._use_depth_key)
-            self._use_depth_key = NULL
-            raise RuntimeError(
-                'Could not create QuestDB thread-use counter.')
+        # Python's thread-local storage is keyed through each Python thread's
+        # state rather than a process-wide pthread_key_t. Keep this per handle
+        # so a call on one handle cannot make close() on another look
+        # re-entrant, without consuming one of the OS's limited TLS slots for
+        # every handle created.
+        self._use_depth = threading.local()
         self._connection_listener = None
         self._error_handler = None
         self._cb_refs_key = 0
@@ -7895,18 +7884,12 @@ cdef class QuestDB:
         finally:
             self._state_cond.release()
 
-    cdef uintptr_t _scoped_call_depth(self) noexcept:
-        """This handle's call depth on the current native thread."""
-        return <uintptr_t>PyThread_tss_get(self._use_depth_key)
+    cdef uintptr_t _scoped_call_depth(self) except? <uintptr_t>-1:
+        """This handle's call depth on the current Python thread."""
+        return <uintptr_t>getattr(self._use_depth, 'value', 0)
 
     cdef void _set_scoped_call_depth(self, uintptr_t depth) except *:
-        # The depth is small and non-negative. Encoding it in the TSS
-        # pointer avoids allocating one Python integer on every enter
-        # and exit; NULL is both an unset slot and the value zero.
-        if PyThread_tss_set(
-                self._use_depth_key, <void*>depth) != 0:
-            raise RuntimeError(
-                'Could not update QuestDB thread-use counter.')
+        self._use_depth.value = depth
 
     cdef void _enter_scoped_call(self) except *:
         """Count a call that borrows nothing but runs on this handle.
@@ -7937,9 +7920,9 @@ cdef class QuestDB:
                 if self._call_uses == 0:
                     raise RuntimeError(
                         'QuestDB call-use counter underflow.')
-                # The TSS update below can raise. Unwind the shared count
-                # first so a failed update cannot leave close() waiting on
-                # a call that has already returned.
+                # The thread-local update below can raise. Unwind the shared
+                # count first so a failed update cannot leave close() waiting
+                # on a call that has already returned.
                 self._call_uses -= 1
                 self._exit_scoped_call()
             else:
@@ -9098,10 +9081,6 @@ cdef class QuestDB:
             _ensure_has_gil(&gs)
         _release_callback_refs(self._cb_refs_key)
         self._cb_refs_key = 0
-        if self._use_depth_key != NULL:
-            PyThread_tss_delete(self._use_depth_key)
-            PyThread_tss_free(self._use_depth_key)
-            self._use_depth_key = NULL
 
 
 @cython.no_gc_clear
@@ -10894,8 +10873,8 @@ cdef class PooledSender:
         return handle
 
     cdef void _exit_call_locked(self, QuestDB handle) except *:
-        # The handle's TSS update can raise; this lease is no longer in its
-        # call either way, so unwind its guard first.
+        # The handle's thread-local update can raise; this lease is no longer
+        # in its call either way, so unwind its guard first.
         self._call_depth -= 1
         if handle is not None:
             handle._exit_scoped_call()
@@ -11531,8 +11510,8 @@ cdef class PooledReader:
         return handle
 
     cdef void _exit_call_locked(self, QuestDB handle) except *:
-        # The handle's TSS update can raise; this lease is no longer in its
-        # call either way, so unwind its guard first.
+        # The handle's thread-local update can raise; this lease is no longer
+        # in its call either way, so unwind its guard first.
         self._call_depth -= 1
         if handle is not None:
             handle._exit_scoped_call()

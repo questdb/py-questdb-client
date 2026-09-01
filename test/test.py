@@ -7155,6 +7155,15 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 db.close()
                 other.close()
 
+    def test_many_handles_do_not_exhaust_native_thread_local_slots(self):
+        """A handle's re-entrant-close guard must not allocate an OS TLS
+        key. Those keys are process-wide and limited to roughly 500 on macOS
+        and 1,000 on Linux, so one key per handle eventually made every later
+        construction fail even though no handle had connected yet.
+        """
+        handles = [qi.QuestDB() for _ in range(2048)]
+        self.assertEqual(len(handles), 2048)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_closing_a_handle_from_inside_its_own_call_is_refused(self):
         """`QuestDB.close()` waits for outstanding uses to be released.
