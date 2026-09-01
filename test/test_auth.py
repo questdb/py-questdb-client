@@ -212,7 +212,9 @@ class NativeOidcTest(unittest.TestCase):
         self.assertEqual(
             config.device_authorization_endpoint,
             'https://idp.example/device')
-        self.assertEqual(config.scope, 'openid groups')
+        # Groups mode selects the ID token but preserves scope exactly, matching
+        # Java's request and persisted token-store identity.
+        self.assertEqual(config.scope, 'groups')
         self.assertTrue(config.groups_in_token)
         self.assertEqual(config.audience, 'questdb-api')
         self.assertEqual(config.issuer, 'https://idp.example/')

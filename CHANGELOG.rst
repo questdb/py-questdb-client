@@ -46,6 +46,10 @@ Highlights:
   auth-specific handling.
 * OIDC discovery, endpoint validation, token selection, caching, refresh, and
   concurrency control use the same native implementation as the C/C++ clients.
+* OIDC scopes are preserved exactly in groups mode and refresh requests,
+  matching the Java client's token requests and persisted token-store identity.
+  Include ``openid`` explicitly when the identity provider requires it to issue
+  an ID token.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
   plaintext credentials atomically and coordinates refresh across processes.
   Custom Python token stores are not supported by the native provider.

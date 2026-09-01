@@ -282,10 +282,11 @@ cdef class OidcDeviceAuth:
         """Configure a provider from explicit IdP endpoints.
 
         ``groups_in_token`` selects the token kind: ``False`` (the default)
-        returns the access token; ``True`` requests and returns the ID token
-        (and ensures the ``openid`` scope). Unlike :meth:`from_questdb` there is
-        no server-advertised default to inherit here, so the kind is always
-        chosen explicitly and defaults to ``False``.
+        returns the access token; ``True`` selects the ID token.
+        It does not modify ``scope``; include ``openid`` explicitly when the
+        identity provider requires it to issue an ID token. Unlike
+        :meth:`from_questdb` there is no server-advertised default to inherit
+        here, so the kind is always chosen explicitly and defaults to ``False``.
         """
         cdef questdb_oidc_builder* builder
         _oidc_validate_bool(groups_in_token, 'groups_in_token', False)

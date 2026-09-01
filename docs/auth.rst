@@ -141,9 +141,11 @@ Explicit keyword arguments override discovered values. Or skip discovery:
         groups_in_token=True,
         audience="questdb")
 
-``groups_in_token=True`` selects the ID token and ensures the ``openid`` scope
-is requested. Otherwise the provider returns the access token, matching the
-QuestDB server's selection.
+``groups_in_token=True`` selects the ID token but preserves ``scope`` exactly;
+include ``openid`` explicitly when the identity provider requires it to issue
+an ID token. Otherwise the provider returns the access token, matching the
+QuestDB server's selection. Preserving the configured scope also keeps persisted
+token identities compatible with the Java client.
 
 Persistence
 ===========
