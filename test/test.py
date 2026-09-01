@@ -3374,6 +3374,54 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             int(ipaddress.IPv4Address('192.0.2.1')).to_bytes(4, 'little'),
             payload)
 
+    def test_non_ascii_datetime_column_name_survives_python_allocation(self):
+        """Datetime conversion must finish before the column name is encoded.
+
+        An aware datetime calls the user's ``tzinfo.utcoffset()``.  Keep the
+        allocations it makes alive through the send so the conversion runs
+        allocating Python before the non-ASCII name is encoded into the UTF-8
+        arena, then inspect the emitted frame rather than client-side state.
+        """
+        allocations = []
+
+        class AllocatingTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                allocations.extend(
+                    f'allocated-{i}-ø'.encode('utf-8') for i in range(1024))
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'ALLOCATING'
+
+        name = 'dátetime'
+        stamp = datetime.datetime(2020, 1, 1, tzinfo=AllocatingTz())
+        expected_micros = 1_577_836_800_000_000
+        with QwpAckServer(record_payloads=True) as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
+                    auto_flush=False) as sender:
+                sender.row(
+                    'qwp_unicode_datetime', columns={name: stamp},
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+                fsn = sender.flush_and_get_fsn()
+                self.assertTrue(sender.await_acked_fsn(fsn, 10000))
+            stats = server.snapshot()
+
+        self.assertTrue(allocations, 'utcoffset() did not run')
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            payload for payload in stats['binary_payloads']
+            if (payload[:4] == b'QWP1'
+                and int.from_bytes(payload[6:8], 'little') > 0))
+        self.assertEqual(
+            _first_qwp_table_column_types(payload),
+            [(name, 0x0A), ('', 0x10)])
+        self.assertIn(name.encode('utf-8'), payload)
+        self.assertIn(expected_micros.to_bytes(8, 'little'), payload)
+
     def test_clear_from_inside_uuid_or_ipv4_conversion(self):
         """The conversion of a UUID or IPV4 value can re-enter the buffer
         while the row is half-written. `clear()` refuses to run there and
