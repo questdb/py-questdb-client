@@ -83,6 +83,14 @@ from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
+from cpython.pythread cimport (
+    PyThread_tss_alloc,
+    PyThread_tss_create,
+    PyThread_tss_delete,
+    PyThread_tss_free,
+    PyThread_tss_get,
+    PyThread_tss_set,
+)
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 from .line_sender cimport *
@@ -7798,7 +7806,7 @@ cdef class QuestDB:
     cdef size_t _call_uses
     cdef bint _closing
     cdef bint _close_running
-    cdef object _use_depth
+    cdef Py_tss_t* _use_depth_key
     cdef object _connection_listener
     cdef object _error_handler
     cdef size_t _cb_refs_key
@@ -7807,13 +7815,21 @@ cdef class QuestDB:
 
     def __cinit__(self):
         self._db = NULL
+        self._use_depth_key = NULL
         self._conf_str = None
         self._state_cond = threading.Condition(threading.RLock())
         self._lease_uses = 0
         self._call_uses = 0
         self._closing = False
         self._close_running = False
-        self._use_depth = threading.local()
+        self._use_depth_key = PyThread_tss_alloc()
+        if self._use_depth_key == NULL:
+            raise MemoryError()
+        if PyThread_tss_create(self._use_depth_key) != 0:
+            PyThread_tss_free(self._use_depth_key)
+            self._use_depth_key = NULL
+            raise RuntimeError(
+                'Could not create QuestDB thread-use counter.')
         self._connection_listener = None
         self._error_handler = None
         self._cb_refs_key = 0
@@ -7853,14 +7869,26 @@ cdef class QuestDB:
             # call finishes on its own, a lease only if its holder
             # closes it.
             if scoped:
+                self._enter_scoped_call()
                 self._call_uses += 1
-                self._use_depth.value = (
-                    getattr(self._use_depth, 'value', 0) + 1)
             else:
                 self._lease_uses += 1
             return db
         finally:
             self._state_cond.release()
+
+    cdef uintptr_t _scoped_call_depth(self) noexcept:
+        """This handle's call depth on the current native thread."""
+        return <uintptr_t>PyThread_tss_get(self._use_depth_key)
+
+    cdef void _set_scoped_call_depth(self, uintptr_t depth) except *:
+        # The depth is small and non-negative. Encoding it in the TSS
+        # pointer avoids allocating one Python integer on every enter
+        # and exit; NULL is both an unset slot and the value zero.
+        if PyThread_tss_set(
+                self._use_depth_key, <void*>depth) != 0:
+            raise RuntimeError(
+                'Could not update QuestDB thread-use counter.')
 
     cdef void _enter_scoped_call(self) except *:
         """Count a call that borrows nothing but runs on this handle.
@@ -7875,12 +7903,14 @@ cdef class QuestDB:
         holds one for its whole lifetime, and it may be released from a
         different thread than the one that borrowed it.
         """
-        self._use_depth.value = (
-            getattr(self._use_depth, 'value', 0) + 1)
+        self._set_scoped_call_depth(self._scoped_call_depth() + 1)
 
     cdef void _exit_scoped_call(self) except *:
-        self._use_depth.value = (
-            getattr(self._use_depth, 'value', 0) - 1)
+        cdef uintptr_t depth = self._scoped_call_depth()
+        if depth == 0:
+            raise RuntimeError(
+                'QuestDB thread-use counter underflow.')
+        self._set_scoped_call_depth(depth - 1)
 
     cdef void _end_db_use(self, bint scoped=True) except *:
         self._state_cond.acquire()
@@ -7889,9 +7919,8 @@ cdef class QuestDB:
                 if self._call_uses == 0:
                     raise RuntimeError(
                         'QuestDB call-use counter underflow.')
+                self._exit_scoped_call()
                 self._call_uses -= 1
-                self._use_depth.value = (
-                    getattr(self._use_depth, 'value', 0) - 1)
             else:
                 if self._lease_uses == 0:
                     raise RuntimeError(
@@ -8827,7 +8856,7 @@ cdef class QuestDB:
             # whole bound, and leave the handle closing under its own
             # caller. Refused before `_closing` is published, so a
             # refused close changes nothing for any other thread.
-            if getattr(self._use_depth, 'value', 0) != 0:
+            if self._scoped_call_depth() != 0:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     "close() can't be called from inside a call on "
@@ -9046,6 +9075,10 @@ cdef class QuestDB:
             _ensure_has_gil(&gs)
         _release_callback_refs(self._cb_refs_key)
         self._cb_refs_key = 0
+        if self._use_depth_key != NULL:
+            PyThread_tss_delete(self._use_depth_key)
+            PyThread_tss_free(self._use_depth_key)
+            self._use_depth_key = NULL
 
 
 @cython.no_gc_clear
@@ -10824,13 +10857,17 @@ cdef class PooledSender:
         cdef QuestDB handle = self._handle
         self._call_depth += 1
         if handle is not None:
-            handle._enter_scoped_call()
+            try:
+                handle._enter_scoped_call()
+            except:
+                self._call_depth -= 1
+                raise
         return handle
 
     cdef void _exit_call_locked(self, QuestDB handle) except *:
-        self._call_depth -= 1
         if handle is not None:
             handle._exit_scoped_call()
+        self._call_depth -= 1
 
     cdef void_int _check_not_mid_call(self, str method) except -1:
         """
@@ -11455,13 +11492,17 @@ cdef class PooledReader:
         cdef QuestDB handle = self._handle
         self._call_depth += 1
         if handle is not None:
-            handle._enter_scoped_call()
+            try:
+                handle._enter_scoped_call()
+            except:
+                self._call_depth -= 1
+                raise
         return handle
 
     cdef void _exit_call_locked(self, QuestDB handle) except *:
-        self._call_depth -= 1
         if handle is not None:
             handle._exit_scoped_call()
+        self._call_depth -= 1
 
     cdef void_int _check_not_mid_call(self, str method) except -1:
         """

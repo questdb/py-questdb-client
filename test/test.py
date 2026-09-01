@@ -7058,6 +7058,46 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             self.assertFalse(closer.is_alive(), 'close() never returned')
             self.assertEqual(closed, [None])
 
+    def test_a_call_on_one_handle_does_not_refuse_closing_another(self):
+        """The self-close depth belongs to both a thread and a handle.
+
+        A module-wide native TLS counter would remove the Python
+        ``threading.local`` traffic but make a call on one handle look like
+        a call on every handle used by that thread. Closing an unrelated,
+        idle handle from a value conversion remains legitimate.
+        """
+        outcome = []
+
+        class HostileAddr(ipaddress.IPv4Address):
+            def __int__(self):
+                try:
+                    other.close()
+                except qi.QuestDBError as exc:
+                    outcome.append(exc)
+                else:
+                    outcome.append(None)
+                return 0x01020304
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'lazy_connect=true;sender_pool_min=0;'
+                    'sender_pool_max=1;query_pool_min=0;pool_reap=manual;')
+            db = qi.QuestDB.from_conf(conf)
+            other = qi.QuestDB.from_conf(conf)
+            lease = db.sender()
+            try:
+                lease.row(
+                    'hostile',
+                    columns={'ip': HostileAddr('192.0.2.1')},
+                    at=qi.ServerTimestamp)
+                self.assertEqual(outcome, [None])
+                with self.assertRaisesRegex(qi.QuestDBError, 'is closed'):
+                    other.reap_idle()
+            finally:
+                lease.close()
+                db.close()
+                other.close()
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_closing_a_handle_from_inside_its_own_call_is_refused(self):
         """`QuestDB.close()` waits for outstanding uses to be released.
