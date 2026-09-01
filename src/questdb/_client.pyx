@@ -7931,8 +7931,11 @@ cdef class QuestDB:
                 if self._call_uses == 0:
                     raise RuntimeError(
                         'QuestDB call-use counter underflow.')
-                self._exit_scoped_call()
+                # The TSS update below can raise. Unwind the shared count
+                # first so a failed update cannot leave close() waiting on
+                # a call that has already returned.
                 self._call_uses -= 1
+                self._exit_scoped_call()
             else:
                 if self._lease_uses == 0:
                     raise RuntimeError(
@@ -10877,9 +10880,11 @@ cdef class PooledSender:
         return handle
 
     cdef void _exit_call_locked(self, QuestDB handle) except *:
+        # The handle's TSS update can raise; this lease is no longer in its
+        # call either way, so unwind its guard first.
+        self._call_depth -= 1
         if handle is not None:
             handle._exit_scoped_call()
-        self._call_depth -= 1
 
     cdef void_int _check_not_mid_call(self, str method) except -1:
         """
@@ -11512,9 +11517,11 @@ cdef class PooledReader:
         return handle
 
     cdef void _exit_call_locked(self, QuestDB handle) except *:
+        # The handle's TSS update can raise; this lease is no longer in its
+        # call either way, so unwind its guard first.
+        self._call_depth -= 1
         if handle is not None:
             handle._exit_scoped_call()
-        self._call_depth -= 1
 
     cdef void_int _check_not_mid_call(self, str method) except -1:
         """
