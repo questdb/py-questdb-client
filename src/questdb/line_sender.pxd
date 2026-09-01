@@ -1074,6 +1074,11 @@ cdef extern from "questdb/oidc.h":
         questdb_oidc_auth* auth
         ) noexcept nogil
 
+    bint questdb_oidc_auth_close(
+        const questdb_oidc_auth* auth,
+        questdb_error** err_out
+        ) noexcept nogil
+
     bint questdb_oidc_auth_sign_in(
         const questdb_oidc_auth* auth,
         questdb_error** err_out
@@ -1128,6 +1133,7 @@ cdef extern from "questdb/oidc.h":
         QUESTDB_OIDC_ERROR_DEVICE_FLOW
         QUESTDB_OIDC_ERROR_TIMEOUT
         QUESTDB_OIDC_ERROR_INTERACTION_REQUIRED
+        QUESTDB_OIDC_ERROR_CANCELLED
         QUESTDB_OIDC_ERROR_UNKNOWN
 
     cdef struct questdb_oidc_error_view:

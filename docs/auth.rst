@@ -59,6 +59,10 @@ The lifecycle is deliberately split:
   needed. Transport connect/reconnect paths have the same behavior.
 * :meth:`~questdb.auth.OidcDeviceAuth.clear` clears memory and the configured
   persisted entry. It does not revoke the credential at the identity provider.
+* :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes the shared
+  provider. Call it from another thread to cancel device polling or a bundled
+  file-token-store lock wait; attached transports observe the same closed
+  state. ``OidcDeviceAuth`` is also a context manager.
 
 This prevents a reconnect, SQLAlchemy pool worker, or ingestion background
 thread from unexpectedly launching a browser flow. Applications should call
@@ -69,6 +73,7 @@ Error handling
 
 All :mod:`questdb.auth` failures are :class:`~questdb.auth.OidcError`
 subclasses — :class:`~questdb.auth.OidcConfigError`,
+:class:`~questdb.auth.OidcCancelledError`,
 :class:`~questdb.auth.OidcNetworkError`,
 :class:`~questdb.auth.OidcInteractionRequired`,
 :class:`~questdb.auth.OidcDeviceFlowError`, and

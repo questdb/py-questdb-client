@@ -181,6 +181,9 @@ See the :ref:`oidc_auth` guide for an overview.
 .. autoexception:: questdb.auth.OidcConfigError
    :show-inheritance:
 
+.. autoexception:: questdb.auth.OidcCancelledError
+   :show-inheritance:
+
 .. autoexception:: questdb.auth.OidcNetworkError
    :show-inheritance:
 

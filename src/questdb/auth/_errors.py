@@ -107,6 +107,10 @@ class OidcInteractionRequired(OidcError):
     """
 
 
+class OidcCancelledError(OidcError):
+    """An OIDC operation was cancelled because its provider was closed."""
+
+
 class OidcDeviceFlowError(OidcError):
     """
     The OAuth 2.0 device authorization grant failed; the IdP

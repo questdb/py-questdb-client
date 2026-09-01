@@ -6256,7 +6256,9 @@ cdef class QuestDB:
                 raise TypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
-            if oidc_auth is not None and (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+            if oidc_auth is not None and (
+                    (<OidcDeviceAuth>oidc_auth)._raw == NULL
+                    or (<OidcDeviceAuth>oidc_auth)._closed):
                 raise ValueError('"oidc_auth" is closed')
             str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
@@ -7097,7 +7099,8 @@ cdef class Sender:
                 raise TypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
-            if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+            if ((<OidcDeviceAuth>oidc_auth)._raw == NULL
+                    or (<OidcDeviceAuth>oidc_auth)._closed):
                 raise ValueError('"oidc_auth" is closed')
             if not line_sender_opts_oidc_auth(
                     self._opts, (<OidcDeviceAuth>oidc_auth)._raw, &err):

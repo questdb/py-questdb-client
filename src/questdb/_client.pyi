@@ -54,7 +54,7 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -121,6 +121,14 @@ class OidcDeviceAuth:
     def headers(self) -> Dict[str, str]: ...
 
     def clear(self) -> None: ...
+
+    def close(self) -> None:
+        """Close the provider and cancel device-poll or token-store lock waits."""
+
+    def __enter__(self) -> OidcDeviceAuth: ...
+
+    def __exit__(self, exc_type: object, exc_value: object,
+                 traceback: object) -> Literal[False]: ...
 
     @property
     def config(self) -> OidcConfig: ...

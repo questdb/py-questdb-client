@@ -59,6 +59,7 @@ from ._render import Renderer
 from ._errors import (
     OidcError,
     OidcConfigError,
+    OidcCancelledError,
     OidcNetworkError,
     OidcInteractionRequired,
     OidcDeviceFlowError,
@@ -73,6 +74,7 @@ __all__ = [
     'FileTokenStore',
     'OidcConfig',
     'OidcConfigError',
+    'OidcCancelledError',
     'OidcDeviceAuth',
     'OidcDeviceFlowError',
     'OidcError',

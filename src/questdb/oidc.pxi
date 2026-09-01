@@ -47,6 +47,7 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
 
     from questdb.auth._errors import (
         OidcConfigError,
+        OidcCancelledError,
         OidcDeviceFlowError,
         OidcError,
         OidcInteractionRequired,
@@ -104,6 +105,10 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
                 in_doubt=in_doubt)
         elif view.kind == QUESTDB_OIDC_ERROR_INTERACTION_REQUIRED:
             exc = OidcInteractionRequired(
+                message, status=status, retry_after=retry_after,
+                in_doubt=in_doubt)
+        elif view.kind == QUESTDB_OIDC_ERROR_CANCELLED:
+            exc = OidcCancelledError(
                 message, status=status, retry_after=retry_after,
                 in_doubt=in_doubt)
         else:
@@ -259,10 +264,20 @@ cdef class OidcDeviceAuth:
     cdef object __weakref__
     cdef questdb_oidc_auth* _raw
     cdef object _renderer
+    cdef bint _closed
 
     def __cinit__(self):
         self._raw = NULL
         self._renderer = None
+        self._closed = False
+
+    cdef void _require_open(self) except *:
+        if self._raw == NULL:
+            raise RuntimeError('OidcDeviceAuth is closed')
+        if self._closed:
+            from questdb.auth._errors import OidcCancelledError
+            raise OidcCancelledError(
+                'The OIDC authentication provider is closed.')
 
     def __init__(
             self,
@@ -522,8 +537,7 @@ cdef class OidcDeviceAuth:
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
-        if self._raw == NULL:
-            raise RuntimeError('OidcDeviceAuth is closed')
+        self._require_open()
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_sign_in(self._raw, &err)
         _ensure_has_gil(&gs)
@@ -537,8 +551,7 @@ cdef class OidcDeviceAuth:
         cdef const char* data = NULL
         cdef size_t length = 0
         cdef PyThreadState* gs = NULL
-        if self._raw == NULL:
-            raise RuntimeError('OidcDeviceAuth is closed')
+        self._require_open()
         _ensure_doesnt_have_gil(&gs)
         token = questdb_oidc_auth_token(self._raw, &err)
         _ensure_has_gil(&gs)
@@ -562,11 +575,42 @@ cdef class OidcDeviceAuth:
         cdef PyThreadState* gs = NULL
         if self._raw == NULL:
             return
+        self._require_open()
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_clear(self._raw, &err)
         _ensure_has_gil(&gs)
         if not ok:
             raise _oidc_err_to_py(err)
+
+    def close(self):
+        """Permanently close this provider and cancel interruptible waits.
+
+        A sign-in, silent-refresh coordination, or bundled file-store lock wait
+        running on another thread is asked to stop. The call waits for that
+        operation to leave the native authentication critical section. Cloned
+        native handles retained by attached transports share the closed state.
+        Idempotent.
+        """
+        cdef questdb_error* err = NULL
+        cdef bint ok
+        cdef PyThreadState* gs = NULL
+        if self._raw == NULL or self._closed:
+            self._closed = True
+            return
+        _ensure_doesnt_have_gil(&gs)
+        ok = questdb_oidc_auth_close(self._raw, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise _oidc_err_to_py(err)
+        self._closed = True
+
+    def __enter__(self):
+        self._require_open()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
 
     @property
     def config(self):
@@ -578,8 +622,7 @@ cdef class OidcDeviceAuth:
         """
         cdef questdb_oidc_config_view view
         from questdb.auth._config import OidcConfig
-        if self._raw == NULL:
-            raise RuntimeError('OidcDeviceAuth is closed')
+        self._require_open()
         memset(&view, 0, sizeof(questdb_oidc_config_view))
         view.struct_size = sizeof(questdb_oidc_config_view)
         if not questdb_oidc_auth_get_config(self._raw, &view):

@@ -30,6 +30,8 @@ import os
 import platform
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 import weakref
@@ -38,6 +40,7 @@ from unittest import mock
 import questdb
 from questdb.auth import (
     FileTokenStore,
+    OidcCancelledError,
     OidcConfigError,
     OidcDeviceAuth,
     OidcDeviceFlowError,
@@ -285,6 +288,7 @@ class NativeOidcTest(unittest.TestCase):
         # OidcError.__init__; the device-flow ones super() into it.
         for factory in (
                 lambda **k: OidcConfigError('x', **k),
+                lambda **k: OidcCancelledError('x', **k),
                 lambda **k: OidcNetworkError('x', **k),
                 lambda **k: OidcInteractionRequired('x', **k),
                 lambda **k: OidcDeviceFlowError('x', error='e', **k),
@@ -663,6 +667,47 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # The flow still completed: SUCCESS fired, FAILURE did not.
         self.assertEqual(len(renderer.successes), 1)
         self.assertEqual(renderer.failures, [])
+
+    def test_close_cancels_device_polling_and_is_permanent(self):
+        waiting = threading.Event()
+
+        class WaitingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                waiting.set()
+
+        renderer = WaitingRenderer()
+        result = []
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(device_token_response=pending) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+
+            def sign_in():
+                try:
+                    auth.sign_in()
+                except BaseException as exc:
+                    result.append(exc)
+
+            worker = threading.Thread(target=sign_in, daemon=True)
+            worker.start()
+            self.assertTrue(
+                waiting.wait(5), 'sign-in did not enter its polling wait')
+            started = time.monotonic()
+            auth.close()
+            self.assertLess(time.monotonic() - started, 2)
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], OidcCancelledError)
+        for op in (auth.sign_in, auth.token, auth.headers, auth.clear):
+            with self.subTest(op=op), self.assertRaisesRegex(
+                    OidcCancelledError, 'closed'):
+                op()
+        auth.close()
+        with self.assertRaisesRegex(OidcCancelledError, 'closed'):
+            with auth:
+                pass
 
     def test_renderer_on_failure_receives_native_message(self):
         # A terminal device-flow error emits FAILURE. The binding must map
