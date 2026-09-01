@@ -47,6 +47,7 @@ FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
 FIRST_QWP_WS_RELEASE = (9, 4, 3)
 FIRST_QWP_GAP_HALT_RELEASE = (9, 4, 4)
+FIRST_QWP_ROW_TYPES_RELEASE = (10, 0, 0)
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -127,6 +128,14 @@ class TestWithDatabase(unittest.TestCase):
         if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
             self.skipTest(
                 'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def _require_qwp_row_types(self):
+        """BINARY and the other QWP-only column types are supported from
+        QuestDB 10, while the compatibility leg intentionally stays on the
+        9.4.3 QWP beta."""
+        self._require_qwp_ws()
+        if self.qdb_plain.version < FIRST_QWP_ROW_TYPES_RELEASE:
+            self.skipTest('QWP-only column types require QuestDB 10+')
 
     def _require_qwp_fuzz(self):
         self._require_qwp_ws()
@@ -2351,6 +2360,17 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(row['vc'], 'varchar-value')
             self.assertEqual(row['st'], 'string-value')
             self.assertEqual(row['ch'], ord('C'))
+            expect_uuid = uuid.UUID(
+                '11111111-2222-3333-4444-555555555555')
+            raw_uuid = (row['uu'] if isinstance(row['uu'], bytes)
+                        else row['uu'].bytes)
+            self.assertEqual(raw_uuid, expect_uuid.bytes)
+
+            # Exercise the separate pyarrow-free UUID decoder too.
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                pdf = client.query(
+                    f'SELECT uu FROM {table_name}').to_pandas()
+            self.assertEqual(pdf['uu'][0], expect_uuid)
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2579,6 +2599,16 @@ class TestEgressWithDatabase(unittest.TestCase):
                     client.query(
                         f'SELECT count() AS n FROM {table_name} '
                         'WHERE lg = $1', [object()])
+
+                class ShortUuid(uuid.UUID):
+                    @property
+                    def bytes(self):
+                        return b'\x01'
+
+                with self.assertRaisesRegex(ValueError, r'expected 16'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE u = $1', [ShortUuid(int=0)])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -4318,10 +4348,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def tearDownClass(cls):
         TestWithDatabase.tearDownClass.__func__(cls)
 
-    def _require_qwp_ws(self):
-        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
-            self.skipTest(
-                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+    _require_qwp_ws = TestWithDatabase._require_qwp_ws
+    _require_qwp_row_types = TestWithDatabase._require_qwp_row_types
 
     def setUp(self):
         self._require_qwp_ws()
@@ -4739,16 +4767,6 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     # ---------- UUID (Category C — canonical mirror + extension type) ----------
 
     @staticmethod
-    def _uuid_to_wire(u):
-        """Convert a Python ``uuid.UUID`` to QuestDB's UUID wire
-        layout (the C header: "bytes 0..8 lo half LE,
-        bytes 8..16 hi half LE"). ``uuid.UUID.bytes`` is big-endian
-        per RFC 4122; the wire layout is two 64-bit LE halves with
-        ``lo`` first."""
-        b = u.bytes
-        return bytes(reversed(b[8:16])) + bytes(reversed(b[0:8]))
-
-    @staticmethod
     def _extract_uuid_storage(col):
         """Return the FSB(16) storage bytes from an egress UUID
         column, whether or not pyarrow has the `arrow.uuid`
@@ -4759,29 +4777,44 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         return col.to_pylist()
 
     def test_uuid_round_trip_via_fsb16(self):
-        """``pa.fixed_size_binary(16)`` → UUID wire → server stores
-        as UUID → egress emits the same FSB(16) storage bytes.
-        Canonical mirror path: no extension type wrapping. Round-trip
-        is byte-identity at the Arrow wire level (the
-        `_uuid_to_wire` helper converts the user-facing UUID to that
-        layout up front)."""
+        """A fixed-size binary column needs an explicit UUID claim;
+        its bytes use canonical RFC 4122 order."""
         import pyarrow as pa
         import uuid as uuid_mod
         self._require_qwp_ws()
         table = self._table()
         self._create_table(table, 'v UUID')
         uuids = [uuid_mod.uuid4() for _ in range(5)]
-        wire_bytes = [self._uuid_to_wire(u) for u in uuids]
-        values = pa.array(wire_bytes, type=pa.binary(16))
+        canonical = [u.bytes for u in uuids]
+        values = pa.array(canonical, type=pa.binary(16))
         df = self._make_df_with_ts('v', values, 5)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts')
+            client.dataframe(
+                df, table_name=table, at='ts',
+                schema_overrides={'v': 'uuid'})
         self.qdb_plain.retry_check_table(table, min_rows=5)
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
-                         wire_bytes)
+                         canonical)
+
+    def test_unclaimed_fsb16_lands_as_binary(self):
+        """A bare ``pa.fixed_size_binary(16)`` column carries no UUID
+        claim, so it is opaque bytes: writing it into a UUID column is
+        a type mismatch the server rejects."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_row_types()
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        values = pa.array(
+            [uuid_mod.uuid4().bytes for _ in range(3)],
+            type=pa.binary(16))
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.QuestDBError):
+                client.dataframe(df, table_name=table, at='ts')
 
     def test_uuid_round_trip_via_arrow_uuid_extension(self):
         """If pyarrow has registered the `arrow.uuid` extension
@@ -4799,10 +4832,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         table = self._table()
         self._create_table(table, 'v UUID')
         uuids = [uuid_mod.uuid4() for _ in range(3)]
-        wire_bytes = [self._uuid_to_wire(u) for u in uuids]
+        canonical = [u.bytes for u in uuids]
         values = pa.ExtensionArray.from_storage(
             uuid_type,
-            pa.array(wire_bytes, type=pa.binary(16)))
+            pa.array(canonical, type=pa.binary(16)))
         df = self._make_df_with_ts('v', values, 3)
         with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
@@ -4811,7 +4844,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
-                         wire_bytes)
+                         canonical)
 
     def test_uuid_with_nulls_round_trip(self):
         """UUID validity bitmap round-trips: nulls stay null."""
@@ -4820,14 +4853,16 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         table = self._table()
         self._create_table(table, 'v UUID')
-        w0 = self._uuid_to_wire(uuid_mod.uuid4())
-        w2 = self._uuid_to_wire(uuid_mod.uuid4())
-        w4 = self._uuid_to_wire(uuid_mod.uuid4())
+        w0 = uuid_mod.uuid4().bytes
+        w2 = uuid_mod.uuid4().bytes
+        w4 = uuid_mod.uuid4().bytes
         values = pa.array(
             [w0, None, w2, None, w4], type=pa.binary(16))
         df = self._make_df_with_ts('v', values, 5)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts')
+            client.dataframe(
+                df, table_name=table, at='ts',
+                schema_overrides={'v': 'uuid'})
         self.qdb_plain.retry_check_table(table, min_rows=5)
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
@@ -4857,10 +4892,9 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        # Server-side coercion lands the value as a UUID; egress
-        # emits the FSB(16) storage in the same wire layout as
-        # the canonical mirror path.
-        expected = [self._uuid_to_wire(u) for u in uuids]
+        # Server-side coercion lands the value as a UUID; egress emits
+        # canonical RFC 4122 bytes.
+        expected = [u.bytes for u in uuids]
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
                          expected)
 
@@ -4882,9 +4916,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
 
     def test_fsb16_rejected_by_row_ilp(self):
         """Row-ILP (`Sender.dataframe`) genuinely does not support
-        UUID. `_FIELD_TARGETS_ROW` doesn't include
-        `col_target_column_uuid`, so the resolver fails to map
-        `fsb16_arrow` to any target. This pins that
+        fixed-size binary columns. `_FIELD_TARGETS_ROW` includes
+        neither `col_target_column_uuid` nor
+        `col_target_column_arrow`, so the resolver fails to map an
+        FSB(16) column to any target. This pins that
         protocol-asymmetry contract."""
         import pyarrow as pa
         import uuid as uuid_mod
@@ -4900,19 +4935,22 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             with self.assertRaises(qi.QuestDBError):
                 sender.dataframe(df, table_name='dummy', at='ts')
 
-    def test_fsb_other_size_rejected(self):
-        """``FixedSizeBinary(k)`` for k != 16 is not UUID and has no
-        QuestDB analogue — should be rejected cleanly rather than
-        silently routed somewhere wrong."""
+    def test_fsb_other_size_lands_as_binary(self):
+        """An unclaimed fixed-size binary column remains opaque BINARY."""
         import pyarrow as pa
-        self._require_qwp_ws()
+        self._require_qwp_row_types()
         table = self._table()
-        values = pa.array(
-            [b'\x00' * 8, b'\xff' * 8], type=pa.binary(8))
+        rows = [b'\x00' * 8, b'\xff' * 8]
+        values = pa.array(rows, type=pa.binary(8))
         df = self._make_df_with_ts('v', values, 2)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.QuestDBError):
-                client.dataframe(df, table_name=table, at='ts')
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY timestamp').to_arrow()
+        self.assertEqual(got.column('v').type, pa.binary())
+        self.assertEqual(got.column('v').to_pylist(), rows)
 
     # ---------- UInt32 / IPV4 policy ----------
 
@@ -5398,10 +5436,11 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     # ---------- LONG256 (Category C — FixedSizeBinary(32)) ----------
 
     def test_long256_round_trip(self):
-        """``pa.fixed_size_binary(32)`` → LONG256 wire → server
-        stores as LONG256 → egress emits FSB(32). Bytes are
-        forwarded verbatim — same opaque-bytes convention as UUID
-        (matches Polars / Rust-direct: see PR #150)."""
+        """``pa.fixed_size_binary(32)`` claimed as LONG256 via
+        ``schema_overrides`` → LONG256 wire → server stores as
+        LONG256 → egress emits FSB(32). Bytes are forwarded
+        verbatim; the 32-byte width alone claims nothing, so without
+        the override the column is BINARY."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
@@ -5414,7 +5453,9 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         values = pa.array([v0, v1, v2], type=pa.binary(32))
         df = self._make_df_with_ts('v', values, 3)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts')
+            client.dataframe(
+                df, table_name=table, at='ts',
+                schema_overrides={'v': 'long256'})
         self.qdb_plain.retry_check_table(table, min_rows=3)
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
@@ -5443,7 +5484,9 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             [v0, None, v2, None, v4], type=pa.binary(32))
         df = self._make_df_with_ts('v', values, 5)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts')
+            client.dataframe(
+                df, table_name=table, at='ts',
+                schema_overrides={'v': 'long256'})
         self.qdb_plain.retry_check_table(table, min_rows=5)
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
@@ -5456,10 +5499,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got_bytes, [v0, None, v2, None, v4])
 
     def test_fsb32_rejected_by_row_ilp(self):
-        """Row-ILP doesn't list `col_target_column_long256` in
+        """Row-ILP doesn't list `col_target_column_arrow` in
         `_FIELD_TARGETS_ROW`, so `Sender.dataframe` rejects FSB(32)
-        with `BadDataFrame`. Symmetric to the UUID FSB(16) row-ILP
-        rejection test in PR 2."""
+        with `BadDataFrame`. Symmetric to the FSB(16) row-ILP
+        rejection test."""
         import pyarrow as pa
         self._require_qwp_ws()
         values = pa.array(

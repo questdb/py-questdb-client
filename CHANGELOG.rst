@@ -340,12 +340,19 @@ Columnar DataFrame Ingestion
 Adds :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, ingesting pandas / polars / pyarrow and
 any Arrow C Data Interface object over QWP/WebSocket. A
 ``schema_overrides`` keyword reclassifies columns as ``symbol``,
-``ipv4``, ``char`` or ``geohash`` (e.g. ``{'addr': 'ipv4', 'loc':
-('geohash', 20)}``); it requires fully Arrow-backed input — on input that
+``ipv4``, ``char``, ``uuid``, ``long256`` or ``geohash`` (e.g.
+``{'addr': 'ipv4', 'id': 'uuid', 'loc': ('geohash', 20)}``); it requires
+fully Arrow-backed input — on input that
 falls back to the NumPy planner it raises
 :class:`UnsupportedDataFrameShapeError <questdb.UnsupportedDataFrameShapeError>` rather than being silently
 ignored. A ``max_rows_per_batch`` keyword (default 16384) bounds the
 rows sent per columnar batch.
+
+UUID bytes now use canonical RFC 4122 order (``uuid.UUID.bytes``) at every
+raw-byte Python/native boundary. An unlabelled Arrow
+``fixed_size_binary`` column is BINARY regardless of width; use the
+``arrow.uuid`` extension, Arrow ``questdb.column_type`` metadata, or
+``schema_overrides`` to claim UUID or LONG256.
 
 The designated-timestamp argument ``at`` is the timestamp column itself,
 given by name (``str``) or position (``int``), a fixed

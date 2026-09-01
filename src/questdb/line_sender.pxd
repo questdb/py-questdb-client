@@ -1463,6 +1463,8 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         qwp_arrow_override_char = 2
         qwp_arrow_override_geohash = 3
         qwp_arrow_override_not_symbol = 4
+        qwp_arrow_override_uuid = 5
+        qwp_arrow_override_long256 = 6
 
     cdef struct qwp_arrow_override:
         const char* column
