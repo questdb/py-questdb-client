@@ -50,6 +50,8 @@ Highlights:
   matching the Java client's token requests and persisted token-store identity.
   Include ``openid`` explicitly when the identity provider requires it to issue
   an ID token.
+* OIDC device-flow polling tolerates transient transport failures until the
+  device code expires, matching the Java client.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
   plaintext credentials atomically and coordinates refresh across processes.
   Custom Python token stores are not supported by the native provider.
