@@ -3882,13 +3882,14 @@ cdef void_int _dataframe(
             # error. `Buffer._row` holds the same property with a bare
             # `except:`.
             #
-            # This is the property held, not a case answered. The row
-            # loop below runs no caller Python -- which is why an object
-            # column of `uuid.UUID` is refused on this path -- and its
-            # auto-flush is a native call, so a signal has no bytecode
-            # boundary to land on between two cells. `Buffer._row` is
-            # where a cell conversion does run the caller's code, and
-            # where one can.
+            # This is the property held, not a closed list of cases.
+            # In particular, an aware datetime object column computes
+            # `dt - _EPOCH_AWARE_UTC`, which can call the caller's
+            # `tzinfo.utcoffset()` while this row and its rewind marker
+            # are live. If that hook raises an interrupt, an exit, or
+            # another `BaseException`, this branch restores the buffer
+            # before propagating it unchanged. It also keeps that rule
+            # true for any future cell serializer that calls Python.
             if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
                 raise c_err_to_py(err)
             raise
