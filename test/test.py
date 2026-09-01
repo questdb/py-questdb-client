@@ -1360,6 +1360,126 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with self.assertRaises(qi.QuestDBError):
                 client.sender()
 
+    def test_shared_rejection_handler_does_not_share_callback_ownership(self):
+        """A callback function may be registered on more than one handle.
+
+        Dispatching it for one handle must not make an unrelated handle look
+        as though its own dispatcher is calling it. In particular, closing a
+        busy unrelated handle is a normal wait, not an own-callback refusal.
+        """
+        handler_entered = threading.Event()
+        handler_done = threading.Event()
+        outcome = []
+        clients = []
+
+        def shared_handler(_error):
+            handler_entered.set()
+            try:
+                clients[1].close()
+            except qi.QuestDBError as exc:
+                outcome.append(exc)
+            else:
+                outcome.append(None)
+            finally:
+                handler_done.set()
+
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=0;sender_pool_max=1;query_pool_min=0;'
+                'pool_reap=manual;close_flush_timeout_millis=0;')
+            first = qi.QuestDB.from_conf(conf, error_handler=shared_handler)
+            second = qi.QuestDB.from_conf(conf, error_handler=shared_handler)
+            clients.extend((first, second))
+            held = second.sender()
+
+            def release_unrelated_lease():
+                if handler_entered.wait(10):
+                    time.sleep(0.2)
+                    held.close(flush=False)
+
+            releaser = threading.Thread(
+                target=release_unrelated_lease, daemon=True)
+            releaser.start()
+            try:
+                with first.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    sender.flush()
+                self.assertTrue(
+                    handler_done.wait(10), 'the shared handler did not finish')
+                releaser.join(10)
+                self.assertFalse(releaser.is_alive())
+                self.assertEqual(outcome, [None])
+            finally:
+                held.close(flush=False)
+                first.close()
+                second.close()
+
+    def test_shared_default_handler_does_not_share_callback_ownership(self):
+        """The default rejection handler is one function shared by every
+        handle, so a Python logging handler re-entering another handle must
+        still get that other handle's ordinary close semantics.
+        """
+        log_entered = threading.Event()
+        log_done = threading.Event()
+        outcome = []
+        clients = []
+
+        class ReenterOther(logging.Handler):
+            def emit(self, record):
+                if log_entered.is_set() or not record.getMessage().startswith(
+                        'QWP/WebSocket server rejection:'):
+                    return
+                log_entered.set()
+                try:
+                    clients[1].close()
+                except qi.QuestDBError as exc:
+                    outcome.append(exc)
+                else:
+                    outcome.append(None)
+                finally:
+                    log_done.set()
+
+        with QwpAckServer(error_status=0x03) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=0;sender_pool_max=1;query_pool_min=0;'
+                'pool_reap=manual;close_flush_timeout_millis=0;')
+            first = qi.QuestDB.from_conf(conf)
+            second = qi.QuestDB.from_conf(conf)
+            clients.extend((first, second))
+            held = second.sender()
+            logger = logging.getLogger('questdb')
+            reenter = ReenterOther()
+            logger.addHandler(reenter)
+
+            def release_unrelated_lease():
+                if log_entered.wait(10):
+                    time.sleep(0.2)
+                    held.close(flush=False)
+
+            releaser = threading.Thread(
+                target=release_unrelated_lease, daemon=True)
+            releaser.start()
+            try:
+                with first.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    sender.flush()
+                self.assertTrue(
+                    log_done.wait(10), 'the default handler did not log')
+                releaser.join(10)
+                self.assertFalse(releaser.is_alive())
+                self.assertEqual(outcome, [None])
+            finally:
+                logger.removeHandler(reenter)
+                held.close(flush=False)
+                first.close()
+                second.close()
+
     def test_close_from_connection_listener_does_not_deadlock(self):
         connected = threading.Event()
         start_close = threading.Event()
@@ -1566,6 +1686,53 @@ class TestQwpWebSocketApi(unittest.TestCase):
             all(code is qi.QuestDBErrorCode.InvalidApiCall
                 for code in captured),
             captured)
+
+    def test_standalone_senders_sharing_handler_have_distinct_ownership(self):
+        """Callback identity is not sender identity: a handler dispatched by
+        one standalone sender may close another sender using the same handler.
+        """
+        senders = []
+        outcome = []
+        fired = threading.Event()
+
+        def shared_handler(_error):
+            try:
+                senders[1].close(False)
+            except qi.QuestDBError as exc:
+                outcome.append(exc)
+            else:
+                outcome.append(None)
+            finally:
+                fired.set()
+
+        with QwpAckServer(error_status=0x0C) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'qwp_ws_progress=manual;close_flush_timeout_millis=0;'
+                'reconnect_max_duration_millis=30000;')
+            first = qi.Sender.from_conf(conf, error_handler=shared_handler)
+            second = qi.Sender.from_conf(conf, error_handler=shared_handler)
+            senders.extend((first, second))
+            try:
+                first.establish()
+                first.row(
+                    'events', columns={'value': 1}, at=qi.ServerTimestamp)
+                first.flush()
+                deadline = time.monotonic() + 15
+                while not fired.is_set():
+                    self.assertLess(
+                        time.monotonic(), deadline,
+                        'the shared error handler must fire')
+                    try:
+                        first.drive_once()
+                    except qi.QuestDBError:
+                        pass
+                    time.sleep(0.01)
+            finally:
+                first.close(False)
+                second.close(False)
+
+        self.assertEqual(outcome, [None])
 
     def test_sender_pool_concurrent_borrow_flush(self):
         """Deterministic multi-thread exerciser for the sender pool:

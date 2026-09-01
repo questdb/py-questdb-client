@@ -2907,16 +2907,38 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len)
 
 
-_DISPATCH_THREAD = threading.local()
+_THREAD_OWNER_STATE = threading.local()
 
 
-# Module-level strong root for callback targets registered with the native
-# dispatchers. It keeps each handler/listener function object reachable from a
-# GC root for as long as its dispatchers can still fire, so the cycle collector
-# never clears a live callback's internals (which would crash the interpreter
-# when a dispatch calls it). A handle abandoned in a reference cycle through its
-# own callback therefore leaks rather than crashing; explicit close() removes
-# the entry once the dispatchers are joined and lets the cycle collect.
+cdef class _DispatchContext:
+    """Python callback targets and the exact owner they dispatch for.
+
+    Native callback registrations borrow a pointer to this object. Its owner
+    field is deliberately an opaque token rather than the owning handle, so
+    the context does not create an owner/context cycle by itself.
+    """
+    cdef object owner_token
+    cdef object error_handler
+    cdef object connection_listener
+
+
+cdef _DispatchContext _new_dispatch_context(
+        object owner_token, object error_handler, object listener):
+    cdef _DispatchContext context = _DispatchContext()
+    context.owner_token = owner_token
+    context.error_handler = error_handler
+    context.connection_listener = listener
+    return context
+
+
+# Module-level strong root for callback contexts registered with the native
+# dispatchers. It keeps the exact object passed as native `void* user_data`
+# reachable from a GC root for as long as its dispatchers can still fire, so
+# the cycle collector never clears a live callback's internals (which would
+# crash the interpreter when a dispatch calls it). A handle abandoned in a
+# reference cycle through its own callback therefore leaks rather than
+# crashing; explicit close() removes the entry once the dispatchers are joined
+# and lets the cycle collect.
 _LIVE_CALLBACK_REFS = {}
 
 
@@ -2924,10 +2946,9 @@ _LIVE_CALLBACK_REFS = {}
 # released through that key alone: `tp_dealloc` must never pass the dying
 # owner back into Python-level calls (PyPy's cpyext aborts on reviving a
 # dying object mid-dealloc).
-cdef size_t _retain_callback_refs(
-        object owner, object error_handler, object listener):
+cdef size_t _retain_callback_refs(object owner, object context):
     cdef size_t key = id(owner)
-    _LIVE_CALLBACK_REFS[key] = (error_handler, listener)
+    _LIVE_CALLBACK_REFS[key] = context
     return key
 
 
@@ -2936,37 +2957,89 @@ cdef _release_callback_refs(size_t key):
         _LIVE_CALLBACK_REFS.pop(key, None)
 
 
-cdef list _dispatch_target_stack():
-    stack = getattr(_DISPATCH_THREAD, 'targets', None)
-    if stack is None:
-        stack = []
-        _DISPATCH_THREAD.targets = stack
-    return stack
+cdef dict _dispatch_depths(bint create):
+    cdef object depths = getattr(
+        _THREAD_OWNER_STATE, 'dispatch_depths', None)
+    if depths is None and create:
+        depths = {}
+        _THREAD_OWNER_STATE.dispatch_depths = depths
+    return depths
 
 
-cdef bint _on_dispatch_thread_for(object handler, object listener):
-    stack = getattr(_DISPATCH_THREAD, 'targets', None)
-    if not stack:
+cdef void _enter_dispatch(object owner_token) except *:
+    cdef dict depths = _dispatch_depths(True)
+    depths[owner_token] = depths.get(owner_token, 0) + 1
+
+
+cdef void _exit_dispatch(object owner_token) except *:
+    cdef dict depths = _dispatch_depths(False)
+    cdef object depth
+    if depths is None:
+        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
+    depth = depths.get(owner_token, 0)
+    if depth == 0:
+        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
+    if depth == 1:
+        del depths[owner_token]
+    else:
+        depths[owner_token] = depth - 1
+
+
+cdef bint _dispatching_for(object owner_token):
+    cdef dict depths = _dispatch_depths(False)
+    if depths is None:
         return False
-    for target in stack:
-        if target is handler or target is listener:
-            return True
-    return False
+    return depths.get(owner_token, 0) != 0
+
+
+cdef dict _call_depths(bint create):
+    cdef object depths = getattr(_THREAD_OWNER_STATE, 'call_depths', None)
+    if depths is None and create:
+        depths = {}
+        _THREAD_OWNER_STATE.call_depths = depths
+    return depths
+
+
+cdef uintptr_t _scoped_depth_for(object owner_token) except? <uintptr_t>-1:
+    cdef dict depths = _call_depths(False)
+    if depths is None:
+        return 0
+    return <uintptr_t>depths.get(owner_token, 0)
+
+
+cdef void _enter_scoped_for(object owner_token) except *:
+    cdef dict depths = _call_depths(True)
+    depths[owner_token] = depths.get(owner_token, 0) + 1
+
+
+cdef void _exit_scoped_for(object owner_token) except *:
+    cdef dict depths = _call_depths(False)
+    cdef object depth
+    if depths is None:
+        raise RuntimeError('QuestDB thread-use counter underflow.')
+    depth = depths.get(owner_token, 0)
+    if depth == 0:
+        raise RuntimeError('QuestDB thread-use counter underflow.')
+    if depth == 1:
+        del depths[owner_token]
+    else:
+        depths[owner_token] = depth - 1
 
 
 cdef void _connection_event_dispatch(
         void* user_data,
         const questdb_connection_event* event) noexcept with gil:
-    listener = <object>user_data
-    stack = _dispatch_target_stack()
-    stack.append(listener)
+    cdef _DispatchContext context = <_DispatchContext>user_data
+    cdef bint entered = False
     try:
+        _enter_dispatch(context.owner_token)
+        entered = True
         kind = ConnectionEventKind.Connected
         for entry in ConnectionEventKind:
             if entry.c_value == <int>event.kind:
                 kind = entry
                 break
-        listener(ConnectionEvent(
+        context.connection_listener(ConnectionEvent(
             kind=kind,
             host=_conn_event_str(event.host, event.host_len),
             port=_conn_event_str(event.port, event.port_len),
@@ -2985,7 +3058,8 @@ cdef void _connection_event_dispatch(
         logging.getLogger("questdb").exception(
             "connection event listener failed")
     finally:
-        stack.pop()
+        if entered:
+            _exit_dispatch(context.owner_token)
 
 
 cdef void _connection_event_trampoline(
@@ -3095,17 +3169,19 @@ def _default_error_handler(error):
 cdef void _sender_error_dispatch(
         void* user_data,
         const line_sender_qwpws_error_view* view) noexcept with gil:
-    handler = <object>user_data
-    stack = _dispatch_target_stack()
-    stack.append(handler)
+    cdef _DispatchContext context = <_DispatchContext>user_data
+    cdef bint entered = False
     try:
-        handler(_sender_error_from_raw(
+        _enter_dispatch(context.owner_token)
+        entered = True
+        context.error_handler(_sender_error_from_raw(
             c_sender_error_view_to_raw(view[0])))
     except BaseException:
         logging.getLogger("questdb").exception(
             "QWP/WebSocket error handler failed")
     finally:
-        stack.pop()
+        if entered:
+            _exit_dispatch(context.owner_token)
 
 
 cdef void _sender_error_trampoline(
@@ -7816,7 +7892,8 @@ cdef class QuestDB:
     cdef size_t _call_uses
     cdef bint _closing
     cdef bint _close_running
-    cdef object _use_depth
+    cdef object _thread_owner_token
+    cdef object _dispatch_context
     cdef object _connection_listener
     cdef object _error_handler
     cdef size_t _cb_refs_key
@@ -7831,12 +7908,12 @@ cdef class QuestDB:
         self._call_uses = 0
         self._closing = False
         self._close_running = False
-        # Python's thread-local storage is keyed through each Python thread's
-        # state rather than a process-wide pthread_key_t. Keep this per handle
-        # so a call on one handle cannot make close() on another look
-        # re-entrant, without consuming one of the OS's limited TLS slots for
-        # every handle created.
-        self._use_depth = threading.local()
+        # One module-level Python thread-local registry indexes scoped calls
+        # by this exact owner token. This preserves per-handle/per-thread
+        # identity without allocating either an OS TLS key or a separate
+        # threading.local object for every handle.
+        self._thread_owner_token = object()
+        self._dispatch_context = None
         self._connection_listener = None
         self._error_handler = None
         self._cb_refs_key = 0
@@ -7886,10 +7963,7 @@ cdef class QuestDB:
 
     cdef uintptr_t _scoped_call_depth(self) except? <uintptr_t>-1:
         """This handle's call depth on the current Python thread."""
-        return <uintptr_t>getattr(self._use_depth, 'value', 0)
-
-    cdef void _set_scoped_call_depth(self, uintptr_t depth) except *:
-        self._use_depth.value = depth
+        return _scoped_depth_for(self._thread_owner_token)
 
     cdef void _enter_scoped_call(self) except *:
         """Count a call that borrows nothing but runs on this handle.
@@ -7904,14 +7978,10 @@ cdef class QuestDB:
         holds one for its whole lifetime, and it may be released from a
         different thread than the one that borrowed it.
         """
-        self._set_scoped_call_depth(self._scoped_call_depth() + 1)
+        _enter_scoped_for(self._thread_owner_token)
 
     cdef void _exit_scoped_call(self) except *:
-        cdef uintptr_t depth = self._scoped_call_depth()
-        if depth == 0:
-            raise RuntimeError(
-                'QuestDB thread-use counter underflow.')
-        self._set_scoped_call_depth(depth - 1)
+        _exit_scoped_for(self._thread_owner_token)
 
     cdef void _end_db_use(self, bint scoped=True) except *:
         self._state_cond.acquire()
@@ -8097,7 +8167,6 @@ cdef class QuestDB:
                 # exists. The handle keeps the callback target alive until
                 # close() has stopped and joined the dispatcher.
                 db._connection_listener = connection_listener
-                connection_listener_data = <void*>db._connection_listener
                 connection_event_cb = _connection_event_trampoline
             # A rejection handler is always installed (defaulting to the
             # `questdb` logger) because the native default logs through the
@@ -8105,6 +8174,12 @@ cdef class QuestDB:
             if error_handler is None:
                 error_handler = _default_error_handler
             db._error_handler = error_handler
+            db._dispatch_context = _new_dispatch_context(
+                db._thread_owner_token,
+                db._error_handler,
+                db._connection_listener)
+            if connection_listener is not None:
+                connection_listener_data = <void*>db._dispatch_context
             # Convert to C integers while still holding the GIL: a bad
             # value must raise here, not inside the nogil region below.
             c_event_inbox_capacity = connection_event_inbox_capacity
@@ -8117,7 +8192,7 @@ cdef class QuestDB:
                 connection_listener_data,
                 c_event_inbox_capacity,
                 _sender_error_trampoline,
-                <void*>db._error_handler,
+                <void*>db._dispatch_context,
                 c_error_inbox_capacity,
                 &err)
             _ensure_has_gil(&gs)
@@ -8126,10 +8201,11 @@ cdef class QuestDB:
                 # returning, so the callback targets are now safe to release.
                 db._connection_listener = None
                 db._error_handler = None
+                db._dispatch_context = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
             db._cb_refs_key = _retain_callback_refs(
-                db, db._error_handler, db._connection_listener)
+                db, db._dispatch_context)
             return db
         finally:
             _ensure_has_gil(&gs)
@@ -8880,8 +8956,7 @@ cdef class QuestDB:
             # the close proceeds: there is no wait to refuse.
             if (self._db != NULL
                     and self._lease_uses + self._call_uses != 0
-                    and _on_dispatch_thread_for(
-                        self._error_handler, self._connection_listener)):
+                    and _dispatching_for(self._thread_owner_token)):
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     "close() can't wait for outstanding leases or "
@@ -8976,8 +9051,7 @@ cdef class QuestDB:
             # in-flight closer joins this very thread. Returning
             # early is safe because closing cannot be undone --
             # the handle only moves toward closed.
-            if _on_dispatch_thread_for(
-                    self._error_handler, self._connection_listener):
+            if _dispatching_for(self._thread_owner_token):
                 return
             # The teardown wait gets its own bound rather than what
             # is left of the drain's: it starts when this wait does,
@@ -9035,6 +9109,9 @@ cdef class QuestDB:
             if closed:
                 _release_callback_refs(self._cb_refs_key)
                 self._cb_refs_key = 0
+                self._dispatch_context = None
+                self._error_handler = None
+                self._connection_listener = None
             with self._state_cond:
                 if closed:
                     self._conf_str = None
@@ -9106,6 +9183,8 @@ cdef class Sender:
     cdef line_sender_opts* _opts
     cdef line_sender* _impl
     cdef Buffer _buffer
+    cdef object _thread_owner_token
+    cdef object _dispatch_context
     cdef object _error_handler
     cdef object _connection_listener
     cdef auto_flush_mode_t _auto_flush_mode
@@ -9251,18 +9330,6 @@ cdef class Sender:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'error_handler is only supported for QWP/WebSocket senders.')
-        if _is_qwp_ws_protocol(self._c_protocol):
-            if error_handler is None:
-                error_handler = _default_error_handler
-            self._error_handler = error_handler
-            if not line_sender_opts_qwpws_error_handler(
-                    self._opts,
-                    _sender_error_trampoline,
-                    <void*>self._error_handler,
-                    &err):
-                self._error_handler = None
-                raise c_err_to_py(err)
-
         if connection_listener is not None and not callable(
                 connection_listener):
             raise TypeError(
@@ -9274,18 +9341,29 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 'connection_listener is only supported for QWP/WebSocket '
                 'senders.')
-        if connection_listener is not None:
-            # The Sender owns the only strong reference the trampoline
-            # relies on; the dispatcher joins its thread when the sender
-            # closes, so no delivery outlives this reference.
+
+        if _is_qwp_ws_protocol(self._c_protocol):
+            if error_handler is None:
+                error_handler = _default_error_handler
+            self._error_handler = error_handler
             self._connection_listener = connection_listener
+            self._dispatch_context = _new_dispatch_context(
+                self._thread_owner_token,
+                self._error_handler,
+                self._connection_listener)
+            if not line_sender_opts_qwpws_error_handler(
+                    self._opts,
+                    _sender_error_trampoline,
+                    <void*>self._dispatch_context,
+                    &err):
+                raise c_err_to_py(err)
+        if connection_listener is not None:
             if not line_sender_opts_connection_event_handler(
                     self._opts,
                     _connection_event_trampoline,
-                    <void*>self._connection_listener,
+                    <void*>self._dispatch_context,
                     <size_t>(connection_event_inbox_capacity or 0),
                     &err):
-                self._connection_listener = None
                 raise c_err_to_py(err)
 
         if username is not None:
@@ -9482,6 +9560,8 @@ cdef class Sender:
         self._opts = NULL
         self._impl = NULL
         self._buffer = None
+        self._thread_owner_token = object()
+        self._dispatch_context = None
         self._error_handler = None
         self._connection_listener = None
         self._auto_flush_mode.enabled = False
@@ -9490,6 +9570,7 @@ cdef class Sender:
         self._in_txn = False
         self._slot_id = -1
         self._qwp_ws_opts = NULL
+        self._cb_refs_key = 0
 
     def __init__(
             self,
@@ -10006,8 +10087,9 @@ cdef class Sender:
         line_sender_opts_free(self._opts)
         self._opts = NULL
 
-        self._cb_refs_key = _retain_callback_refs(
-            self, self._error_handler, self._connection_listener)
+        if self._dispatch_context is not None:
+            self._cb_refs_key = _retain_callback_refs(
+                self, self._dispatch_context)
 
         # Request callbacks when rows are complete.
         self._buffer._row_complete_sender = PyWeakref_NewRef(self, None)
@@ -10203,6 +10285,7 @@ cdef class Sender:
         cdef qdb_pystr_buf* ws_b = NULL
         cdef dataframe_plan_t ws_plan
         cdef line_sender_opts* ws_opts = NULL
+        cdef object ws_dispatch_context = None
         # The QWP/WebSocket branch below goes straight to its own
         # connection and never reaches `_dataframe`, where the same
         # check stands for every other route. Without it here, a frame
@@ -10215,6 +10298,11 @@ cdef class Sender:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     "dataframe() can't be called: Sender is closed.")
+            # The cloned opts below contain a borrowed pointer to this
+            # context. Caller Python run while planning may close the Sender,
+            # so keep the clone's callback target rooted in this frame until
+            # the direct connection and its dispatchers have been torn down.
+            ws_dispatch_context = self._dispatch_context
             src.db = NULL
             # The call owns its options for its whole length. The plan
             # build below runs caller Python -- reading `attrs`,
@@ -10393,11 +10481,11 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
     cdef inline void_int _check_not_in_own_callback(self, str method) except -1:
-        # The QWP/WebSocket error handler runs synchronously on the flushing
-        # thread while the native sender is borrowed; reentering it from the
-        # handler would alias or free the live sender and abort the process.
-        if _on_dispatch_thread_for(
-                self._error_handler, self._connection_listener):
+        # Native QWP/WebSocket callback dispatch keeps this sender borrowed.
+        # Reentering the exact owner from either of its callbacks would alias
+        # or free the live sender and abort the process. A callback function
+        # shared with another sender does not carry this owner's token.
+        if _dispatching_for(self._thread_owner_token):
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f'{method}() cannot be called from within this sender\'s own '
@@ -10705,6 +10793,7 @@ cdef class Sender:
         _release_callback_refs(self._cb_refs_key)
         self._cb_refs_key = 0
         self._buffer = None
+        self._dispatch_context = None
         self._error_handler = None
         self._connection_listener = None
         if self._slot_id != -1:
