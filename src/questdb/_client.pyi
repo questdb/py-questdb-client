@@ -369,7 +369,8 @@ class DateMillis:
     kind for ``schema_overrides``. A NumPy ``datetime64[ms]`` dtype has no
     route of its own to DATE and widens to a microsecond TIMESTAMP, unless
     a ``df.attrs['questdb']`` claim names the column DATE and puts the
-    Arrow type back on it.
+    Arrow type back on it. That claim is written as ``{'kind': 'date'}``
+    under the column's entry in the version-1 claim mapping.
     DATE is QWP-only: over ILP, datetime columns all land as TIMESTAMP.
 
     ``INT64_MIN`` is QuestDB's ``NULL`` sentinel for DATE. It is accepted
@@ -740,9 +741,12 @@ class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        Also see the :func:`Sender.dataframe` method if you're
-        not using the buffer explicitly. It supports the same parameters
-        and also supports auto-flushing.
+        Also see :func:`Sender.dataframe` if you are not using the buffer
+        explicitly. Over ILP and QWP/UDP it accepts the arguments shown here
+        and adds auto-flushing. Over QWP/WebSocket it instead uses the direct
+        columnar path, additionally accepting ``max_rows_per_batch`` and
+        ``schema_overrides``; see :meth:`QuestDB.dataframe` for that path's
+        supported column types and arguments.
 
         This feature requires the ``pandas``, ``numpy`` and ``pyarrow``
         package to be installed.
@@ -1933,8 +1937,13 @@ class Sender:
             with qi.Sender.from_env() as sender:
                 sender.dataframe(df, table_name='race_metrics', at='ts')
 
-        This method builds on top of the :func:`Buffer.dataframe` method.
-        See its documentation for details on arguments.
+        Over QWP/WebSocket, supported column types and arguments mirror
+        :meth:`QuestDB.dataframe`, including UUID, IPV4, BINARY, GEOHASH,
+        LONG256, CHAR, DATE, ``schema_overrides`` and round-trip claims in
+        ``df.attrs['questdb']``. Over ILP and QWP/UDP, see
+        :func:`Buffer.dataframe` for the row-serializing mappings;
+        ``max_rows_per_batch`` and ``schema_overrides`` do not apply on those
+        protocols.
 
         Additionally, this method also supports auto-flushing the buffer
         as specified in the ``Sender``'s ``auto_flush`` constructor argument.

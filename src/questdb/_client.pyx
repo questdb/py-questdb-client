@@ -922,9 +922,11 @@ cdef class DateMillis:
     ``datetime64[ms]`` dtype has no route of its own to DATE and widens
     to a microsecond TIMESTAMP, unless the frame carries a
     ``df.attrs['questdb']`` claim naming the column DATE, which puts the
-    Arrow type back on it first. Like the other QWP-only types, DATE
-    needs a QWP sender; ILP senders have no DATE type, so the datetime
-    columns they accept all land as TIMESTAMP.
+    Arrow type back on it first. That claim is written as
+    ``{'kind': 'date'}`` under the column's entry in the version-1 claim
+    mapping. Like the other QWP-only types, DATE needs a QWP sender; ILP
+    senders have no DATE type, so the datetime columns they accept all
+    land as TIMESTAMP.
     """
     cdef int64_t _value
 
@@ -2228,9 +2230,13 @@ cdef class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        Also see the :func:`Sender.dataframe <questdb.Sender.dataframe>` method if you're
-        not using the buffer explicitly. It supports the same parameters
-        and also supports auto-flushing.
+        Also see :func:`Sender.dataframe <questdb.Sender.dataframe>` if you
+        are not using the buffer explicitly. Over ILP and QWP/UDP it accepts
+        the arguments shown here and adds auto-flushing. Over QWP/WebSocket
+        it instead uses the direct columnar path, additionally accepting
+        ``max_rows_per_batch`` and ``schema_overrides``; see
+        :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` for that path's
+        supported column types and arguments.
 
         Requires ``pandas`` and ``numpy``. ``pyarrow`` is only needed
         when the frame contains ``pd.ArrowDtype`` / ``pd.Categorical`` /
@@ -8439,7 +8445,7 @@ cdef class QuestDB:
         A pandas frame that came out of :meth:`QueryResult.to_pandas`
         carries its source column types in ``df.attrs['questdb']``, and
         this method reads them back. That is what keeps UUID, LONG256,
-        IPV4, CHAR, and GEOHASH columns their own type on a
+        IPV4, CHAR, GEOHASH, and DATE columns their own type on a
         read-modify-write round trip: their claim lives in Arrow *field*
         metadata, which a pandas dtype — an Arrow type and no field —
         cannot hold. The metadata recalls what the frame held when it was
@@ -8503,6 +8509,7 @@ cdef class QuestDB:
                 'columns': {
                     'src_ip': {'kind': 'ipv4'},
                     'pos': {'kind': 'geohash', 'precision_bits': 20},
+                    'traded_on': {'kind': 'date'},
                 },
             }
 
@@ -8512,11 +8519,12 @@ cdef class QuestDB:
         the outcome the claim exists to prevent. A mapping without it,
         or carrying any other version, is not a claim this client can
         read and every column in it is ignored. ``kind`` is one of
-        ``'uuid'``, ``'long256'``, ``'ipv4'``, ``'char'``, or
-        ``'geohash'`` — the types whose claim cannot ride on a pandas
-        dtype — and ``precision_bits`` accompanies ``'geohash'`` alone.
-        Naming a column that is not in the frame is not an error; the
-        entry is skipped.
+        ``'uuid'``, ``'long256'``, ``'ipv4'``, ``'char'``, ``'geohash'``,
+        or ``'date'`` — the types whose claim cannot always ride on a pandas
+        dtype. ``precision_bits`` accompanies ``'geohash'`` alone. A
+        ``'date'`` claim restores the DATE type after plain pandas has
+        represented it as NumPy ``datetime64[ms]``. Naming a column that is
+        not in the frame is not an error; the entry is skipped.
 
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
@@ -10191,8 +10199,14 @@ cdef class Sender:
             with qi.Sender.from_env() as sender:
                 sender.dataframe(df, table_name='race_metrics', at='ts')
 
-        See the buffer-level ``dataframe`` documentation for details on
-        the supported column types and arguments.
+        Over QWP/WebSocket, supported column types and arguments mirror
+        :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`, including
+        UUID, IPV4, BINARY, GEOHASH, LONG256, CHAR, DATE,
+        ``schema_overrides`` and round-trip claims in
+        ``df.attrs['questdb']``. Over ILP and QWP/UDP, see
+        :func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` for the
+        row-serializing mappings; ``max_rows_per_batch`` and
+        ``schema_overrides`` do not apply on those protocols.
 
         Additionally, this method also supports auto-flushing the buffer
         as specified in the ``Sender``'s ``auto_flush`` constructor argument.

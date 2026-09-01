@@ -1866,14 +1866,23 @@ cdef inline bint _dataframe_is_null_pyobj(PyObject* obj) noexcept:
         _dataframe_is_float_nan(obj))
 
 
+_ROW_WRAPPER_COLUMNAR_ROUTE = (
+    'To write this type from a DataFrame, use a QWP/WebSocket columnar call '
+    '(`QuestDB.dataframe()`, `PooledSender.dataframe()`, or '
+    '`Sender.dataframe()` over `ws::` / `wss::`). `Buffer.dataframe()` and '
+    '`Sender.dataframe()` over other protocols serialize rows and cannot '
+    'apply `schema_overrides`.')
+
+
 cdef object _dataframe_row_wrapper_df_message(
         object col_name, PyObject* obj):
     """A working DataFrame route for a scalar wrapper learned from row()."""
     if isinstance(<object>obj, Char):
         return (
             'questdb.Char is a row-ingestion wrapper, not a DataFrame cell '
-            'type. Replace each wrapper with `ord(value.value)` in a uint16 '
-            'column in a fully Arrow-backed frame and pass '
+            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
+            'each wrapper with `ord(value.value)` in a uint16 column in a '
+            'fully Arrow-backed frame and pass '
             f'`schema_overrides={{{col_name!r}: \'char\'}}`.')
     if isinstance(<object>obj, DateMillis):
         return (
@@ -1884,14 +1893,16 @@ cdef object _dataframe_row_wrapper_df_message(
     if isinstance(<object>obj, Long256):
         return (
             'questdb.Long256 is a row-ingestion wrapper, not a DataFrame cell '
-            'type. Replace each wrapper with its unsigned value encoded as 32 '
-            'little-endian bytes in a binary column in a fully Arrow-backed '
-            f'frame and pass `schema_overrides={{{col_name!r}: \'long256\'}}`.')
+            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
+            'each wrapper with its unsigned value encoded as 32 little-endian '
+            'bytes in a binary column in a fully Arrow-backed frame and pass '
+            f'`schema_overrides={{{col_name!r}: \'long256\'}}`.')
     if isinstance(<object>obj, Geohash):
         return (
             'questdb.Geohash is a row-ingestion wrapper, not a DataFrame cell '
-            'type. Replace each wrapper with its `.bits` value in a signed-'
-            'integer column in a fully Arrow-backed frame and pass '
+            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
+            'each wrapper with its `.bits` value in a signed-integer column '
+            'in a fully Arrow-backed frame and pass '
             f'`schema_overrides={{{col_name!r}: (\'geohash\', '
             f'{(<object>obj).precision})}}`; every value in the column must '
             'use that precision.')

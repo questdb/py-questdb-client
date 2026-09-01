@@ -2932,6 +2932,9 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         cases = (
             (qi.Char('Q'), (
                 'questdb.Char is a row-ingestion wrapper',
+                'QWP/WebSocket columnar call',
+                '`Buffer.dataframe()`',
+                'cannot apply `schema_overrides`',
                 '`ord(value.value)`',
                 "`schema_overrides={'value': 'char'}`")),
             (qi.DateMillis(1), (
@@ -2940,10 +2943,16 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 'has no `schema_overrides` kind')),
             (qi.Long256(1), (
                 'questdb.Long256 is a row-ingestion wrapper',
+                'QWP/WebSocket columnar call',
+                '`Buffer.dataframe()`',
+                'cannot apply `schema_overrides`',
                 '32 little-endian bytes',
                 "`schema_overrides={'value': 'long256'}`")),
             (qi.Geohash(7, 20), (
                 'questdb.Geohash is a row-ingestion wrapper',
+                'QWP/WebSocket columnar call',
+                '`Buffer.dataframe()`',
+                'cannot apply `schema_overrides`',
                 'signed-integer column in a fully Arrow-backed frame',
                 "`schema_overrides={'value': ('geohash', 20)}`")),
         )
