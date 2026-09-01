@@ -401,13 +401,15 @@ def _outer_sender_dataframe_stream(ctx, stack, hook, deps):
     sender.dataframe(hostile_arrow_stream(hook, pa), table_name='t', at='ts')
 
 
-@outer('Buffer.row', 'a hostile IPV4 cell in a caller-owned QWP buffer')
+@outer('Buffer.row',
+       'a hostile IPV4 cell with an arena-backed non-ASCII column name '
+       'in a caller-owned QWP buffer')
 def _outer_buffer_row(ctx, stack, hook, deps):
     sender = _qwp_sender(ctx, stack)
     buffer = sender.new_buffer()
     ctx.buffer = buffer
     buffer.row('outer', columns={'v': 1}, at=qi.ServerTimestamp)
-    buffer.row('hostile', columns={'ip': hostile_ipv4(hook)},
+    buffer.row('hostile', columns={'íp': hostile_ipv4(hook)},
                at=qi.ServerTimestamp)
 
 
