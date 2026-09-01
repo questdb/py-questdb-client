@@ -163,11 +163,12 @@ configured:
     auth.sign_in()
 
 The default directory is ``~/.questdb/oidc-tokens/``, overridable with
-``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR``. The native client writes plaintext JSON
-using atomic replacement and cross-process coordination; on POSIX, directories
-are mode ``0700`` and files mode ``0600``. Enabling it stores a long-lived
-refresh token on disk, so use it only when that at-rest tradeoff is acceptable.
-Custom Python token stores are not supported by the native provider.
+the ``questdb.client.oidc.token.store.dir`` environment variable shared with
+Java. The native client writes plaintext JSON using atomic replacement and
+cross-process coordination; on POSIX, directories are mode ``0700`` and files
+mode ``0600``. Enabling it stores a long-lived refresh token on disk, so use it
+only when that at-rest tradeoff is acceptable. Custom Python token stores are
+not supported by the native provider.
 
 PG-wire and manual token use
 ============================

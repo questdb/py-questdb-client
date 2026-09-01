@@ -390,7 +390,8 @@ class NativeOidcTest(unittest.TestCase):
     def test_default_file_store_environment_override(self):
         with mock.patch.dict(
                 os.environ,
-                {'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR': '/tmp/qdb-oidc-test'}):
+                {'questdb.client.oidc.token.store.dir':
+                 '/tmp/qdb-oidc-test'}):
             self.assertEqual(
                 FileTokenStore.at_default_location().directory,
                 '/tmp/qdb-oidc-test')

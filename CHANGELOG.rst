@@ -56,7 +56,8 @@ Highlights:
   interval, matching the complete Java device challenge.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
   plaintext credentials atomically and coordinates refresh across processes.
-  Custom Python token stores are not supported by the native provider.
+  Its ``questdb.client.oidc.token.store.dir`` override matches Java. Custom
+  Python token stores are not supported by the native provider.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed

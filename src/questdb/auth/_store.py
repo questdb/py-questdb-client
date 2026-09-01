@@ -32,7 +32,7 @@ from typing import Any
 from ._errors import OidcConfigError
 
 
-TOKEN_STORE_DIR_ENV = 'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR'
+TOKEN_STORE_DIR_ENV = 'questdb.client.oidc.token.store.dir'
 
 
 class FileTokenStore:
