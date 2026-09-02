@@ -468,11 +468,17 @@ section for more details.
    :class:`~questdb.auth.OidcInteractionRequired` when explicit sign-in has
    lapsed), from the same ``flush()``, ``dataframe()``, ``row()``,
    ``query()``, or :func:`questdb.connect` call. ``OidcError`` **is** a
-   subclass of :class:`QuestDBError <questdb.QuestDBError>` (``code``
-   ``QuestDBErrorCode.AuthError``), so an existing ``except QuestDBError``
-   retry or dead-letter handler keeps catching auth failures; catch
-   ``OidcError`` (or a typed subclass) *before* ``QuestDBError`` to handle
-   auth failures specifically. See :ref:`oidc_auth`.
+   subclass of :class:`QuestDBError <questdb.QuestDBError>`, so an existing
+   ``except QuestDBError`` retry or dead-letter handler keeps catching auth
+   failures; catch ``OidcError`` (or a typed subclass) *before*
+   ``QuestDBError`` to handle auth failures specifically.
+
+   Its ``code`` mirrors the client's own classification rather than being
+   fixed: ``QuestDBErrorCode.AuthError`` for a terminal auth failure,
+   ``SocketError`` for one the client treats as retryable (a transient token
+   pull on a reconnect), and ``ConfigError`` for a misconfiguration. Retry
+   logic keyed on ``code`` therefore handles an OIDC failure exactly as it
+   handles any other — do not assume ``AuthError``. See :ref:`oidc_auth`.
 
 .. _sender_transaction:
 

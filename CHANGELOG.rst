@@ -4,8 +4,52 @@
 Changelog
 =========
 
-5.0.1 (unreleased)
+5.1.0 (unreleased)
 ------------------
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+UUID and fixed-size-binary DataFrame columns
+********************************************
+
+UUID bytes are now **canonical RFC 4122 big-endian** at every API boundary, and
+a 16-byte Arrow column is only treated as a UUID when it carries the
+``arrow.uuid`` extension label. Three changes, all affecting
+``dataframe()`` / ``Sender.dataframe()`` over QWP:
+
+* **UUID byte order.** Values are read and written in canonical RFC 4122
+  order; the client byte-swaps to QWP wire order internally. If you previously
+  worked around the old layout by pre-reversing bytes yourself, remove that
+  workaround. The bytes on the wire are unchanged and still match the Java
+  client, so stored data and round-trips are unaffected — only the bytes your
+  application hands over or receives change. A ``uuid.UUID`` object column
+  needs no change at all.
+
+* **Unlabelled** ``pa.fixed_size_binary(16)`` **now lands as BINARY, not
+  UUID.** The ``arrow.uuid`` extension label is what claims a 16-byte column as
+  a UUID; without it the column is opaque bytes. If you were relying on the
+  width alone, either wrap the column in the ``arrow.uuid`` extension type or
+  claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='t', at='ts',
+                       schema_overrides={'u': 'uuid'})
+
+* ``pa.fixed_size_binary(32)`` **no longer maps to LONG256.** pyarrow drops
+  field metadata when it exports a single pandas column, so the width alone can
+  no longer claim the type. Claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='t', at='ts',
+                       schema_overrides={'h': 'long256'})
+
+``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
+exactly this purpose. Writing an unlabelled 16- or 32-byte column to an
+existing UUID or LONG256 table column without one of the above will be rejected
+by the server as a type mismatch, rather than silently storing the wrong type.
 
 Features
 ~~~~~~~~

@@ -136,6 +136,30 @@ through one sender, borrow one pooled sender per thread instead.
 Behavioural changes to watch for
 ================================
 
+* **UUID bytes are canonical RFC 4122.** UUID values are read and written in
+  canonical big-endian order at every API boundary; the client byte-swaps to
+  QWP wire order internally. The wire format is unchanged and still matches the
+  Java client, so stored data and round-trips are unaffected — only the bytes
+  your application supplies or receives change. A ``uuid.UUID`` object column
+  needs no change; if you pre-reversed bytes to work around the old layout,
+  remove that workaround.
+
+* **A 16-byte Arrow column needs the** ``arrow.uuid`` **label to be a UUID,
+  and** ``fixed_size_binary(32)`` **no longer maps to LONG256.** The width alone
+  no longer claims either type — pyarrow drops field metadata when it exports a
+  single pandas column. An unlabelled column now lands as ``BINARY``, which the
+  server rejects against an existing UUID or LONG256 column rather than storing
+  the wrong type silently. Claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='trades', at='ts',
+                       schema_overrides={'id': 'uuid', 'hash': 'long256'})
+
+  ``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
+  this purpose. Wrapping the column in pyarrow's ``arrow.uuid`` extension type
+  also works for the 16-byte case.
+
 * **Removed QWP flight-window keys.** ``max_in_flight`` and
   ``in_flight_window`` are no longer accepted. Remove them from ws/wss
   configuration strings; the client raises ``QuestDBError(ConfigError)``
