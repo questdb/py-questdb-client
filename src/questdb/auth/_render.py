@@ -584,10 +584,18 @@ class Renderer:
 
     **Concurrency.** The callbacks run while ``OidcDeviceAuth`` holds its
     (non-reentrant) acquisition lock, so a callback must not call back into the
-    same instance's :meth:`~questdb.auth.OidcDeviceAuth.token` /
-    :meth:`~questdb.auth.OidcDeviceAuth.clear` (doing so raises rather than
-    deadlocks). Callbacks are best-effort: an exception raised by one is
-    swallowed and never aborts an otherwise-successful sign-in.
+    same instance's :meth:`~questdb.auth.OidcDeviceAuth.sign_in`,
+    :meth:`~questdb.auth.OidcDeviceAuth.token` or
+    :meth:`~questdb.auth.OidcDeviceAuth.clear` — each raises rather than
+    deadlocking. :meth:`~questdb.auth.OidcDeviceAuth.close` is the exception and
+    is safe here: it is how a renderer offers a "cancel" affordance, and how
+    another thread aborts a running device flow.
+
+    Callbacks are best-effort: an exception raised by one is logged and never
+    aborts an otherwise-successful sign-in. ``KeyboardInterrupt`` and
+    ``SystemExit`` are the exceptions to *that* — they cancel the flow and are
+    re-raised from :meth:`~questdb.auth.OidcDeviceAuth.sign_in`, so Ctrl-C
+    works.
     """
 
     def on_prompt(self, resp: Dict[str, Any]) -> None:

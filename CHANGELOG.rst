@@ -66,6 +66,18 @@ Highlights:
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
   token on every new pooled connection, ``psycopg_connect`` captures it at
   connect time.
+* :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and
+  cancels a device flow, silent-refresh coordination, or token-store lock wait
+  running on another thread; ``OidcDeviceAuth`` is also a context manager.
+  Operations on a closed provider raise the new
+  :class:`~questdb.auth.OidcCancelledError`, except
+  :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
+  persisted credential can still be removed, and ``config``, which remains
+  readable. ``Ctrl-C`` during ``sign_in()`` cancels the flow and raises
+  ``KeyboardInterrupt``.
+* Renderer prompts receive the device code's bounded lifetime and polling
+  interval (``expires_in`` / ``interval``) plus ``browser_target``, the single
+  natively vetted URL that built-in renderers use for links and QR codes.
 * OIDC requires no additional Python dependency; ``sqlalchemy`` / ``psycopg`` /
   ``qrcode`` / ``IPython`` are imported lazily for optional conveniences.
 

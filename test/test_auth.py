@@ -356,18 +356,19 @@ class NativeOidcTest(unittest.TestCase):
                 self.assertTrue(factory(in_doubt=True).in_doubt)
 
     def test_closed_provider_is_rejected(self):
-        # A provider built with __new__ but never __init__'d has _raw == NULL
-        # ("closed"). Its own token-flow ops raise RuntimeError, and attaching it
-        # to a transport raises ValueError -- never a native NULL deref. clear()
-        # is a documented no-op on a closed provider.
+        # A provider built with __new__ but never __init__'d has _raw == NULL.
+        # That is *not* the same state as closed, and the error says so: its own
+        # token-flow ops raise RuntimeError, and attaching it to a transport
+        # raises ValueError -- never a native NULL deref. clear() is a
+        # documented no-op on it.
         closed = OidcDeviceAuth.__new__(OidcDeviceAuth)
         for op in ('sign_in', 'token', 'headers'):
             with self.subTest(op=op), self.assertRaisesRegex(
-                    RuntimeError, 'closed'):
+                    RuntimeError, 'not initialized'):
                 getattr(closed, op)()
-        with self.assertRaisesRegex(RuntimeError, 'closed'):
+        with self.assertRaisesRegex(RuntimeError, 'not initialized'):
             closed.config
-        closed.clear()  # idempotent no-op on a closed provider
+        closed.clear()  # idempotent no-op on an uninitialized provider
         with self.assertRaisesRegex(ValueError, 'closed'):
             questdb.Sender(
                 questdb.Protocol.Http, '127.0.0.1', 9000,
@@ -376,6 +377,23 @@ class NativeOidcTest(unittest.TestCase):
             questdb.connect(
                 'ws::addr=127.0.0.1:9000;lazy_connect=true;',
                 oidc_auth=closed)
+
+    def test_explicitly_closed_provider_is_rejected(self):
+        # The other closed state: a real provider that close() disabled. The
+        # attach guards gained a `_closed` check that only this covers -- the
+        # uninitialized case above exercises `_raw == NULL` instead.
+        auth = make_auth()
+        auth.close()
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            questdb.Sender(
+                questdb.Protocol.Http, '127.0.0.1', 9000,
+                oidc_auth=auth, auto_flush=False)
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;', oidc_auth=auth)
+        # config stays readable: it is immutable native state that close does
+        # not invalidate.
+        self.assertEqual(auth.config.client_id, 'questdb')
 
     def test_invalid_unicode_is_typed(self):
         with self.assertRaises(OidcConfigError):
@@ -789,7 +807,10 @@ class NativeOidcIntegrationTest(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertIsInstance(result[0], OidcCancelledError)
-        for op in (auth.sign_in, auth.token, auth.headers, auth.clear):
+        # clear() is excluded: it is pure teardown and must outlive close(),
+        # which drops the in-memory credential but leaves the persisted entry.
+        auth.clear()
+        for op in (auth.sign_in, auth.token, auth.headers):
             with self.subTest(op=op), self.assertRaisesRegex(
                     OidcCancelledError, 'closed'):
                 op()
@@ -965,6 +986,36 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 fresh.sign_in()
                 self.assertEqual(fresh.token(), 'AT-initial')
                 self.assertEqual(len(server.requests('/device', 'POST')), 2)
+
+    def test_clear_after_close_removes_persisted_token(self):
+        # close() drops the in-memory credential but deliberately leaves the
+        # persisted entry, and clear() used to refuse on a closed provider --
+        # both layers did. So the ordinary scoped form left a long-lived
+        # plaintext refresh token on disk with no supported way to remove it:
+        # the only recoveries were rebuilding an identical provider or deleting
+        # the file by hand.
+        with tempfile.TemporaryDirectory() as directory:
+            with OidcTestServer() as server:
+                with make_discovered_auth(
+                        server,
+                        token_store=FileTokenStore.at(directory)) as auth:
+                    auth.sign_in()
+                    self.assertEqual(auth.token(), 'AT-initial')
+                self.assertTrue(os.listdir(directory), 'nothing was persisted')
+
+                # __exit__ closed it; clearing must still work.
+                auth.clear()
+                self.assertEqual(
+                    os.listdir(directory), [],
+                    'the persisted credential survived clear() after close()')
+
+                # And the credential is really gone: a fresh provider has to
+                # run a second device flow.
+                fresh = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                fresh.sign_in()
+                self.assertEqual(
+                    len(server.requests('/device', 'POST')), 2)
 
     def test_http_sender_authenticates_retry_and_flush(self):
         with OidcTestServer(write_statuses=(500, 204)) as server:

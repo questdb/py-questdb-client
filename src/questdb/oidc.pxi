@@ -323,7 +323,9 @@ cdef class OidcDeviceAuth:
 
     cdef void _require_open(self) except *:
         if self._raw == NULL:
-            raise RuntimeError('OidcDeviceAuth is closed')
+            # Never __init__'d (e.g. cls.__new__ without construction) -- not
+            # the same state as closed, which is reported below.
+            raise RuntimeError('OidcDeviceAuth is not initialized')
         if self._closed:
             from questdb.auth._errors import OidcCancelledError
             raise OidcCancelledError(
@@ -633,13 +635,19 @@ cdef class OidcDeviceAuth:
         return {'Authorization': 'Bearer ' + self.token()}
 
     def clear(self):
-        """Clear memory and persisted credentials without revoking at the IdP."""
+        """Clear memory and persisted credentials without revoking at the IdP.
+
+        Works after :meth:`close`. ``close`` drops the in-memory credential but
+        deliberately leaves the persisted entry, so clearing has to stay
+        available afterwards -- otherwise the ``with`` form, whose exit closes
+        the provider, would leave a long-lived plaintext refresh token on disk
+        with no supported way to remove it.
+        """
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
         if self._raw == NULL:
             return
-        self._require_open()
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_clear(self._raw, &err)
         _ensure_has_gil(&gs)
@@ -682,11 +690,16 @@ cdef class OidcDeviceAuth:
 
         Reports the client id, the token and device-authorization endpoints, the
         scope, the selected token kind (``groups_in_token``), and the optional
-        audience / issuer. Raises ``RuntimeError`` if the provider is closed.
+        audience / issuer.
+
+        Readable after :meth:`close`: the resolved configuration is immutable
+        native state that closing does not invalidate. Raises ``RuntimeError``
+        only on a provider that was never initialized.
         """
         cdef questdb_oidc_config_view view
         from questdb.auth._config import OidcConfig
-        self._require_open()
+        if self._raw == NULL:
+            raise RuntimeError('OidcDeviceAuth is not initialized')
         memset(&view, 0, sizeof(questdb_oidc_config_view))
         view.struct_size = sizeof(questdb_oidc_config_view)
         if not questdb_oidc_auth_get_config(self._raw, &view):
