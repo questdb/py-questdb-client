@@ -1295,6 +1295,53 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 'ws::addr=localhost:9000;lazy_connect=true;token=fixed;',
                 oidc_auth=self.auth)
 
+    def test_token_conflict_names_the_parameters_the_caller_wrote(self):
+        # Regression: only native enforced this, and it reports the internal
+        # config key it knows -- "qwp_ws_token_provider" / "http_token_provider"
+        # -- which exists in no public API, so a caller who passed oidc_auth=
+        # and token= was told about a symbol they cannot find anywhere.
+        with self.assertRaises(questdb.QuestDBError) as ctx:
+            questdb.Sender(
+                questdb.Protocol.Http, 'localhost', 9000,
+                token='fixed', oidc_auth=self.auth)
+        message = str(ctx.exception)
+        self.assertIn('oidc_auth', message)
+        self.assertIn('token', message)
+        self.assertNotIn('token_provider', message)
+
+        with self.assertRaises(questdb.QuestDBError) as ctx:
+            questdb.connect(
+                'ws::addr=localhost:9000;lazy_connect=true;token=fixed;',
+                oidc_auth=self.auth)
+        message = str(ctx.exception)
+        self.assertIn('oidc_auth', message)
+        self.assertNotIn('token_provider', message)
+
+    def test_required_constructor_arguments_reject_none(self):
+        # Regression: the three required positionals went through the
+        # optional-string helper, which drops a None and leaves the field unset.
+        # Native then reported it as missing from QuestDB's /settings and told
+        # the caller to pass it explicitly -- advice that makes no sense for a
+        # constructor that never contacts /settings, naming a builder method
+        # this API does not have.
+        cases = [
+            (None, 'https://idp.example/device', 'https://idp.example/token',
+             'client_id'),
+            ('questdb', None, 'https://idp.example/token',
+             'device_authorization_endpoint'),
+            ('questdb', 'https://idp.example/device', None, 'token_endpoint'),
+        ]
+        for client_id, device_endpoint, token_endpoint, expected in cases:
+            with self.subTest(missing=expected):
+                with self.assertRaises(OidcConfigError) as ctx:
+                    OidcDeviceAuth(
+                        client_id, device_endpoint, token_endpoint,
+                        interactive=False, open_browser=False)
+                message = str(ctx.exception)
+                self.assertIn(expected, message)
+                self.assertIn('required', message)
+                self.assertNotIn('/settings', message)
+
     def test_sender_rejects_wrong_auth_type(self):
         with self.assertRaisesRegex(TypeError, 'OidcDeviceAuth'):
             questdb.Sender(

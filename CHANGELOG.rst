@@ -51,6 +51,18 @@ exactly this purpose. Writing an unlabelled 16- or 32-byte column to an
 existing UUID or LONG256 table column without one of the above will be rejected
 by the server as a type mismatch, rather than silently storing the wrong type.
 
+Callback inbox capacities are capped
+************************************
+
+``connection_event_inbox_capacity`` and ``error_event_inbox_capacity`` now
+reject a value above **65536** at connect time, raising
+:class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+``QuestDBErrorCode.InvalidApiCall``. A larger value was previously accepted.
+These inboxes exist to bound memory when a listener cannot keep up, and both
+already drop the oldest event on overflow, so a very large capacity defers that
+policy rather than avoiding it. Lower any value above the cap; ``0`` still
+selects the default of 64.
+
 Features
 ~~~~~~~~
 
