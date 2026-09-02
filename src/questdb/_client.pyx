@@ -6182,7 +6182,10 @@ cdef class QuestDB:
         failures, failover, terminal auth rejection). It runs on a
         dedicated dispatcher thread fed by a bounded inbox
         (``connection_event_inbox_capacity``; ``0`` selects the default
-        of 64) with a drop-oldest overflow policy, so a slow listener
+        of 64 and 65536 is the maximum — a larger value raises
+        :class:`QuestDBError` with ``code`` set to
+        ``QuestDBErrorCode.InvalidApiCall``) with a drop-oldest overflow
+        policy, so a slow listener
         cannot stall ingest or reconnects. Exceptions it raises are
         logged and swallowed. Dropped/delivered totals are available via
         :attr:`connection_events_dropped` /
@@ -6196,7 +6199,10 @@ cdef class QuestDB:
         rows published through a :class:`PooledSender` that was already
         closed. It runs on its own dedicated dispatcher thread fed by a
         bounded inbox (``error_event_inbox_capacity``; ``0`` selects the
-        default of 64, overflow drops the oldest event). Exceptions it
+        default of 64 and 65536 is the maximum — a larger value raises
+        :class:`QuestDBError` with ``code`` set to
+        ``QuestDBErrorCode.InvalidApiCall`` — overflow drops the oldest
+        event). Exceptions it
         raises are logged and swallowed. Without a handler every rejection
         is logged through the ``questdb`` logger instead — ``ERROR`` for
         terminal rejections, ``WARNING`` for retriable ones (the affected
@@ -6293,6 +6299,24 @@ cdef class QuestDB:
                     (<OidcDeviceAuth>oidc_auth)._raw == NULL
                     or (<OidcDeviceAuth>oidc_auth)._closed):
                 raise ValueError('"oidc_auth" is closed')
+            if oidc_auth is not None:
+                # Same conflict as the Sender path, but the fixed credential
+                # arrives as a configuration key here. Name the keys the caller
+                # wrote rather than letting native report the internal provider
+                # key, which exists in no public API.
+                conflicting = [
+                    key for key in ('token', 'username', 'password')
+                    if params.get(key) is not None]
+                if conflicting:
+                    raise QuestDBError(
+                        QuestDBErrorCode.ConfigError,
+                        '"oidc_auth" is mutually exclusive with the '
+                        + ', '.join(f'"{key}"' for key in conflicting)
+                        + ' configuration '
+                        + ('key' if len(conflicting) == 1 else 'keys')
+                        + '. An OIDC provider supplies the credential itself; '
+                        'remove it from the configuration string, or drop '
+                        '"oidc_auth" to keep using it.')
             str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
@@ -7135,6 +7159,26 @@ cdef class Sender:
             if ((<OidcDeviceAuth>oidc_auth)._raw == NULL
                     or (<OidcDeviceAuth>oidc_auth)._closed):
                 raise ValueError('"oidc_auth" is closed')
+            # Reject the conflict here, in terms of the parameters the caller
+            # actually wrote. Native enforces it too, but reports the internal
+            # config key it knows -- "qwp_ws_token_provider" or
+            # "http_token_provider" -- which exists in no public API, so a user
+            # who passed oidc_auth= and token= was told about a symbol they
+            # cannot find.
+            _conflicting = [
+                name for name, value in (
+                    ('token', token),
+                    ('username', username),
+                    ('password', password))
+                if value is not None]
+            if _conflicting:
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
+                    '"oidc_auth" is mutually exclusive with '
+                    + ', '.join(f'"{name}"' for name in _conflicting)
+                    + '. An OIDC provider supplies the credential itself; '
+                    'remove the fixed credential, or drop "oidc_auth" to keep '
+                    'using it.')
             if not line_sender_opts_oidc_auth(
                     self._opts, (<OidcDeviceAuth>oidc_auth)._raw, &err):
                 raise c_err_to_py(err)
